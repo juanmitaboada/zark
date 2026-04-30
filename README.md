@@ -1,13 +1,13 @@
 # zark
 **The Zettabyte Ark - Full bare-metal ZFS recovery with encrypted boot**
 
-[![License: MIT](https://img.shields.io/badge/license-Apache%20License%202.0-yellow)](https://opensource.org/license/apache-2.0) [![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/) [![Ubuntu Version](https://img.shields.io/badge/Ubuntu-24.04%2B-green.svg)](https://ubuntu.com/download) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-orange.svg)](CHANGELOG.md)
+[![License: License: Apache 2.0](https://img.shields.io/badge/license-Apache%20License%202.0-yellow)](https://opensource.org/license/apache-2.0) [![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/) [![Ubuntu Version](https://img.shields.io/badge/Ubuntu-24.04%2B-green.svg)](https://ubuntu.com/download) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-orange.svg)](CHANGELOG.md)
 
 zark is a portable Python-based suite for backing up and fully recovering Ubuntu systems running ZFS with full-disk encryption. It runs from any location - USB drive, live session, or local directory - with zero installation required.
 
 One command to back up. One command to recover. Boot chain identical to a fresh Ubuntu install.
 
-> **Project status.** Active development. Recovery flow validated end-to-end on real hardware (MINISFORUM UM890 with Ubuntu 24.04 + 25.10 + 26.04 and Dell XPS 9315 wih Ubuntu 25.10) and in a QEMU/OVMF integration harness simulating both Ubuntu 24.04 (initramfs-tools) and 25.04+ (dracut). Backup and recover have also been used in anger to restore a separate Ubuntu 25.10 system after disk failure. Suite version is tracked in [`CHANGELOG.md`](CHANGELOG.md).
+> **Project status.** Active development. Recovery flow validated end-to-end on real hardware (MINISFORUM UM890 with Ubuntu 24.04 + 25.10 + 26.04 and Dell XPS 9315 with Ubuntu 25.10) and in a QEMU/OVMF integration harness simulating both Ubuntu 24.04 (initramfs-tools) and 25.04+ (dracut). Backup and recover have also been used in anger to restore a separate Ubuntu 25.10 system after disk failure. Suite version is tracked in [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -84,9 +84,11 @@ zark will:
 6. Install the GRUB guard and regenerate initrd
 7. Display post-recovery instructions
 
-Total recovery time: approximately one minute for a typical system recovery + data transfer timing.
+Total recovery time: approximately one minute, plus the data transfer time itself."
 
 ### After first boot
+
+Once the recovered system boots successfully:
 
 ```bash
 sudo ./zark finish    # regenerate grub.cfg, finalize Secure Boot chain
@@ -233,7 +235,7 @@ See `tests/test_integration.py` for harness internals and `tests/create_test_sys
 
 ```bash
 make check        # py_compile every .py file (fast, no dependencies)
-make mypy         # type-check with mypy (strict; fails on any error)
+make mypy         # type-check with mypy (fails on any error)
 make pylint       # run pylint
 make lint         # check + mypy + pylint
 make format       # black + isort
@@ -251,10 +253,6 @@ Tool configuration lives in `pyproject.toml` (mypy, pyright, black, isort, flake
 ---
 
 ## FAQ
-
-**Is this related to whoschek/bzfs?**
-
-No. [whoschek/bzfs](https://github.com/whoschek/bzfs) is a ZFS snapshot replication tool focused on continuous, parallel replication across fleets of hosts for DR/HA. zark focuses on portable bare-metal recovery of individual systems with full-disk encryption and Secure Boot. Different problems, different solutions.
 
 **Can I use multiple backup drives?**
 

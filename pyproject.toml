@@ -6,7 +6,7 @@
 [tool.pyright]
 include       = ["lib", "commands", "tests"]
 extraPaths    = ["."]
-pythonVersion = "3.12"
+pythonVersion = "3.12"  # Pyright's "pythonVersion" is the minimum supported version, not the target version.
 
 [tool.mypy]
 python_version = "3.12"
