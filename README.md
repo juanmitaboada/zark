@@ -1,7 +1,12 @@
 # zark
 **The Zettabyte Ark - Full bare-metal ZFS recovery with encrypted boot**
 
-[![License: License: Apache 2.0](https://img.shields.io/badge/license-Apache%20License%202.0-yellow)](https://opensource.org/license/apache-2.0) [![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/) [![Ubuntu Version](https://img.shields.io/badge/Ubuntu-24.04%2B-green.svg)](https://ubuntu.com/download) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-orange.svg)](CHANGELOG.md)
+*A Noah's Ark for ZFS-on-root Ubuntu: when the disaster comes, your system makes it across.*
+
+[![License: License: Apache 2.0](https://img.shields.io/badge/license-Apache%20License%202.0-yellow)](https://opensource.org/license/apache-2.0)
+[![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![Ubuntu Version](https://img.shields.io/badge/Ubuntu-24.04%2B-green.svg)](https://ubuntu.com/download)
+[![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-orange.svg)](CHANGELOG.md)
 
 zark is a portable Python-based suite for backing up and fully recovering Ubuntu systems running ZFS with full-disk encryption. It runs from any location - USB drive, live session, or local directory - with zero installation required.
 
