@@ -1,0 +1,35 @@
+# zark — project metadata and tool configuration.
+#
+# Single source of truth for tool settings. Tools that don't yet read
+# pyproject.toml (notably pylint, which uses .pylintrc) keep their own file.
+
+[tool.pyright]
+include       = ["lib", "commands", "tests"]
+extraPaths    = ["."]
+pythonVersion = "3.12"
+
+[tool.mypy]
+python_version = "3.12"
+files          = ["lib", "commands", "tests", "zark"]
+
+[tool.black]
+line-length    = 100
+target-version = ["py312"]
+include        = '\.pyi?$'
+
+[tool.isort]
+profile           = "black"
+line_length       = 100
+known_first_party = ["lib", "commands", "tests"]
+
+[tool.flake8]
+# Requires the flake8-pyproject plugin (added to .pre-commit-config.yaml).
+max-line-length = 100
+select          = ["B", "C", "E", "F", "W", "T4", "B9"]
+ignore          = ["E203", "W503"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]

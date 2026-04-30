@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""
+zark — ZFS backup suite for external drives.
+
+Portable: run from any location (USB drive, /opt, ~/bin, etc.)
+Usage:    sudo ./zark <command> [options]
+"""
+
+import os
+import sys
+
+from lib.config import VERSION, Config
+from lib.log import Log
+
+# Add project root to path so lib/ and commands/ are importable
+ZARK_ROOT = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, ZARK_ROOT)
+
+COMMANDS = {
+    "backup": "Run incremental backup to connected drive",
+    "recover": "Full bare-metal recovery from backup drive",
+    "repair": "Fix boot issues from live USB (grub.cfg, initrd)",
+    "simulate": "Boot recovered system in QEMU/KVM (test without rebooting)",
+    "prepare": "Prepare a new blank drive for backup",
+    "purge": "Securely wipe a managed backup drive",
+    "setup": "Install dependencies, configure sanoid snapshots",
+    "finish": "Post-recovery finalization (run from recovered system)",
+    "mount": "Mount a backup pool for inspection / chroot / recovery",
+    "umount": "Unmount a previously mounted backup pool",
+    "explore": "Scan for ZFS pools, show known/unknown status",
+    "monitor": "Live progress monitor (run in separate terminal)",
+    "clean": "Emergency cleanup: unmount everything, export all pools",
+}
+
+
+def print_help():
+    """
+    Print usage instructions and available commands
+    """
+    log = Log()
+    log.banner(f"zark v{VERSION}", "ZFS backup suite for external drives")
+    print()
+    log.info("Usage:  sudo ./zark <command> [options]")
+    print()
+    log.info("Commands:")
+    for cmd, desc in COMMANDS.items():
+        print(f"    {log.W}{cmd:<12}{log.N} {desc}")
+    print()
+    log.info(f"Config: {Config.default_config_dir()}/known_drives.json")
+    log.info("Log:    /var/log/zark.log")
+    print()
+    log.info("Examples:")
+    print("    sudo ./zark backup          # run backup")
+    print("    sudo ./zark explore         # scan for pools")
+    print("    sudo ./zark mount           # mount backup for inspection")
+    print("    sudo ./zark recover         # full system recovery")
+    print()
+
+
+def main():
+    """
+    Main entry point: parse command and dispatch to appropriate module
+    """
+    if os.geteuid() != 0:
+        print("\033[0;31mError:\033[0m zark must be run as root (sudo ./zark ...)")
+        sys.exit(1)
+
+    args = sys.argv[1:]
+
+    if not args or args[0] in ("--help", "-h", "help"):
+        print_help()
+        sys.exit(0)
+
+    if args[0] in ("--version", "-v"):
+        print(f"zark v{VERSION}")
+        sys.exit(0)
+
+    cmd_name = args[0]
+    cmd_args = args[1:]
+
+    if cmd_name.startswith("--"):
+        cmd_name = cmd_name[2:]  # accept --backup, --explore, etc.
+
+    if cmd_name not in COMMANDS:
+        print(f"\033[0;31mError:\033[0m unknown command '{cmd_name}'")
+        print("  Run: sudo ./zark --help")
+        sys.exit(1)
+
+    # Import and run the command
+    try:
+        mod = __import__(f"commands.{cmd_name}", fromlist=[cmd_name])
+        mod.run(cmd_args)
+    except KeyboardInterrupt:
+        print("\n\n  Interrupted by user.")
+        sys.exit(130)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"\n\033[0;31m[FATAL]\033[0m {e}")
+        if "--debug" in cmd_args:
+            import traceback  # pylint: disable=import-outside-toplevel
+
+            traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

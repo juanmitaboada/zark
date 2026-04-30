@@ -1,0 +1,94 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    -   id: check-added-large-files
+    -   id: check-ast
+    -   id: check-merge-conflict
+    -   id: check-json
+    -   id: check-xml
+    -   id: check-yaml
+    -   id: debug-statements
+    -   id: end-of-file-fixer
+    -   id: trailing-whitespace
+    -   id: destroyed-symlinks
+    -   id: detect-private-key
+-   repo: https://github.com/psf/black
+    rev: 26.3.1
+    hooks:
+    -   id: black
+        args:
+          - --line-length=100
+          - --include='\.pyi?$'
+-   repo: https://github.com/keewis/blackdoc
+    rev: v0.4.6
+    hooks:
+    -   id: blackdoc
+        args: ["-l", "99"]
+        exclude: ^doc/.*
+-   repo: https://github.com/PyCQA/isort
+    rev: 8.0.1
+    hooks:
+    -   id: isort
+        name: isort
+        args: [--profile, black, --line-length, "100"]
+-   repo: https://github.com/asottile/add-trailing-comma
+    rev: v4.0.0
+    hooks:
+    -   id: add-trailing-comma
+-   repo: https://github.com/pycqa/flake8
+    rev: 7.3.0
+    hooks:
+    - id: flake8
+      additional_dependencies: [flake8-pyproject]
+      args:
+        - "--max-line-length=100"
+        - "--select=B,C,E,F,W,T4,B9"
+        - "--ignore=E203,W503"
+        # - "--max-complexity=18"
+-   repo: https://github.com/pre-commit/mirrors-mypy
+    rev: 'v1.19.1'
+    hooks:
+      - id: mypy
+        alias: mypy
+        name: mypy
+-   repo: https://github.com/asottile/pyupgrade
+    rev: v3.21.2
+    hooks:
+    -   id: pyupgrade
+        args: [--keep-percent-format]
+-   repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+    -   id: shellcheck
+-   repo: https://github.com/get-woke/woke
+    rev: v0.19.0
+    # add GOFLAGS="-buildvcs=false" when woke is being installed
+    hooks:
+    -   id: woke-from-source
+        exclude: >
+          (?x)(
+              CHANGELOG
+            | .pylintrc
+          )
+-   repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4
+    hooks:
+    -   id: bandit
+        args: ["-r", "-lll"]
+
+-   repo: https://github.com/pycqa/pylint
+    rev: v3.3.9
+    hooks:
+    - id: pylint
+exclude: >
+  (?x)(
+      \.env
+    | \.git
+    | \.tox
+    | \.venv
+    | \.__pycache__
+    | _build
+    | build
+    | dist
+  )
