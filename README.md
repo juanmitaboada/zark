@@ -3,6 +3,7 @@
 
 *A Noah's Ark for ZFS-on-root Ubuntu: when the disaster comes, your system makes it across.*
 
+[![CI](https://github.com/juanmitaboada/zark/actions/workflows/ci.yml/badge.svg)](https://github.com/juanmitaboada/zark/actions/workflows/ci.yml)
 [![License: License: Apache 2.0](https://img.shields.io/badge/license-Apache%20License%202.0-yellow)](https://opensource.org/license/apache-2.0)
 [![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Ubuntu Version](https://img.shields.io/badge/Ubuntu-24.04%2B-green.svg)](https://ubuntu.com/download)
@@ -49,6 +50,49 @@ zark automates the entire process:
 | `simulate`  | Boot the target disk in QEMU/KVM to verify the boot chain    |
 
 ---
+
+## Installation
+
+zark ships in two complementary forms; **both are first-class** and
+serve different use cases.
+
+### Apt (recommended for productive systems)
+
+For machines where zark drives the day-to-day backup routine:
+
+```bash
+sudo add-apt-repository ppa:juanmitaboada/zark
+sudo apt update
+sudo apt install zark
+```
+
+Supported series: 24.04, 24.10, 25.04, 25.10, 26.04. The package
+installs zark under `/usr/share/zark/`, exposes it as `/usr/bin/zark`,
+and creates `/etc/zark/` for `known_drives.json`. Logs go to
+`/var/log/zark.log`.
+
+### Portable tarball (required for live-USB recovery)
+
+For disaster recovery from a live USB — when there is no installed
+system to `apt install` into:
+
+```bash
+wget https://github.com/juanmitaboada/zark/releases/download/v1.0.5/zark_1.0.5.tar.gz
+tar xzf zark_1.0.5.tar.gz
+cd zark
+sudo ./zark explore
+```
+
+The tarball runs from any directory (USB pendrive, `/opt`, `~/bin`)
+without installation. When zark detects it is running on a live USB
+session, it logs to `<zark_root>/zark.log` next to the script (which
+survives reboot, since the pendrive does) instead of `/var/log/`.
+
+> **Why both?** The `.deb` package cannot help during recovery because
+> the live USB does not have zark installed and you cannot `apt install`
+> in a casper environment. The portable tarball is the only path for
+> the recover command. The package is a convenience for the routine
+> backup case.
 
 ## Quick start
 
@@ -211,10 +255,13 @@ zark has two layers of automated testing.
 Pure Python, no root, no ZFS, no real disks. Every shell call is intercepted by a mock framework (`tests/mock_sh.py`).
 
 ```bash
-make test
+make test       # fast path: invokes the test runner directly
+make tox        # full path: runs the suite under Python 3.12, 3.13 and 3.14
 ```
 
-Currently 82 tests covering config loading, drive detection, ZFS operations, keystore handling, dataset-layout drift detection, grub.cfg manipulation, and the cleanup trap handler.
+Currently 91 tests covering config loading, drive detection, ZFS operations, keystore handling, the recovery abort path when a keystore is missing from backup, dataset-layout drift detection, grub.cfg manipulation, and the cleanup trap handler.
+
+GitHub Actions runs the unit-test suite on every push and pull request, with one job per supported Python version plus a separate lint job (mypy + pylint + ruff). See `.github/workflows/ci.yml`.
 
 ### Integration tests (QEMU)
 
@@ -224,6 +271,8 @@ End-to-end test that creates a real encrypted ZFS Ubuntu system inside QEMU, bac
 make test-deps                                # one-time: qemu, ovmf, genisoimage
 sudo make test-real ISO=/path/to/ubuntu.iso   # full run (all 3 phases)
 ```
+
+**Integration tests do not run in GitHub Actions.** GitHub-hosted runners lack nested KVM, the recovery flow needs root and the ZFS kernel modules, and the full run takes ~15 minutes per phase. They are intended for local validation on real hardware (or a workstation with KVM enabled) before tagging a release.
 
 The harness can also run individual phases — useful while iterating on a single phase without re-creating earlier artifacts:
 

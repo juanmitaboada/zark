@@ -1,0 +1,143 @@
+# zark — Continuous Integration.
+#
+# Runs on every push and pull request:
+#
+#   tests  — matrix of Python 3.12 / 3.13 / 3.14, each runs `tox -e py3X`
+#            on the unit-test suite (tests/test_unit.py). Three parallel
+#            jobs so a per-version regression is visible immediately.
+#
+#   lint   — single job pinned to Python 3.12, runs `tox -e lint`:
+#              mypy + pylint + ruff (RUF027 only).
+#            Versions of mypy/pylint/ruff come from pyproject.toml under
+#            [dependency-groups].dev (PEP 735), so tox and CI share a
+#            single source of truth.
+#
+# What this workflow does NOT cover
+# ─────────────────────────────────
+# Integration tests (`make test-real`) run zark end-to-end inside QEMU
+# with OVMF firmware, real ZFS pools and an Ubuntu live ISO. They cannot
+# run on GitHub-hosted runners because:
+#   - GitHub-hosted runners do not provide nested KVM virtualisation.
+#   - The recovery flow needs root, raw block-device access and the ZFS
+#     kernel modules.
+#   - The full integration test takes ~15 minutes per phase and consumes
+#     several GB of disk for the QEMU images.
+# Run them locally on real hardware with `sudo make test-real ISO=...`.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Cancel an older run on the same ref when a new commit lands. Saves
+# minutes and avoids piling up stale results in the PR view.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# This workflow only reads source. No write permissions needed.
+permissions:
+  contents: read
+
+jobs:
+
+  # ── Unit tests across the supported Python matrix ────────────────────
+  tests:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Keep every Python version running even if one fails — we want the
+      # full picture of which versions break, not just the first hit.
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          cache: 'pip'
+
+      - name: Install tox
+        run: python -m pip install --upgrade pip tox
+
+      - name: Run tests
+        # tox env name has no dot: 3.12 → py312
+        run: tox -e py$(echo "${{ matrix.python }}" | tr -d .)
+
+  # ── Static analysis (mypy + pylint + ruff RUF027) ────────────────────
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install tox
+        run: python -m pip install --upgrade pip tox
+
+      - name: Run lint suite (mypy + pylint + ruff RUF027)
+        run: tox -e lint
+
+  # ── Debian packaging smoke build (tags only) ─────────────────────────
+  #
+  # Builds the .deb on release tags (vX.Y.Z), uploads it as a workflow
+  # artefact, and attaches it to the GitHub Release. Does NOT sign and
+  # does NOT upload to the PPA — those steps require the maintainer's
+  # GPG key and run locally via `make deb-ppa`. See
+  # debian/README.packaging.md for the PPA flow.
+  package:
+    name: package (.deb)
+    runs-on: ubuntu-latest
+    needs: [tests, lint]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write   # needed to attach asset to the release
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential devscripts debhelper fakeroot lintian
+
+      - name: Build unsigned .deb
+        run: make deb
+
+      - name: Run lintian (informational)
+        # Don't fail the build on lintian warnings — the maintainer
+        # reviews them locally before PPA upload.
+        run: lintian -i ../zark_*.changes || true
+
+      - name: Stage build artefacts inside the workspace
+        # dpkg-buildpackage drops .deb / .changes / .buildinfo into the
+        # parent directory of the source tree (Debian convention). The
+        # upload-artifact and gh-release actions refuse paths containing
+        # '..' for security reasons, so copy the artefacts into the
+        # workspace under dist/ before publishing them.
+        run: |
+          mkdir -p dist
+          cp ../zark_*_all.deb       dist/
+          cp ../zark_*.changes       dist/ 2>/dev/null || true
+          cp ../zark_*.buildinfo     dist/ 2>/dev/null || true
+          ls -la dist/
+
+      - name: Upload .deb as workflow artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zark-deb
+          path: dist/zark_*_all.deb
+
+      - name: Attach .deb to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/zark_*_all.deb

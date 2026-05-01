@@ -1,0 +1,4 @@
+zark                          usr/share/zark/
+lib                           usr/share/zark/
+commands                      usr/share/zark/
+etc/known_drives.json.example etc/zark/

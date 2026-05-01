@@ -1,0 +1,29 @@
+#!/usr/bin/make -f
+#
+# zark — Debian build rules.
+#
+# zark is a portable Python script suite, NOT an installable Python
+# package. There is no [project] table in pyproject.toml (a deliberate
+# choice: see v1.0.5 design). We therefore do NOT use dh-python /
+# pybuild — they would try to treat zark as a pip-installable package
+# and fail.
+#
+# Instead, we copy the project tree into /usr/share/zark/ verbatim and
+# expose the entry point as /usr/bin/zark via a symlink (debian/links).
+# All the path-resolution logic in lib/config.py already handles this
+# layout via the existing env -> <root>/etc -> /etc/zark search order.
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+# Nothing to compile: pure Python, no C extensions.
+override_dh_auto_build:
+
+# Tests need root, ZFS modules, real disks. They cannot run inside a
+# Debian build environment; they live behind `make test-real`.
+override_dh_auto_test:
+
+# Installation is fully described by debian/install + debian/links.
+override_dh_auto_install:

@@ -1,0 +1,41 @@
+Source: zark
+Section: admin
+Priority: optional
+Maintainer: Juanmi Taboada <juanmi@juanmitaboada.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://github.com/juanmitaboada/zark
+Vcs-Git: https://github.com/juanmitaboada/zark.git
+Vcs-Browser: https://github.com/juanmitaboada/zark
+Rules-Requires-Root: no
+
+Package: zark
+Architecture: all
+Depends: ${misc:Depends},
+         python3 (>= 3.12),
+         zfsutils-linux,
+         sanoid,
+         cryptsetup-bin,
+         gdisk,
+         grub2-common,
+         dracut | initramfs-tools
+Recommends: dosfstools,
+            grub-efi-amd64-signed,
+            shim-signed,
+            qemu-system-x86,
+            ovmf
+Description: ZFS bare-metal backup and recovery suite for Ubuntu
+ zark provides full bare-metal backup and disaster recovery for Ubuntu
+ systems running on encrypted ZFS root pools (rpool/bpool with a LUKS
+ keystore zvol). Backups are written to external drives via syncoid raw
+ send, preserving native ZFS encryption end-to-end.
+ .
+ The recover command performs a full system restoration from a live USB
+ in approximately one minute, reconstructing rpool, bpool, the LUKS
+ keystore, GRUB and initramfs without touching the source system.
+ .
+ zark is portable: it can also be run directly from a USB pendrive
+ without installation, which is the recommended workflow for disaster
+ recovery scenarios. The Debian package is intended for system-wide
+ installation on machines where zark drives the day-to-day backup
+ routine.

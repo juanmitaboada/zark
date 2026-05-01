@@ -1,0 +1,19 @@
+zark (1.0.5-1) UNRELEASED; urgency=medium
+
+  * Initial Debian/Ubuntu packaging.
+  * Distribution mechanism for zark on Ubuntu systems where the tool is
+    used for day-to-day backups. The portable tarball workflow is
+    preserved unchanged for live-USB disaster recovery — the .deb
+    package targets the "install on the productive host" use case only.
+  * Installs sources under /usr/share/zark/, exposes the entry point as
+    /usr/bin/zark via symlink, and ships an example known_drives.json
+    in /etc/zark/. The configuration directory search order in
+    lib/config.py (env override -> portable etc/ -> /etc/zark/) makes
+    this layout work without code changes.
+  * Depends: zfsutils-linux, sanoid, cryptsetup-bin, gdisk, grub2-common
+    and one of dracut | initramfs-tools — every external command zark
+    invokes outside the recover-only path. Recommends pulls in the
+    recover dependencies (dosfstools, grub-efi-amd64-signed, shim-signed)
+    and the simulate dependencies (qemu-system-x86, ovmf).
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Fri, 01 May 2026 12:00:00 +0200

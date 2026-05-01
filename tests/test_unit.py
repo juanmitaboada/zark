@@ -128,6 +128,53 @@ class TestConfig:
         etc = root / "etc"
         assert etc.name == "etc"
 
+    def test_system_install_fallback(self):
+        """
+        When the package is installed under /usr/share/zark/ (the .deb
+        layout), <zark_root>/etc/known_drives.json does not exist and
+        the lookup falls back to /etc/zark/known_drives.json.
+
+        We simulate this by:
+          - pointing zark_root() at a tmp dir that has an empty etc/
+          - stubbing Path("/etc/zark") to also be a tmp dir, this time
+            with known_drives.json present.
+        """
+        import pathlib  # pylint: disable=import-outside-toplevel
+
+        with tempfile.TemporaryDirectory() as td:
+            base = pathlib.Path(td)
+
+            # Layout: zark_root with empty etc/ (= what the .deb ships)
+            fake_zark_root = base / "usr_share_zark"
+            (fake_zark_root / "etc").mkdir(parents=True)
+
+            # Layout: simulated /etc/zark with known_drives.json present
+            fake_etc_zark = base / "etc_zark"
+            fake_etc_zark.mkdir()
+            (fake_etc_zark / "known_drives.json").write_text("{}", encoding="utf-8")
+
+            def _path_factory(p):
+                # Redirect the hard-coded "/etc/zark" lookup to our fake;
+                # everything else goes through the real Path constructor.
+                if str(p) == "/etc/zark":
+                    return fake_etc_zark
+                return pathlib.Path(p)
+
+            # Make sure the env override is not set (otherwise step 1 wins).
+            env_backup = os.environ.pop("ZARK_CONFIG_DIR", None)
+            try:
+                with (
+                    patch.object(Config, "zark_root", return_value=fake_zark_root),
+                    patch("lib.config.Path", side_effect=_path_factory),
+                ):
+                    result = Config.default_config_dir()
+                assert (
+                    result == fake_etc_zark
+                ), f"Expected fallback to /etc/zark (= {fake_etc_zark}), got {result}"
+            finally:
+                if env_backup is not None:
+                    os.environ["ZARK_CONFIG_DIR"] = env_backup
+
 
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/log.py
@@ -1208,6 +1255,106 @@ class TestRecoverDatasetLayout:
         assert children == {"usr", "var/lib", "var/log"}
         # Parent itself is excluded
         assert f"rpool/ROOT/{self.UBUNTU}" not in children
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/recover.py — _abort_missing_keystore
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
+    """
+    Tests for the abort path when the keystore zvol cannot be restored.
+
+    Validates that:
+      - Each of the three failure modes raises SystemExit with code 1.
+      - The reason string lands in the rendered banner so the user can
+        diagnose the failure from the terminal output alone.
+      - The pool name appears in the message (so the user knows which
+        backup drive to re-prepare).
+    """
+
+    @staticmethod
+    def _capture_abort(reason: str, pool: str) -> tuple[int, str]:
+        """Run the abort and capture (exit_code, captured_stdout)."""
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from commands.recover import _abort_missing_keystore
+
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            try:
+                _abort_missing_keystore(reason, pool, log)
+            except SystemExit as exc:
+                return int(exc.code or 0), buf.getvalue()
+        # Should never reach here — _abort_missing_keystore is NoReturn
+        raise AssertionError("_abort_missing_keystore did not raise SystemExit")
+
+    def test_no_dataset_aborts_with_exit_1(self):
+        code, _ = self._capture_abort("no_dataset", "backup")
+        assert code == 1
+
+    def test_no_snapshot_aborts_with_exit_1(self):
+        code, _ = self._capture_abort("no_snapshot", "backup")
+        assert code == 1
+
+    def test_send_failed_aborts_with_exit_1(self):
+        code, _ = self._capture_abort("send_failed", "backup")
+        assert code == 1
+
+    def test_no_dataset_message_mentions_pool_and_dataset(self):
+        _, output = self._capture_abort("no_dataset", "myvault")
+        assert "myvault" in output
+        assert "myvault/keystore" in output
+
+    def test_no_snapshot_message_mentions_snapshots(self):
+        _, output = self._capture_abort("no_snapshot", "backup")
+        assert "snapshot" in output.lower()
+
+    def test_send_failed_message_mentions_send_or_receive(self):
+        _, output = self._capture_abort("send_failed", "backup")
+        text = output.lower()
+        assert "send" in text or "receive" in text
+
+    def test_unknown_reason_still_aborts(self):
+        # Forward-compat: a future caller passing a new reason string
+        # must not crash with KeyError — the abort must still happen.
+        code, output = self._capture_abort("totally_new_reason", "backup")
+        assert code == 1
+        assert "totally_new_reason" in output
+
+    def test_message_explains_why_zark_refuses_to_continue(self):
+        """The banner must explain the security rationale, not just fail."""
+        _, output = self._capture_abort("no_dataset", "backup")
+        # User must see actionable next steps and the security explanation
+        assert "zark prepare" in output
+        assert "How to recover" in output
+
+    def test_abort_path_does_not_silently_warn(self):
+        """Regression guard: the old behaviour was a misleading WARN.
+
+        v1.0.4 emitted '[WARN] system.key will be embedded in initrd' and
+        continued silently. v1.0.5 must abort instead — verified here by
+        checking SystemExit is raised (not just logged).
+        """
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from commands.recover import _abort_missing_keystore
+
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            try:
+                _abort_missing_keystore("no_dataset", "backup", log)
+            except SystemExit:
+                return  # expected
+        raise AssertionError(
+            "v1.0.4 silent-fallback regression: _abort_missing_keystore "
+            "must raise SystemExit, not return.",
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════

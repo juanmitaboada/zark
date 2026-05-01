@@ -1,0 +1,25 @@
+#!/bin/sh
+# zark postinst — ensure /etc/zark/ exists with sane permissions.
+# We deliberately do NOT auto-create /etc/zark/known_drives.json:
+# zark's onboarding flow guides the user through creating it from
+# the example file the first time they run an applicable command.
+
+set -e
+
+case "$1" in
+    configure)
+        if [ ! -d /etc/zark ]; then
+            mkdir -m 0755 /etc/zark
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

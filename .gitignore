@@ -14,8 +14,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -206,5 +204,29 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Configuration example
-etc
+# Personal config: never commit the real known_drives.json (it
+# contains hardware GUIDs / drive IDs), but DO commit the .example
+# template that the package and onboarding flow rely on.
+etc/known_drives.json
+
+# pyenv local Python version pin (used by `pyenv local 3.12 3.13 3.14`
+# to drive `make tox`). Not committed: each developer's setup may differ.
+.python-version
+
+# Debian/Ubuntu packaging build artefacts.
+#
+# `dpkg-buildpackage` and `debuild` write transient files into debian/
+# during the build, and the produced binaries (.deb, .dsc, .changes,
+# etc.) into the parent directory. None of this should be committed —
+# `make deb` regenerates everything from the source tree.
+debian/.debhelper/
+debian/files
+debian/zark/
+debian/zark.substvars
+debian/debhelper-build-stamp
+debian/*.log
+
+# `make dist` writes the release tarball into the project root before
+# moving it to outputs. `make deb` also writes a sibling .orig.tar.gz
+# above the project root, which `make clean` removes.
+zark_*.tar.gz

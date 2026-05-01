@@ -1,3 +1,10 @@
+# zark — pre-commit hooks.
+#
+# NOTE on tooling versions: mypy, pylint and ruff are pinned both here
+# (by git rev) and in pyproject.toml under [dependency-groups].dev (consumed
+# by tox and CI via PEP 735). pre-commit and PEP 735 use different install
+# mechanisms and cannot share a single source of truth, so when bumping a
+# version in either place, also bump the matching one in the other file.
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -81,6 +88,14 @@ repos:
     rev: v3.3.9
     hooks:
     - id: pylint
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    # Ruff is used here ONLY for the RUF027 rule (missing-f-string-syntax),
+    # which detects strings that look like f-strings but lack an f/F prefix.
+    rev: v0.15.12
+    hooks:
+    -   id: ruff-check
+        name: ruff (RUF027 missing f-string syntax)
+        args: [--select=RUF027, --preview, --no-fix]
 exclude: >
   (?x)(
       \.env

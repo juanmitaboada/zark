@@ -31,6 +31,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from typing import NoReturn
 
 from lib import grub_guard, sh
 from lib.cleanup import Cleanup
@@ -208,6 +209,91 @@ def _bpool_fix_mountpoint(ubuntu_name: str, log: Log, zfs: ZFS) -> bool:
     kernel_count = len(list(Path(f"{RECOVER_MNT}/boot").glob("vmlinuz*")))
     log.ok(f"bpool mounted at {RECOVER_MNT}/boot ✓  ({kernel_count} kernel(s))")
     return True
+
+
+def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
+    """
+    Abort the recovery when the keystore zvol cannot be restored from backup.
+
+    Reaching this point means the security model of the recovered system would
+    be silently degraded: the rpool encryption depends on `system.key`, which
+    normally lives inside the LUKS-encrypted keystore zvol. Without that zvol,
+    the recovered system has no way to load its keys at boot.
+
+    Two unsafe fallbacks were considered and deliberately rejected for v1.0.5:
+
+      (b) Embed system.key in the target rootfs (e.g. /etc/zfs/system.key).
+          Trivial to implement but degrades the security model — the raw key
+          ends up readable in the initrd, defeating the LUKS layer.
+
+      (c) Switch rpool to keylocation=prompt with `zfs change-key`. Viable
+          but requires re-wrapping the master key with a brand-new passphrase
+          chosen during recovery, which is a non-trivial UX path and easy to
+          get wrong under pressure.
+
+    Both options are recoverable from after the fact (the user can apply
+    them manually on a successfully recovered system if needed), so the
+    safe default is to refuse and tell the user how to fix the backup.
+
+    `reason` is one of:
+      "no_dataset"  → backup pool has no <pool>/keystore dataset
+      "no_snapshot" → dataset exists but has no snapshots
+      "send_failed" → send/receive of the keystore zvol failed
+    """
+    causes_by_reason = {
+        "no_dataset": [
+            f"The backup pool '{pool_name}' has no '{pool_name}/keystore' dataset.",
+            "This usually means the backup was prepared with an old zark/backup_zfs",
+            "version that didn't sync the keystore, or the dataset was deleted",
+            "manually after preparation.",
+        ],
+        "no_snapshot": [
+            f"The '{pool_name}/keystore' dataset exists but has no snapshots.",
+            "Without a snapshot there is nothing to send/receive.",
+            "This is unusual — `zark prepare` always creates an initial snapshot.",
+        ],
+        "send_failed": [
+            f"`zfs send {pool_name}/keystore@... | zfs receive rpool/keystore` failed.",
+            "Possible causes: USB I/O error, corrupted snapshot, ZFS version",
+            "mismatch between source and target.",
+        ],
+    }
+    causes = causes_by_reason.get(reason, [f"Unknown failure mode: {reason}"])
+
+    log.banner_error(
+        "RECOVERY ABORTED — KEYSTORE MISSING FROM BACKUP",
+        [
+            f"{log.Y}Why this is fatal:{log.N}",
+            "  The rpool is raw-encrypted with a key stored inside a LUKS-",
+            "  encrypted zvol called the 'keystore'. Without restoring that",
+            "  keystore zvol on the new system, the recovered rpool would",
+            "  have no way to load its encryption key at boot.",
+            "",
+            f"{log.Y}What went wrong:{log.N}",
+            *[f"  • {c}" for c in causes],
+            "",
+            f"{log.G}How to recover:{log.N}",
+            "  1. If the original system is still alive:",
+            "     → Boot the original system and re-run `zark prepare` on the",
+            f"       backup drive. This recreates {pool_name}/keystore properly.",
+            "     → Then re-run `zark backup` to refresh data.",
+            "     → Then retry `zark recover` from the live USB.",
+            "",
+            "  2. If the original system is gone:",
+            "     → If you have ANOTHER backup drive prepared from the same",
+            "       origin, use that one instead.",
+            "     → If not, the rpool data on this backup is unreadable",
+            "       without the keystore zvol. Sorry.",
+            "",
+            f"{log.Y}Why zark refuses to continue:{log.N}",
+            "  Two fallbacks exist (embedding the raw key in the rootfs, or",
+            "  switching to a passphrase prompt at boot). Both silently",
+            "  degrade the security model that you set up when you installed",
+            "  Ubuntu with ZFS encryption + keystore. zark will not make that",
+            "  decision for you.",
+        ],
+    )
+    raise SystemExit(1)
 
 
 def _install_keystore_dracut(recover_mnt: str, ubuntu_name: str, log: Log):
@@ -850,24 +936,30 @@ def run(
         bpool_received = _bpool_send_recv(pool_name, ubuntu_name, log, zfs)
 
         # ── 12b. Restore keystore zvol (LAST zfs op — adds zvol to rpool)
-        if zfs.dataset_exists(f"{pool_name}/keystore"):
-            log.info("Restoring keystore zvol...")
-            ks_snap = sh.run(
-                f"zfs list -H -o name -t snapshot {pool_name}/keystore | tail -1",
-            ).output
-            if ks_snap:
-                r = sh.run_pipe(
-                    f"zfs send {ks_snap}",
-                    "zfs receive -o encryption=off rpool/keystore",
-                )
-                if r.ok:
-                    log.ok("rpool/keystore restored ✓")
-                else:
-                    log.warn(f"Keystore restore failed: {r.stderr.strip()}")
-            else:
-                log.warn("No keystore snapshot in backup")
-        else:
-            log.warn("No keystore in backup — system.key will be embedded in initrd")
+        #
+        # If anything goes wrong here the recovered system would boot without
+        # a way to load its encryption key. Continuing silently in that state
+        # is unsafe, so we abort with a detailed explanation and let the user
+        # fix the backup before retrying. See _abort_missing_keystore() for
+        # the full rationale and the rejected fallback options.
+        if not zfs.dataset_exists(f"{pool_name}/keystore"):
+            _abort_missing_keystore("no_dataset", pool_name, log)
+
+        log.info("Restoring keystore zvol...")
+        ks_snap = sh.run(
+            f"zfs list -H -o name -t snapshot {pool_name}/keystore | tail -1",
+        ).output
+        if not ks_snap:
+            _abort_missing_keystore("no_snapshot", pool_name, log)
+
+        r = sh.run_pipe(
+            f"zfs send {ks_snap}",
+            "zfs receive -o encryption=off rpool/keystore",
+        )
+        if not r.ok:
+            log.error(f"Keystore restore failed: {r.stderr.strip()}")
+            _abort_missing_keystore("send_failed", pool_name, log)
+        log.ok("rpool/keystore restored ✓")
 
         log.info(f"Exporting backup pool {pool_name} (final)...")
         _ = sh.run(f"zfs unload-key -r {pool_name}")

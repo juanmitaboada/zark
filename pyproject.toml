@@ -3,6 +3,24 @@
 # Single source of truth for tool settings. Tools that don't yet read
 # pyproject.toml (notably pylint, which uses .pylintrc) keep their own file.
 
+# ── Dev dependencies (PEP 735) ───────────────────────────────────────────
+#
+# Used by tox (and downstream CI) via `dependency_groups = dev` to install
+# the static-analysis stack into the lint environment. zark itself is a
+# portable script with no runtime dependencies; this group is purely for
+# development tooling.
+#
+# Versions here are duplicated with `.pre-commit-config.yaml` because pre-
+# commit installs hook tools by git rev (a different mechanism) and cannot
+# read PEP 735 groups. When bumping a version below, also bump it in the
+# corresponding hook in .pre-commit-config.yaml.
+[dependency-groups]
+dev = [
+    "mypy==1.19.1",
+    "pylint==3.3.9",
+    "ruff==0.15.12",
+]
+
 [tool.pyright]
 include       = ["lib", "commands", "tests"]
 extraPaths    = ["."]
