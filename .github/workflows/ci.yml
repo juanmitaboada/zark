@@ -132,12 +132,12 @@ jobs:
           ls -la dist/
 
       - name: Upload .deb as workflow artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: zark-deb
           path: dist/zark_*_all.deb
 
       - name: Attach .deb to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/zark_*_all.deb
