@@ -124,20 +124,28 @@ jobs:
         # upload-artifact and gh-release actions refuse paths containing
         # '..' for security reasons, so copy the artefacts into the
         # workspace under dist/ before publishing them.
+        # `make dist` (invoked transitively by `make deb`) produces
+        # zark_X.Y.Z.tar.gz in the project root — the canonical portable
+        # form referenced by the README — so we stage it alongside.
         run: |
           mkdir -p dist
           cp ../zark_*_all.deb       dist/
           cp ../zark_*.changes       dist/ 2>/dev/null || true
           cp ../zark_*.buildinfo     dist/ 2>/dev/null || true
+          cp zark_*.tar.gz           dist/ 2>/dev/null || true
           ls -la dist/
 
-      - name: Upload .deb as workflow artefact
+      - name: Upload .deb and tarball as workflow artefacts
         uses: actions/upload-artifact@v6
         with:
-          name: zark-deb
-          path: dist/zark_*_all.deb
+          name: zark-release-assets
+          path: |
+            dist/zark_*_all.deb
+            dist/zark_*.tar.gz
 
-      - name: Attach .deb to GitHub Release
+      - name: Attach release assets to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/zark_*_all.deb
+          files: |
+            dist/zark_*_all.deb
+            dist/zark_*.tar.gz

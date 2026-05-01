@@ -3,7 +3,7 @@
 
 *A Noah's Ark for ZFS-on-root Ubuntu: when the disaster comes, your system makes it across.*
 
-[![CI](https://github.com/juanmitaboada/zark/actions/workflows/ci.yml/badge.svg)](https://github.com/juanmitaboada/zark/actions/workflows/ci.yml) [![PPA](https://img.shields.io/badge/Ubuntu-PPA-orange?logo=ubuntu)](https://launchpad.net/~juanmitaboada/+archive/ubuntu/zark) [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-yellow)](https://opensource.org/license/apache-2.0) [![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/) [![Ubuntu Version](https://img.shields.io/badge/Ubuntu-24.04%2B-green.svg)](https://ubuntu.com/download) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-orange.svg)](CHANGELOG.md)
+[![CI](https://github.com/juanmitaboada/zark/actions/workflows/ci.yml/badge.svg)](https://github.com/juanmitaboada/zark/actions/workflows/ci.yml) [![PPA](https://img.shields.io/badge/Ubuntu-PPA-orange?logo=ubuntu)](https://launchpad.net/~juanmitaboada/+archive/ubuntu/zark) [![Latest release](https://img.shields.io/github/v/release/juanmitaboada/zark?label=release&color=blue)](https://github.com/juanmitaboada/zark/releases/latest) [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-yellow)](https://opensource.org/license/apache-2.0) [![Python Version](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/downloads/) [![Ubuntu Version](https://img.shields.io/badge/Ubuntu-24.04%2B-green.svg)](https://ubuntu.com/download) [![Changelog](https://img.shields.io/badge/changelog-CHANGELOG.md-orange.svg)](CHANGELOG.md)
 
 zark is a portable Python-based suite for backing up and fully recovering Ubuntu systems running ZFS with full-disk encryption. It runs from any location - USB drive, live session, or local directory - with zero installation required.
 
@@ -49,8 +49,7 @@ zark automates the entire process:
 
 ## Installation
 
-zark ships in two complementary forms; **both are first-class** and
-serve different use cases.
+zark ships in two complementary forms; **both are first-class** and serve different use cases.
 
 ### Apt (recommended for productive systems)
 
@@ -62,33 +61,25 @@ sudo apt update
 sudo apt install zark
 ```
 
-Supported series: 24.04, 24.10, 25.04, 25.10, 26.04. The package
-installs zark under `/usr/share/zark/`, exposes it as `/usr/bin/zark`,
-and creates `/etc/zark/` for `known_drives.json`. Logs go to
-`/var/log/zark.log`.
+Supported series: 24.04, 24.10, 25.04, 25.10, 26.04. The package installs zark under `/usr/share/zark/`, exposes it as `/usr/bin/zark`,
+and creates `/etc/zark/` for `known_drives.json`. Logs go to `/var/log/zark.log`.
 
 ### Portable tarball (required for live-USB recovery)
 
-For disaster recovery from a live USB — when there is no installed
-system to `apt install` into:
+For disaster recovery from a live USB — when there is no installed system to `apt install` into — head to the [**Releases page**](https://github.com/juanmitaboada/zark/releases/latest) and
+download the `zark_X.Y.Z.tar.gz` asset attached to the latest release. Then:
 
 ```bash
-wget https://github.com/juanmitaboada/zark/releases/download/v1.0.5/zark_1.0.5.tar.gz
-tar xzf zark_1.0.5.tar.gz
+tar xzf zark_*.tar.gz
 cd zark
 sudo ./zark explore
 ```
 
-The tarball runs from any directory (USB pendrive, `/opt`, `~/bin`)
-without installation. When zark detects it is running on a live USB
-session, it logs to `<zark_root>/zark.log` next to the script (which
-survives reboot, since the pendrive does) instead of `/var/log/`.
+The tarball runs from any directory (USB pendrive, `/opt`, `~/bin`) withoutinstallation. When zark detects it is running on a live USB session, it logs
+to `<zark_root>/zark.log` next to the script (which survives reboot, since the pendrive does) instead of `/var/log/`.
 
-> **Why both?** The `.deb` package cannot help during recovery because
-> the live USB does not have zark installed and you cannot `apt install`
-> in a casper environment. The portable tarball is the only path for
-> the recover command. The package is a convenience for the routine
-> backup case.
+> **Why both?** The `.deb` package cannot help during recovery because the live USB does not have zark installed and you cannot `apt install`
+> in a casper environment. The portable tarball is the only path for the recover command. The package is a convenience for the routine backup case.
 
 ## Quick start
 
