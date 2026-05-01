@@ -178,10 +178,19 @@ PPA_DPUT_TGT := ppa:juanmitaboada/zark
 
 # Helper: regenerate the orig tarball next to the source tree, named
 # the way dpkg-source expects for a non-native package.
+#
+# `make dist` writes zark_$(VERSION).tar.gz into the project root.
+# `dpkg-source -b .` (invoked by debuild) then computes a diff between
+# the .orig and the working tree to produce the debian tarball; if the
+# release tarball is sitting in the root at that point, dpkg-source
+# treats it as an unrepresentable binary change and aborts. Moving
+# (not copying) the file fixes that — the orig becomes the canonical
+# upstream source, and there's nothing left in the working tree that
+# diverges from it.
 ORIG_TARBALL := ../zark_$(VERSION).orig.tar.gz
 
 $(ORIG_TARBALL): dist
-	@cp zark_$(VERSION).tar.gz $(ORIG_TARBALL)
+	@mv zark_$(VERSION).tar.gz $(ORIG_TARBALL)
 	@echo "  Orig tarball ready: $(ORIG_TARBALL)"
 
 deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally (-us -uc)
@@ -190,6 +199,12 @@ deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally (-us -uc)
 		exit 1; \
 	}
 	debuild -us -uc -b
+	@# Make the upstream tarball available in cwd for downstream steps
+	@# (CI's "stage release artefacts" step in .github/workflows/ci.yml
+	@# expects to find zark_$(VERSION).tar.gz in the project root). The
+	@# canonical copy is the .orig.tar.gz in the parent directory; we
+	@# just expose a renamed link/copy for convenience.
+	@cp $(ORIG_TARBALL) zark_$(VERSION).tar.gz
 	@echo ""
 	@echo "  Built: $$(ls -1t ../zark_$(VERSION)-*_all.deb | head -1)"
 	@echo "  Inspect: lintian -i ../zark_$(VERSION)-*.changes"

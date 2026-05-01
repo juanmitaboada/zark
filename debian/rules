@@ -21,6 +21,13 @@ export DH_VERBOSE = 1
 # Nothing to compile: pure Python, no C extensions.
 override_dh_auto_build:
 
+# `make clean` is a developer-facing target that wipes a wide range of
+# artefacts including the parent-directory .orig.tar.gz that
+# dpkg-source needs during a non-native (3.0 quilt) build. dh_clean
+# already handles the per-build cleanup we need, so we override
+# dh_auto_clean to a no-op.
+override_dh_auto_clean:
+
 # Tests need root, ZFS modules, real disks. They cannot run inside a
 # Debian build environment; they live behind `make test-real`.
 override_dh_auto_test:
