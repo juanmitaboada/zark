@@ -192,16 +192,35 @@ clean: ## Remove __pycache__ and temp files
 
 # ── Release ──────────────────────────────────────────────────────────────
 
-dist: ## Build release tarball: zark_<version>.tar.gz
+dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 	@echo "  Building zark_$(VERSION).tar.gz..."
-	@# The exclusion list MUST stay in sync with debian/source/options.
-	@# The Makefile defends `make dist` (the upstream tarball that goes
-	@# to the PPA orig.tar.gz and to the GitHub release); the source
-	@# options file defends `dpkg-source -b .` (the diff between
-	@# working tree and that tarball). Both must agree or the next
+	@# Why we exclude debian/ from the tarball:
+	@#
+	@# The Debian source format 3.0 (quilt) deliberately keeps the
+	@# upstream tarball (.orig.tar.gz) and the packaging (debian/)
+	@# separate. Including debian/ in the .orig.tar.gz produces three
+	@# concrete problems:
+	@#
+	@#   1) Lintian flags `no-debian-changes` because the
+	@#      debian.tar.xz adds nothing on top of an upstream that
+	@#      already contains debian/.
+	@#   2) Re-uploading the same upstream version with a tweaked
+	@#      debian/ (e.g. 1.0.5-1 -> 1.0.5-1~ubuntu24.04.2) regenerates
+	@#      the .orig.tar.gz with a different sha256, which Launchpad
+	@#      rejects ("File already exists with different contents").
+	@#   3) Conceptually wrong: this is exactly the separation that
+	@#      3.0 (quilt) was designed to enforce.
+	@#
+	@# Users browsing the GitHub release tarball don't lose anything:
+	@# they can see debian/ in the git repo. The tarball is the
+	@# upstream slice; debian/ is the packaging slice.
+	@#
+	@# The exclusion list (caches, pyc, etc.) MUST stay in sync with
+	@# debian/source/options. Both must agree or the next
 	@# `make deb-source` fails with "unexpected upstream changes".
 	@tmpdir=$$(mktemp -d) && \
 		cp -a . $$tmpdir/zark && \
+		rm -rf $$tmpdir/zark/debian; \
 		find $$tmpdir/zark -type d -name __pycache__   -exec rm -rf {} + 2>/dev/null; \
 		find $$tmpdir/zark -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null; \
 		find $$tmpdir/zark -type d -name .mypy_cache   -exec rm -rf {} + 2>/dev/null; \
@@ -211,7 +230,6 @@ dist: ## Build release tarball: zark_<version>.tar.gz
 		find $$tmpdir/zark -name '*.pyc'               -delete 2>/dev/null; \
 		find $$tmpdir/zark -name 'zark.log'            -delete 2>/dev/null; \
 		find $$tmpdir/zark -name '.DS_Store'           -delete 2>/dev/null; \
-		rm -f $$tmpdir/zark/debian/zark.1 $$tmpdir/zark/debian/zark.1.raw 2>/dev/null; \
 		tar -czf zark_$(VERSION).tar.gz -C $$tmpdir zark && \
 		rm -rf $$tmpdir && \
 		ls -la zark_$(VERSION).tar.gz
