@@ -167,6 +167,12 @@ jobs:
 
           # Clean up so subsequent steps see a pristine system
           sudo apt-get purge -y zark
+          # bash caches resolved command paths in this shell; the
+          # earlier `which zark` populated the cache. After purge the
+          # file is gone but `command -v zark` still returns the stale
+          # cached path. `hash -r` flushes the cache so the assertion
+          # below reflects reality.
+          hash -r
           ! command -v zark
 
       - name: Stage build artefacts inside the workspace
