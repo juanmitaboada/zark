@@ -2,53 +2,77 @@
 
 ## Supported versions
 
-zark is a single-maintainer project. Security fixes are produced for
-the **latest released version only**. Older versions are not patched.
+zark follows [semantic versioning](https://semver.org/). Only the latest
+release on the `main` branch receives security fixes.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+| Latest  | :white_check_mark: |
+| Older   | :x:                |
+
+If you are running a release older than the current one, please upgrade
+before reporting — the issue may already be fixed.
 
 ## Reporting a vulnerability
 
-If you have found a security issue in zark — anything that could allow data loss, unauthorised disk access, encryption-key exposure, or
-boot-chain compromise on a system using zark — please **do not open a public GitHub issue**.
+zark runs as **root** by design, operates on **whole disks**, and
+manages **encryption keys**. A vulnerability in zark could result in
+data loss, key disclosure, or unauthorized system access. Please
+report responsibly.
 
-Instead, email **juanmi@juanmitaboada.com** with:
+There are two ways to report a security issue, in order of preference:
 
-- A description of the issue and the affected zark version.
-- Steps to reproduce, or a minimal proof of concept.
-- Your assessment of impact (loss of confidentiality / integrity / availability, requires local access, requires root, etc.).
-- Optionally, a suggested fix.
+### 1. GitHub Security Advisories (preferred)
 
-You should receive an acknowledgement within **72 hours**. If you do not, please follow up — the email may have been filtered or missed.
+Open a private advisory at
+<https://github.com/juanmitaboada/zark/security/advisories/new>.
 
-## Handling
+This keeps the report private until a fix is published, lets us
+coordinate a CVE if warranted, and creates a clear audit trail. You
+will need a GitHub account.
 
-For accepted reports:
+### 2. Email
 
-1. We confirm the issue and assess severity.
-2. We prepare a fix in a private branch.
-3. We coordinate a release date with you (default: as soon as the fix is validated).
-4. The fix ships in the next zark release.
-5. The vulnerability is disclosed in the release notes ([`CHANGELOG.md`](CHANGELOG.md), GitHub Releases page) and credits
-   the reporter unless they prefer to remain anonymous.
+Send an email to **juanmi@juanmitaboada.com** with subject line
+beginning `[zark security]`. If the issue is sensitive, encrypt the
+message with the maintainer's PGP key
+(fingerprint: `347D C6D5 0D77 9E6C 93E2 11C6 2D87 70E8 99CF 5696`,
+available from `keyserver.ubuntu.com`).
 
-For reports that turn out not to be vulnerabilities (e.g. expected behaviour, configuration issue, upstream ZFS/GRUB bug), we reply with
-an explanation and, where useful, recommend filing an issue with the appropriate project.
+## What to include
 
-## Threat model — what zark assumes
+To help triage and reproduce, please provide:
 
-zark always runs as **root** and orchestrates `zfs`, `cryptsetup`, `grub-install`, `dracut` and similar tools. It is therefore **not**
-designed to defend against an attacker who already has root on the system being backed up — such an attacker has already won.
+- A description of the vulnerability and its impact
+- Steps to reproduce, or a proof-of-concept
+- The zark version (`zark --version`)
+- The Ubuntu version and ZFS version
+- Whether the issue requires user interaction or specific configuration
+- Any suggested fix or mitigation, if you have one
 
-zark **is** designed to:
+## What to expect
 
-- Preserve the confidentiality of ZFS-encrypted data during transfer to the backup drive (raw `zfs send`, no decryption in flight).
-- Detect and refuse to recover from a backup with a missing or tampered keystore zvol.
-- Avoid producing a recovered system that diverges from a fresh Ubuntu install (custom binaries, unsigned boot chain, etc.).
-- Fail loudly rather than silently when integrity assumptions break.
+- **Acknowledgement** within 72 hours
+- **Initial assessment** within 7 days, including whether we accept the
+  report and an estimated timeline for a fix
+- **Coordinated disclosure**: we will work with you on a public
+  disclosure date, typically once a fix has been released. Please do
+  not publicly disclose the vulnerability before then
+- **Credit** in the release notes of the fixing version, unless you
+  prefer to remain anonymous
 
-Reports about behaviour outside this model (for example, "I gave zark root and it did something powerful") are not security issues but may
-still be valid bug reports — please file them as regular GitHub issues.
+## Out of scope
+
+The following are **not** considered security vulnerabilities in zark:
+
+- Issues in upstream dependencies (ZFS, sanoid, GRUB, dracut,
+  cryptsetup) — please report those to the respective projects
+- Configuration mistakes by the operator (e.g. weak LUKS passphrase,
+  unencrypted backup destination)
+- Issues that require physical access to a machine that is already
+  compromised or unlocked
+- Denial of service that requires root on the same host where zark
+  runs (root can already do anything)
+
+If you are unsure whether something qualifies, report it anyway and
+we will discuss.
