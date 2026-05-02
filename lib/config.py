@@ -72,7 +72,15 @@ class Config:
         if (system / "known_drives.json").exists():
             return system
 
-        # Default to portable if nothing exists yet
+        # No known_drives.json exists yet (fresh install or first run).
+        # Pick the appropriate default for the layout:
+        #   - System install (.deb): zark_root is /usr/share/zark, which
+        #     is read-only as far as dpkg is concerned. The user's config
+        #     belongs in /etc/zark, where postinst created the directory.
+        #   - Portable: zark_root is wherever the suite was extracted to
+        #     (USB pendrive, /opt, ~/bin, ...). Keep config alongside.
+        if Config.zark_root() == Path("/usr/share/zark"):
+            return system
         return portable
 
     @classmethod

@@ -175,6 +175,59 @@ class TestConfig:
                 if env_backup is not None:
                     os.environ["ZARK_CONFIG_DIR"] = env_backup
 
+    def test_system_install_default_with_no_config(self):
+        """
+        Fresh .deb install before the user creates known_drives.json:
+        zark_root is /usr/share/zark, neither <root>/etc/known_drives.json
+        nor /etc/zark/known_drives.json exist yet. The default must point
+        at /etc/zark (writable, where postinst created the directory),
+        NOT at /usr/share/zark/etc which is dpkg-managed and read-only.
+        """
+        import pathlib  # pylint: disable=import-outside-toplevel
+
+        sys_install_root = pathlib.Path("/usr/share/zark")
+        env_backup = os.environ.pop("ZARK_CONFIG_DIR", None)
+        try:
+            with (
+                patch.object(Config, "zark_root", return_value=sys_install_root),
+                # Make every "exists()" return False so neither portable
+                # nor system have a known_drives.json yet.
+                patch.object(pathlib.Path, "exists", return_value=False),
+                patch.object(pathlib.Path, "is_dir", return_value=False),
+            ):
+                result = Config.default_config_dir()
+            assert result == pathlib.Path("/etc/zark"), (
+                f"system install with no config should default to /etc/zark, " f"got {result}"
+            )
+        finally:
+            if env_backup is not None:
+                os.environ["ZARK_CONFIG_DIR"] = env_backup
+
+    def test_portable_default_with_no_config(self):
+        """
+        Fresh portable run before the user creates known_drives.json:
+        zark_root is e.g. /home/user/zark, neither <root>/etc/known_drives.json
+        nor /etc/zark/known_drives.json exist yet. The default must
+        point at <zark_root>/etc (writable, alongside the script).
+        """
+        import pathlib  # pylint: disable=import-outside-toplevel
+
+        portable_root = pathlib.Path("/home/user/zark")
+        env_backup = os.environ.pop("ZARK_CONFIG_DIR", None)
+        try:
+            with (
+                patch.object(Config, "zark_root", return_value=portable_root),
+                patch.object(pathlib.Path, "exists", return_value=False),
+                patch.object(pathlib.Path, "is_dir", return_value=False),
+            ):
+                result = Config.default_config_dir()
+            assert result == portable_root / "etc", (
+                f"portable run with no config should default to <root>/etc, " f"got {result}"
+            )
+        finally:
+            if env_backup is not None:
+                os.environ["ZARK_CONFIG_DIR"] = env_backup
+
 
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/log.py

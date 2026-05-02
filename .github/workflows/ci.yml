@@ -152,9 +152,18 @@ jobs:
 
           # Entry point: --version and --help must work without root
           # (we are root in the runner, but the entry point's adaptive
-          # help logic should produce sensible output either way)
+          # help logic should produce sensible output either way).
+          # We capture --help and assert key content is present, rather
+          # than piping to head -N — head closes its read end after N
+          # lines, killing zark with SIGPIPE, which trips up `set -e`
+          # under pipefail.
           zark --version
-          zark --help | head -25
+          zark --help > /tmp/zark_help.out
+          test -s /tmp/zark_help.out
+          grep -q "Commands:" /tmp/zark_help.out
+          grep -q "Examples:" /tmp/zark_help.out
+          grep -q "backup" /tmp/zark_help.out
+          grep -q "recover" /tmp/zark_help.out
 
           # Clean up so subsequent steps see a pristine system
           sudo apt-get purge -y zark
