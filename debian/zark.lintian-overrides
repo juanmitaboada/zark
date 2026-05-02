@@ -9,8 +9,3 @@
 # require either filing a synthetic Debian bug or migrating issue
 # tracking, neither of which makes sense for a Launchpad PPA.
 zark: initial-upload-closes-no-bugs
-
-# A manpage is a planned improvement — not blocking the first PPA
-# release. Once written, it will install via debian/zark.manpages and
-# this override can be removed.
-zark: no-manual-page [usr/bin/zark]

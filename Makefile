@@ -3,6 +3,7 @@
         test-phase1 test-phase2 test-phase3 test-cleanup \
         setup clean version \
         check mypy pylint format pre-commit lint tox \
+        manpage manpage-view manpage-clean \
         dist deb deb-source deb-ppa
 
 SHELL  := /bin/bash
@@ -116,6 +117,48 @@ tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint (in isolated venvs)
 	# silently skip missing interpreters per tox.ini default).
 	$(TOX) --skip-missing-interpreters=false
 
+# ── Documentation ────────────────────────────────────────────────────────
+#
+# The manpage source lives at debian/zark.1.md and is converted to roff
+# at build time (see debian/rules). These targets let you iterate on the
+# Markdown without going through a full `make deb` cycle each time.
+#
+# The pipeline mirrors debian/rules verbatim — keep the two in sync if
+# you ever change one.
+
+manpage: ## Build debian/zark.1 from debian/zark.1.md (pandoc + sed + awk)
+	@command -v pandoc >/dev/null || { \
+		echo "  pandoc not installed. Install with: sudo apt install pandoc"; \
+		exit 1; \
+	}
+	pandoc -s -f markdown-smart -t man --ascii \
+	    debian/zark.1.md -o debian/zark.1.raw
+	@sed -E \
+	    -e 's/\\f\[CB\]/\\fB/g' \
+	    -e 's/\\f\[CI\]/\\f(BI/g' \
+	    -e 's/\\f\[C\]/\\fB/g' \
+	    -e 's/\\f\[BI\]/\\f(BI/g' \
+	    -e 's/\\f\[B\]/\\fB/g' \
+	    -e 's/\\f\[I\]/\\fI/g' \
+	    -e 's/\\f\[R\]/\\fR/g' \
+	    -e 's/\\f\[\]/\\fR/g' \
+	    debian/zark.1.raw \
+	  | awk '/^\.PP$$/ && prev ~ /^\.S[HS] / { next } { print; prev = $$0 }' \
+	  > debian/zark.1
+	@rm -f debian/zark.1.raw
+	@echo "  Built: debian/zark.1"
+	@echo "  View with: make manpage-view"
+
+manpage-view: manpage ## Render debian/zark.1 with man (after rebuilding it)
+	@command -v man >/dev/null || { \
+		echo "  man not installed. Install with: sudo apt install man-db"; \
+		exit 1; \
+	}
+	man -l debian/zark.1
+
+manpage-clean: ## Remove the generated manpage (keeps debian/zark.1.md)
+	rm -f debian/zark.1 debian/zark.1.raw
+
 # ── Lifecycle ────────────────────────────────────────────────────────────
 
 setup: ## Run zark setup (install sanoid, register drive)
@@ -140,6 +183,8 @@ clean: ## Remove __pycache__ and temp files
 	      2>/dev/null || true
 	rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp \
 	       2>/dev/null || true
+	# The generated manpage is a build artefact (source is debian/zark.1.md).
+	rm -f debian/zark.1 debian/zark.1.raw 2>/dev/null || true
 	# `dist/` is created by CI (.github/workflows/ci.yml) to stage build
 	# artefacts inside the workspace before upload. Cleaning it here is
 	# defensive — local builds drop artefacts in the parent directory.
@@ -158,6 +203,7 @@ dist: ## Build release tarball: zark_<version>.tar.gz
 		find $$tmpdir/zark -name '*.pyc'               -delete 2>/dev/null; \
 		find $$tmpdir/zark -name 'zark.log'            -delete 2>/dev/null; \
 		find $$tmpdir/zark -name '.DS_Store'           -delete 2>/dev/null; \
+		rm -f $$tmpdir/zark/debian/zark.1 $$tmpdir/zark/debian/zark.1.raw 2>/dev/null; \
 		tar -czf zark_$(VERSION).tar.gz -C $$tmpdir zark && \
 		rm -rf $$tmpdir && \
 		ls -la zark_$(VERSION).tar.gz

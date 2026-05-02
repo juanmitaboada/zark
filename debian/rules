@@ -18,8 +18,44 @@ export DH_VERBOSE = 1
 %:
 	dh $@
 
-# Nothing to compile: pure Python, no C extensions.
+# Build the manpage from its Markdown source. We keep zark.1.md in
+# debian/ as the canonical source; the generated zark.1 is shipped to
+# the user via debian/zark.manpages but never committed to the repo.
+#
+# The pipeline does three things:
+#
+#   1) pandoc -t man --ascii: emit roff and escape Unicode (e.g. ≥
+#      becomes \[u2265]) so the page renders identically on terminals
+#      without UTF-8 fonts.
+#
+#   2) sed: rewrite pandoc's bracket-form font selectors into the
+#      portable two-letter forms. pandoc 3.x emits \f[C], \f[CB] etc.
+#      to request a Courier font; mandoc rejects these and most
+#      terminal renderers have no Courier anyway, so we collapse them
+#      to bold (which is the universal man convention for code).
+#
+#   3) awk: drop the .PP that pandoc emits as the first line of every
+#      section. mandoc warns ("skipping paragraph macro: PP after
+#      SH/SS") and the macro is redundant — .SH already starts a new
+#      paragraph.
+#
+# The result passes both `mandoc -Tlint` and `groff -ww -z` cleanly.
 override_dh_auto_build:
+	pandoc -s -f markdown-smart -t man --ascii \
+	    debian/zark.1.md -o debian/zark.1.raw
+	sed -E \
+	    -e 's/\\f\[CB\]/\\fB/g' \
+	    -e 's/\\f\[CI\]/\\f(BI/g' \
+	    -e 's/\\f\[C\]/\\fB/g' \
+	    -e 's/\\f\[BI\]/\\f(BI/g' \
+	    -e 's/\\f\[B\]/\\fB/g' \
+	    -e 's/\\f\[I\]/\\fI/g' \
+	    -e 's/\\f\[R\]/\\fR/g' \
+	    -e 's/\\f\[\]/\\fR/g' \
+	    debian/zark.1.raw \
+	  | awk '/^\.PP$$/ && prev ~ /^\.S[HS] / { next } { print; prev = $$0 }' \
+	  > debian/zark.1
+	rm -f debian/zark.1.raw
 
 # `make clean` is a developer-facing target that wipes a wide range of
 # artefacts including the parent-directory .orig.tar.gz that
@@ -27,6 +63,13 @@ override_dh_auto_build:
 # already handles the per-build cleanup we need, so we override
 # dh_auto_clean to a no-op.
 override_dh_auto_clean:
+
+# Remove the generated manpage so a fresh `debuild` always rebuilds it
+# from the .md source. dh_clean runs late, after dh_installman has
+# done its work, which is exactly when we want the .1 gone.
+override_dh_clean:
+	dh_clean
+	rm -f debian/zark.1 debian/zark.1.raw
 
 # Tests need root, ZFS modules, real disks. They cannot run inside a
 # Debian build environment; they live behind `make test-real`.
