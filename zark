@@ -33,6 +33,22 @@ COMMANDS = {
 }
 
 
+def _invocation_hint() -> tuple[str, str]:
+    """
+    Compute the (prefix, command) pair to suggest in help text.
+
+    - When zark is installed system-wide (`/usr/share/zark/`), the
+      shipped /usr/bin/zark symlink puts the command on PATH, so the
+      natural invocation is `zark`. Otherwise (portable USB / git
+      checkout / extracted tarball), it's `./zark`.
+    - When already running as root, suggest commands without sudo;
+      adding it would just be noise.
+    """
+    cmd = "zark" if ZARK_ROOT == "/usr/share/zark" else "./zark"
+    prefix = "" if os.geteuid() == 0 else "sudo "
+    return prefix, cmd
+
+
 def print_help():
     """
     Print usage instructions and available commands
@@ -40,20 +56,21 @@ def print_help():
     log = Log()
     log.banner(f"zark v{VERSION}", "ZFS backup suite for external drives")
     print()
-    log.info("Usage:  sudo ./zark <command> [options]")
+    prefix, cmd = _invocation_hint()
+    log.info(f"Usage:  {prefix}{cmd} <command> [options]")
     print()
     log.info("Commands:")
-    for cmd, desc in COMMANDS.items():
-        print(f"    {log.W}{cmd:<12}{log.N} {desc}")
+    for name, desc in COMMANDS.items():
+        print(f"    {log.W}{name:<12}{log.N} {desc}")
     print()
     log.info(f"Config: {Config.default_config_dir()}/known_drives.json")
     log.info("Log:    /var/log/zark.log")
     print()
     log.info("Examples:")
-    print("    sudo ./zark backup          # run backup")
-    print("    sudo ./zark explore         # scan for pools")
-    print("    sudo ./zark mount           # mount backup for inspection")
-    print("    sudo ./zark recover         # full system recovery")
+    print(f"    {prefix}{cmd} backup          # run backup")
+    print(f"    {prefix}{cmd} explore         # scan for pools")
+    print(f"    {prefix}{cmd} mount           # mount backup for inspection")
+    print(f"    {prefix}{cmd} recover         # full system recovery")
     print()
 
 
@@ -61,12 +78,11 @@ def main():
     """
     Main entry point: parse command and dispatch to appropriate module
     """
-    if os.geteuid() != 0:
-        print("\033[0;31mError:\033[0m zark must be run as root (sudo ./zark ...)")
-        sys.exit(1)
-
     args = sys.argv[1:]
 
+    # Short-circuit informational flags BEFORE the root check. These
+    # produce static output that depends on neither system state nor
+    # privileges; refusing to print them without sudo is just rude.
     if not args or args[0] in ("--help", "-h", "help"):
         print_help()
         sys.exit(0)
@@ -74,6 +90,11 @@ def main():
     if args[0] in ("--version", "-v"):
         print(f"zark v{VERSION}")
         sys.exit(0)
+
+    if os.geteuid() != 0:
+        _, invoke_name = _invocation_hint()
+        print(f"\033[0;31mError:\033[0m zark must be run as root (sudo {invoke_name} ...)")
+        sys.exit(1)
 
     cmd_name = args[0]
     cmd_args = args[1:]

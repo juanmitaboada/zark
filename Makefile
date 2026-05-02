@@ -171,10 +171,15 @@ version: ## Show current version
 # debian/README.packaging.md for the full guide, including GPG setup,
 # PPA upload procedure, and version-suffix rules.
 #
-# Series covered by the PPA:                   24.04 → 26.04
+# Series covered by the PPA: 24.04 → 26.04. Codenames are stable
+# (resolute = 26.04 LTS Resolute Raccoon).
 PPA_SERIES   := noble oracular plucky questing resolute
-# (resolute is provisional for 26.04 — adjust when the codename is set.)
-PPA_DPUT_TGT := ppa:juanmitaboada/zark
+# Upload target. We use a named profile (`zark-ppa`) rather than the
+# canonical `ppa:juanmitaboada/zark` shorthand because dput-ng's default
+# profile uses FTP, which is increasingly blocked by ISPs and didn't
+# work for us. The profile is defined in ./dput.cf at the repo root and
+# uses HTTPS.
+PPA_DPUT_TGT := zark-ppa
 
 # Helper: regenerate the orig tarball next to the source tree, named
 # the way dpkg-source expects for a non-native package.
@@ -311,7 +316,7 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 		debsign -k$(GPG_KEYID) "../zark_$(VERSION)-1$${suffix}_source.changes"; \
 		head -1 "../zark_$(VERSION)-1$${suffix}_source.changes" | grep -q "BEGIN PGP SIGNED MESSAGE" \
 		    || { echo "  ERROR: $$series .changes is NOT signed. Aborting."; exit 1; }; \
-		dput $(PPA_DPUT_TGT) ../zark_$(VERSION)-1$${suffix}_source.changes; \
+		dput -c dput.cf $(PPA_DPUT_TGT) ../zark_$(VERSION)-1$${suffix}_source.changes; \
 	done
 	@echo ""
 	@echo "  All series uploaded. Launchpad will email build results."

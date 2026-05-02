@@ -118,6 +118,48 @@ jobs:
         # reviews them locally before PPA upload.
         run: lintian -i ../zark_*.changes || true
 
+      - name: Smoke test the built .deb
+        # Install the freshly-built .deb on the runner and verify zark
+        # starts. This catches regressions in debian/control's Depends:
+        # — if a dependency is missing, apt fails here. We also check
+        # that the symlink layout works (/usr/bin/zark resolves to
+        # /usr/share/zark/zark via realpath) and that --help / --version
+        # produce output, which exercises the lib/ and commands/ imports.
+        # We then purge so subsequent steps run on a clean system.
+        run: |
+          set -euo pipefail
+          DEB=$(ls ../zark_*_all.deb | head -1)
+          echo "Testing: $DEB"
+
+          # Inspect package metadata before installing
+          dpkg-deb -I "$DEB"
+
+          # Verify the Depends list is what we declared. If Depends ever
+          # drifts (a refactor adds a new tool, a new debian/control field
+          # is mis-edited), this catches it before users do.
+          dpkg-deb -f "$DEB" Depends | grep -q 'zfsutils-linux'
+          dpkg-deb -f "$DEB" Depends | grep -q 'sanoid'
+          dpkg-deb -f "$DEB" Depends | grep -q 'cryptsetup-bin'
+          dpkg-deb -f "$DEB" Depends | grep -q 'gdisk'
+
+          # Install with apt (resolves Depends from the Ubuntu archive)
+          sudo apt-get install -y "$DEB"
+
+          # Layout: symlink in /usr/bin pointing at /usr/share/zark/zark
+          which zark
+          test -L /usr/bin/zark
+          readlink -f /usr/bin/zark | grep -q '/usr/share/zark/zark'
+
+          # Entry point: --version and --help must work without root
+          # (we are root in the runner, but the entry point's adaptive
+          # help logic should produce sensible output either way)
+          zark --version
+          zark --help | head -25
+
+          # Clean up so subsequent steps see a pristine system
+          sudo apt-get purge -y zark
+          ! command -v zark
+
       - name: Stage build artefacts inside the workspace
         # dpkg-buildpackage drops .deb / .changes / .buildinfo into the
         # parent directory of the source tree (Debian convention). The

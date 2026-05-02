@@ -1,0 +1,6 @@
+[zark-ppa]
+fqdn = ppa.launchpad.net
+method = https
+incoming = ~juanmitaboada/ubuntu/zark/
+login = anonymous
+allow_unsigned_uploads = 0

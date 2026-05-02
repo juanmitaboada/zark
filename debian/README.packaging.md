@@ -151,11 +151,24 @@ If you prefer a manual single-series upload:
 # Edit debian/changelog: change "UNRELEASED" to "noble" (or whichever)
 # and append "~ubuntu24.04.1" to the version. Save.
 debuild -S -sa
-dput ppa:juanmitaboada/zark ../zark_1.0.5-1~ubuntu24.04.1_source.changes
+dput -c dput.cf zark-ppa ../zark_1.0.5-1~ubuntu24.04.1_source.changes
 ```
 
 After upload, Launchpad emails you with the build status (usually within
 ~15 min for accepted builds).
+
+### Why a custom dput profile?
+
+The repo ships a `dput.cf` at the project root with a `[zark-ppa]`
+profile that uploads via **HTTPS** to `ppa.launchpad.net`. The
+canonical shorthand `ppa:juanmitaboada/zark` resolved by `dput-ng`
+defaults to **FTP**, which we observed timing out — many ISPs and
+corporate networks block outbound FTP (port 21) by default. HTTPS
+goes through the same port (443) as the rest of the Launchpad web,
+so it works wherever `git push` does.
+
+`make deb-ppa` invokes `dput -c dput.cf zark-ppa ...` so the local
+profile is always picked up regardless of the user's `~/.dput.cf`.
 
 ---
 
