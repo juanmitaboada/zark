@@ -214,11 +214,47 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 		echo "  debuild not installed. Install with: sudo apt install devscripts debhelper"; \
 		exit 1; \
 	}
-	@gpg --list-secret-keys juanmi@juanmitaboada.com >/dev/null 2>&1 || { \
-		echo "  No GPG secret key for juanmi@juanmitaboada.com — see debian/README.packaging.md §1.2"; \
+	@# Discover the maintainer's GPG signing key.
+	@#
+	@# Some keyrings end up with several historical keys for the same
+	@# email (rotated yearly, expired, revoked, replaced...). The
+	@# 'sec' record's second column tells us per-key validity:
+	@#   - 'u' = ultimate trust — the maintainer's current key
+	@#   - '-' = valid, secret available, but not marked as own key
+	@#   - 'r' = revoked
+	@#   - 'e' = expired
+	@# We require 'u' and fall back to '-' only when no 'u' exists,
+	@# because GPG defaults (e.g. `gpg --clearsign` with no -u) also
+	@# pick the 'u' key — keeping our build consistent with what the
+	@# user sees interactively.
+	@#
+	@# We extract the full fingerprint (the `fpr` record immediately
+	@# following the chosen `sec`) rather than the 16-char long key ID:
+	@# `debsign` prefers fingerprints and warns about long IDs.
+	$(eval GPG_KEYID := $(shell gpg --list-secret-keys --with-colons juanmi@juanmitaboada.com 2>/dev/null | awk -F: 'BEGIN{want=0;u="";v=""} $$1=="sec" {want=($$2=="u")?1:(($$2=="-")?2:0); next} $$1=="fpr" && want==1 && !u {u=$$10} $$1=="fpr" && want==2 && !v {v=$$10} END{print (u ? u : v)}'))
+	@test -n "$(GPG_KEYID)" || { \
+		echo "  No usable GPG secret key for juanmi@juanmitaboada.com"; \
+		echo "  (revoked/expired keys are ignored — see debian/README.packaging.md §1.2)"; \
 		exit 1; \
 	}
-	debuild -S -sa
+	@echo "  Signing with GPG key: $(GPG_KEYID)"
+	@# Build the source package unsigned, then sign with debsign
+	@# explicitly. This separation is more reliable than debuild's
+	@# combined build+sign mode, whose -k / DEBSIGN_KEYID handling
+	@# has had inconsistent semantics across versions and silently
+	@# falls back to unsigned in some configurations.
+	debuild -S -sa -us -uc
+	debsign -k$(GPG_KEYID) ../zark_$(VERSION)-1_source.changes
+	@# Verify the .changes is actually signed before claiming success.
+	@# An unsigned upload would be rejected by Launchpad with "Bad
+	@# signature", so failing here saves a round-trip.
+	@head -1 ../zark_$(VERSION)-*_source.changes | grep -q "BEGIN PGP SIGNED MESSAGE" || { \
+		echo ""; \
+		echo "  ERROR: source.changes is NOT signed. Aborting."; \
+		echo "  Check gpg-agent / pinentry interaction or run debsign manually:"; \
+		echo "    debsign -k$(GPG_KEYID) ../zark_$(VERSION)-1_source.changes"; \
+		exit 1; \
+	}
 	@echo ""
 	@echo "  Source package built and signed:"
 	@ls -1 ../zark_$(VERSION)-*_source.changes
@@ -228,8 +264,10 @@ deb-ppa: ## Upload a signed source package per Ubuntu series to the PPA
 		echo "  dput not installed. Install with: sudo apt install dput-ng"; \
 		exit 1; \
 	}
-	@gpg --list-secret-keys juanmi@juanmitaboada.com >/dev/null 2>&1 || { \
-		echo "  No GPG secret key for juanmi@juanmitaboada.com — see debian/README.packaging.md §1.2"; \
+	$(eval GPG_KEYID := $(shell gpg --list-secret-keys --with-colons juanmi@juanmitaboada.com 2>/dev/null | awk -F: 'BEGIN{want=0;u="";v=""} $$1=="sec" {want=($$2=="u")?1:(($$2=="-")?2:0); next} $$1=="fpr" && want==1 && !u {u=$$10} $$1=="fpr" && want==2 && !v {v=$$10} END{print (u ? u : v)}'))
+	@test -n "$(GPG_KEYID)" || { \
+		echo "  No usable GPG secret key for juanmi@juanmitaboada.com"; \
+		echo "  (revoked/expired keys are ignored — see debian/README.packaging.md §1.2)"; \
 		exit 1; \
 	}
 	@echo "  This will build and upload one source package per series:"
@@ -252,7 +290,13 @@ deb-ppa: ## Upload a signed source package per Ubuntu series to the PPA
 		dch --newversion "$(VERSION)-1$$suffix" --distribution "$$series" \
 		    --force-distribution --preserve \
 		    "Build for Ubuntu $$series."; \
-		debuild -S -sa || { mv debian/changelog.bak debian/changelog; exit 1; }; \
+		debuild -S -sa -us -uc \
+		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
+		debsign -k$(GPG_KEYID) "../zark_$(VERSION)-1$${suffix}_source.changes" \
+		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
+		head -1 "../zark_$(VERSION)-1$${suffix}_source.changes" | grep -q "BEGIN PGP SIGNED MESSAGE" \
+		    || { echo "  ERROR: $$series .changes is NOT signed. Aborting."; \
+		         mv debian/changelog.bak debian/changelog; exit 1; }; \
 		dput $(PPA_DPUT_TGT) ../zark_$(VERSION)-1$${suffix}_source.changes \
 		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
 	done
