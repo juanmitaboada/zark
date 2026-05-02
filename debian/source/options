@@ -1,0 +1,44 @@
+# Options passed to dpkg-source(1) when building the source package.
+#
+# Why this file exists:
+#
+#   `dpkg-source -b .` (3.0 quilt format) compares the working tree
+#   against the .orig.tar.gz and treats every difference outside of
+#   debian/ as "unrepresentable upstream changes". Tool caches like
+#   .mypy_cache/ or .ruff_cache/ aren't in the tarball (Makefile's
+#   `make dist` excludes them) but DO live in the working tree, so
+#   without these directives the build aborts with:
+#
+#       dpkg-source: info: local changes detected, the modified files are:
+#        zark/.mypy_cache/3.12/...
+#       dpkg-source: error: aborting due to unexpected upstream changes
+#
+# Two directives, both needed:
+#
+#   tar-ignore        — patterns excluded when dpkg-source itself
+#                       generates a tarball (mostly defensive; we use
+#                       `make dist` for that, but if anyone ever runs
+#                       dpkg-source -b without -sa, this kicks in).
+#
+#   extend-diff-ignore — regex of paths to ignore when generating the
+#                       upstream diff. This is what actually silences
+#                       the "local changes detected" abort.
+#
+# Keep these in sync with the `find ... -delete` invocations in the
+# Makefile's dist target. If you add a cache directory there, add it
+# here too. Note that .git/ and .github/ are deliberately NOT listed:
+# .git/ is excluded from the tarball but never appears in working-tree
+# diffs (dpkg-source ignores it by default), and .github/ is legitimate
+# project content that ships in both the tarball and the working tree
+# (so the diff is always empty).
+
+tar-ignore = .mypy_cache
+tar-ignore = .pytest_cache
+tar-ignore = .ruff_cache
+tar-ignore = .tox
+tar-ignore = __pycache__
+tar-ignore = "*.pyc"
+tar-ignore = ".DS_Store"
+tar-ignore = "zark.log"
+
+extend-diff-ignore = "(^|/)(\.mypy_cache|\.pytest_cache|\.ruff_cache|\.tox|__pycache__|.+\.pyc|\.DS_Store|zark\.log)(/|$)"

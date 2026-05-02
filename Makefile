@@ -194,11 +194,19 @@ clean: ## Remove __pycache__ and temp files
 
 dist: ## Build release tarball: zark_<version>.tar.gz
 	@echo "  Building zark_$(VERSION).tar.gz..."
+	@# The exclusion list MUST stay in sync with debian/source/options.
+	@# The Makefile defends `make dist` (the upstream tarball that goes
+	@# to the PPA orig.tar.gz and to the GitHub release); the source
+	@# options file defends `dpkg-source -b .` (the diff between
+	@# working tree and that tarball). Both must agree or the next
+	@# `make deb-source` fails with "unexpected upstream changes".
 	@tmpdir=$$(mktemp -d) && \
 		cp -a . $$tmpdir/zark && \
 		find $$tmpdir/zark -type d -name __pycache__   -exec rm -rf {} + 2>/dev/null; \
 		find $$tmpdir/zark -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null; \
 		find $$tmpdir/zark -type d -name .mypy_cache   -exec rm -rf {} + 2>/dev/null; \
+		find $$tmpdir/zark -type d -name .ruff_cache   -exec rm -rf {} + 2>/dev/null; \
+		find $$tmpdir/zark -type d -name .tox          -exec rm -rf {} + 2>/dev/null; \
 		find $$tmpdir/zark -type d -name .git          -exec rm -rf {} + 2>/dev/null; \
 		find $$tmpdir/zark -name '*.pyc'               -delete 2>/dev/null; \
 		find $$tmpdir/zark -name 'zark.log'            -delete 2>/dev/null; \
