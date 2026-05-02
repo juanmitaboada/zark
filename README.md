@@ -75,7 +75,7 @@ cd zark
 sudo ./zark explore
 ```
 
-The tarball runs from any directory (USB pendrive, `/opt`, `~/bin`) withoutinstallation. When zark detects it is running on a live USB session, it logs
+The tarball runs from any directory (USB pendrive, `/opt`, `~/bin`) without installation. When zark detects it is running on a live USB session, it logs
 to `<zark_root>/zark.log` next to the script (which survives reboot, since the pendrive does) instead of `/var/log/`.
 
 > **Why both?** The `.deb` package cannot help during recovery because the live USB does not have zark installed and you cannot `apt install`
