@@ -259,7 +259,7 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 	@echo "  Source package built and signed:"
 	@ls -1 ../zark_$(VERSION)-*_source.changes
 
-deb-ppa: ## Upload a signed source package per Ubuntu series to the PPA
+deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to the PPA
 	@command -v dput >/dev/null || { \
 		echo "  dput not installed. Install with: sudo apt install dput-ng"; \
 		exit 1; \
@@ -274,23 +274,31 @@ deb-ppa: ## Upload a signed source package per Ubuntu series to the PPA
 	@echo "    $(PPA_SERIES)"
 	@echo "  to $(PPA_DPUT_TGT)."
 	@read -r -p "  Continue? [y/N] " ans && [ "$$ans" = "y" ] || { echo "  Aborted."; exit 1; }
-	@cp debian/changelog debian/changelog.bak
+	@# All shell commands run in a single sub-shell (one '\' line) so we
+	@# can use trap to restore debian/changelog regardless of which step
+	@# fails. The inner cp/mv-based logic was fragile: nested error
+	@# branches could move .bak twice, leaving the working tree with a
+	@# half-rewritten changelog and a confusing "cannot stat .bak" error.
+	@#
 	@# DEBEMAIL/DEBFULLNAME tell dch which identity to record in the new
-	@# changelog entry. Without these dch falls back to whoami@hostname,
-	@# which produces upload metadata that doesn't match the Maintainer
-	@# field declared in debian/control.
-	@# All commands inside the per-series loop chain to a common
-	@# "restore changelog and bail" branch so we never leave the working
-	@# tree with a half-rewritten changelog.
-	@for series in $(PPA_SERIES); do \
+	@# changelog entry. Without these dch falls back to whoami@hostname.
+	@#
+	@# We refresh the .orig tarball before each series because dch
+	@# modifies debian/changelog (which is fine, debian/ isn't compared)
+	@# but ALSO because if the working tree has any uncommitted change
+	@# outside debian/, we need that to be reflected in .orig too —
+	@# otherwise dpkg-source -b aborts with "unexpected upstream changes".
+	@set -e; \
+	cp debian/changelog debian/changelog.bak; \
+	trap 'mv -f debian/changelog.bak debian/changelog 2>/dev/null || true' EXIT INT TERM; \
+	for series in $(PPA_SERIES); do \
 		case $$series in \
 			noble)     suffix="~ubuntu24.04.1" ;; \
 			oracular)  suffix="~ubuntu24.10.1" ;; \
 			plucky)    suffix="~ubuntu25.04.1" ;; \
 			questing)  suffix="~ubuntu25.10.1" ;; \
 			resolute)  suffix="~ubuntu26.04.1" ;; \
-			*)         echo "  Unknown series: $$series"; \
-			           mv debian/changelog.bak debian/changelog; exit 1 ;; \
+			*)         echo "  Unknown series: $$series"; exit 1 ;; \
 		esac; \
 		echo ""; \
 		echo "  ── Building for $$series ($(VERSION)-1$$suffix) ──"; \
@@ -298,18 +306,12 @@ deb-ppa: ## Upload a signed source package per Ubuntu series to the PPA
 		DEBEMAIL="juanmi@juanmitaboada.com" DEBFULLNAME="Juanmi Taboada" \
 		    dch --newversion "$(VERSION)-1$$suffix" --distribution "$$series" \
 		        --force-distribution --force-bad-version \
-		        "Build for Ubuntu $$series." \
-		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
-		debuild -S -sa -us -uc \
-		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
-		debsign -k$(GPG_KEYID) "../zark_$(VERSION)-1$${suffix}_source.changes" \
-		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
+		        "Build for Ubuntu $$series."; \
+		debuild -S -sa -us -uc; \
+		debsign -k$(GPG_KEYID) "../zark_$(VERSION)-1$${suffix}_source.changes"; \
 		head -1 "../zark_$(VERSION)-1$${suffix}_source.changes" | grep -q "BEGIN PGP SIGNED MESSAGE" \
-		    || { echo "  ERROR: $$series .changes is NOT signed. Aborting."; \
-		         mv debian/changelog.bak debian/changelog; exit 1; }; \
-		dput $(PPA_DPUT_TGT) ../zark_$(VERSION)-1$${suffix}_source.changes \
-		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
+		    || { echo "  ERROR: $$series .changes is NOT signed. Aborting."; exit 1; }; \
+		dput $(PPA_DPUT_TGT) ../zark_$(VERSION)-1$${suffix}_source.changes; \
 	done
-	@mv debian/changelog.bak debian/changelog
 	@echo ""
 	@echo "  All series uploaded. Launchpad will email build results."
