@@ -275,6 +275,13 @@ deb-ppa: ## Upload a signed source package per Ubuntu series to the PPA
 	@echo "  to $(PPA_DPUT_TGT)."
 	@read -r -p "  Continue? [y/N] " ans && [ "$$ans" = "y" ] || { echo "  Aborted."; exit 1; }
 	@cp debian/changelog debian/changelog.bak
+	@# DEBEMAIL/DEBFULLNAME tell dch which identity to record in the new
+	@# changelog entry. Without these dch falls back to whoami@hostname,
+	@# which produces upload metadata that doesn't match the Maintainer
+	@# field declared in debian/control.
+	@# All commands inside the per-series loop chain to a common
+	@# "restore changelog and bail" branch so we never leave the working
+	@# tree with a half-rewritten changelog.
 	@for series in $(PPA_SERIES); do \
 		case $$series in \
 			noble)     suffix="~ubuntu24.04.1" ;; \
@@ -282,14 +289,17 @@ deb-ppa: ## Upload a signed source package per Ubuntu series to the PPA
 			plucky)    suffix="~ubuntu25.04.1" ;; \
 			questing)  suffix="~ubuntu25.10.1" ;; \
 			resolute)  suffix="~ubuntu26.04.1" ;; \
-			*)         echo "  Unknown series: $$series"; exit 1 ;; \
+			*)         echo "  Unknown series: $$series"; \
+			           mv debian/changelog.bak debian/changelog; exit 1 ;; \
 		esac; \
 		echo ""; \
 		echo "  ── Building for $$series ($(VERSION)-1$$suffix) ──"; \
 		cp debian/changelog.bak debian/changelog; \
-		dch --newversion "$(VERSION)-1$$suffix" --distribution "$$series" \
-		    --force-distribution --preserve \
-		    "Build for Ubuntu $$series."; \
+		DEBEMAIL="juanmi@juanmitaboada.com" DEBFULLNAME="Juanmi Taboada" \
+		    dch --newversion "$(VERSION)-1$$suffix" --distribution "$$series" \
+		        --force-distribution --force-bad-version \
+		        "Build for Ubuntu $$series." \
+		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
 		debuild -S -sa -us -uc \
 		    || { mv debian/changelog.bak debian/changelog; exit 1; }; \
 		debsign -k$(GPG_KEYID) "../zark_$(VERSION)-1$${suffix}_source.changes" \
