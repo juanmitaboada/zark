@@ -1,0 +1,80 @@
+name: Feature request
+description: Suggest an enhancement to zark
+title: "[Feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest a feature.
+
+        **Before submitting**, please review the project scope:
+
+        zark deliberately stays narrow — ZFS-on-root Ubuntu with
+        full-disk encryption, UEFI Secure Boot, and portable
+        invocation. Proposals that broaden this scope (other
+        distributions, non-encrypted setups, non-ZFS filesystems)
+        are unlikely to be accepted; they are better served as
+        separate projects. See [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md#scope).
+
+        For **questions or design discussions**, prefer
+        [Discussions](https://github.com/juanmitaboada/zark/discussions)
+        over a feature request — it keeps issues focused on actionable
+        work.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem you're trying to solve
+      description: |
+        What real-world situation prompted this request? A feature
+        without a concrete problem behind it is hard to evaluate.
+      placeholder: |
+        "When I run `zark recover` on a system with X, I currently have
+        to do Y manually because zark doesn't ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        How would you like zark to behave? A new subcommand? A flag
+        on an existing one? Be as concrete as you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Workarounds you tried, other tools that solve this, or
+        alternative designs you ruled out and why.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Does this stay within project scope?
+      description: |
+        Be honest — features that broaden the scope are usually
+        rejected, but knowing up front helps the discussion.
+      options:
+        - "Yes, fits ZFS-on-root + encryption + UEFI use case"
+        - "Borderline — not sure"
+        - "No, it would broaden zark beyond its current scope"
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: |
+        References, related upstream features, links to similar
+        functionality in other tools, etc.
+    validations:
+      required: false

@@ -1,0 +1,119 @@
+name: Bug report
+description: Report a defect in zark
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        Before submitting, please check that:
+        - You are running the **latest release** (see the Releases page).
+        - The issue is in zark itself, not in upstream ZFS / sanoid /
+          GRUB / dracut / cryptsetup. Bugs in those go to their
+          respective projects.
+        - For **security** issues, do not file a public bug — see
+          [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: input
+    id: zark_version
+    attributes:
+      label: zark version
+      description: Output of `zark --version`.
+      placeholder: "zark v1.0.5"
+    validations:
+      required: true
+
+  - type: input
+    id: ubuntu_version
+    attributes:
+      label: Ubuntu version
+      description: Output of `lsb_release -d`.
+      placeholder: "Description: Ubuntu 25.10"
+    validations:
+      required: true
+
+  - type: input
+    id: zfs_version
+    attributes:
+      label: ZFS version
+      description: Output of `zfs version`.
+      placeholder: "zfs-2.2.6-1ubuntu1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command involved
+      description: Which zark subcommand exposed the issue?
+      options:
+        - backup
+        - recover
+        - repair
+        - prepare
+        - purge
+        - setup
+        - finish
+        - mount
+        - umount
+        - clean
+        - explore
+        - monitor
+        - simulate
+        - "(other / not command-specific)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: A clear description of what you observed.
+      placeholder: "When I ran `sudo zark backup`, the syncoid step ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_expected
+    attributes:
+      label: What you expected
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce the issue from a clean state.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log slice
+      description: |
+        From `/var/log/zark.log` (system install) or `<zark_root>/zark.log`
+        (portable). Include 20-50 lines around the failure, not the entire
+        log.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: |
+        Anything that might help — a workaround you found, kernel oops in
+        `dmesg`, related upstream bugs, your `known_drives.json` (with
+        GUIDs/serials redacted), etc.
+    validations:
+      required: false

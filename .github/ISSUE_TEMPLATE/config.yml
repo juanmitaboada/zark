@@ -1,0 +1,19 @@
+# Issue chooser configuration. Disables blank issues so users go through
+# one of the templates, and adds redirect links for cases that should
+# NOT be issues (questions, security reports).
+blank_issues_enabled: false
+contact_links:
+  - name: Question or general discussion
+    url: https://github.com/juanmitaboada/zark/discussions
+    about: |
+      For questions, troubleshooting help, or open-ended design
+      discussions, please use Discussions instead of opening an issue.
+      Issues are reserved for confirmed bugs and concrete feature
+      requests.
+
+  - name: Security vulnerability
+    url: https://github.com/juanmitaboada/zark/security/advisories/new
+    about: |
+      Do NOT report security issues as public bugs. Open a private
+      Security Advisory or email juanmi@juanmitaboada.com with
+      subject "[zark security]". See SECURITY.md for the full process.
