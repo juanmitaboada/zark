@@ -381,11 +381,11 @@ Verify the recovery in QEMU before rebooting, without writing to disk:
 
 # BUGS
 
-Report bugs at <https://github.com/juanmitaboada/zark/issues>.
+Report bugs at https://github.com/juanmitaboada/zark/issues.
 
 # AUTHOR
 
-Juanmi Taboada <juanmi@juanmitaboada.com>
+Juanmi Taboada (juanmi@juanmitaboada.com)
 
 # SEE ALSO
 

@@ -2,9 +2,9 @@
         test test-real test-deps test-all \
         test-phase1 test-phase2 test-phase3 test-cleanup \
         setup clean version \
-        check mypy pylint format pre-commit lint tox \
-        manpage manpage-view manpage-clean \
-        dist deb deb-source deb-ppa
+        check mypy pylint ruff ruff-strict format pre-commit lint tox \
+        manpage manpage-view manpage-lint manpage-clean \
+        dist dist-check fulltest fulltest-clean deb deb-source deb-ppa
 
 SHELL  := /bin/bash
 ZARK   := ./zark
@@ -104,6 +104,24 @@ pylint: ## Run pylint on the whole project
 	}
 	pylint lib commands tests zark
 
+ruff: ## Run ruff (full ruleset, as configured in pyproject.toml)
+	@command -v ruff >/dev/null || { \
+		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
+		exit 1; \
+	}
+	ruff check .
+
+ruff-strict: ## Run ruff with --select=RUF027 --preview (matches the CI lint job)
+	@# CI's lint job runs only RUF027 (the stripped-`f`-string rule that
+	@# caused the v1.0.4 regression) under --preview. Keeping a separate
+	@# target makes the CI behaviour reproducible locally without having to
+	@# remember the flag combination.
+	@command -v ruff >/dev/null || { \
+		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
+		exit 1; \
+	}
+	ruff check --select=RUF027 --preview --no-fix lib commands tests zark
+
 format: ## Run black + isort on the whole project
 	@command -v black >/dev/null && command -v isort >/dev/null || { \
 		echo "  black or isort missing. Install with:"; \
@@ -178,6 +196,23 @@ manpage-view: manpage ## Render debian/zark.1 with man (after rebuilding it)
 		exit 1; \
 	}
 	man -l debian/zark.1
+
+manpage-lint: manpage ## Validate the generated manpage with mandoc + groff
+	@# mandoc -Tlint and groff -ww -z catch different things — mandoc's
+	@# parser is stricter on macro semantics, groff's is the reference
+	@# rendering implementation. Both must be clean for the manpage to be
+	@# considered ready for shipping.
+	@command -v mandoc >/dev/null || { \
+		echo "  mandoc not installed. Install with: sudo apt install mandoc"; \
+		exit 1; \
+	}
+	@command -v groff >/dev/null || { \
+		echo "  groff not installed. Install with: sudo apt install groff"; \
+		exit 1; \
+	}
+	mandoc -Tlint debian/zark.1
+	groff -ww -z -man debian/zark.1
+	@echo "  Manpage lints clean"
 
 manpage-clean: ## Remove the generated manpage (keeps debian/zark.1.md)
 	rm -f debian/zark.1 debian/zark.1.raw
@@ -256,6 +291,126 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 		tar -czf zark_$(VERSION).tar.gz -C $$tmpdir zark && \
 		rm -rf $$tmpdir && \
 		ls -la zark_$(VERSION).tar.gz
+
+dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succeeds
+	@# This target is a non-invasive end-to-end check of the source-package
+	@# pipeline: build the upstream tarball, set it up as the .orig.tar.gz
+	@# in the parent directory (where dpkg-source expects it), then invoke
+	@# `dpkg-source -b .` to produce the .debian.tar.xz and .dsc.
+	@#
+	@# It catches the regressions that bit us in v1.0.6 cycle:
+	@#   - debian/ leaking into .orig.tar.gz (lintian no-debian-changes)
+	@#   - new tool caches in the working tree breaking dpkg-source
+	@#     ("unexpected upstream changes") when not in source/options
+	@#
+	@# All artefacts are removed at the end — the working tree is left
+	@# exactly as it was found.
+	@command -v dpkg-source >/dev/null || { \
+		echo "  dpkg-source not installed. Install with: sudo apt install dpkg-dev"; \
+		exit 1; \
+	}
+	@$(MAKE) --no-print-directory dist
+	@# Verify upstream-purity: zark-X.Y.Z/debian/ must NOT exist in the tarball
+	@if tar tzf zark_$(VERSION).tar.gz | grep -q '^zark-$(VERSION)/debian/'; then \
+		echo "  FAIL: zark_$(VERSION).tar.gz contains debian/ — this should not happen"; \
+		rm -f zark_$(VERSION).tar.gz; \
+		exit 1; \
+	fi
+	@echo "  OK: tarball is upstream-pure (no debian/ inside)"
+	@# Set up .orig.tar.gz where dpkg-source expects it (parent dir) and
+	@# clean any prior debian artefacts of the same version that might
+	@# confuse dpkg-source.
+	@cp zark_$(VERSION).tar.gz ../zark_$(VERSION).orig.tar.gz
+	@rm -f ../zark_$(VERSION)-1.dsc ../zark_$(VERSION)-1.debian.tar.xz
+	@# A previous `make deb` (or fakeroot dpkg-buildpackage) leaves the
+	@# dh staging tree in debian/zark/ and the debhelper bookkeeping in
+	@# debian/.debhelper, debian/files, debian/debhelper-build-stamp.
+	@# dpkg-source -b would then complain about "unwanted binary file"s
+	@# (the gzipped manpage and changelog inside debian/zark/). Wipe
+	@# them — same logic as `make clean` but limited to the debian/
+	@# bookkeeping so we don't disturb caches the previous fulltest
+	@# steps just produced.
+	@rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp 2>/dev/null || true
+	@# `make dist` left zark_X.Y.Z.tar.gz in the repo root (CI consumes
+	@# it from there). dpkg-source -b sees that file as an unrepresented
+	@# change vs the .orig (which is the same bytes!) and aborts. Remove
+	@# it now — we've already captured it as ../zark_X.Y.Z.orig.tar.gz.
+	@rm -f zark_$(VERSION).tar.gz
+	@# Run dpkg-source -b . — the same call debuild would make, without
+	@# the build/lintian/sign overhead. Capture rc to clean up before
+	@# propagating it.
+	@dpkg-source -b . ; rc=$$? ; \
+		rm -f ../zark_$(VERSION).orig.tar.gz \
+		      ../zark_$(VERSION)-1.dsc \
+		      ../zark_$(VERSION)-1.debian.tar.xz ; \
+		if [ $$rc -ne 0 ]; then \
+			echo "  FAIL: dpkg-source -b . returned $$rc"; \
+			exit $$rc; \
+		fi
+	@echo "  OK: dpkg-source -b . succeeds"
+
+fulltest: check ruff ruff-strict mypy pylint test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
+	@# fulltest is the "before-commit" gate. Make's default fail-fast
+	@# behaviour gives us free short-circuit semantics: the moment any
+	@# dependency fails, the rest is skipped.
+	@#
+	@# Order is fast→slow so failures surface early:
+	@#   check       — py_compile, milliseconds
+	@#   ruff        — full ruleset, ~1s
+	@#   ruff-strict — RUF027 only (CI subset), ~1s
+	@#   mypy        — ~10-15s (cold) / ~2-3s (warm)
+	@#   pylint      — ~15-20s
+	@#   test        — 94 unit tests, ~1-2s
+	@#   manpage-lint — pandoc + sed + awk + mandoc + groff, ~1s
+	@#   dist-check  — make dist + dpkg-source -b, ~3-5s
+	@#   tox         — tests on python3.12/3.13/3.14 in venvs, ~30-60s
+	@#                 (requires all three Pythons on PATH; install with
+	@#                  pyenv or deadsnakes if missing)
+	@#   deb         — full debuild -b (binary .deb), ~10-15s
+	@#                 LAST on purpose: it stages the install tree under
+	@#                 debian/zark/, which would confuse mypy in tox -e lint
+	@#                 (duplicate-module error from debian/zark/commands/
+	@#                 vs ./commands/) if it ran earlier.
+	@#
+	@# What fulltest does NOT cover and why:
+	@#   - dpkg -i     : would alter the local zark installation.
+	@#   - test-real   : QEMU integration tests need root and ZFS modules.
+	@#   - pre-commit  : black/isort would rewrite files in place; not
+	@#                   "non-invasive". Run separately when desired.
+	@#   - make deb-source / deb-ppa : require the GPG signing key and
+	@#                   are part of the release flow, not the pre-commit
+	@#                   gate.
+	@#
+	@# Leave the working tree exactly as we found it: tests, manpage-lint
+	@# and deb generated artefacts that we now clean up. The caches mypy
+	@# / ruff / pytest / tox leave behind are intentionally PRESERVED —
+	@# they speed up the next fulltest run dramatically.
+	@$(MAKE) --no-print-directory fulltest-clean
+	@echo ""
+	@echo "  fulltest: all checks passed."
+
+fulltest-clean:
+	@# Internal target invoked at the end of fulltest. Removes the
+	@# packaging artefacts that `make deb` and `make manpage-lint` drop
+	@# in the working tree and the parent directory, but PRESERVES the
+	@# tooling caches (__pycache__, .mypy_cache, .ruff_cache,
+	@# .pytest_cache, .tox) that the next fulltest run will reuse.
+	@#
+	@# Mirrors the logic in `make clean` line-by-line, with the cache
+	@# wipes deliberately omitted. Keep this in sync with `make clean`
+	@# whenever a new artefact path is added there.
+	@rm -f /tmp/zark_dist_*.tar.gz 2>/dev/null || true
+	@rm -f ../zark_$(VERSION)*.deb ../zark_$(VERSION)*.dsc \
+	       ../zark_$(VERSION)*.changes ../zark_$(VERSION)*.buildinfo \
+	       ../zark_$(VERSION)*.build ../zark_$(VERSION)*.tar.* \
+	       ../zark_$(VERSION)*.orig.tar.* \
+	       2>/dev/null || true
+	@rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp \
+	        2>/dev/null || true
+	@rm -f debian/zark.1 debian/zark.1.raw 2>/dev/null || true
+	@# `make deb` (transitively, via the $(ORIG_TARBALL) prerequisite)
+	@# also leaves a copy of zark_X.Y.Z.tar.gz in the repo root.
+	@rm -f zark_$(VERSION).tar.gz 2>/dev/null || true
 
 version: ## Show current version
 	@echo "zark v$(VERSION)"
