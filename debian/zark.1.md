@@ -1,6 +1,6 @@
-% ZARK(1) zark 1.0.5 | User Commands
+% ZARK(1) zark @VERSION@ | User Commands
 %
-% May 2, 2026
+% May 3, 2026
 
 # NAME
 

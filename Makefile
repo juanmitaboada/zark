@@ -15,6 +15,23 @@ TOX    := tox
 # Used by `make dist` to build a properly-named tarball.
 VERSION := $(shell $(PYTHON) -c "from lib.config import VERSION; print(VERSION)")
 
+# Lintian tags suppressed during local builds. Kept centralised so the
+# rationale lives in one place and `make deb` / `make deb-source` stay
+# in sync.
+#
+# bad-distribution-in-changes-file:
+#   debian/changelog uses "unstable" as the base distribution — the
+#   Debian convention for "no specific series, will be retargeted at
+#   upload time". `make deb-ppa` rewrites it to a concrete Ubuntu
+#   series (noble/oracular/...) per upload, so the actual files going
+#   to Launchpad never carry "unstable". Local `make deb` / `make
+#   deb-source` runs do produce .changes files with Distribution:
+#   unstable, which lintian (Ubuntu) flags as not-a-valid-Ubuntu-series.
+#   That is by design; the override silences the noise locally without
+#   masking real distribution typos at PPA upload time (deb-ppa runs
+#   debuild without this flag).
+LINTIAN_SUPPRESS_TAGS := bad-distribution-in-changes-file
+
 # ── Help ─────────────────────────────────────────────────────────────────
 
 help: ## Show this help
@@ -124,15 +141,21 @@ tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint (in isolated venvs)
 # Markdown without going through a full `make deb` cycle each time.
 #
 # The pipeline mirrors debian/rules verbatim — keep the two in sync if
-# you ever change one.
+# you ever change one. Both substitute @VERSION@ in the source against
+# lib/config.py so we don't have to bump the manpage header by hand.
 
 manpage: ## Build debian/zark.1 from debian/zark.1.md (pandoc + sed + awk)
 	@command -v pandoc >/dev/null || { \
 		echo "  pandoc not installed. Install with: sudo apt install pandoc"; \
 		exit 1; \
 	}
-	pandoc -s -f markdown-smart -t man --ascii \
-	    debian/zark.1.md -o debian/zark.1.raw
+	@# We pipe the Markdown source through `sed` to substitute @VERSION@
+	@# *before* pandoc sees it, rather than after. pandoc --ascii escapes
+	@# any literal '@' in roff output as '\[at]', so a post-pandoc sed
+	@# would have to match '\[at]VERSION\[at]' — fragile. Substituting
+	@# upstream of pandoc keeps the substitution as a plain ASCII match.
+	sed 's/@VERSION@/$(VERSION)/g' debian/zark.1.md \
+	  | pandoc -s -f markdown-smart -t man --ascii -o debian/zark.1.raw
 	@sed -E \
 	    -e 's/\\f\[CB\]/\\fB/g' \
 	    -e 's/\\f\[CI\]/\\f(BI/g' \
@@ -146,7 +169,7 @@ manpage: ## Build debian/zark.1 from debian/zark.1.md (pandoc + sed + awk)
 	  | awk '/^\.PP$$/ && prev ~ /^\.S[HS] / { next } { print; prev = $$0 }' \
 	  > debian/zark.1
 	@rm -f debian/zark.1.raw
-	@echo "  Built: debian/zark.1"
+	@echo "  Built: debian/zark.1 (zark $(VERSION))"
 	@echo "  View with: make manpage-view"
 
 manpage-view: manpage ## Render debian/zark.1 with man (after rebuilding it)
@@ -275,7 +298,7 @@ deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally (-us -uc)
 		echo "  debuild not installed. Install with: sudo apt install devscripts debhelper"; \
 		exit 1; \
 	}
-	debuild -us -uc -b
+	debuild -us -uc -b --lintian-opts --suppress-tags $(LINTIAN_SUPPRESS_TAGS)
 	@# Make the upstream tarball available in cwd for downstream steps
 	@# (CI's "stage release artefacts" step in .github/workflows/ci.yml
 	@# expects to find zark_$(VERSION).tar.gz in the project root). The
@@ -320,7 +343,7 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 	@# combined build+sign mode, whose -k / DEBSIGN_KEYID handling
 	@# has had inconsistent semantics across versions and silently
 	@# falls back to unsigned in some configurations.
-	debuild -S -sa -us -uc
+	debuild -S -sa -us -uc --lintian-opts --suppress-tags $(LINTIAN_SUPPRESS_TAGS)
 	debsign -k$(GPG_KEYID) ../zark_$(VERSION)-1_source.changes
 	@# Verify the .changes is actually signed before claiming success.
 	@# An unsigned upload would be rejected by Launchpad with "Bad

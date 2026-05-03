@@ -6,7 +6,7 @@ Launchpad PPA `ppa:juanmitaboada/zark`.
 
 The contents of `debian/` are managed in-tree alongside the upstream
 source. The package is **non-native** (`3.0 (quilt)`): the upstream
-version is `1.0.5` (read from `lib/config.py`), and the Debian revision
+version is read from `lib/config.py` (`VERSION`) and the Debian revision
 is `-1`, `-2`, ... for packaging-only fixes.
 
 ---
@@ -81,13 +81,13 @@ Equivalent to:
 debuild -us -uc -b
 ```
 
-Result: `../zark_1.0.5-1_all.deb` and the artefacts of the build process
+Result: `../zark_X.Y.Z-1_all.deb` and the artefacts of the build process
 (`.changes`, `.buildinfo`, `.dsc`, `.tar.xz`) sitting next to the source
 tree. Install it locally to smoke-test:
 
 ```sh
-sudo dpkg -i ../zark_1.0.5-1_all.deb
-zark --version          # should print 1.0.5
+sudo dpkg -i ../zark_X.Y.Z-1_all.deb
+zark --version          # should print the version from lib/config.py
 sudo zark explore       # should run; failures here probably mean a
                         # Recommends should be a Depends
 sudo dpkg -P zark       # purge to clean up
@@ -151,7 +151,7 @@ If you prefer a manual single-series upload:
 # Edit debian/changelog: change "UNRELEASED" to "noble" (or whichever)
 # and append "~ubuntu24.04.1" to the version. Save.
 debuild -S -sa
-dput -c dput.cf zark-ppa ../zark_1.0.5-1~ubuntu24.04.1_source.changes
+dput -c dput.cf zark-ppa ../zark_X.Y.Z-1~ubuntu24.04.1_source.changes
 ```
 
 After upload, Launchpad emails you with the build status (usually within
@@ -177,18 +177,18 @@ profile is always picked up regardless of the user's `~/.dput.cf`.
 * **Upstream version** lives in `lib/config.py` as the `VERSION` constant.
   Bump it for every upstream release.
 * **Debian revision** (`-1`, `-2`, ...) is bumped only when the packaging
-  itself changes between upstream releases. The same upstream `1.0.5`
-  may produce `1.0.5-1` and later `1.0.5-2` if a packaging fix is needed.
+  itself changes between upstream releases. The same upstream `X.Y.Z`
+  may produce `X.Y.Z-1` and later `X.Y.Z-2` if a packaging fix is needed.
 * **PPA suffix** (`~ubuntuXX.YY.N`) distinguishes per-series builds of the
   same source package. `~` sorts before any letter or digit, so
-  `1.0.5-1~ubuntu24.04.1` is correctly considered older than
-  `1.0.5-1` (which would be the upload to Debian sid, if we ever did
-  that) and older than `1.0.5-2~ubuntu24.04.1`.
+  `X.Y.Z-1~ubuntu24.04.1` is correctly considered older than
+  `X.Y.Z-1` (which would be the upload to Debian sid, if we ever did
+  that) and older than `X.Y.Z-2~ubuntu24.04.1`.
 
 The full version string for a typical PPA upload is therefore:
 
 ```
-1.0.5-1~ubuntu24.04.1
+X.Y.Z-1~ubuntu24.04.1
 ^^^^^ ^ ^^^^^^^^^^^^
 |     | |
 |     | per-series build, increment if you re-upload the same -N
@@ -226,7 +226,7 @@ wants to keep.
   `Distribution:` line in `debian/changelog` says `UNRELEASED` (the
   default for development). Change it to the target Ubuntu series
   (e.g. `noble`) before building for upload.
-* **`No such file or directory: zark_1.0.5.orig.tar.gz`** — non-native
+* **`No such file or directory: zark_X.Y.Z.orig.tar.gz`** — non-native
   source format requires an `.orig.tar.gz`. `make deb` regenerates it
   from `make dist` automatically; if running `debuild` by hand, run
-  `make dist && cp zark_1.0.5.tar.gz ../zark_1.0.5.orig.tar.gz` first.
+  `make dist && cp zark_X.Y.Z.tar.gz ../zark_X.Y.Z.orig.tar.gz` first.

@@ -21,7 +21,7 @@ body:
     attributes:
       label: zark version
       description: Output of `zark --version`.
-      placeholder: "zark v1.0.5"
+      placeholder: "e.g. zark v1.2.3 (output of zark --version)"
     validations:
       required: true
 

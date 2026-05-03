@@ -115,8 +115,15 @@ jobs:
 
       - name: Run lintian (informational)
         # Don't fail the build on lintian warnings — the maintainer
-        # reviews them locally before PPA upload.
-        run: lintian -i ../zark_*.changes || true
+        # reviews them locally before PPA upload. We suppress the same
+        # tags as `make deb` / `make deb-source` (see Makefile's
+        # LINTIAN_SUPPRESS_TAGS for the rationale): bad-distribution-
+        # in-changes-file fires because the base changelog uses
+        # "unstable", which is rewritten to a concrete Ubuntu series
+        # only at PPA upload time (`make deb-ppa`) — never on the
+        # CI-built .deb. This keeps the CI log clean while preserving
+        # the warning at the moment that matters most.
+        run: lintian -i --suppress-tags bad-distribution-in-changes-file ../zark_*.changes || true
 
       - name: Smoke test the built .deb
         # Install the freshly-built .deb on the runner and verify zark

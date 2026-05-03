@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 
 @dataclass

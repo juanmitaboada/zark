@@ -1,4 +1,33 @@
-zark (1.0.5-1) UNRELEASED; urgency=medium
+zark (1.0.6-1) unstable; urgency=medium
+
+  * Add zark(1) manpage. Source kept as Markdown in debian/zark.1.md;
+    converted to roff at build time via pandoc + sed + awk in
+    debian/rules. The pipeline normalises pandoc 3.x's bracket-form
+    font selectors and drops redundant .PP after section macros so the
+    output passes both `mandoc -Tlint` and `groff -ww -z` cleanly.
+    Build-Depends adjusted accordingly.
+  * Stop dpkg-source choking on tool caches in the working tree. Add
+    debian/source/options with tar-ignore + extend-diff-ignore for
+    .mypy_cache, .pytest_cache, .ruff_cache, .tox, __pycache__, *.pyc,
+    .DS_Store and zark.log so a build never aborts with "unexpected
+    upstream changes" after running mypy/pytest/ruff locally.
+  * Stop bundling debian/ inside the .orig.tar.gz. The 3.0 (quilt)
+    format expects a clean upstream slice; including debian/ produced
+    a redundant overlay (lintian W: no-debian-changes) and broke the
+    Debian-revision-bump workflow. The Makefile's `make dist` target
+    now strips debian/ when assembling the upstream tarball.
+  * Make lib/config.py the single source of truth for the version.
+    The manpage source carries @VERSION@ in its header, substituted
+    by both `make manpage` and debian/rules before pandoc runs (post-
+    pandoc substitution would have to match the \[at] escape pandoc
+    --ascii emits, which is fragile). The bug-report issue template
+    placeholder and the example versions in debian/README.packaging.md
+    were moved to a generic X.Y.Z form. Releasing now means editing
+    lib/config.py and the two changelogs only.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Sun, 03 May 2026 12:00:00 +0200
+
+zark (1.0.5-1) unstable; urgency=medium
 
   * Initial Debian/Ubuntu packaging.
   * Distribution mechanism for zark on Ubuntu systems where the tool is
