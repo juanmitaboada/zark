@@ -130,9 +130,12 @@ GPG keyring.
 ## 4. Upload to the PPA
 
 Launchpad needs **one source package per target Ubuntu series**. The
-PPA covers: noble (24.04), oracular (24.10), plucky (25.04), questing
-(25.10), and the 26.04 release codename when it lands. Each upload is
-distinguished by a `~ubuntuXX.YY.N` suffix on the version.
+PPA covers the currently-supported Ubuntu releases. As of May 2026:
+noble (24.04 LTS, supported until 2036), questing (25.10, supported
+until 2026-07), and resolute (26.04 LTS, to be released). Each upload
+is distinguished by a `~ubuntuXX.YY.N` suffix on the version. The
+authoritative list lives in `Makefile`'s `PPA_SERIES` variable —
+update it there when Ubuntu drops a release.
 
 The recommended workflow is:
 
@@ -161,7 +164,7 @@ If `deb-ppa-test` succeeds (Launchpad emails an "Accepted" notice
 within a minute or two), you can complete the rollout with:
 
 ```sh
-make deb-ppa-resume   # uploads the remaining series (oracular onwards)
+make deb-ppa-resume   # uploads the remaining series (questing onwards)
 ```
 
 Together, `deb-ppa-test` + `deb-ppa-resume` cover the same ground as

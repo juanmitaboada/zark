@@ -281,6 +281,37 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 	@# The exclusion list (caches, pyc, etc.) MUST stay in sync with
 	@# debian/source/options. Both must agree or the next
 	@# `make deb-source` fails with "unexpected upstream changes".
+	@#
+	@# REPRODUCIBILITY: tar(1) defaults bake in volatile state — file
+	@# mtimes, the user's UID/GID, the order in which the filesystem
+	@# returns directory entries — that all produce a different
+	@# byte-for-byte tarball each run, even with identical source.
+	@# Launchpad rejects an .orig.tar.gz upload if the same filename
+	@# already exists with different contents:
+	@#
+	@#   File zark_X.Y.Z.orig.tar.gz already exists in <PPA>, but
+	@#   uploaded version has different contents.
+	@#
+	@# That happens between a `make deb-ppa-test` and a
+	@# `make deb-ppa-resume`: the first leaves a tarball on Launchpad,
+	@# the second tries to upload a freshly-rebuilt tarball with the
+	@# same filename but different bytes.
+	@#
+	@# We pin everything tar(1) and gzip(1) can vary:
+	@#   --sort=name       — directory entries in stable order
+	@#   --owner=0 --group=0 --numeric-owner
+	@#                     — strip the maintainer's UID/GID
+	@#   --mtime=@$$ts     — single timestamp for every entry, taken
+	@#                       from the last git commit (SOURCE_DATE_EPOCH
+	@#                       convention). Falls back to debian/changelog
+	@#                       timestamp if the working tree isn't a git
+	@#                       checkout (release tarball downloaded via
+	@#                       `wget` from GitHub, etc.).
+	@#   gzip -n           — no original-filename / no mtime in the
+	@#                       gzip header
+	@#
+	@# Net effect: `make dist` is byte-for-byte reproducible across
+	@# runs of the same source revision.
 	@tmpdir=$$(mktemp -d) && \
 		cp -a . $$tmpdir/zark && \
 		rm -rf $$tmpdir/zark/debian; \
@@ -293,7 +324,13 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 		find $$tmpdir/zark -name '*.pyc'               -delete 2>/dev/null; \
 		find $$tmpdir/zark -name 'zark.log'            -delete 2>/dev/null; \
 		find $$tmpdir/zark -name '.DS_Store'           -delete 2>/dev/null; \
-		tar -czf zark_$(VERSION).tar.gz -C $$tmpdir zark && \
+		ts=$$(git log -1 --format=%ct 2>/dev/null \
+		      || date -u -d "$$(dpkg-parsechangelog -SDate)" +%s 2>/dev/null \
+		      || echo 0); \
+		tar --sort=name \
+		    --owner=0 --group=0 --numeric-owner \
+		    --mtime="@$$ts" \
+		    -cf - -C $$tmpdir zark | gzip -n > zark_$(VERSION).tar.gz && \
 		rm -rf $$tmpdir && \
 		ls -la zark_$(VERSION).tar.gz
 
@@ -427,9 +464,18 @@ version: ## Show current version
 # debian/README.packaging.md for the full guide, including GPG setup,
 # PPA upload procedure, and version-suffix rules.
 #
-# Series covered by the PPA: 24.04 → 26.04. Codenames are stable
-# (resolute = 26.04 LTS Resolute Raccoon).
-PPA_SERIES   := noble oracular plucky questing resolute
+# Series covered by the PPA. Only currently-supported Ubuntu releases:
+# Launchpad rejects uploads to EOL series with "<series> is obsolete and
+# will not accept new uploads." Update this list when adding/dropping
+# support for a release. As of May 2026:
+#   - noble    (24.04 LTS) — supported until 2036
+#   - questing (25.10)     — supported until 2026-07
+#   - resolute (26.04 LTS) — to be released, accepted as upcoming
+# Releases dropped along the way (do not re-add without checking
+# https://wiki.ubuntu.com/Releases first):
+#   - oracular (24.10) — EOL 2025-07
+#   - plucky   (25.04) — EOL 2026-01
+PPA_SERIES   := noble questing resolute
 # Upload target. We use a named profile (`zark-ppa`) rather than the
 # canonical `ppa:juanmitaboada/zark` shorthand so the configuration
 # travels with the repo (./dput.cf) and any maintainer can clone+upload
