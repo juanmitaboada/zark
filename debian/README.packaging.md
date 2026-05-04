@@ -145,10 +145,39 @@ This iterates over the configured Ubuntu series, regenerates
 suffix, builds a signed source package, and uploads it via `dput`.
 The original `debian/changelog` is restored at the end.
 
-If you prefer a manual single-series upload:
+### Validating the pipeline before a full upload
+
+If you have not run `make deb-ppa` for a while, or you are setting up
+a fresh maintainer machine, you do not have to commit to all five
+Ubuntu series at once. The pipeline is split into two complementary
+targets:
 
 ```sh
-# Edit debian/changelog: change "UNRELEASED" to "noble" (or whichever)
+make deb-ppa-test     # uploads ONLY the first series in PPA_SERIES
+                      # (currently noble = 24.04 LTS)
+```
+
+If `deb-ppa-test` succeeds (Launchpad emails an "Accepted" notice
+within a minute or two), you can complete the rollout with:
+
+```sh
+make deb-ppa-resume   # uploads the remaining series (oracular onwards)
+```
+
+Together, `deb-ppa-test` + `deb-ppa-resume` cover the same ground as
+`deb-ppa`. The advantage is that if the first upload fails (broken
+GPG, wrong PPA path, network issue, Launchpad outage…), only one
+version slot is burned instead of five — the same `1.0.6-1~ubuntu24.04.1`
+identifier can be reused after a `Delete packages` action in the PPA
+web UI.
+
+### Manual single-series upload
+
+If for any reason the targets above don't fit, here is the manual
+equivalent:
+
+```sh
+# Edit debian/changelog: change "unstable" to "noble" (or whichever)
 # and append "~ubuntu24.04.1" to the version. Save.
 debuild -S -sa
 dput -c dput.cf zark-ppa ../zark_X.Y.Z-1~ubuntu24.04.1_source.changes
@@ -160,12 +189,20 @@ After upload, Launchpad emails you with the build status (usually within
 ### Why a custom dput profile?
 
 The repo ships a `dput.cf` at the project root with a `[zark-ppa]`
-profile that uploads via **HTTPS** to `ppa.launchpad.net`. The
-canonical shorthand `ppa:juanmitaboada/zark` resolved by `dput-ng`
-defaults to **FTP**, which we observed timing out — many ISPs and
-corporate networks block outbound FTP (port 21) by default. HTTPS
-goes through the same port (443) as the rest of the Launchpad web,
-so it works wherever `git push` does.
+profile that uploads via **SFTP** to `ppa.launchpad.net`, authenticating
+with the SSH key registered on the maintainer's Launchpad account.
+SFTP was chosen over the canonical shorthand `ppa:juanmitaboada/zark`
+resolved by `dput-ng` for two reasons:
+
+1. **Reproducibility**: the profile travels with the repo, so any
+   maintainer can `git clone && make deb-ppa` without setting up a
+   personal `~/.dput.cf`.
+2. **Robustness**: SFTP avoids the HTTPS endpoint at `ppa.launchpad.net`
+   entirely. During the v1.0.6 release window the HTTPS endpoint was
+   serving a TLS certificate issued for `private-ppa.launchpad.net`
+   (hostname mismatch), causing every HTTPS upload to fail with
+   `SSL: CERTIFICATE_VERIFY_FAILED`. SFTP uses port 22 (SSH) instead
+   of 443 (HTTPS), so it was unaffected.
 
 `make deb-ppa` invokes `dput -c dput.cf zark-ppa ...` so the local
 profile is always picked up regardless of the user's `~/.dput.cf`.

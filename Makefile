@@ -4,7 +4,7 @@
         setup clean version \
         check mypy pylint ruff ruff-strict format pre-commit lint tox \
         manpage manpage-view manpage-lint manpage-clean \
-        dist dist-check fulltest fulltest-clean deb deb-source deb-ppa
+        dist dist-check fulltest fulltest-clean deb deb-source deb-ppa deb-ppa-test deb-ppa-resume
 
 SHELL  := /bin/bash
 ZARK   := ./zark
@@ -233,11 +233,16 @@ clean: ## Remove __pycache__ and temp files
 	# Debian build artefacts land in the parent directory. Limit the
 	# wildcard to our own version to avoid touching unrelated files.
 	# Covers: .deb, .dsc, .changes, .buildinfo, .build (build log),
-	# .tar.* (debian tarball, debian.tar.xz) and .orig.tar.* (upstream).
+	# .tar.* (debian tarball, debian.tar.xz), .orig.tar.* (upstream),
+	# and .upload (dput's "already-uploaded" marker — it lingers from
+	# previous dput runs and would suppress legitimate re-uploads when
+	# the previous Launchpad-side outcome was a rejection that dput
+	# never observed locally).
 	rm -f ../zark_$(VERSION)*.deb ../zark_$(VERSION)*.dsc \
 	      ../zark_$(VERSION)*.changes ../zark_$(VERSION)*.buildinfo \
 	      ../zark_$(VERSION)*.build ../zark_$(VERSION)*.tar.* \
 	      ../zark_$(VERSION)*.orig.tar.* \
+	      ../zark_$(VERSION)*.upload \
 	      2>/dev/null || true
 	rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp \
 	       2>/dev/null || true
@@ -404,6 +409,7 @@ fulltest-clean:
 	       ../zark_$(VERSION)*.changes ../zark_$(VERSION)*.buildinfo \
 	       ../zark_$(VERSION)*.build ../zark_$(VERSION)*.tar.* \
 	       ../zark_$(VERSION)*.orig.tar.* \
+	       ../zark_$(VERSION)*.upload \
 	       2>/dev/null || true
 	@rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp \
 	        2>/dev/null || true
@@ -425,10 +431,10 @@ version: ## Show current version
 # (resolute = 26.04 LTS Resolute Raccoon).
 PPA_SERIES   := noble oracular plucky questing resolute
 # Upload target. We use a named profile (`zark-ppa`) rather than the
-# canonical `ppa:juanmitaboada/zark` shorthand because dput-ng's default
-# profile uses FTP, which is increasingly blocked by ISPs and didn't
-# work for us. The profile is defined in ./dput.cf at the repo root and
-# uses HTTPS.
+# canonical `ppa:juanmitaboada/zark` shorthand so the configuration
+# travels with the repo (./dput.cf) and any maintainer can clone+upload
+# without setting up ~/.dput.cf. See dput.cf and debian/README.packaging.md
+# for the rationale (SFTP method, hardcoded Launchpad ID).
 PPA_DPUT_TGT := zark-ppa
 
 # Helper: regenerate the orig tarball next to the source tree, named
@@ -514,6 +520,40 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 	@echo "  Source package built and signed:"
 	@ls -1 ../zark_$(VERSION)-*_source.changes
 
+deb-ppa-test: ## Smoke-test the PPA pipeline by uploading only the first series
+	@# A safer way to validate the deb-ppa flow end-to-end without
+	@# burning all five Ubuntu version slots if something is broken.
+	@#
+	@# This target re-invokes `make deb-ppa` but overrides PPA_SERIES
+	@# from the make command line, so only the first series in the
+	@# default list (noble = 24.04 LTS) gets built and uploaded. The
+	@# original PPA_SERIES is not touched on disk, no editing required.
+	@#
+	@# Use this when:
+	@#   - First time setting up the PPA pipeline
+	@#   - After changes to debian/ that might affect the source build
+	@#   - After a Launchpad outage / config change you want to verify
+	@#   - Before a multi-day absence, to keep the pipeline warm
+	@#
+	@# Once the test upload reaches Launchpad and the build farm picks
+	@# it up successfully, run the full `make deb-ppa` for the rest:
+	@#
+	@#   make deb-ppa-resume
+	@#
+	@# (or edit PPA_SERIES inline as a last resort, see deb-ppa-resume
+	@# below for the canonical form).
+	@$(MAKE) --no-print-directory deb-ppa PPA_SERIES=$(firstword $(PPA_SERIES))
+
+deb-ppa-resume: ## Upload remaining series after a deb-ppa-test (skips first series)
+	@# Counterpart to deb-ppa-test. After a successful test upload of
+	@# the first series, this uploads the rest. Together they cover
+	@# the same ground as `make deb-ppa` but split into two phases.
+	@#
+	@# The remaining series list is computed at runtime by stripping
+	@# the first word from PPA_SERIES, so it stays in sync if the
+	@# default series list ever changes.
+	@$(MAKE) --no-print-directory deb-ppa PPA_SERIES="$(wordlist 2,$(words $(PPA_SERIES)),$(PPA_SERIES))"
+
 deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to the PPA
 	@command -v dput >/dev/null || { \
 		echo "  dput not installed. Install with: sudo apt install dput-ng"; \
@@ -535,6 +575,15 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 	@# branches could move .bak twice, leaving the working tree with a
 	@# half-rewritten changelog and a confusing "cannot stat .bak" error.
 	@#
+	@# IMPORTANT: the backup MUST live outside the package source tree.
+	@# dh_clean (run by `debian/rules clean`, invoked by every
+	@# dpkg-buildpackage) deletes any *.bak file under the working tree
+	@# by default — see the find(1) expression in dh_clean. Storing the
+	@# backup at debian/changelog.bak meant the first series uploaded
+	@# fine, but `debuild -S` of that series wiped the backup, so the
+	@# second series failed with "cannot stat 'debian/changelog.bak'".
+	@# Use mktemp under /tmp instead.
+	@#
 	@# DEBEMAIL/DEBFULLNAME tell dch which identity to record in the new
 	@# changelog entry. Without these dch falls back to whoami@hostname.
 	@#
@@ -544,8 +593,9 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 	@# outside debian/, we need that to be reflected in .orig too —
 	@# otherwise dpkg-source -b aborts with "unexpected upstream changes".
 	@set -e; \
-	cp debian/changelog debian/changelog.bak; \
-	trap 'mv -f debian/changelog.bak debian/changelog 2>/dev/null || true' EXIT INT TERM; \
+	changelog_backup=$$(mktemp -t zark-changelog-XXXXXX); \
+	cp debian/changelog "$$changelog_backup"; \
+	trap 'cp -f "$$changelog_backup" debian/changelog 2>/dev/null || true; rm -f "$$changelog_backup"' EXIT INT TERM; \
 	for series in $(PPA_SERIES); do \
 		case $$series in \
 			noble)     suffix="~ubuntu24.04.1" ;; \
@@ -557,7 +607,7 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 		esac; \
 		echo ""; \
 		echo "  ── Building for $$series ($(VERSION)-1$$suffix) ──"; \
-		cp debian/changelog.bak debian/changelog; \
+		cp "$$changelog_backup" debian/changelog; \
 		DEBEMAIL="juanmi@juanmitaboada.com" DEBFULLNAME="Juanmi Taboada" \
 		    dch --newversion "$(VERSION)-1$$suffix" --distribution "$$series" \
 		        --force-distribution --force-bad-version \
@@ -566,7 +616,24 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 		debsign -k$(GPG_KEYID) "../zark_$(VERSION)-1$${suffix}_source.changes"; \
 		head -1 "../zark_$(VERSION)-1$${suffix}_source.changes" | grep -q "BEGIN PGP SIGNED MESSAGE" \
 		    || { echo "  ERROR: $$series .changes is NOT signed. Aborting."; exit 1; }; \
+		: "Remove dput's stale .upload marker before each push. dput" ; \
+		: "writes that file when the SFTP transfer completes and refuses" ; \
+		: "to re-send the same .changes if it exists, even if the previous" ; \
+		: "Launchpad-side outcome was a rejection (which dput does not see" ; \
+		: "— rejections come as asynchronous emails). Our deb-ppa has its" ; \
+		: "own version-bumping safeguards, so dput's lock adds no value" ; \
+		: "for us and only causes false 'already uploaded' failures." ; \
+		rm -f "../zark_$(VERSION)-1$${suffix}_source.$(PPA_DPUT_TGT).upload"; \
 		dput -c dput.cf $(PPA_DPUT_TGT) ../zark_$(VERSION)-1$${suffix}_source.changes; \
 	done
 	@echo ""
-	@echo "  All series uploaded. Launchpad will email build results."
+	@# Print the series that just finished uploading. PPA_SERIES is the
+	@# authoritative list (deb-ppa-test and deb-ppa-resume override it
+	@# from the make command line). $(words) gives the count, so the
+	@# message reads naturally whether it was 1 series, 4 series, or 5.
+	@nseries="$(words $(PPA_SERIES))"; \
+	if [ "$$nseries" = "1" ]; then \
+		echo "  Uploaded 1 series ($(PPA_SERIES)). Launchpad will email build results."; \
+	else \
+		echo "  Uploaded $$nseries series ($(PPA_SERIES)). Launchpad will email build results."; \
+	fi
