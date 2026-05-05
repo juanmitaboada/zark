@@ -41,6 +41,10 @@ from commands.recover import (  # pylint: disable=wrong-import-position # noqa: 
     _detect_root_children,
     _emit_dataset_layout_warnings,
 )
+from commands.repair_divergent import (  # pylint: disable=wrong-import-position # noqa: E402
+    SIZE_LIMIT_BYTES,
+    _find_divergent,
+)
 from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E402
     _classify,
     _diff_rules,
@@ -1773,9 +1777,192 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
         assert parsed["tank/games"]["use_template"] == "production"
 
 
-# ═════════════════════════════════════════════════════════════════════════
-#  Runner
-# ═════════════════════════════════════════════════════════════════════════
+class TestRepairDivergent:  # pylint: disable=missing-function-docstring
+    """Tests for repair-divergent's detection logic.
+
+    The command's safety hinges on _find_divergent correctly identifying
+    datasets without shared snapshots — false positives would destroy
+    real data, false negatives would leave the user with a broken backup.
+    """
+
+    def _setup_mock(  # pylint: disable=too-many-locals
+        self,
+        target_pool: str,
+        target_datasets: list[tuple[str, str]],  # (name, type)
+        target_snaps: dict[str, list[str]],  # dataset → snapshot suffixes
+        source_snaps: dict[str, list[str]],
+        source_exists: set[str] | None = None,
+        used_bytes: dict[str, int] | None = None,
+    ) -> tuple[MockShell, ZFS]:
+        """Wire up a MockShell that answers all the queries _find_divergent makes."""
+        mock, zfs = make_mock_zfs()
+
+        # list_datasets call
+        rows = []
+        for name, type_ in target_datasets:
+            rows.append(f"{name}\tnone\t8K\t8K\toff\t{type_}")
+        mock.on(
+            "zfs list -H -o name,mountpoint,used,refer,canmount,type "
+            + f"-t filesystem,volume -r {target_pool}",
+        ).succeeds("\n".join(rows) + "\n")
+
+        # snapshots and `dataset_exists` per (target, source) pair
+        all_targets = [n for n, t in target_datasets if t == "filesystem"]
+        for tgt in all_targets:
+            snaps = target_snaps.get(tgt, [])
+            mock.on(f"zfs list -H -o name -t snapshot {tgt}").succeeds(
+                "\n".join(f"{tgt}@{s}" for s in snaps) + ("\n" if snaps else ""),
+            )
+
+        # Compute source counterparts (target_pool/X → X)
+        for tgt in all_targets:
+            if not tgt.startswith(target_pool + "/"):
+                continue
+            src = tgt[len(target_pool) + 1 :]
+            # `zfs list <source>` for dataset_exists
+            if source_exists is None or src in source_exists:
+                mock.on(f"zfs list {src}").succeeds(f"{src}\t-\t-\t-\t-\n")
+            else:
+                mock.on(f"zfs list {src}").fails(f"cannot open '{src}': dataset does not exist")
+            # snapshots on source
+            snaps = source_snaps.get(src, [])
+            mock.on(f"zfs list -H -o name -t snapshot {src}").succeeds(
+                "\n".join(f"{src}@{s}" for s in snaps) + ("\n" if snaps else ""),
+            )
+            # used size — both -p numeric and human-readable
+            ub = (used_bytes or {}).get(tgt, 8 * 1024)  # default 8K
+            mock.on(f"zfs get -H -p -o value used {tgt}").succeeds(f"{ub}\n")
+            # human form: anything plausible — caller doesn't parse
+            mock.on(f"zfs get -H -o value used {tgt}").succeeds(f"{ub}B\n")
+
+        return mock, zfs
+
+    def test_no_divergence_when_snapshots_overlap(self):
+        """Common snapshot present → not divergent."""
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[
+                ("blue", "filesystem"),
+                ("blue/rpool", "filesystem"),
+                ("blue/rpool/var", "filesystem"),
+            ],
+            target_snaps={
+                "blue": [],
+                "blue/rpool": ["snap_A"],
+                "blue/rpool/var": ["snap_A", "snap_B"],
+            },
+            source_snaps={
+                "rpool": ["snap_A"],
+                "rpool/var": ["snap_B", "snap_C"],
+            },
+        )
+        with patch_sh(mock):
+            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+        assert not divergent
+
+    def test_detects_dataset_with_no_shared_snapshots(self):
+        """Target has a snapshot, source has different ones, no overlap → divergent."""
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[
+                ("blue", "filesystem"),
+                ("blue/rpool", "filesystem"),
+                ("blue/rpool/var", "filesystem"),
+            ],
+            target_snaps={
+                "blue/rpool": ["shared_anchor"],
+                "blue/rpool/var": ["old_april_snap"],
+            },
+            source_snaps={
+                "rpool": ["shared_anchor"],
+                "rpool/var": ["may_snap_1", "may_snap_2"],  # disjoint from old_april_snap
+            },
+        )
+        with patch_sh(mock):
+            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+        names = [d.target for d in divergent]
+        assert "blue/rpool/var" in names
+        assert "blue/rpool" not in names  # this one has overlap
+
+    def test_skips_dataset_with_no_target_snapshots(self):
+        """A target with no snapshots at all is a different bug — don't flag it.
+
+        Without snapshots there's nothing meaningful to compare; the user
+        should investigate why the dataset exists empty (e.g. someone ran
+        `zfs create blue/rpool/foo` manually).
+        """
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[
+                ("blue", "filesystem"),
+                ("blue/rpool", "filesystem"),
+                ("blue/rpool/empty", "filesystem"),
+            ],
+            target_snaps={"blue/rpool": ["s1"], "blue/rpool/empty": []},
+            source_snaps={"rpool": ["s1"], "rpool/empty": ["src_snap"]},
+        )
+        with patch_sh(mock):
+            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+        assert not divergent
+
+    def test_skips_dataset_when_source_missing(self):
+        """A target dataset whose source doesn't exist is not divergent —
+        it's orphaned. Different problem, not handled here."""
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[
+                ("blue", "filesystem"),
+                ("blue/rpool", "filesystem"),
+                ("blue/rpool/orphan", "filesystem"),
+            ],
+            target_snaps={"blue/rpool": ["s1"], "blue/rpool/orphan": ["snap"]},
+            source_snaps={"rpool": ["s1"]},  # rpool/orphan absent below
+            source_exists={"rpool"},  # explicitly: rpool/orphan does NOT exist
+        )
+        with patch_sh(mock):
+            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+        assert not divergent
+
+    def test_skips_zvols(self):
+        """Zvols are replicated by prepare/recover, never by syncoid → ignore."""
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[
+                ("blue", "filesystem"),
+                ("blue/keystore", "volume"),
+            ],
+            target_snaps={"blue/keystore": ["whatever"]},
+            source_snaps={"rpool/keystore": ["different"]},
+        )
+        with patch_sh(mock):
+            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+        assert not divergent
+
+    def test_size_limit_constant_is_64mb(self):
+        """The SIZE_LIMIT_BYTES constant is the safety threshold the command
+        documents to the user; pinning it here so a careless edit becomes
+        a failing test."""
+        assert SIZE_LIMIT_BYTES == 64 * 1024 * 1024
+
+    def test_used_bytes_recorded_in_divergent(self):
+        """The DivergentDataset records the destination's actual size, not
+        just the human-readable form. The size guards the 64MB safety
+        check, so it must be parsed numerically."""
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[
+                ("blue", "filesystem"),
+                ("blue/rpool", "filesystem"),
+                ("blue/rpool/var", "filesystem"),
+            ],
+            target_snaps={"blue/rpool": ["s1"], "blue/rpool/var": ["old"]},
+            source_snaps={"rpool": ["s1"], "rpool/var": ["new"]},
+            used_bytes={"blue/rpool/var": 8192},  # 8 KB
+        )
+        with patch_sh(mock):
+            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+        assert len(divergent) == 1
+        assert divergent[0].used_bytes == 8192
 
 
 def main() -> int:

@@ -28,6 +28,7 @@ COMMANDS = {
     "backup": "Run incremental backup to connected drive",
     "recover": "Full bare-metal recovery from backup drive",
     "repair-boot": "Fix boot issues from live USB (grub.cfg, initrd)",
+    "repair-divergent": "Reset backup datasets that have no shared snapshots with the source",
     "simulate": "Boot recovered system in QEMU/KVM (test without rebooting)",
     "prepare": "Prepare a new blank drive for backup",
     "purge": "Securely wipe a managed backup drive",
