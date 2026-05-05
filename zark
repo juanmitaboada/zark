@@ -27,7 +27,7 @@ signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 COMMANDS = {
     "backup": "Run incremental backup to connected drive",
     "recover": "Full bare-metal recovery from backup drive",
-    "repair": "Fix boot issues from live USB (grub.cfg, initrd)",
+    "repair-boot": "Fix boot issues from live USB (grub.cfg, initrd)",
     "simulate": "Boot recovered system in QEMU/KVM (test without rebooting)",
     "prepare": "Prepare a new blank drive for backup",
     "purge": "Securely wipe a managed backup drive",
@@ -115,9 +115,11 @@ def main():
         print("  Run: sudo ./zark --help")
         sys.exit(1)
 
-    # Import and run the command
+    # Import and run the command. CLI uses kebab-case (e.g. "repair-boot"),
+    # Python module names use snake_case (e.g. "repair_boot.py").
     try:
-        mod = __import__(f"commands.{cmd_name}", fromlist=[cmd_name])
+        mod_name = cmd_name.replace("-", "_")
+        mod = __import__(f"commands.{mod_name}", fromlist=[mod_name])
         mod.run(cmd_args)
     except KeyboardInterrupt:
         print("\n\n  Interrupted by user.")

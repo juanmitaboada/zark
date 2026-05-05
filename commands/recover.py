@@ -601,7 +601,7 @@ def run(
         if confirm != "IUNDERSTAND":
             return
 
-    if not sh.run("command -v syncoid").ok:
+    if not sh.run("which syncoid").ok:
         log.info("Installing required packages...")
         _ = sh.run(
             "apt-get install -y sanoid zfsutils-linux gdisk bc pv mbuffer lzop",
@@ -1255,6 +1255,6 @@ def run(
             f"  5. Run: {log.W}sudo ./zark finish{log.N}",
             "",
             f"  {log.Y}If boot fails:{log.N} boot from live USB and run:",
-            f"     {log.W}sudo ./zark repair{log.N}",
+            f"     {log.W}sudo ./zark repair-boot{log.N}",
         ],
     )

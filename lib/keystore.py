@@ -149,7 +149,14 @@ class Keystore:
         return True
 
     def umount(self):
-        """Unmount keystore and close LUKS."""
+        """Unmount keystore and close LUKS. Idempotent: safe to call multiple times."""
+        if not self._mounted:
+            # Already unmounted. Critical: do NOT touch KEYSTORE_MOUNT here.
+            # If our mount overlaid an existing mount (e.g. backup pool's keystore
+            # mounted on top of the live system's rpool keystore at the same path),
+            # the underlying mount has now reappeared and unmounting it would
+            # break the live system.
+            return
         mnt = Path(KEYSTORE_MOUNT)
         if mnt.is_mount():
             run(f"umount {mnt}")

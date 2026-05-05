@@ -1,5 +1,5 @@
 """
-zark repair — Fix boot issues from a live USB.
+zark repair-boot — Fix boot issues from a live USB.
 
 Imports rpool/bpool, mounts the system, regenerates grub.cfg and initrd.
 Use when grub.cfg is corrupted (e.g., update-grub ran with backup drive connected).
@@ -22,8 +22,8 @@ TOTAL_STEPS = 7
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
-    """Main entry point for zark repair command."""
-    del args  # Unused — no args expected for repair
+    """Main entry point for zark repair-boot command."""
+    del args  # Unused — no args expected for repair-boot
     log = Log()
     zfs = ZFS(log)
     cleanup = Cleanup(log)

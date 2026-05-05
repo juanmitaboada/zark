@@ -8,7 +8,7 @@ and tries to mount their encrypted datasets, fails, and leaves grub.cfg with
 no kernel entries — a hard-to-debug brick.
 
 This module centralises both the script body and the install logic so all
-three callers (`zark recover`, `zark repair`, `zark finish`) deposit the same
+three callers (`zark recover`, `zark repair-boot`, `zark finish`) deposit the same
 file. Previously each command duplicated the script in a heredoc, with the
 obvious risk that fixing a typo in one wouldn't reach the others.
 """

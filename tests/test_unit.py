@@ -7,13 +7,21 @@ Run:  python3 -m pytest tests/test_unit.py -v
 Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 """
 
-# pylint: disable=import-outside-toplevel
+# pylint: disable=too-many-lines
+# Rationale: this is the single-file unit suite by design. A `main()` runner
+# at the bottom of this file lets developers run tests without pytest, and
+# splitting per-class would scatter that contract. The agreement is that
+# only test code lives here — production modules stay under the standard
+# line limit.
 
-
+import inspect
 import json
 import os
 import sys
 import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,14 +30,40 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa: E402
 
+import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
+from commands.backup import _detect_live_usb  # pylint: disable=wrong-import-position # noqa: E402
+from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
+from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
+    _UBUNTU_ROOT_CHILDREN_ALL,
+    _abort_missing_keystore,
+    _apply_root_children_canmount,
+    _detect_root_children,
+    _emit_dataset_layout_warnings,
+)
+from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E402
+    _classify,
+    _diff_rules,
+    _discover_rules,
+    _format_rule,
+    _generate_sanoid_conf,
+    _parse_sanoid_conf,
+)
+from commands.simulate import (  # pylint: disable=wrong-import-position # noqa: E402
+    OVMF_CODE_CANDIDATES,
+)
 from lib.cleanup import Cleanup  # pylint: disable=wrong-import-position # noqa: E402
 from lib.config import Config, DriveInfo  # pylint: disable=wrong-import-position # noqa: E402
-from lib.drives import ConnectedDrive  # pylint: disable=wrong-import-position # noqa: E402
+from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
+    ConnectedDrive,
+    validate_external_block_device,
+)
 from lib.keystore import Keystore  # pylint: disable=wrong-import-position # noqa: E402
 from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
-from lib.sh import RunResult, run  # pylint: disable=wrong-import-position # noqa: E402
+from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
+    DatasetInfo,
     fix_grub_bpool_uuid,
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
@@ -139,10 +173,8 @@ class TestConfig:
           - stubbing Path("/etc/zark") to also be a tmp dir, this time
             with known_drives.json present.
         """
-        import pathlib  # pylint: disable=import-outside-toplevel
-
         with tempfile.TemporaryDirectory() as td:
-            base = pathlib.Path(td)
+            base = Path(td)
 
             # Layout: zark_root with empty etc/ (= what the .deb ships)
             fake_zark_root = base / "usr_share_zark"
@@ -158,7 +190,7 @@ class TestConfig:
                 # everything else goes through the real Path constructor.
                 if str(p) == "/etc/zark":
                     return fake_etc_zark
-                return pathlib.Path(p)
+                return Path(p)
 
             # Make sure the env override is not set (otherwise step 1 wins).
             env_backup = os.environ.pop("ZARK_CONFIG_DIR", None)
@@ -183,20 +215,18 @@ class TestConfig:
         at /etc/zark (writable, where postinst created the directory),
         NOT at /usr/share/zark/etc which is dpkg-managed and read-only.
         """
-        import pathlib  # pylint: disable=import-outside-toplevel
-
-        sys_install_root = pathlib.Path("/usr/share/zark")
+        sys_install_root = Path("/usr/share/zark")
         env_backup = os.environ.pop("ZARK_CONFIG_DIR", None)
         try:
             with (
                 patch.object(Config, "zark_root", return_value=sys_install_root),
                 # Make every "exists()" return False so neither portable
                 # nor system have a known_drives.json yet.
-                patch.object(pathlib.Path, "exists", return_value=False),
-                patch.object(pathlib.Path, "is_dir", return_value=False),
+                patch.object(Path, "exists", return_value=False),
+                patch.object(Path, "is_dir", return_value=False),
             ):
                 result = Config.default_config_dir()
-            assert result == pathlib.Path("/etc/zark"), (
+            assert result == Path("/etc/zark"), (
                 f"system install with no config should default to /etc/zark, " f"got {result}"
             )
         finally:
@@ -210,15 +240,13 @@ class TestConfig:
         nor /etc/zark/known_drives.json exist yet. The default must
         point at <zark_root>/etc (writable, alongside the script).
         """
-        import pathlib  # pylint: disable=import-outside-toplevel
-
-        portable_root = pathlib.Path("/home/user/zark")
+        portable_root = Path("/home/user/zark")
         env_backup = os.environ.pop("ZARK_CONFIG_DIR", None)
         try:
             with (
                 patch.object(Config, "zark_root", return_value=portable_root),
-                patch.object(pathlib.Path, "exists", return_value=False),
-                patch.object(pathlib.Path, "is_dir", return_value=False),
+                patch.object(Path, "exists", return_value=False),
+                patch.object(Path, "is_dir", return_value=False),
             ):
                 result = Config.default_config_dir()
             assert result == portable_root / "etc", (
@@ -301,30 +329,20 @@ class TestShPart:  # pylint: disable=missing-function-docstring
     """Tests for part() function that generates partition device names."""
 
     def test_nvme(self):
-        from lib.sh import part
-
         assert part("/dev/nvme0n1", 1) == "/dev/nvme0n1p1"
         assert part("/dev/nvme0n1", 4) == "/dev/nvme0n1p4"
 
     def test_sata(self):
-        from lib.sh import part
-
         assert part("/dev/sda", 1) == "/dev/sda1"
         assert part("/dev/sda", 3) == "/dev/sda3"
 
     def test_virtio(self):
-        from lib.sh import part
-
         assert part("/dev/vda", 2) == "/dev/vda2"
 
     def test_loop(self):
-        from lib.sh import part
-
         assert part("/dev/loop0", 1) == "/dev/loop0p1"
 
     def test_mmcblk(self):
-        from lib.sh import part
-
         assert part("/dev/mmcblk0", 1) == "/dev/mmcblk0p1"
 
 
@@ -404,17 +422,21 @@ class TestZFS:  # pylint: disable=missing-function-docstring
 
     def test_list_datasets(self):
         mock, zfs = make_mock_zfs()
-        mock.on("zfs list -H -o name,mountpoint,used,refer,canmount -r rpool").succeeds(
-            "rpool\tnone\t500G\t192K\toff\n"
-            "rpool/ROOT\tnone\t50G\t192K\toff\n"
-            "rpool/ROOT/ubuntu_8bt2zy\t/\t50G\t10G\tnoauto\n"
-            "rpool/ROOT/ubuntu_8bt2zy/home\t/home\t30G\t30G\ton\n",
+        mock.on(
+            "zfs list -H -o name,mountpoint,used,refer,canmount,type "
+            + "-t filesystem,volume -r rpool",
+        ).succeeds(
+            "rpool\tnone\t500G\t192K\toff\tfilesystem\n"
+            "rpool/ROOT\tnone\t50G\t192K\toff\tfilesystem\n"
+            "rpool/ROOT/ubuntu_8bt2zy\t/\t50G\t10G\tnoauto\tfilesystem\n"
+            "rpool/ROOT/ubuntu_8bt2zy/home\t/home\t30G\t30G\ton\tfilesystem\n",
         )
         with patch_sh(mock):
             datasets = zfs.list_datasets("rpool")
             assert len(datasets) == 4
             assert datasets[2].name == "rpool/ROOT/ubuntu_8bt2zy"
             assert datasets[2].mountpoint == "/"
+            assert datasets[2].type == "filesystem"
 
     def test_list_snapshots(self):
         mock, zfs = make_mock_zfs()
@@ -426,6 +448,43 @@ class TestZFS:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             snaps = zfs.list_snapshots("rpool", pattern="autosnap")
             assert len(snaps) == 2
+
+    def test_release_all_holds_no_holds_returns_zero(self):
+        """When no held snapshots exist, the helper does nothing and reports 0."""
+        mock, zfs = make_mock_zfs()
+        mock.on("zfs holds -r -H blue/bpool").succeeds("")
+        with patch_sh(mock):
+            assert zfs.release_all_holds("blue/bpool") == 0
+
+    def test_release_all_holds_releases_each_hold(self):
+        """Each (snapshot, tag) pair from `zfs holds` produces one zfs release call."""
+        mock, zfs = make_mock_zfs()
+        mock.on("zfs holds -r -H blue/bpool").succeeds(
+            "blue/bpool@syncoid_carmen_2026-05-05:14:25:19-GMT02:00\tsyncoid\t-\n"
+            "blue/bpool/BOOT@syncoid_carmen_2026-05-05:14:25:19-GMT02:00\tsyncoid\t-\n",
+        )
+        # Match exact snapshot names — verifies the parser pulls col 1 + col 2 correctly
+        mock.on(
+            "zfs release syncoid blue/bpool@syncoid_carmen_2026-05-05:14:25:19-GMT02:00",
+        ).succeeds("")
+        mock.on(
+            "zfs release syncoid blue/bpool/BOOT@syncoid_carmen_2026-05-05:14:25:19-GMT02:00",
+        ).succeeds("")
+        with patch_sh(mock):
+            assert zfs.release_all_holds("blue/bpool") == 2
+
+    def test_release_all_holds_continues_on_partial_failure(self):
+        """If one release fails, the others still run. Caller relies on
+        the destroy that follows to detect any real problem."""
+        mock, zfs = make_mock_zfs()
+        mock.on("zfs holds -r -H blue/bpool").succeeds(
+            "blue/bpool@snap1\ttagA\t-\n" + "blue/bpool@snap2\ttagB\t-\n",
+        )
+        mock.on("zfs release tagA blue/bpool@snap1").fails("permission denied")
+        mock.on("zfs release tagB blue/bpool@snap2").succeeds("")
+        with patch_sh(mock):
+            # Reports only the successful one
+            assert zfs.release_all_holds("blue/bpool") == 1
 
     def test_unique_snap_names(self):
         mock, zfs = make_mock_zfs()
@@ -728,10 +787,6 @@ class TestBackupLiveUSBDetection:  # pylint: disable=missing-function-docstring
 
     def test_detect_live_usb_casper(self):
         """Detects live USB via boot=casper in cmdline."""
-        from commands.backup import (
-            _detect_live_usb,
-        )
-
         mock = MockShell()
         mock.on("cat /proc/cmdline").succeeds("BOOT_IMAGE=/casper/vmlinuz boot=casper quiet splash")
         with patch_sh(mock):
@@ -739,10 +794,6 @@ class TestBackupLiveUSBDetection:  # pylint: disable=missing-function-docstring
 
     def test_detect_live_usb_rofs(self):
         """Detects live USB via /rofs directory."""
-        from commands.backup import (
-            _detect_live_usb,
-        )
-
         mock = MockShell()
         mock.on("cat /proc/cmdline").succeeds("BOOT_IMAGE=/vmlinuz root=/dev/mapper/root")
         mock.on("test -d /rofs").succeeds()
@@ -751,10 +802,6 @@ class TestBackupLiveUSBDetection:  # pylint: disable=missing-function-docstring
 
     def test_detect_live_usb_no_rpool(self):
         """Detects live USB when rpool is not imported."""
-        from commands.backup import (
-            _detect_live_usb,
-        )
-
         mock = MockShell()
         mock.on("cat /proc/cmdline").succeeds("normal boot")
         mock.on("test -d /rofs").fails()
@@ -765,10 +812,6 @@ class TestBackupLiveUSBDetection:  # pylint: disable=missing-function-docstring
 
     def test_detect_normal_system(self):
         """Normal installed system is NOT live USB."""
-        from commands.backup import (
-            _detect_live_usb,
-        )
-
         mock = MockShell()
         mock.on("cat /proc/cmdline").succeeds("BOOT_IMAGE=/vmlinuz root=ZFS=rpool/ROOT/ubuntu")
         mock.on("test -d /rofs").fails()
@@ -788,8 +831,6 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
 
     def test_refuses_nvme(self):
         """Refuses internal NVMe drives."""
-        from lib.drives import validate_external_block_device
-
         log = make_log()
         mock = MockShell()
         mock.on("test -b /dev/nvme0n1").succeeds()
@@ -810,8 +851,6 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
 
     def test_refuses_nonexistent(self):
         """Refuses non-existent devices."""
-        from lib.drives import validate_external_block_device
-
         log = make_log()
 
         with patch("pathlib.Path.exists", return_value=False):
@@ -837,10 +876,6 @@ class TestSimulate:  # pylint: disable=missing-function-docstring,too-few-public
 
     def test_ovmf_candidates_exist(self):
         """OVMF candidate paths are defined."""
-        from commands.simulate import (
-            OVMF_CODE_CANDIDATES,
-        )
-
         assert len(OVMF_CODE_CANDIDATES) > 0
         assert any("OVMF_CODE" in p for p in OVMF_CODE_CANDIDATES)
 
@@ -856,10 +891,6 @@ class TestClean:  # pylint: disable=missing-function-docstring,too-few-public-me
     def test_cleanup_patterns(self):
         """Clean targets the right mount patterns."""
         # Verify the patterns used in clean.py match expectations
-        import inspect  # pylint: disable=redefined-outer-name
-
-        import commands.clean as clean_mod
-
         source = inspect.getsource(clean_mod.run)
         assert "/mnt/recover" in source
         assert "/mnt/zark" in source
@@ -876,10 +907,6 @@ class TestMonitor:  # pylint: disable=missing-function-docstring,too-few-public-
     """Tests for progress bar drawing logic in monitor command."""
 
     def test_draw_bar(self):
-        from commands.monitor import (
-            _draw_bar,
-        )
-
         bar_0 = _draw_bar(0, width=10)
         bar_50 = _draw_bar(50, width=10)
         bar_100 = _draw_bar(100, width=10)
@@ -900,8 +927,6 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on("echo hello").succeeds("hello")
         with patch_sh(mock):
-            import lib.sh as _sh
-
             r = _sh.run("echo hello")
             assert r.ok
             assert r.output == "hello"
@@ -910,8 +935,6 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on("bad_cmd").fails("nope", rc=42)
         with patch_sh(mock):
-            import lib.sh as _sh
-
             r = _sh.run("bad_cmd")
             assert not r.ok
             assert r.returncode == 42
@@ -919,16 +942,12 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
     def test_unregistered_returns_127(self):
         mock = MockShell()
         with patch_sh(mock):
-            import lib.sh as _sh
-
             r = _sh.run("unknown_command")
             assert r.returncode == 127
 
     def test_strict_mode(self):
         mock = MockShell(strict=True)
         with patch_sh(mock):
-            import lib.sh as _sh
-
             try:
                 _sh.run("unknown_command")
                 assert False, "Should have raised"
@@ -939,8 +958,6 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on("zpool export backup").succeeds()
         with patch_sh(mock):
-            import lib.sh as _sh
-
             _sh.run("zpool export backup")
         assert mock.was_called("zpool export backup")
         assert mock.was_not_called("zpool import")
@@ -949,8 +966,6 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on("sync").succeeds()
         with patch_sh(mock):
-            import lib.sh as _sh
-
             _sh.run("sync")
             _sh.run("sync")
             _sh.run("sync")
@@ -960,8 +975,6 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on(r"zpool list \w+", regex=True).succeeds("pool_data")
         with patch_sh(mock):
-            import lib.sh as _sh
-
             r = _sh.run("zpool list anything")
             assert r.ok
 
@@ -969,8 +982,6 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on_prefix("syncoid").succeeds("syncing...")
         with patch_sh(mock):
-            import lib.sh as _sh
-
             r = _sh.run("syncoid --recursive --raw rpool backup/rpool")
             assert r.ok
 
@@ -994,8 +1005,6 @@ class TestFixGrubBpoolUuid:
     NEW_HEX = "7318858f7ebb57e3"
 
     def _write(self, content: str):
-        from pathlib import Path
-
         fd, path = tempfile.mkstemp(suffix=".cfg")
         os.close(fd)
         p = Path(path)
@@ -1056,8 +1065,6 @@ class TestFixGrubBpoolUuid:
 
     def test_missing_file_returns_false(self):
         """Missing grub.cfg should warn and return False (caller handles fallback)."""
-        from pathlib import Path
-
         p = Path(tempfile.mkdtemp()) / "nope.cfg"
         assert fix_grub_bpool_uuid(p, self.NEW_HEX, make_log()) is False
 
@@ -1143,11 +1150,6 @@ class TestRecoverDatasetLayout:
 
     def test_full_ubuntu_layout_no_drift(self):
         """Real Ubuntu hardware: all 15 expected children present, no drift."""
-        from commands.recover import (
-            _UBUNTU_ROOT_CHILDREN_ALL,
-            _apply_root_children_canmount,
-        )
-
         all_children = sorted(_UBUNTU_ROOT_CHILDREN_ALL)
         mock = self._make_mock(all_children)
         with patch_sh(mock):
@@ -1159,10 +1161,6 @@ class TestRecoverDatasetLayout:
 
     def test_reduced_layout_reports_missing(self):
         """QEMU test fixture: only a subset of the expected children exist."""
-        from commands.recover import (
-            _apply_root_children_canmount,
-        )
-
         present = [
             "usr",
             "usr/local",
@@ -1193,11 +1191,6 @@ class TestRecoverDatasetLayout:
 
     def test_extended_layout_reports_extra(self):
         """Custom system: source has datasets zark doesn't know about."""
-        from commands.recover import (
-            _UBUNTU_ROOT_CHILDREN_ALL,
-            _apply_root_children_canmount,
-        )
-
         actual = sorted(_UBUNTU_ROOT_CHILDREN_ALL) + ["opt", "srv/data"]
         mock = self._make_mock(actual)
         with patch_sh(mock):
@@ -1212,10 +1205,6 @@ class TestRecoverDatasetLayout:
         zark must NOT issue `zfs set` against datasets it doesn't recognize,
         even if they're present. Extras are reported but not modified.
         """
-        from commands.recover import (
-            _apply_root_children_canmount,
-        )
-
         actual = ["usr", "var", "var/lib", "opt", "srv/data"]
         mock = self._make_mock(actual)
         with patch_sh(mock):
@@ -1232,10 +1221,6 @@ class TestRecoverDatasetLayout:
 
     def test_missing_datasets_not_set(self):
         """A dataset zark expects but isn't present must not trigger `zfs set`."""
-        from commands.recover import (
-            _apply_root_children_canmount,
-        )
-
         # Present: only usr and usr/local. Everything else missing.
         actual = ["usr", "usr/local"]
         mock = self._make_mock(actual)
@@ -1252,15 +1237,6 @@ class TestRecoverDatasetLayout:
 
     def test_emit_warnings_skipped_when_no_drift(self):
         """Empty missing + empty extra → no warnings emitted (capture stdout)."""
-        from contextlib import (
-            redirect_stdout,
-        )
-        from io import StringIO
-
-        from commands.recover import (
-            _emit_dataset_layout_warnings,
-        )
-
         buf = StringIO()
         with redirect_stdout(buf):
             log = Log()  # writes to stdout via print
@@ -1270,15 +1246,6 @@ class TestRecoverDatasetLayout:
 
     def test_emit_warnings_lists_both(self):
         """When both sets are non-empty, both sections are printed."""
-        from contextlib import (
-            redirect_stdout,
-        )
-        from io import StringIO
-
-        from commands.recover import (
-            _emit_dataset_layout_warnings,
-        )
-
         buf = StringIO()
         with redirect_stdout(buf):
             log = Log()
@@ -1297,10 +1264,6 @@ class TestRecoverDatasetLayout:
 
     def test_detect_root_children_strips_prefix(self):
         """_detect_root_children returns relative names, not full paths."""
-        from commands.recover import (
-            _detect_root_children,
-        )
-
         mock = self._make_mock(["usr", "var/lib", "var/log"])
         with patch_sh(mock):
             children = _detect_root_children(self.UBUNTU)
@@ -1330,11 +1293,6 @@ class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
     @staticmethod
     def _capture_abort(reason: str, pool: str) -> tuple[int, str]:
         """Run the abort and capture (exit_code, captured_stdout)."""
-        from contextlib import redirect_stdout
-        from io import StringIO
-
-        from commands.recover import _abort_missing_keystore
-
         log = make_log()
         buf = StringIO()
         with redirect_stdout(buf):
@@ -1392,11 +1350,6 @@ class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
         continued silently. v1.0.5 must abort instead — verified here by
         checking SystemExit is raised (not just logged).
         """
-        from contextlib import redirect_stdout
-        from io import StringIO
-
-        from commands.recover import _abort_missing_keystore
-
         log = make_log()
         buf = StringIO()
         with redirect_stdout(buf):
@@ -1408,6 +1361,416 @@ class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
             "v1.0.4 silent-fallback regression: _abort_missing_keystore "
             "must raise SystemExit, not return.",
         )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  Sanoid auto-discovery (test5+)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestSanoidClassification:  # pylint: disable=missing-function-docstring
+    """Verify that _classify produces the right rule for each dataset shape.
+
+    The rules are policy decisions encoded in code (zvols → autosnap=no, live
+    system → production, unknown discovered datasets → minimal+recursive).
+    Regressions here would silently change snapshot retention for users.
+    """
+
+    UBUNTU = "ubuntu_jqqq5u"
+
+    def _ds(self, name: str, type_: str = "filesystem"):
+        return DatasetInfo(name=name, type=type_)
+
+    def test_pool_root_is_minimal_non_recursive(self):
+        rule = _classify(self._ds("rpool"), self.UBUNTU)
+        assert rule["template"] == "minimal"
+        assert rule["recursive"] is False
+
+    def test_bpool_root_is_minimal_non_recursive(self):
+        rule = _classify(self._ds("bpool"), self.UBUNTU)
+        assert rule["template"] == "minimal"
+        assert rule["recursive"] is False
+
+    def test_live_system_is_production_recursive(self):
+        rule = _classify(self._ds(f"rpool/ROOT/{self.UBUNTU}"), self.UBUNTU)
+        assert rule["template"] == "production"
+        assert rule["recursive"] is True
+
+    def test_userdata_is_production_recursive(self):
+        rule = _classify(self._ds("rpool/USERDATA"), self.UBUNTU)
+        assert rule["template"] == "production"
+        assert rule["recursive"] is True
+
+    def test_root_container_is_minimal_non_recursive(self):
+        rule = _classify(self._ds("rpool/ROOT"), self.UBUNTU)
+        assert rule["template"] == "minimal"
+        assert rule["recursive"] is False
+
+    def test_zvol_is_excluded_from_autosnap(self):
+        """Critical: keystore (and any future zvol) must NOT be autosnapped.
+
+        The keystore zvol is replicated by prepare/recover, not by sanoid.
+        Snapshotting it accumulates useless snapshots that nobody consults.
+        """
+        rule = _classify(self._ds("rpool/keystore", type_="volume"), self.UBUNTU)
+        assert rule["template"] is None  # signals autosnap=no
+
+    def test_discovered_filesystem_is_minimal_recursive(self):
+        """rpool/var, rpool/libvirt, anything else discovered → minimal+recursive.
+
+        This is the agnostic default that protects users from forgetting
+        to configure sanoid for new datasets they create.
+        """
+        for name in ("rpool/var", "rpool/libvirt", "rpool/data"):
+            rule = _classify(self._ds(name), self.UBUNTU)
+            assert rule["template"] == "minimal", f"failed for {name}"
+            assert rule["recursive"] is True, f"failed for {name}"
+
+    def test_userdata_children_are_skipped(self):
+        """Children of recursively-covered parents must NOT get their own rule.
+
+        Two overlapping rules confuse sanoid (upstream issue 627). Children
+        inherit the parent's recursive policy automatically.
+        """
+        for name in ("rpool/USERDATA/home_xyz", "rpool/USERDATA/root_xyz"):
+            rule = _classify(self._ds(name), self.UBUNTU)
+            assert not rule, f"{name} should be skipped, got {rule}"
+
+    def test_live_system_children_are_skipped(self):
+        for name in (
+            f"rpool/ROOT/{self.UBUNTU}/var",
+            f"rpool/ROOT/{self.UBUNTU}/var/lib/docker",
+        ):
+            rule = _classify(self._ds(name), self.UBUNTU)
+            assert not rule
+
+    def test_other_boot_environment_is_skipped(self):
+        """If the user has an alternate BE (e.g. rpool/ROOT/ubuntu_old),
+        we should NOT generate a rule for it — the named ubuntu_* rule
+        only covers the live one."""
+        rule = _classify(self._ds("rpool/ROOT/ubuntu_old"), self.UBUNTU)
+        assert not rule
+
+    def test_format_zvol_rule_emits_autosnap_no(self):
+        rule = _classify(self._ds("rpool/keystore", type_="volume"), self.UBUNTU)
+        lines = _format_rule("rpool/keystore", rule)
+        assert lines[0] == "[rpool/keystore]"
+        assert "autosnap = no" in lines
+        assert "autoprune = no" in lines
+
+    def test_format_filesystem_rule_emits_template(self):
+        rule = _classify(self._ds(f"rpool/ROOT/{self.UBUNTU}"), self.UBUNTU)
+        lines = _format_rule(f"rpool/ROOT/{self.UBUNTU}", rule)
+        assert lines[0] == f"[rpool/ROOT/{self.UBUNTU}]"
+        assert "use_template = production" in lines
+        assert "recursive = yes" in lines
+
+
+class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
+    """When _classify produces a recursive rule for a dataset, any descendants
+    that would also receive a rule must be dropped. Two overlapping recursive
+    rules trigger sanoid upstream bug 627 (the deeper rule may be ignored)."""
+
+    UBUNTU = "ubuntu_jqqq5u"
+
+    def _run_discovery(self, names_and_types):
+        """Stub _discover_rules using a fake ZFS that returns the given list."""
+
+        class FakeZFS:
+            """Minimal ZFS stub: pool_exists + list_datasets only."""
+
+            def pool_exists(self, name):
+                return name in {n.split("/")[0] for n, _ in names_and_types}
+
+            def list_datasets(self, root, recursive=True):
+                del recursive
+                return [
+                    DatasetInfo(name=n, type=t)
+                    for n, t in names_and_types
+                    if n == root or n.startswith(root + "/")
+                ]
+
+        return _discover_rules(FakeZFS(), self.UBUNTU)
+
+    def test_var_subtree_collapses_to_single_rule(self):
+        """rpool/var, rpool/var/lib, rpool/var/lib/docker → only rpool/var
+        appears in the output, because it covers the rest recursively."""
+        rules = self._run_discovery(
+            [
+                ("rpool", "filesystem"),
+                ("rpool/var", "filesystem"),
+                ("rpool/var/lib", "filesystem"),
+                ("rpool/var/lib/docker", "filesystem"),
+            ],
+        )
+        names = [n for n, _ in rules]
+        assert "rpool/var" in names
+        assert "rpool/var/lib" not in names
+        assert "rpool/var/lib/docker" not in names
+
+    def test_bpool_boot_subtree_collapses(self):
+        rules = self._run_discovery(
+            [
+                ("bpool", "filesystem"),
+                ("bpool/BOOT", "filesystem"),
+                (f"bpool/BOOT/{self.UBUNTU}", "filesystem"),
+            ],
+        )
+        names = [n for n, _ in rules]
+        assert "bpool" in names
+        assert "bpool/BOOT" in names
+        assert f"bpool/BOOT/{self.UBUNTU}" not in names
+
+    def test_zvol_under_recursive_parent_keeps_explicit_rule(self):
+        """If a zvol sits under a recursively-covered filesystem, its
+        autosnap=no rule must REMAIN as an explicit override. Pruning it
+        would let the ancestor's recursive autosnap=yes apply, defeating
+        the zvol-exclusion policy and creating useless snapshots."""
+        rules = self._run_discovery(
+            [
+                ("rpool", "filesystem"),
+                ("rpool/data", "filesystem"),  # → minimal+recursive
+                ("rpool/data/swap", "volume"),  # → autosnap=no override
+            ],
+        )
+        names = [n for n, _ in rules]
+        rules_dict = dict(rules)
+        assert "rpool/data" in names
+        assert (
+            "rpool/data/swap" in names
+        ), "zvol must keep its explicit rule even under a recursive parent"
+        # Verify it kept the right policy
+        assert rules_dict["rpool/data/swap"]["template"] is None  # autosnap=no
+
+
+class TestSanoidDiff:  # pylint: disable=missing-function-docstring
+    """Verify the comparator that decides whether to overwrite sanoid.conf.
+
+    Bad diffs lead to either prompting the user when nothing changed (annoying)
+    or skipping the prompt when something *did* change (dangerous). Both ends
+    of that mistake are tested here.
+    """
+
+    UBUNTU = "ubuntu_jqqq5u"
+
+    def _planned_for_carmen(self):
+        """The rule list we'd generate for Juanmi's actual layout."""
+        names = [
+            ("rpool", "filesystem"),
+            ("rpool/ROOT", "filesystem"),
+            (f"rpool/ROOT/{self.UBUNTU}", "filesystem"),
+            ("rpool/USERDATA", "filesystem"),
+            ("rpool/keystore", "volume"),
+            ("rpool/var", "filesystem"),
+            ("bpool", "filesystem"),
+            ("bpool/BOOT", "filesystem"),
+        ]
+        rules = []
+        for name, type_ in names:
+            ds = DatasetInfo(name=name, type=type_)
+            rule = _classify(ds, self.UBUNTU)
+            if rule:
+                rules.append((name, rule))
+        return rules
+
+    def _serialize(self, rules):
+        return _generate_sanoid_conf(rules)
+
+    def test_parse_extracts_sections_and_keys(self):
+        text = (
+            "# header\n"
+            "[rpool/foo]\n"
+            "use_template = minimal\n"
+            "recursive = yes\n"
+            "\n"
+            "[template_minimal]\n"
+            "daily = 2\n"
+        )
+        parsed = _parse_sanoid_conf(text)
+        assert parsed["rpool/foo"]["use_template"] == "minimal"
+        assert parsed["rpool/foo"]["recursive"] == "yes"
+        assert parsed["template_minimal"]["daily"] == "2"
+
+    def test_parse_ignores_comments_and_blank_lines(self):
+        text = "\n# comment\n   # indented comment\n" + "[rpool/foo]\nuse_template = minimal\n"
+        parsed = _parse_sanoid_conf(text)
+        assert "rpool/foo" in parsed
+        assert "# comment" not in parsed
+
+    def test_diff_no_changes_when_conf_matches_rules(self):
+        """Re-running setup against an already-consistent file must produce
+        an empty diff so the prompt is skipped."""
+        rules = self._planned_for_carmen()
+        text = self._serialize(rules)
+        current = _parse_sanoid_conf(text)
+        diff = _diff_rules(current, rules)
+        assert not diff["added"]
+        assert not diff["removed"]
+        assert not diff["changed"]
+        assert not diff["manual"]
+
+    def test_diff_detects_added_section(self):
+        """An old conf that lacks a section we now generate (e.g. user just
+        added rpool/var on disk) must show up as `added`."""
+        # Old conf that's missing the new rpool/var rule
+        old_text = (
+            f"[rpool/ROOT/{self.UBUNTU}]\n"
+            "use_template = production\nrecursive = yes\n\n"
+            "[rpool/USERDATA]\nuse_template = production\nrecursive = yes\n\n"
+            "[rpool]\nuse_template = minimal\nrecursive = no\n\n"
+            "[rpool/ROOT]\nuse_template = minimal\nrecursive = no\n"
+        )
+        rules = self._planned_for_carmen()
+        diff = _diff_rules(_parse_sanoid_conf(old_text), rules)
+        added_names = [n for n, _ in diff["added"]]
+        assert "rpool/var" in added_names
+        assert "rpool/keystore" in added_names
+        assert "bpool" in added_names
+
+    def test_diff_detects_changed_settings(self):
+        """If user manually changed a section's template/recursive, surface it."""
+        # Same sections but with USERDATA downgraded to minimal (not what we'd plan)
+        old_text = (
+            f"[rpool/ROOT/{self.UBUNTU}]\n"
+            "use_template = production\nrecursive = yes\n\n"
+            "[rpool/USERDATA]\nuse_template = minimal\nrecursive = yes\n"
+        )
+        rules = self._planned_for_carmen()
+        diff = _diff_rules(_parse_sanoid_conf(old_text), rules)
+        changed_names = [n for n, _, _ in diff["changed"]]
+        assert "rpool/USERDATA" in changed_names
+
+    def test_diff_detects_removed_section(self):
+        """If old conf has a managed section that's no longer in planned,
+        show it as removed (e.g. rpool/old_thing that user destroyed)."""
+        old_text = self._serialize(self._planned_for_carmen())
+        old_text += "\n[rpool/old_thing]\nuse_template = minimal\nrecursive = yes\n"
+        rules = self._planned_for_carmen()
+        diff = _diff_rules(_parse_sanoid_conf(old_text), rules)
+        removed_names = [n for n, _ in diff["removed"]]
+        assert "rpool/old_thing" in removed_names
+
+    def test_diff_flags_manual_unmanaged_sections(self):
+        """User-added sections under non-managed pools (e.g. tank/games)
+        must be reported as manual so the user doesn't lose them silently."""
+        old_text = self._serialize(self._planned_for_carmen())
+        old_text += "\n[tank/games]\nuse_template = production\nrecursive = yes\n"
+        rules = self._planned_for_carmen()
+        diff = _diff_rules(_parse_sanoid_conf(old_text), rules)
+        manual_names = [n for n, _ in diff["manual"]]
+        assert "tank/games" in manual_names
+
+    def test_templates_never_appear_in_diff(self):
+        """Templates are fixed in the generator; they must not produce diff
+        entries even if the parser sees them."""
+        old_text = self._serialize(self._planned_for_carmen())
+        rules = self._planned_for_carmen()
+        diff = _diff_rules(_parse_sanoid_conf(old_text), rules)
+        all_names = (
+            [n for n, _ in diff["added"]]
+            + [n for n, _ in diff["removed"]]
+            + [n for n, _, _ in diff["changed"]]
+            + [n for n, _ in diff["manual"]]
+        )
+        for n in all_names:
+            assert not n.startswith("template_"), f"template leaked into diff: {n}"
+
+
+class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
+    """Manual sections (e.g. [tank/games]) must survive a sanoid.conf
+    regeneration. Losing them would silently destroy user customisation
+    every time setup is run, which would be a serious trust violation."""
+
+    UBUNTU = "ubuntu_jqqq5u"
+
+    def _planned(self):
+        names = [
+            ("rpool", "filesystem"),
+            (f"rpool/ROOT/{self.UBUNTU}", "filesystem"),
+            ("rpool/USERDATA", "filesystem"),
+        ]
+        rules = []
+        for name, type_ in names:
+            ds = DatasetInfo(name=name, type=type_)
+            rule = _classify(ds, self.UBUNTU)
+            if rule:
+                rules.append((name, rule))
+        return rules
+
+    def test_generated_with_no_manual_omits_preserve_section(self):
+        """When there are no manual sections, the output must NOT contain the
+        '# Preserved user sections' header — keep the file clean."""
+        text = _generate_sanoid_conf(self._planned(), preserve_manual=None)
+        assert "Preserved user sections" not in text
+
+    def test_generated_with_manual_includes_them_verbatim(self):
+        """The exact section name and key=value pairs must appear in the
+        regenerated file, otherwise round-tripping would lose data."""
+        manual = [
+            ("tank/games", {"use_template": "production", "recursive": "yes"}),
+        ]
+        text = _generate_sanoid_conf(self._planned(), preserve_manual=manual)
+        assert "[tank/games]" in text
+        assert "use_template = production" in text
+        assert "recursive = yes" in text
+
+    def test_round_trip_preserves_manual_section(self):
+        """Generate → parse → check that manual sections survived intact.
+
+        This is the integration test that actually proves the promise:
+        if a user has [tank/games], running setup again must leave it
+        completely unchanged in the new file.
+        """
+        original_manual = [
+            ("tank/games", {"use_template": "production", "recursive": "yes"}),
+            ("data/scratch", {"autosnap": "no", "autoprune": "no"}),
+        ]
+        rules = self._planned()
+
+        # Initial state: zark rules + manual entries
+        v1 = _generate_sanoid_conf(rules, preserve_manual=original_manual)
+
+        # Simulate "user re-runs setup": parse current, diff, regenerate
+        current = _parse_sanoid_conf(v1)
+        diff = _diff_rules(current, rules)
+
+        # No managed changes expected
+        assert not diff["added"]
+        assert not diff["removed"]
+        assert not diff["changed"]
+
+        # Manual sections detected and reported
+        manual_names = sorted(n for n, _ in diff["manual"])
+        assert manual_names == ["data/scratch", "tank/games"]
+
+        # Regenerate using the detected manuals and verify they're still there
+        v2 = _generate_sanoid_conf(rules, preserve_manual=diff["manual"])
+        current_v2 = _parse_sanoid_conf(v2)
+        assert current_v2["tank/games"]["use_template"] == "production"
+        assert current_v2["tank/games"]["recursive"] == "yes"
+        assert current_v2["data/scratch"]["autosnap"] == "no"
+        assert current_v2["data/scratch"]["autoprune"] == "no"
+
+    def test_manual_sections_survive_when_managed_rules_change(self):
+        """Even if zark rules genuinely change (added datasets, etc.),
+        the manuals must still be preserved in the new file."""
+        manual = [("tank/games", {"use_template": "production", "recursive": "yes"})]
+        # First version: only base planned rules. Verify the manual section
+        # is present here too — preservation must work regardless of what
+        # zark's own rule set looks like.
+        v1 = _generate_sanoid_conf(self._planned(), preserve_manual=manual)
+        parsed_v1 = _parse_sanoid_conf(v1)
+        assert "tank/games" in parsed_v1
+
+        # Now simulate that we discovered an extra dataset: rpool/var
+        new_rules = self._planned() + [
+            ("rpool/var", _classify(DatasetInfo(name="rpool/var", type="filesystem"), self.UBUNTU)),
+        ]
+        v2 = _generate_sanoid_conf(new_rules, preserve_manual=manual)
+        parsed = _parse_sanoid_conf(v2)
+        assert "rpool/var" in parsed
+        assert "tank/games" in parsed
+        assert parsed["tank/games"]["use_template"] == "production"
 
 
 # ═════════════════════════════════════════════════════════════════════════

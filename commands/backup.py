@@ -213,8 +213,14 @@ def run(
 
     # Run syncoid in foreground — visible in terminal
     # Exclude keystore zvol (sent separately to avoid kernel crash)
+    # --use-hold places a ZFS hold on the latest synced snapshot on both
+    # source and target so sanoid can't purge it. Without this, long gaps
+    # between backups (weeks/months) eventually erase all shared snapshots
+    # and force a full re-sync. The hold migrates to the new latest snapshot
+    # on each successful backup — no accumulation.
     r = sh.run(
         "syncoid --recursive --no-privilege-elevation --sendoptions=w "
+        + "--use-hold "
         + "--exclude=rpool/keystore "
         + f"{cfg.source_pool} {target_pool}",
         log=log,
@@ -250,13 +256,62 @@ def run(
     if zfs.pool_exists("bpool"):
         r = sh.run(
             "syncoid --recursive --no-privilege-elevation --preserve-properties "
+            + "--use-hold "
             + f"bpool {pool_name}/bpool",
             log=log,
         )
         if r.ok:
             log.ok("bpool synced")
+        elif "no snapshots matching" in r.stdout.lower():
+            # Common case: sanoid (or syncoid's own --no-sync-snap behaviour)
+            # purged the snapshot that was shared between bpool and
+            # {pool_name}/bpool, so syncoid can no longer do an incremental
+            # send and refuses to destroy the target. bpool is small (~150MB)
+            # and recover regenerates initrd via dracut anyway, so destroying
+            # the stale target and resending from scratch is safe and fast.
+            log.info(
+                "No common snapshots with "
+                + f"{pool_name}/bpool — recreating from scratch "
+                + "(sanoid purged the shared syncoid snapshot)",
+            )
+            # Release any holds left by previous --use-hold runs. Without
+            # this, the recursive destroy below fails because ZFS refuses
+            # to delete a held snapshot ("dataset is busy").
+            n_released = zfs.release_all_holds(f"{pool_name}/bpool")
+            if n_released:
+                log.dbg(f"Released {n_released} hold(s) on {pool_name}/bpool")
+            r = sh.run(f"zfs destroy -r {pool_name}/bpool", log=log)
+            if not r.ok:
+                log.warn(
+                    f"Could not destroy {pool_name}/bpool — "
+                    + "bpool backup is stale (recover still works via dracut)",
+                )
+            else:
+                # The first (failed) syncoid already created a syncoid_*
+                # snapshot in source bpool with the current timestamp
+                # (resolution: 1 second). Sleep 2s before relaunching so the
+                # next syncoid generates a fresh timestamp and doesn't
+                # collide with "dataset already exists".
+                time.sleep(2)
+                r = sh.run(
+                    "syncoid --recursive --no-privilege-elevation "
+                    + "--use-hold "
+                    + f"bpool {pool_name}/bpool",
+                    log=log,
+                )
+                if r.ok:
+                    log.ok("bpool resynced from scratch ✓")
+                else:
+                    log.warn(
+                        "bpool resync failed — bpool backup is stale "
+                        + "(recover still works via dracut, but consider "
+                        + "investigating)",
+                    )
         else:
-            log.warn("bpool sync had warnings — check log")
+            log.warn(
+                f"bpool sync failed (rc={r.returncode}) — bpool backup may "
+                + "be stale (recover still works via dracut --regenerate-all)",
+            )
     else:
         log.dbg("No bpool found — skipping")
 

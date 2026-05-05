@@ -55,7 +55,7 @@ class RunResult:
 # If a future caller passes user-controlled input here, that caller
 # is responsible for validating or escaping it — but no such caller
 # exists today.
-def run(
+def run(  # pylint: disable=too-many-branches
     cmd: str | list[str],
     check: bool = False,
     input: str | None = None,  # pylint: disable=redefined-builtin
@@ -122,6 +122,14 @@ def run(
     if log and r.stderr.strip():
         for line in r.stderr.strip().splitlines():
             log.dbg(f"  stderr: {line}")
+
+    # When a command fails, also surface stdout — many tools (syncoid, zfs,
+    # zpool) emit error messages to stdout rather than stderr. Without this,
+    # fatal errors disappear into the void and the user sees a generic
+    # "check log" message with nothing useful in the log.
+    if log and not r.ok and r.stdout.strip():
+        for line in r.stdout.strip().splitlines():
+            log.dbg(f"  stdout: {line}")
 
     if check and not r.ok:
         msg = f"Command failed (rc={r.returncode}): {cmd_str}"

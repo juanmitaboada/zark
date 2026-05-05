@@ -75,7 +75,7 @@ def run(
     disk_arg = next((a for a in args if a.startswith("/dev/")), None)
 
     # ── Check for QEMU ───────────────────────────────────────────────────
-    if not sh.run("command -v qemu-system-x86_64").ok:
+    if not sh.run("which qemu-system-x86_64").ok:
         log.warn("qemu-system-x86_64 not found")
         try:
             install = input("  Install qemu-system-x86 + ovmf? [Y/n]: ").strip().lower()

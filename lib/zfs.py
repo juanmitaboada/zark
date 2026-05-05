@@ -29,7 +29,7 @@ class PoolInfo:  # pylint: disable=too-many-instance-attributes
 
 
 @dataclass
-class DatasetInfo:
+class DatasetInfo:  # pylint: disable=too-many-instance-attributes
     """Information about a ZFS dataset."""
 
     name: str
@@ -39,6 +39,7 @@ class DatasetInfo:
     canmount: str = ""
     keystatus: str = ""
     encryption: str = ""
+    type: str = ""  # "filesystem" or "volume"
 
 
 class ZFS:
@@ -186,7 +187,7 @@ class ZFS:
 
         The dance is required because ``zpool export`` removes a pool from the
         active cachefile, but if we set ``cachefile=none`` first we lose the
-        entries entirely. Workflow used by both ``recover`` and ``repair`` when
+        entries entirely. Workflow used by both ``recover`` and ``repair-boot`` when
         preparing a target system to boot:
 
         1. Point both pools at ``cache_path`` so their entries land in it.
@@ -211,14 +212,17 @@ class ZFS:
     def list_datasets(self, root: str, recursive: bool = True) -> list[DatasetInfo]:
         """List datasets under a root."""
         flag = "-r" if recursive else ""
-        r = run(f"zfs list -H -o name,mountpoint,used,refer,canmount {flag} {root}")
+        r = run(
+            "zfs list -H -o name,mountpoint,used,refer,canmount,type "
+            + f"-t filesystem,volume {flag} {root}",
+        )
         if not r.ok:
             return []
 
         result = []
         for line in r.lines:
             parts = line.split("\t")
-            if len(parts) >= 5 and "@" not in parts[0]:
+            if len(parts) >= 6 and "@" not in parts[0]:
                 result.append(
                     DatasetInfo(
                         name=parts[0],
@@ -226,6 +230,7 @@ class ZFS:
                         used=parts[2],
                         refer=parts[3],
                         canmount=parts[4],
+                        type=parts[5],
                     ),
                 )
         return result
@@ -239,6 +244,33 @@ class ZFS:
         if pattern:
             snaps = [s for s in snaps if pattern in s]
         return snaps
+
+    def release_all_holds(self, root: str) -> int:
+        """Release every hold on every snapshot under ``root`` (recursive).
+
+        Used before ``zfs destroy -r`` on a dataset whose snapshots may have
+        holds placed by ``syncoid --use-hold``. Without this, the destroy
+        fails with "dataset is busy". Returns the number of holds released.
+
+        Resilient to partial failures: if individual ``zfs release`` calls
+        fail, the remaining ones are still attempted. The caller should
+        retry the destroy and react to its result, not to this count.
+        """
+        # `zfs holds -r -H` outputs three tab-separated columns per held
+        # snapshot: NAME, TAG, TIMESTAMP. One row per (snapshot, tag) pair.
+        r = run(f"zfs holds -r -H {root}")
+        if not r.ok or not r.lines:
+            return 0
+
+        released = 0
+        for line in r.lines:
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            snap, tag = parts[0], parts[1]
+            if run(f"zfs release {tag} {snap}").ok:
+                released += 1
+        return released
 
     def unique_snap_names(self, root: str, pattern: str = "autosnap") -> list[str]:
         """Get unique snapshot timestamps sorted."""
