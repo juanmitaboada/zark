@@ -49,9 +49,9 @@ zark automates the entire process:
 
 ## Installation
 
-zark ships in two complementary forms; **both are first-class** and serve different use cases.
+zark ships in three complementary forms; **all three are first-class** and serve different use cases.
 
-### Apt (recommended for productive systems)
+### Apt via PPA (recommended for productive systems)
 
 For machines where zark drives the day-to-day backup routine:
 
@@ -61,8 +61,19 @@ sudo apt update
 sudo apt install zark
 ```
 
-Supported series: 24.04, 24.10, 25.04, 25.10, 26.04. The package installs zark under `/usr/share/zark/`, exposes it as `/usr/bin/zark`,
+Supported series: noble (24.04 LTS), questing (25.10), resolute (26.04 LTS). The package installs zark under `/usr/share/zark/`, exposes it as `/usr/bin/zark`,
 and creates `/etc/zark/` for `known_drives.json`. Logs go to `/var/log/zark.log`.
+
+### Standalone .deb download (when PPA isn't an option)
+
+If you cannot or prefer not to add a PPA — restricted networks, offline systems, or simply a one-shot install — every release ships a prebuilt `.deb` as a release asset on GitHub:
+
+```bash
+wget https://github.com/juanmitaboada/zark/releases/latest/download/zark_<VERSION>-1_all.deb
+sudo apt install ./zark_*.deb
+```
+
+Same package, same layout as the PPA install — only the delivery channel differs. Updates are manual: re-download when a new release is announced.
 
 ### Portable tarball (required for live-USB recovery)
 
@@ -78,8 +89,8 @@ sudo ./zark explore
 The tarball runs from any directory (USB pendrive, `/opt`, `~/bin`) without installation. When zark detects it is running on a live USB session, it logs
 to `<zark_root>/zark.log` next to the script (which survives reboot, since the pendrive does) instead of `/var/log/`.
 
-> **Why both?** The `.deb` package cannot help during recovery because the live USB does not have zark installed and you cannot `apt install`
-> in a casper environment. The portable tarball is the only path for the recover command. The package is a convenience for the routine backup case.
+> **Why three?** The `.deb` package (PPA or direct) cannot help during recovery because the live USB does not have zark installed and you cannot `apt install`
+> in a casper environment. The portable tarball is the only path for the recover command. The PPA is the most ergonomic for routine backups (apt updates handle versioning), and the standalone `.deb` covers air-gapped or offline deployments where the PPA channel is impractical.
 
 ## Quick start
 
