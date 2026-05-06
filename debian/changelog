@@ -1,3 +1,48 @@
+zark (1.0.7-1) unstable; urgency=medium
+
+  * Cross-host recovery, Secure Boot fixes, syncoid version
+    compatibility.
+  * Recover now pins shimx64.efi.signed and grubx64.efi.signed to .latest
+    before dpkg-reconfigure, so a recovered system never inherits a
+    revoked .signed.previous binary even when the source install (left
+    by subiquity) happened to point at one. Fixes the "Verifying shim
+    SBAT data failed: Security Policy Violation" failure mode reported
+    after Ubuntu 26.04 fwupd SBAT updates.
+  * Setup gains a Secure Boot pre-check (step 5) that inspects the live
+    system's shim/grub alternatives and prompts (default NO) before
+    switching them to .latest.
+  * bpool features pruned to the GRUB-compatible subset documented in
+    /usr/share/zfs/compatibility.d/grub2. Earlier zark versions activated
+    head_errlog and vdev_zaps_v2 on bpool, which GRUB 2.14 (Ubuntu 26.04)
+    cannot read — boot failed with "file not found" and "prohibited by
+    secure boot policy" for every kernel. Existing recoveries hit by
+    this need a fresh `zark recover` with this version.
+  * fix_grub_bpool_uuid now rewrites every --fs-uuid line in grub.cfg,
+    including those carrying --hint-bios / --hint-efi / --hint-baremetal
+    options between --set=<name> and the UUID. The previous regex
+    silently skipped these lines, leaving the source machine's stale
+    bpool UUID in the if-branch of every menu entry on grub 2.12+. The
+    bug stayed hidden whenever the recovered disk landed at the same
+    BIOS index as the original, but produced "no such device: <old-uuid>"
+    on cross-host recovery (different machine, different drive
+    enumeration). Two new unit tests cover the regex.
+  * New lib.zfs.syncoid_exclude_flag() helper auto-selects --exclude
+    (sanoid 2.1.0 - 2.2.0-2, Ubuntu 22.04 through 25.10) or
+    --exclude-datasets (sanoid 2.3.0+, Ubuntu 26.04+). Earlier versions
+    hard-coded --exclude-datasets and silently produced a backup with
+    keystore + bpool but no rpool on older sanoid.
+  * New, source retention now follows sanoid policy alone; backup
+    auto-resolves divergence under 64 MB silently and aborts with a
+    pointer to interactive `zark repair-divergent` for anything larger.
+  * Repair command split into repair-boot (fix grub.cfg / initrd from
+    a live USB) and repair-divergent (interactively reset diverged
+    backup datasets). Total command count is now 14.
+  * bpool/BOOT snapshot policy moved from sanoid template_minimal
+    (2 days) to template_production (~3 months) so the boot chain has
+    the same rollback horizon as user data.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Wed, 06 May 2026 22:50:31 +0200
+
 zark (1.0.6-1) unstable; urgency=medium
 
   * Add zark(1) manpage. Source kept as Markdown in debian/zark.1.md;
