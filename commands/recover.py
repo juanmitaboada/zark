@@ -48,10 +48,25 @@ BPOOL_FEATURES_BASE = (
     "lz4_compress spacemap_histogram"
 )
 
-# Additional bpool features for Ubuntu 25.04+ (dracut / GRUB with ZFS patches)
-BPOOL_FEATURES_EXTENDED = (
-    "userobj_accounting project_quota spacemap_v2 log_spacemap head_errlog vdev_zaps_v2"
-)
+# Additional bpool features for Ubuntu 25.04+ (dracut systems).
+#
+# These are the bpool features Ubuntu's installer activates by default on
+# 25.04+. Enabling them on the recovered bpool keeps the pool layout
+# consistent with a stock install and avoids surprises on the first
+# `apt upgrade` (which may auto-enable them).
+#
+# CRITICAL: this list MUST be a subset of /usr/share/zfs/compatibility.d/grub2
+# (the features GRUB2's built-in ZFS reader supports). GRUB reads bpool to
+# load the kernel during boot. If bpool has features GRUB doesn't recognize,
+# GRUB rejects the entire filesystem as unreadable and boot fails with
+# "file '/BOOT/.../vmlinuz-...' not found" — even though Linux can read the
+# pool fine.
+#
+# Specifically excluded: head_errlog, vdev_zaps_v2 — both unsupported by
+# GRUB up to and including 2.14 (the version shipped in Ubuntu 26.04).
+# rpool is unaffected by this restriction since rpool is read by the
+# kernel's full ZFS module, never by GRUB.
+BPOOL_FEATURES_EXTENDED = "userobj_accounting project_quota spacemap_v2 log_spacemap"
 
 
 RECOVER_MNT = "/mnt/recover"
@@ -89,6 +104,52 @@ _UBUNTU_ROOT_CHILDREN_ON = frozenset(
     },
 )
 _UBUNTU_ROOT_CHILDREN_ALL = _UBUNTU_ROOT_CHILDREN_OFF | _UBUNTU_ROOT_CHILDREN_ON
+
+
+def _force_latest_signed_alternative(
+    chroot_path: str,
+    name: str,
+    latest_path: str,
+    log: Log,
+) -> None:
+    """Force update-alternatives to point at the ``.signed.latest`` variant.
+
+    Since shim-signed 1.51 (Ubuntu 22.04 SRU and 24.04+), the package ships
+    two variants under update-alternatives: ``shimx64.efi.signed.latest``
+    (currently shim 15.8) and ``shimx64.efi.signed.previous`` (currently
+    15.4). Same split exists for grub-efi-amd64-signed.
+
+    Subiquity in Ubuntu 26.04 has been observed to leave systems pointing
+    at ``.previous``, which is then revoked by SBAT_LEVEL updates and
+    causes ``Verifying shim SBAT data failed: Security Policy Violation``
+    on the next boot. To avoid recover propagating this state to the
+    restored system, we explicitly switch to ``.latest`` before invoking
+    ``dpkg-reconfigure`` (which copies the chosen alternative to the ESP).
+
+    Defensive about older releases: if the ``.latest`` variant doesn't
+    exist in the chroot (e.g. very old Ubuntu without this split), the
+    function logs a debug note and returns without changes. The
+    subsequent ``dpkg-reconfigure`` still runs and uses whatever the
+    default alternative is.
+
+    Args:
+        chroot_path: filesystem root where the recovered Ubuntu lives.
+        name: alternative name (e.g. "shimx64.efi.signed").
+        latest_path: absolute path inside the chroot to the .latest file
+            (e.g. "/usr/lib/shim/shimx64.efi.signed.latest").
+        log: logger.
+    """
+    if not Path(f"{chroot_path}{latest_path}").exists():
+        log.dbg(f"  {name}: no .latest variant in chroot — using default alternative")
+        return
+    r = sh.run(
+        f"chroot {chroot_path} update-alternatives --set {name} {latest_path}",
+        log=log,
+    )
+    if r.ok:
+        log.ok(f"  {name} → {latest_path} (latest variant forced)")
+    else:
+        log.warn(f"  {name}: update-alternatives --set failed (rc={r.returncode})")
 
 
 def _is_live_usb() -> bool:
@@ -1136,6 +1197,26 @@ def run(
             log=log,
         )
         log.dbg(f"debconf grub-efi/install_devices → {new_efi_part}")
+
+    # ── Force .latest signed variant before dpkg-reconfigure ────────────
+    # shim-signed and grub-efi-amd64-signed ship both .latest and .previous
+    # binaries since 1.51. Subiquity may leave the alternative pointing at
+    # .previous (revoked by recent SBAT updates), so we explicitly switch
+    # to .latest before dpkg-reconfigure copies it to the ESP. See
+    # _force_latest_signed_alternative for full rationale.
+    log.info("Pinning Secure Boot binaries to .latest variant...")
+    _force_latest_signed_alternative(
+        RECOVER_MNT,
+        "shimx64.efi.signed",
+        "/usr/lib/shim/shimx64.efi.signed.latest",
+        log,
+    )
+    _force_latest_signed_alternative(
+        RECOVER_MNT,
+        "grubx64.efi.signed",
+        "/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed.latest",
+        log,
+    )
 
     r = sh.run(
         f"chroot {RECOVER_MNT} dpkg-reconfigure -f noninteractive grub-efi-amd64-signed",

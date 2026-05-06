@@ -5,12 +5,19 @@ Auto-detects connected known drive, imports pool, loads key,
 runs syncoid (raw send), syncs bpool, exports pool.
 
 Refuses to run from live USB (would back up the wrong system).
+
+Divergence handling: when syncoid aborts with "cowardly refusing"
+(no common snapshots between source and target), backup invokes the
+auto-repair logic in ``lib.repair`` to destroy any divergent datasets
+under 64MB and re-run syncoid so it recreates them via initial
+replication. Datasets above 64MB abort with a clear message asking
+the user to run ``zark repair-divergent`` interactively.
 """
 
 import time
 from pathlib import Path
 
-from lib import sh
+from lib import repair, sh
 from lib.cleanup import Cleanup
 from lib.config import Config
 from lib.drives import scan_connected_drives, select_drive
@@ -211,20 +218,47 @@ def run(
     target_pool = f"{pool_name}/rpool"
     start = time.time()
 
-    # Run syncoid in foreground — visible in terminal
-    # Exclude keystore zvol (sent separately to avoid kernel crash)
-    # --use-hold places a ZFS hold on the latest synced snapshot on both
-    # source and target so sanoid can't purge it. Without this, long gaps
-    # between backups (weeks/months) eventually erase all shared snapshots
-    # and force a full re-sync. The hold migrates to the new latest snapshot
-    # on each successful backup — no accumulation.
-    r = sh.run(
+    # The base sync command. Held in a variable because we may need to
+    # invoke it twice: once normally, and once after auto-repair if syncoid
+    # aborts with "cowardly refusing" due to divergent datasets.
+    rpool_syncoid_cmd = (
         "syncoid --recursive --no-privilege-elevation --sendoptions=w "
-        + "--use-hold "
-        + "--exclude=rpool/keystore "
-        + f"{cfg.source_pool} {target_pool}",
-        log=log,
+        + "--exclude-datasets=rpool/keystore "
+        + f"{cfg.source_pool} {target_pool}"
     )
+    r = sh.run(rpool_syncoid_cmd, log=log)
+
+    # If syncoid aborted with "cowardly refusing" (divergent datasets that
+    # exist on both sides without a common snapshot), try auto-repair: any
+    # divergent dataset under 64MB is destroyed so the next syncoid run
+    # recreates it via initial replication. Datasets above the threshold
+    # may contain real user data and are not touched — we abort with a
+    # clear pointer to the interactive `zark repair-divergent` command.
+    if not r.ok and repair.is_divergence_error(r.stdout):
+        log.warn("Source and target have no common snapshots on one or more datasets")
+        log.info(
+            "This usually means the drive has been disconnected longer than "
+            "your sanoid retention policy. Attempting auto-repair of small "
+            "datasets (< 64MB)...",
+        )
+        ok, big = repair.auto_repair_under_64mb(zfs, cfg.source_pool, pool_name, log)
+        if not ok:
+            log.fatal(
+                "Auto-repair could not resolve all divergent datasets",
+                causes=[
+                    f"{len(big)} dataset(s) exceed the 64MB safety limit:",
+                    *[f"  {d.target}  used: {d.used_human}" for d in big],
+                    "These may contain real data — zark refuses to destroy them silently",
+                ],
+                solutions=[
+                    "Run 'sudo ./zark repair-divergent' for an interactive review",
+                ],
+            )
+        log.info("Re-running syncoid after auto-repair...")
+        # Sleep 2s so any new syncoid_* snapshot from the failed attempt
+        # doesn't collide with the next one (timestamp resolution: 1 s).
+        time.sleep(2)
+        r = sh.run(rpool_syncoid_cmd, log=log)
 
     elapsed = int(time.time() - start)
     mins, secs = divmod(elapsed, 60)
@@ -254,32 +288,22 @@ def run(
     log.step(7, 8, "Syncing bpool (kernels + grub)...")
 
     if zfs.pool_exists("bpool"):
-        r = sh.run(
+        bpool_syncoid_cmd = (
             "syncoid --recursive --no-privilege-elevation --preserve-properties "
-            + "--use-hold "
-            + f"bpool {pool_name}/bpool",
-            log=log,
+            + f"bpool {pool_name}/bpool"
         )
+        r = sh.run(bpool_syncoid_cmd, log=log)
         if r.ok:
             log.ok("bpool synced")
         elif "no snapshots matching" in r.stdout.lower():
-            # Common case: sanoid (or syncoid's own --no-sync-snap behaviour)
-            # purged the snapshot that was shared between bpool and
-            # {pool_name}/bpool, so syncoid can no longer do an incremental
-            # send and refuses to destroy the target. bpool is small (~150MB)
-            # and recover regenerates initrd via dracut anyway, so destroying
-            # the stale target and resending from scratch is safe and fast.
+            # bpool is small (~150MB) and recover regenerates initrd via
+            # dracut anyway, so destroying the stale target and resending
+            # from scratch is safe and fast. Always auto-recreate.
             log.info(
                 "No common snapshots with "
                 + f"{pool_name}/bpool — recreating from scratch "
                 + "(sanoid purged the shared syncoid snapshot)",
             )
-            # Release any holds left by previous --use-hold runs. Without
-            # this, the recursive destroy below fails because ZFS refuses
-            # to delete a held snapshot ("dataset is busy").
-            n_released = zfs.release_all_holds(f"{pool_name}/bpool")
-            if n_released:
-                log.dbg(f"Released {n_released} hold(s) on {pool_name}/bpool")
             r = sh.run(f"zfs destroy -r {pool_name}/bpool", log=log)
             if not r.ok:
                 log.warn(
@@ -287,18 +311,10 @@ def run(
                     + "bpool backup is stale (recover still works via dracut)",
                 )
             else:
-                # The first (failed) syncoid already created a syncoid_*
-                # snapshot in source bpool with the current timestamp
-                # (resolution: 1 second). Sleep 2s before relaunching so the
-                # next syncoid generates a fresh timestamp and doesn't
-                # collide with "dataset already exists".
+                # Sleep 2s before relaunching so the next syncoid generates
+                # a fresh timestamp and doesn't collide with the failed run.
                 time.sleep(2)
-                r = sh.run(
-                    "syncoid --recursive --no-privilege-elevation "
-                    + "--use-hold "
-                    + f"bpool {pool_name}/bpool",
-                    log=log,
-                )
+                r = sh.run(bpool_syncoid_cmd, log=log)
                 if r.ok:
                     log.ok("bpool resynced from scratch ✓")
                 else:

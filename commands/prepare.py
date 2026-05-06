@@ -102,10 +102,10 @@ def run(
     rpool_used = sh.run("zfs list -H -o used rpool").output
     log.info(f"~{rpool_used} to transfer")
 
-    # Syncoid raw send (excludes keystore — sent separately)
+    # Syncoid raw send (excludes keystore — sent separately).
     r = sh.run(
         "syncoid --recursive --no-privilege-elevation --sendoptions=w "
-        + "--exclude=rpool/keystore "
+        + "--exclude-datasets=rpool/keystore "
         + f"rpool {new_pool}/rpool",
         log=log,
     )
@@ -127,7 +127,7 @@ def run(
     else:
         log.warn("Keystore sync had errors")
 
-    # Sync bpool
+    # Sync bpool.
     if zfs.pool_exists("bpool"):
         log.info("Syncing bpool (kernels + grub)...")
         r = sh.run(

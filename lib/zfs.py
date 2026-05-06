@@ -245,33 +245,6 @@ class ZFS:
             snaps = [s for s in snaps if pattern in s]
         return snaps
 
-    def release_all_holds(self, root: str) -> int:
-        """Release every hold on every snapshot under ``root`` (recursive).
-
-        Used before ``zfs destroy -r`` on a dataset whose snapshots may have
-        holds placed by ``syncoid --use-hold``. Without this, the destroy
-        fails with "dataset is busy". Returns the number of holds released.
-
-        Resilient to partial failures: if individual ``zfs release`` calls
-        fail, the remaining ones are still attempted. The caller should
-        retry the destroy and react to its result, not to this count.
-        """
-        # `zfs holds -r -H` outputs three tab-separated columns per held
-        # snapshot: NAME, TAG, TIMESTAMP. One row per (snapshot, tag) pair.
-        r = run(f"zfs holds -r -H {root}")
-        if not r.ok or not r.lines:
-            return 0
-
-        released = 0
-        for line in r.lines:
-            parts = line.split("\t")
-            if len(parts) < 2:
-                continue
-            snap, tag = parts[0], parts[1]
-            if run(f"zfs release {tag} {snap}").ok:
-                released += 1
-        return released
-
     def unique_snap_names(self, root: str, pattern: str = "autosnap") -> list[str]:
         """Get unique snapshot timestamps sorted."""
         snaps = self.list_snapshots(root, pattern)
@@ -399,9 +372,20 @@ class ZFS:
 #
 # `update-grub` (10_linux_zfs) emits `--set=root` on real Ubuntu hardware.
 # Manual / test configs may use `--set=boot_fs`. The regex matches any
-# `--set=<name>` so both work, and restricts to 16-hex-char strings (the
-# fixed format of a ZFS pool GUID) to avoid catching unrelated tokens.
-_GRUB_FS_UUID_RE = re.compile(r"(fs-uuid\s+--set=\w+\s+)([a-f0-9]{16})")
+# `--fs-uuid` followed by zero or more options (such as `--set=<name>`,
+# `--hint-bios=...`, `--hint-efi=...`, `--hint-baremetal=...`) and finally
+# the 16-hex-char UUID. The earlier version of this regex required only
+# whitespace between `--set=<name>` and the UUID, which silently failed on
+# the standard Ubuntu grub.cfg lines that include hints (the only ones that
+# actually run on grub 2.12+ when `feature_platform_search_hint` is set).
+# This caused the recovered system to keep stale (source) UUIDs in the
+# `if`-branch of every menu entry, producing `error: no such device:
+# <old-uuid>` followed by `disk 'hdN,gptN' not found` and
+# `you need to load the kernel first` at boot — but only on machines
+# where the source disk's BIOS index didn't happen to match the new
+# machine's, so the bug stayed hidden until a recovery between hosts
+# with different drive enumeration.
+_GRUB_FS_UUID_RE = re.compile(r"(--fs-uuid[^\n]*?\s+)([a-f0-9]{16})\b")
 
 
 def fix_grub_bpool_uuid(grub_cfg: Path, new_bpool_hex: str, log: Log) -> bool:

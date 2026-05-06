@@ -40,10 +40,7 @@ from commands.recover import (  # pylint: disable=wrong-import-position # noqa: 
     _apply_root_children_canmount,
     _detect_root_children,
     _emit_dataset_layout_warnings,
-)
-from commands.repair_divergent import (  # pylint: disable=wrong-import-position # noqa: E402
-    SIZE_LIMIT_BYTES,
-    _find_divergent,
+    _force_latest_signed_alternative,
 )
 from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E402
     _classify,
@@ -52,10 +49,12 @@ from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E4
     _format_rule,
     _generate_sanoid_conf,
     _parse_sanoid_conf,
+    _signed_alternative_status,
 )
 from commands.simulate import (  # pylint: disable=wrong-import-position # noqa: E402
     OVMF_CODE_CANDIDATES,
 )
+from lib import repair  # pylint: disable=wrong-import-position # noqa: E402
 from lib.cleanup import Cleanup  # pylint: disable=wrong-import-position # noqa: E402
 from lib.config import Config, DriveInfo  # pylint: disable=wrong-import-position # noqa: E402
 from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -64,6 +63,11 @@ from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
 )
 from lib.keystore import Keystore  # pylint: disable=wrong-import-position # noqa: E402
 from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
+from lib.repair import (  # pylint: disable=wrong-import-position # noqa: E402
+    SIZE_LIMIT_BYTES,
+    find_divergent,
+    is_divergence_error,
+)
 from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
@@ -452,43 +456,6 @@ class TestZFS:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             snaps = zfs.list_snapshots("rpool", pattern="autosnap")
             assert len(snaps) == 2
-
-    def test_release_all_holds_no_holds_returns_zero(self):
-        """When no held snapshots exist, the helper does nothing and reports 0."""
-        mock, zfs = make_mock_zfs()
-        mock.on("zfs holds -r -H blue/bpool").succeeds("")
-        with patch_sh(mock):
-            assert zfs.release_all_holds("blue/bpool") == 0
-
-    def test_release_all_holds_releases_each_hold(self):
-        """Each (snapshot, tag) pair from `zfs holds` produces one zfs release call."""
-        mock, zfs = make_mock_zfs()
-        mock.on("zfs holds -r -H blue/bpool").succeeds(
-            "blue/bpool@syncoid_carmen_2026-05-05:14:25:19-GMT02:00\tsyncoid\t-\n"
-            "blue/bpool/BOOT@syncoid_carmen_2026-05-05:14:25:19-GMT02:00\tsyncoid\t-\n",
-        )
-        # Match exact snapshot names — verifies the parser pulls col 1 + col 2 correctly
-        mock.on(
-            "zfs release syncoid blue/bpool@syncoid_carmen_2026-05-05:14:25:19-GMT02:00",
-        ).succeeds("")
-        mock.on(
-            "zfs release syncoid blue/bpool/BOOT@syncoid_carmen_2026-05-05:14:25:19-GMT02:00",
-        ).succeeds("")
-        with patch_sh(mock):
-            assert zfs.release_all_holds("blue/bpool") == 2
-
-    def test_release_all_holds_continues_on_partial_failure(self):
-        """If one release fails, the others still run. Caller relies on
-        the destroy that follows to detect any real problem."""
-        mock, zfs = make_mock_zfs()
-        mock.on("zfs holds -r -H blue/bpool").succeeds(
-            "blue/bpool@snap1\ttagA\t-\n" + "blue/bpool@snap2\ttagB\t-\n",
-        )
-        mock.on("zfs release tagA blue/bpool@snap1").fails("permission denied")
-        mock.on("zfs release tagB blue/bpool@snap2").succeeds("")
-        with patch_sh(mock):
-            # Reports only the successful one
-            assert zfs.release_all_holds("blue/bpool") == 1
 
     def test_unique_snap_names(self):
         mock, zfs = make_mock_zfs()
@@ -1113,6 +1080,64 @@ class TestFixGrubBpoolUuid:
         assert self.OLD_HEX not in new
         os.unlink(p)
 
+    def test_replaces_lines_with_search_hints(self):
+        """
+        Real Ubuntu grub.cfg lines include `--hint-bios`, `--hint-efi`, and
+        `--hint-baremetal` between `--set=<name>` and the UUID. Earlier
+        versions of the regex required only whitespace there and silently
+        skipped these lines, leaving the source machine's stale UUID intact
+        — which broke boot whenever the recovered system's drive enumeration
+        differed from the original (i.e. cross-host recovery).
+        """
+        p = self._write(
+            f"menuentry 'Ubuntu 26.04 LTS' {{\n"
+            f"    set root='hd2,gpt2'\n"
+            f"    if [ x$feature_platform_search_hint = xy ]; then\n"
+            f"        search --no-floppy --fs-uuid --set=root "
+            f"--hint-bios=hd2,gpt2 --hint-efi=hd2,gpt2 "
+            f"--hint-baremetal=ahci2,gpt2  {self.OLD_HEX}\n"
+            f"    else\n"
+            f"        search --no-floppy --fs-uuid --set=root {self.OLD_HEX}\n"
+            f"    fi\n"
+            f"    linux /BOOT/ubuntu_xxx@/vmlinuz-...\n"
+            f"}}\n",
+        )
+        assert fix_grub_bpool_uuid(p, self.NEW_HEX, make_log()) is True
+        new = p.read_text(encoding="utf-8")
+        # Both occurrences (if-branch with hints AND else-branch without)
+        # must be rewritten — regex must accept the hints in between.
+        assert new.count(self.NEW_HEX) == 2
+        assert self.OLD_HEX not in new
+        # The hints themselves must remain (we only replace the UUID,
+        # not the surrounding options)
+        assert "--hint-bios=hd2,gpt2" in new
+        assert "--hint-efi=hd2,gpt2" in new
+        assert "--hint-baremetal=ahci2,gpt2" in new
+        os.unlink(p)
+
+    def test_does_not_touch_uuids_outside_fs_uuid_context(self):
+        """
+        The new permissive regex must still scope its replacements to lines
+        that mention `--fs-uuid`. A 16-hex-char token elsewhere in the file
+        (e.g. inside a `set foo=...` line, or a partition UUID) must remain
+        untouched even if it happens to be the same as the old bpool UUID.
+        """
+        p = self._write(
+            f"# Comment with hex like {self.OLD_HEX} should not be touched\n"
+            f"set unrelated_var={self.OLD_HEX}\n"
+            f"menuentry 'Ubuntu' {{\n"
+            f"    search --no-floppy --fs-uuid --set=root {self.OLD_HEX}\n"
+            f"}}\n",
+        )
+        assert fix_grub_bpool_uuid(p, self.NEW_HEX, make_log()) is True
+        new = p.read_text(encoding="utf-8")
+        # The fs-uuid line was rewritten
+        assert f"--set=root {self.NEW_HEX}" in new
+        # The unrelated hex tokens were preserved
+        assert f"# Comment with hex like {self.OLD_HEX}" in new
+        assert f"set unrelated_var={self.OLD_HEX}" in new
+        os.unlink(p)
+
 
 # ═════════════════════════════════════════════════════════════════════════
 #  commands/recover.py — dataset layout detection
@@ -1404,6 +1429,19 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
         rule = _classify(self._ds("rpool/USERDATA"), self.UBUNTU)
         assert rule["template"] == "production"
         assert rule["recursive"] is True
+
+    def test_bpool_boot_is_production_recursive(self):
+        """bpool/BOOT holds kernels and grub config — same retention horizon
+        as user data so the user can roll back ~3 months after a bad update."""
+        rule = _classify(self._ds("bpool/BOOT"), self.UBUNTU)
+        assert rule["template"] == "production"
+        assert rule["recursive"] is True
+
+    def test_bpool_boot_children_are_skipped(self):
+        """Children of bpool/BOOT (the named boot environment) must be
+        skipped because the recursive rule on bpool/BOOT covers them."""
+        rule = _classify(self._ds(f"bpool/BOOT/{self.UBUNTU}"), self.UBUNTU)
+        assert not rule
 
     def test_root_container_is_minimal_non_recursive(self):
         rule = _classify(self._ds("rpool/ROOT"), self.UBUNTU)
@@ -1777,10 +1815,11 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
         assert parsed["tank/games"]["use_template"] == "production"
 
 
-class TestRepairDivergent:  # pylint: disable=missing-function-docstring
-    """Tests for repair-divergent's detection logic.
+class TestLibRepair:  # pylint: disable=missing-function-docstring
+    """Tests for lib/repair's detection logic.
 
-    The command's safety hinges on _find_divergent correctly identifying
+    Used by both ``zark backup`` (silent path) and ``zark repair-divergent``
+    (interactive path). Safety hinges on find_divergent correctly identifying
     datasets without shared snapshots — false positives would destroy
     real data, false negatives would leave the user with a broken backup.
     """
@@ -1794,7 +1833,7 @@ class TestRepairDivergent:  # pylint: disable=missing-function-docstring
         source_exists: set[str] | None = None,
         used_bytes: dict[str, int] | None = None,
     ) -> tuple[MockShell, ZFS]:
-        """Wire up a MockShell that answers all the queries _find_divergent makes."""
+        """Wire up a MockShell that answers all the queries find_divergent makes."""
         mock, zfs = make_mock_zfs()
 
         # list_datasets call
@@ -1857,7 +1896,7 @@ class TestRepairDivergent:  # pylint: disable=missing-function-docstring
             },
         )
         with patch_sh(mock):
-            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+            divergent = find_divergent(zfs, "rpool", "blue", make_log())
         assert not divergent
 
     def test_detects_dataset_with_no_shared_snapshots(self):
@@ -1879,7 +1918,7 @@ class TestRepairDivergent:  # pylint: disable=missing-function-docstring
             },
         )
         with patch_sh(mock):
-            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+            divergent = find_divergent(zfs, "rpool", "blue", make_log())
         names = [d.target for d in divergent]
         assert "blue/rpool/var" in names
         assert "blue/rpool" not in names  # this one has overlap
@@ -1902,7 +1941,7 @@ class TestRepairDivergent:  # pylint: disable=missing-function-docstring
             source_snaps={"rpool": ["s1"], "rpool/empty": ["src_snap"]},
         )
         with patch_sh(mock):
-            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+            divergent = find_divergent(zfs, "rpool", "blue", make_log())
         assert not divergent
 
     def test_skips_dataset_when_source_missing(self):
@@ -1920,7 +1959,7 @@ class TestRepairDivergent:  # pylint: disable=missing-function-docstring
             source_exists={"rpool"},  # explicitly: rpool/orphan does NOT exist
         )
         with patch_sh(mock):
-            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+            divergent = find_divergent(zfs, "rpool", "blue", make_log())
         assert not divergent
 
     def test_skips_zvols(self):
@@ -1935,7 +1974,7 @@ class TestRepairDivergent:  # pylint: disable=missing-function-docstring
             source_snaps={"rpool/keystore": ["different"]},
         )
         with patch_sh(mock):
-            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+            divergent = find_divergent(zfs, "rpool", "blue", make_log())
         assert not divergent
 
     def test_size_limit_constant_is_64mb(self):
@@ -1960,9 +1999,234 @@ class TestRepairDivergent:  # pylint: disable=missing-function-docstring
             used_bytes={"blue/rpool/var": 8192},  # 8 KB
         )
         with patch_sh(mock):
-            divergent = _find_divergent(zfs, "rpool", "blue", make_log())
+            divergent = find_divergent(zfs, "rpool", "blue", make_log())
         assert len(divergent) == 1
         assert divergent[0].used_bytes == 8192
+
+    # ── is_divergence_error ─────────────────────────────────────────────
+
+    def test_is_divergence_error_matches_cowardly_refusing(self):
+        """The exact phrase syncoid prints on divergence-protected aborts."""
+        s = (
+            "CRITICAL ERROR: Target blue/rpool/var exists but has no "
+            "snapshots matching with rpool/var! Replication to target would "
+            "require destroying existing target. Cowardly refusing to "
+            "destroy your existing target."
+        )
+        assert is_divergence_error(s)
+
+    def test_is_divergence_error_matches_no_snapshots_matching(self):
+        """The other phrasing syncoid uses for the same condition."""
+        s = "no snapshots matching with rpool/var"
+        assert is_divergence_error(s)
+
+    def test_is_divergence_error_is_case_insensitive(self):
+        """Defensive: never trust exact case from third-party stderr."""
+        s = "COWARDLY REFUSING to destroy your existing target"
+        assert is_divergence_error(s)
+
+    def test_is_divergence_error_does_not_match_other_failures(self):
+        """Real failures unrelated to divergence must not trigger auto-repair."""
+        assert not is_divergence_error("CRITICAL ERROR: out of space")
+        assert not is_divergence_error("syncoid succeeded")
+        assert not is_divergence_error("")
+
+    # ── auto_repair_under_64mb ──────────────────────────────────────────
+
+    def test_auto_repair_returns_ok_true_when_no_divergence(self):
+        """No divergent datasets → return (True, []) immediately."""
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[("blue", "filesystem"), ("blue/rpool", "filesystem")],
+            target_snaps={"blue/rpool": ["autosnap_2026-01-01"]},
+            source_snaps={"rpool": ["autosnap_2026-01-01"]},  # overlap
+        )
+        with patch_sh(mock):
+            ok, too_big = repair.auto_repair_under_64mb(
+                zfs,
+                "rpool",
+                "blue",
+                make_log(),
+            )
+        assert ok is True
+        assert too_big == []
+
+    def test_auto_repair_destroys_small_divergent_datasets(self):
+        """All divergent < 64MB → destroy each, return (True, [])."""
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[("blue", "filesystem"), ("blue/rpool/var", "filesystem")],
+            target_snaps={"blue/rpool/var": ["X"]},
+            source_snaps={"rpool/var": ["Y"]},  # no overlap → divergent
+            used_bytes={"blue/rpool/var": 8192},  # 8KB, well below 64MB
+        )
+        # The destroy call must be wired up to succeed.
+        mock.on("zfs destroy -r blue/rpool/var").succeeds("")
+        with patch_sh(mock):
+            ok, too_big = repair.auto_repair_under_64mb(
+                zfs,
+                "rpool",
+                "blue",
+                make_log(),
+            )
+        assert ok is True
+        assert too_big == []
+
+    def test_auto_repair_aborts_when_dataset_exceeds_64mb(self):
+        """Anything > 64MB → return (False, [those_datasets]) without
+        destroying anything. Caller must surface this to the user."""
+        big_size = repair.SIZE_LIMIT_BYTES + 1
+        mock, zfs = self._setup_mock(
+            target_pool="blue",
+            target_datasets=[("blue", "filesystem"), ("blue/rpool/home", "filesystem")],
+            target_snaps={"blue/rpool/home": ["X"]},
+            source_snaps={"rpool/home": ["Y"]},
+            used_bytes={"blue/rpool/home": big_size},
+        )
+        # Note: NO mock for `zfs destroy`. If auto-repair tried to destroy
+        # this dataset, MockShell would raise — this is the test invariant.
+        with patch_sh(mock):
+            ok, too_big = repair.auto_repair_under_64mb(
+                zfs,
+                "rpool",
+                "blue",
+                make_log(),
+            )
+        assert ok is False
+        assert len(too_big) == 1
+        assert too_big[0].target == "blue/rpool/home"
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/recover.py — Secure Boot .latest variant pinning
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestForceLatestSignedAlternative:  # pylint: disable=missing-function-docstring
+    """Tests for ``_force_latest_signed_alternative``.
+
+    The function is the entry point used by ``recover`` to avoid copying
+    the older shim/grub variant to the recovered system's ESP. Two
+    behaviors must be guaranteed: (1) when the .latest variant exists
+    in the chroot, run update-alternatives --set; (2) when it does not,
+    do nothing — so older Ubuntu releases without the split keep working.
+    """
+
+    def test_no_op_when_latest_does_not_exist(self):
+        """Older Ubuntu releases (or unusual chroots) without a .latest
+        variant must not trigger update-alternatives — the function
+        silently returns and lets the default behavior run."""
+        mock = MockShell()
+        with tempfile.TemporaryDirectory() as tmp:
+            # No .latest file created; just an empty chroot
+            with patch_sh(mock):
+                _force_latest_signed_alternative(
+                    tmp,
+                    "shimx64.efi.signed",
+                    "/usr/lib/shim/shimx64.efi.signed.latest",
+                    make_log(),
+                )
+            assert not mock._calls  # pylint: disable=protected-access
+
+    def test_runs_update_alternatives_when_latest_exists(self):
+        """When the .latest file is present in the chroot, the function
+        invokes update-alternatives --set inside the chroot."""
+        mock = MockShell()
+        with tempfile.TemporaryDirectory() as tmp:
+            shim_dir = Path(tmp) / "usr/lib/shim"
+            shim_dir.mkdir(parents=True)
+            (shim_dir / "shimx64.efi.signed.latest").write_text("fake binary")
+            resp = mock.on(
+                f"chroot {tmp} update-alternatives --set shimx64.efi.signed "
+                "/usr/lib/shim/shimx64.efi.signed.latest",
+            ).succeeds("")
+            with patch_sh(mock):
+                _force_latest_signed_alternative(
+                    tmp,
+                    "shimx64.efi.signed",
+                    "/usr/lib/shim/shimx64.efi.signed.latest",
+                    make_log(),
+                )
+            assert resp.call_count == 1
+
+    def test_logs_warning_but_continues_on_command_failure(self):
+        """If update-alternatives itself fails (rare), the function logs
+        a warning but does not raise — the subsequent dpkg-reconfigure
+        will still run and use whatever default is configured."""
+        mock = MockShell()
+        with tempfile.TemporaryDirectory() as tmp:
+            shim_dir = Path(tmp) / "usr/lib/shim"
+            shim_dir.mkdir(parents=True)
+            (shim_dir / "shimx64.efi.signed.latest").write_text("fake binary")
+            mock.on(
+                f"chroot {tmp} update-alternatives --set shimx64.efi.signed "
+                "/usr/lib/shim/shimx64.efi.signed.latest",
+            ).fails("alternative not registered")
+            with patch_sh(mock):
+                # Should not raise
+                _force_latest_signed_alternative(
+                    tmp,
+                    "shimx64.efi.signed",
+                    "/usr/lib/shim/shimx64.efi.signed.latest",
+                    make_log(),
+                )
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/setup.py — Secure Boot alternatives status
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestSignedAlternativeStatus:  # pylint: disable=missing-function-docstring
+    """Tests for ``_signed_alternative_status``.
+
+    The function returns ``(current_target, latest_path)`` for a given
+    update-alternatives name. Both fields tell the caller different
+    things, and the absence of either changes the recommended action.
+    """
+
+    def test_returns_none_when_alternative_not_installed(self):
+        """When /etc/alternatives/<name> doesn't exist (e.g. on a system
+        that never installed shim-signed), both fields are None and the
+        caller skips the dataset entirely."""
+        # We can't easily mock Path.exists for /etc/alternatives, so we
+        # use a name that's guaranteed not to exist as an alternative.
+        # The real behavior: alt_link.exists() returns False → current=None,
+        # update-alternatives --query returns non-zero → latest=None.
+        mock = MockShell()
+        mock.on(
+            "update-alternatives --query nonexistent.alternative.zark.test",
+        ).fails("no alternatives for nonexistent.alternative.zark.test")
+        with patch_sh(mock):
+            current, latest = _signed_alternative_status(
+                "nonexistent.alternative.zark.test",
+            )
+        assert current is None
+        assert latest is None
+
+    def test_latest_is_none_when_query_does_not_list_signed_latest(self):
+        """If update-alternatives succeeds but returns no alternative
+        path ending in '.signed.latest', the helper's latest field is
+        None — meaning this Ubuntu release doesn't ship the split."""
+        mock = MockShell()
+        mock.on(
+            "update-alternatives --query nonexistent.alternative.zark.test",
+        ).succeeds(
+            "Name: nonexistent.alternative.zark.test\n"
+            "Link: /usr/lib/whatever\n"
+            "Status: auto\n"
+            "Best: /usr/lib/whatever.signed\n"
+            "Value: /usr/lib/whatever.signed\n"
+            "\n"
+            "Alternative: /usr/lib/whatever.signed\n"
+            "Priority: 100\n",
+        )
+        with patch_sh(mock):
+            _, latest = _signed_alternative_status(
+                "nonexistent.alternative.zark.test",
+            )
+        # No path ending in .signed.latest in the query output → None
+        assert latest is None
 
 
 def main() -> int:

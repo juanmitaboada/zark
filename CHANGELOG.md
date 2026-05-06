@@ -5,6 +5,42 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] — 2026-05-06
+
+### Backup model
+
+- **Removed `--use-hold` from all syncoid invocations.** Earlier iterations experimented with ZFS holds to keep the syncoid anchor snapshot alive across long backup gaps, but holds retain blocks on the *source* pool until manually released — meaning a forgotten backup drive could silently keep tens of GB unreclaimable on `rpool` for months. The new model is simpler and honest: source retention is governed entirely by sanoid policy; the destination accumulates whatever it receives. If a drive sits offline longer than the source policy retains (~3 months on `production`), the next backup auto-resolves the resulting divergence.
+- **`zark backup` now auto-repairs divergent datasets under 64 MB silently.** When syncoid aborts with `Cowardly refusing to destroy your existing target`, backup invokes the same logic as `repair-divergent` for any dataset under 64 MB (the threshold syncoid itself uses to flag "did you mistakenly run zfs create on the target?") and re-runs syncoid. Anything larger aborts with a clear pointer to interactive `zark repair-divergent` — no user data ever destroyed silently.
+- **`bpool/BOOT` snapshot policy moved from `minimal` (2 days) to `production` (~3 months).** Kernel and initramfs history deserves the same rollback horizon as user data; ZFS deduplicates the extra hourly snapshots since `/boot` doesn't change between hours.
+
+### Secure Boot
+
+- **`zark recover` now pins the `.latest` signed shim/grub variant before reinstalling.** Subiquity has been observed leaving Ubuntu installations pointing at the older `.signed.previous` shim (15.4-0ubuntu9), which gets revoked by the next SBAT level update from `fwupd`, leaving the system unbootable with `Verifying shim SBAT data failed: Security Policy Violation`. Recover now switches the alternative to `.latest` before `dpkg-reconfigure`, so the recovered system uses the up-to-date binary regardless of what the original installation chose. No-op on releases that don't ship the `.latest`/`.previous` split.
+- **`zark setup` adds a Secure Boot pre-check (step 5).** Inspects the live system's alternatives for both shim and grub signed binaries; if either points to anything other than `.latest`, prompts (default NO — boot chain changes warrant explicit consent) before switching and re-running the postinst. Helps the user fix the subiquity bug before it propagates to backups.
+- **bpool features pruned to GRUB-compatible subset.** Earlier versions of zark activated `head_errlog` and `vdev_zaps_v2` on bpool for "Ubuntu 25.04+ dracut systems," based on the assumption that dracut implied a more capable GRUB. This was wrong: GRUB2's bundled ZFS reader (used during boot to load the kernel) does not support either feature even in GRUB 2.14, the version shipped in Ubuntu 26.04. With those features active, GRUB rejects bpool as unreadable and boot fails with `file '/BOOT/.../vmlinuz-...' not found` followed by `prohibited by secure boot policy` for every menu entry. Existing recovered systems hit by this need a fresh `zark recover` with v1.0.7+ (features cannot be disabled once active). The recover code now activates only features documented in `/usr/share/zfs/compatibility.d/grub2` on bpool. rpool is unaffected — it's read by the full ZFS kernel module and continues to use whatever features the running ZFS supports.
+- **`fix_grub_bpool_uuid` now rewrites every `--fs-uuid` reference, including those with `--hint-*` options.** The previous regex required only whitespace between `--set=<name>` and the 16-hex UUID, which silently skipped Ubuntu's standard menu-entry lines (`search --fs-uuid --set=root --hint-bios=... --hint-efi=... --hint-baremetal=... <UUID>` — the only ones that actually run on grub 2.12+ when `feature_platform_search_hint` is set). The result was that the `if`-branch of every menu entry kept the source machine's stale UUID after recovery, while only the `else`-branch got rewritten. This bug was invisible whenever the recovered disk happened to match the source's BIOS index (e.g. always recovering the same physical machine), but produced `error: no such device: <old-uuid>` followed by `disk 'hdN,gptN' not found` and `you need to load the kernel first` on cross-host recovery (different machine, different drive enumeration). The new regex is permissive about what may appear between `--fs-uuid` and the UUID.
+- **README troubleshooting section** documents two recurring scenarios users may hit: (1) the harmless "System program problem detected" Apport popup that appears during disk-intensive operations on the live USB (caused by unrelated GNOME/udev daemons reacting to rapid disk activity), and (2) the SBAT rescue procedure for users hit by the shim revocation issue with a pre-1.0.7 recover (boot live USB → temporarily disable Secure Boot → switch alternatives → reboot with Secure Boot back on).
+
+### Refactor
+
+- Moved divergence detection (`find_divergent`, `auto_repair_under_64mb`, `is_divergence_error`) from `commands/repair_divergent.py` to a new `lib/repair.py`, shared between `backup` (silent path) and `repair-divergent` (interactive path).
+- Removed `lib.zfs.release_all_holds` and `lib.zfs.has_syncoid_holds` (no longer needed; both were broken anyway because `zfs holds -r <dataset>` only accepts snapshots).
+- Renamed syncoid flag `--exclude` to `--exclude-datasets` (the older form is deprecated upstream and emits a warning on every run). Available in sanoid ≥ 2.2.0, present in Ubuntu 24.04 and later, which is the supported range.
+
+### Tests
+
+- 137 unit tests, ruff clean, pylint 10.00/10.
+
+### Breaking change
+
+- Pools backed up with v1.0.6 or earlier may have leftover `syncoid_carmen_*` snapshots in source `rpool` and `bpool` (with no useful function). Cleanup is optional and one-shot:
+  ```
+  sudo zfs list -H -o name -t snapshot -r rpool | grep '@syncoid_carmen_' | xargs -r -n1 sudo zfs destroy
+  sudo zfs list -H -o name -t snapshot -r bpool | grep '@syncoid_carmen_' | xargs -r -n1 sudo zfs destroy
+  ```
+
+[1.0.7]: #107--2026-05-06
+
 ## [1.0.6] — 2026-05-03
 
 ### Distribution
