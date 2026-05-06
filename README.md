@@ -29,21 +29,22 @@ zark automates the entire process:
 
 ## Commands
 
-| Command     | Description                                                  |
-|-------------|--------------------------------------------------------------|
-| `explore`   | Scan for ZFS pools, show known/unknown drives                |
-| `setup`     | Install dependencies, configure sanoid for automatic snapshots |
-| `prepare`   | Initialize a new blank drive as a backup target              |
-| `backup`    | Incremental encrypted backup via syncoid raw send            |
-| `recover`   | Full bare-metal system recovery from backup                  |
-| `finish`    | Post-recovery finalization (run from the recovered system)   |
-| `repair`    | Fix boot issues from a live USB without full recovery        |
-| `mount`     | Mount backup pool read-only for inspection or chroot         |
-| `umount`    | Unmount a previously mounted backup pool                     |
-| `clean`     | Emergency cleanup: unmount everything, export all pools      |
-| `purge`     | Securely wipe a managed backup drive                         |
-| `monitor`   | Live progress monitor (run in a separate terminal)           |
-| `simulate`  | Boot the target disk in QEMU/KVM to verify the boot chain    |
+| Command            | Description                                                  |
+|--------------------|--------------------------------------------------------------|
+| `explore`          | Scan for ZFS pools, show known/unknown drives                |
+| `setup`            | Install dependencies, configure sanoid for automatic snapshots |
+| `prepare`          | Initialize a new blank drive as a backup target              |
+| `backup`           | Incremental encrypted backup via syncoid raw send            |
+| `recover`          | Full bare-metal system recovery from backup                  |
+| `finish`           | Post-recovery finalization (run from the recovered system)   |
+| `repair-boot`      | Fix boot issues from a live USB without full recovery        |
+| `repair-divergent` | Reset backup datasets that diverged from the source          |
+| `mount`            | Mount backup pool read-only for inspection or chroot         |
+| `umount`           | Unmount a previously mounted backup pool                     |
+| `clean`            | Emergency cleanup: unmount everything, export all pools      |
+| `purge`            | Securely wipe a managed backup drive                         |
+| `monitor`          | Live progress monitor (run in a separate terminal)           |
+| `simulate`         | Boot the target disk in QEMU/KVM to verify the boot chain    |
 
 ---
 
@@ -166,21 +167,23 @@ zark/
 │   ├── keystore.py      # Encryption key management
 │   ├── drives.py        # Drive detection and GUID verification
 │   ├── mount.py         # Mount/unmount orchestration
+│   ├── repair.py        # Divergence detection (shared by backup + repair-divergent)
 │   └── cleanup.py       # Trap handler, safe teardown
 ├── commands/
-│   ├── backup.py        # Incremental encrypted backup
-│   ├── recover.py       # Full bare-metal recovery
-│   ├── repair.py        # Boot repair from live USB
-│   ├── finish.py        # Post-recovery finalization
-│   ├── explore.py       # Pool and drive scanner
-│   ├── setup.py         # Dependency installation
-│   ├── prepare.py       # New drive initialization
-│   ├── mount.py         # Backup pool mounting
-│   ├── umount.py        # Backup pool unmounting
-│   ├── clean.py         # Emergency cleanup
-│   ├── purge.py         # Secure drive wipe
-│   ├── monitor.py       # Live progress display
-│   └── simulate.py      # QEMU boot test (read-only by default)
+│   ├── backup.py            # Incremental encrypted backup
+│   ├── recover.py           # Full bare-metal recovery
+│   ├── repair_boot.py       # Boot chain repair from live USB
+│   ├── repair_divergent.py  # Reset diverged backup datasets (interactive)
+│   ├── finish.py            # Post-recovery finalization
+│   ├── explore.py           # Pool and drive scanner
+│   ├── setup.py             # Dependency installation, Secure Boot pre-check
+│   ├── prepare.py           # New drive initialization
+│   ├── mount.py             # Backup pool mounting
+│   ├── umount.py            # Backup pool unmounting
+│   ├── clean.py             # Emergency cleanup
+│   ├── purge.py             # Secure drive wipe
+│   ├── monitor.py           # Live progress display
+│   └── simulate.py          # QEMU boot test (read-only by default)
 └── etc/
     └── known_drives.json  # Registered backup drives (by GUID)
 ```
@@ -257,7 +260,7 @@ make test       # fast path: invokes the test runner directly
 make tox        # full path: runs the suite under Python 3.12, 3.13 and 3.14
 ```
 
-Currently 91 tests covering config loading, drive detection, ZFS operations, keystore handling, the recovery abort path when a keystore is missing from backup, dataset-layout drift detection, grub.cfg manipulation, and the cleanup trap handler.
+Currently 147 tests covering config loading, drive detection, ZFS operations, keystore handling, the recovery abort path when a keystore is missing from backup, dataset-layout drift detection, grub.cfg manipulation including cross-host UUID rewriting, the syncoid version-detection helper, and the cleanup trap handler.
 
 GitHub Actions runs the unit-test suite on every push and pull request, with one job per supported Python version plus a separate lint job (mypy + pylint + ruff). See `.github/workflows/ci.yml`.
 
@@ -342,6 +345,26 @@ After this rescue, your sanoid snapshots include the corrected boot chain — th
 
 To detect and fix the same issue on your live system before it's too late, run `zark setup`. Step 5 of setup now inspects the alternatives and offers (with confirmation) to switch them.
 
+### "disk hdN,gptN not found" / "you need to load the kernel first" after cross-host recovery
+
+Symptom: after `zark recover`, the GRUB menu appears and lets you select a kernel, but selecting any entry produces:
+
+```
+error: no such device: <16-hex-uuid>.
+error: disk 'hd2,gpt2' not found.
+error: you need to load the kernel first.
+```
+
+Cause: the source machine's bpool UUID was not fully rewritten in `grub.cfg` during recovery. Pre-1.0.7 versions of zark only rewrote the simple `search --fs-uuid --set=root <UUID>` form and silently skipped the standard Ubuntu form (`search --fs-uuid --set=root --hint-bios=hd2,gpt2 --hint-efi=hd2,gpt2 --hint-baremetal=ahci2,gpt2  <UUID>`), which is the only one that actually runs on grub 2.12+. The bug stayed hidden whenever the recovered disk happened to land at the same BIOS index as the original (typically when re-recovering the same physical machine), but surfaces immediately on **cross-host recovery** where the new drive enumeration differs.
+
+This is fixed in v1.0.7. If you have an older recovery hitting it, the simplest path is to re-run `zark recover` with v1.0.7+. As an alternative without a fresh recover, boot from the live USB and:
+
+```bash
+sudo ./zark repair-boot
+```
+
+`repair-boot` regenerates `grub.cfg` from inside the recovered system, which produces UUIDs and hints matching the current firmware layout.
+
 ---
 
 ## License
@@ -358,7 +381,7 @@ Yes. Register additional drives in `etc/known_drives.json` with their GUID. zark
 
 **What if recovery drops to an emergency shell?**
 
-Run `zpool import rpool && exit`. On subsequent boots this won't happen. Alternatively, boot from the live USB and run `sudo ./zark repair`.
+Run `zpool import rpool && exit`. On subsequent boots this won't happen. Alternatively, boot from the live USB and run `sudo ./zark repair-boot`.
 
 **Does the recovered system require any custom components?**
 

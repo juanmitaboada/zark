@@ -60,7 +60,7 @@ equivalent: passing **--backup** is treated as **backup**.
 
 # COMMANDS
 
-The thirteen commands are grouped here by purpose. Within each group the
+The fourteen commands are grouped here by purpose. Within each group the
 commands appear in the order they are typically used. See **WORKFLOWS** below
 for the canonical end-to-end sequences.
 
@@ -152,13 +152,31 @@ for the canonical end-to-end sequences.
     backup and recovery; once the disaster is over it can be unplugged
     along with the live USB.
 
-**repair**
+**repair-boot**
 :   Fix a broken boot chain on a system whose ZFS pools are intact.
     Imports **rpool** and **bpool** under an alternate root, mounts the
     affected system, regenerates **grub.cfg** and the initramfs and
-    cleanly exports the pools. The most common reason to need this is
+    cleanly exports the pools. The most common reasons to need this are
     that **update-grub**(8) ran while a **zark** backup drive was
-    connected, polluting **grub.cfg** with backup-pool UUIDs.
+    connected (polluting **grub.cfg** with backup-pool UUIDs), or that a
+    GRUB or shim package upgrade has left a **grub.cfg** referencing
+    drive paths or UUIDs that no longer match the current firmware
+    layout.
+
+**repair-divergent**
+:   Interactively repair backup datasets whose snapshot history has
+    diverged from the source. Divergence usually appears when the
+    backup drive has been disconnected for longer than the source
+    pool's **sanoid**(8) retention policy, so the snapshot that was
+    once shared between source and target has been pruned on the
+    source. **backup** auto-resolves divergence silently when the
+    affected dataset is under 64 MB (almost always system metadata that
+    can be recreated from the next initial replication); larger
+    datasets are left alone and **backup** aborts with a pointer to
+    this command. **repair-divergent** lists every divergent dataset
+    with its size and asks for confirmation before destroying the
+    target side and queueing it for re-replication on the next
+    **backup** run. No source data is ever touched.
 
 **finish**
 :   Post-recovery finalisation, intended to be run *from inside the
@@ -261,7 +279,7 @@ To verify a recovery without rebooting:
 
 */mnt/zark/*
 :   Alternate-root mountpoint base used by **mount** and (transiently) by
-    **recover** and **repair**.
+    **recover** and **repair-boot**.
 
 */run/keystore/rpool/system.key*
 :   In-memory location of the unlocked rpool key on a running system.
@@ -321,7 +339,7 @@ installer does on a fresh install.
 
 ## Live ISO behaviour
 
-**recover** and **repair** must run from a live environment. Importing
+**recover** and **repair-boot** must run from a live environment. Importing
 and exporting pools repeatedly on a live USB is known to corrupt the
 overlay filesystem (*/bin/sh* and similar essentials disappear), so
 **zark** keeps such cycles to the minimum required by the recovery

@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- 137 unit tests, ruff clean, pylint 10.00/10.
+- 147 unit tests, ruff clean, pylint 10.00/10.
 
 ### Breaking change
 
