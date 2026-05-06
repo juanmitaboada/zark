@@ -388,6 +388,31 @@ class ZFS:
 _GRUB_FS_UUID_RE = re.compile(r"(--fs-uuid[^\n]*?\s+)([a-f0-9]{16})\b")
 
 
+def syncoid_exclude_flag() -> str:
+    """Return the correct dataset-exclusion flag for the installed syncoid.
+
+    syncoid 2.3.0 (Ubuntu 26.04 'resolute') renamed ``--exclude`` to
+    ``--exclude-datasets``. The older name still works on 2.3.0 but is
+    deprecated and emits a warning. On Ubuntu 22.04 - 25.10 (sanoid 2.1.0
+    - 2.2.0-2), only the old ``--exclude`` exists and the new name fails
+    with "Unknown option: exclude-datasets" — aborting syncoid mid-run.
+
+    Detection by parsing ``syncoid --help`` rather than version probing
+    because (a) the output doesn't expose a stable version flag and (b)
+    backports may diverge from the upstream release.
+
+    Returns:
+        ``"--exclude-datasets"`` if syncoid supports the new flag,
+        ``"--exclude"`` otherwise. Caller appends ``=<regex>``.
+    """
+    r = run("syncoid --help")
+    # syncoid prints help to stderr; sh.run captures both fields.
+    haystack = (r.stdout or "") + (r.stderr or "")
+    if "--exclude-datasets" in haystack:
+        return "--exclude-datasets"
+    return "--exclude"
+
+
 def fix_grub_bpool_uuid(grub_cfg: Path, new_bpool_hex: str, log: Log) -> bool:
     """
     Rewrite every `fs-uuid --set=<name> <hex>` line in grub_cfg so the hex

@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Moved divergence detection (`find_divergent`, `auto_repair_under_64mb`, `is_divergence_error`) from `commands/repair_divergent.py` to a new `lib/repair.py`, shared between `backup` (silent path) and `repair-divergent` (interactive path).
 - Removed `lib.zfs.release_all_holds` and `lib.zfs.has_syncoid_holds` (no longer needed; both were broken anyway because `zfs holds -r <dataset>` only accepts snapshots).
-- Renamed syncoid flag `--exclude` to `--exclude-datasets` (the older form is deprecated upstream and emits a warning on every run). Available in sanoid ≥ 2.2.0, present in Ubuntu 24.04 and later, which is the supported range.
+- Renamed syncoid flag `--exclude` to `--exclude-datasets` *automatically* per installed syncoid version. Initially we hard-coded `--exclude-datasets` in test15, assuming Ubuntu's `2.2.0-2` package backported the rename. It didn't: only sanoid `2.3.0` upstream knows `--exclude-datasets`, and on Ubuntu that version is 26.04+ only. On 22.04, 24.04, 25.04, and 25.10 (all sanoid `2.1.0` or `2.2.0-2`), `--exclude-datasets` aborted syncoid with "Unknown option" and left the destination pool with keystore + bpool but **no rpool** — a silently broken backup. The new `syncoid_exclude_flag()` helper inspects `syncoid --help` at runtime and picks `--exclude-datasets` (2.3+) or `--exclude` (2.2-) accordingly. Both `prepare` and `backup` use it.
 
 ### Tests
 

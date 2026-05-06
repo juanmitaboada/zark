@@ -23,7 +23,7 @@ from lib.config import Config
 from lib.drives import scan_connected_drives, select_drive
 from lib.keystore import Keystore
 from lib.log import Log
-from lib.zfs import ZFS
+from lib.zfs import ZFS, syncoid_exclude_flag
 
 
 def _detect_live_usb() -> bool:
@@ -221,9 +221,11 @@ def run(
     # The base sync command. Held in a variable because we may need to
     # invoke it twice: once normally, and once after auto-repair if syncoid
     # aborts with "cowardly refusing" due to divergent datasets.
+    # syncoid 2.3.0+ uses --exclude-datasets; older releases use --exclude.
+    excl = syncoid_exclude_flag()
     rpool_syncoid_cmd = (
         "syncoid --recursive --no-privilege-elevation --sendoptions=w "
-        + "--exclude-datasets=rpool/keystore "
+        + f"{excl}=rpool/keystore "
         + f"{cfg.source_pool} {target_pool}"
     )
     r = sh.run(rpool_syncoid_cmd, log=log)

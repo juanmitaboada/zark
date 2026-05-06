@@ -73,6 +73,7 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
     DatasetInfo,
     fix_grub_bpool_uuid,
+    syncoid_exclude_flag,
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 
@@ -1137,6 +1138,61 @@ class TestFixGrubBpoolUuid:
         assert f"# Comment with hex like {self.OLD_HEX}" in new
         assert f"set unrelated_var={self.OLD_HEX}" in new
         os.unlink(p)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  lib/zfs.py — syncoid_exclude_flag helper
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestSyncoidExcludeFlag:
+    """Tests for the syncoid version-aware exclude-flag helper.
+
+    syncoid 2.3.0 (Ubuntu 26.04) renamed --exclude to --exclude-datasets.
+    On Ubuntu 22.04 - 25.10 (sanoid 2.1.0 - 2.2.0-2), only --exclude exists
+    and the new name aborts syncoid mid-run with "Unknown option:
+    exclude-datasets". The helper picks the right flag at runtime by
+    inspecting `syncoid --help`.
+    """
+
+    HELP_2_3 = """\
+syncoid [options]... SOURCE TARGET
+
+  --exclude=REGEX           DEPRECATED. Equivalent to --exclude-datasets.
+  --exclude-datasets=REGEX  Exclude specific datasets which match the given regex.
+  --exclude-snaps=REGEX     Exclude specific snapshots that match the given regex.
+"""
+
+    HELP_2_2 = """\
+syncoid [options]... SOURCE TARGET
+
+  --exclude=REGEX           Exclude specific datasets which match the given regex.
+                            Can be specified multiple times
+  --sendoptions=OPTIONS     Use advanced options for zfs send.
+"""
+
+    def test_returns_exclude_datasets_on_syncoid_2_3(self):
+        """syncoid 2.3+ help text mentions --exclude-datasets explicitly."""
+        mock = MockShell()
+        mock.on("syncoid --help").succeeds(self.HELP_2_3)
+        with patch_sh(mock):
+            assert syncoid_exclude_flag() == "--exclude-datasets"
+
+    def test_returns_exclude_on_syncoid_2_2(self):
+        """syncoid 2.2 (Ubuntu 22.04 - 25.10) only knows --exclude."""
+        mock = MockShell()
+        mock.on("syncoid --help").succeeds(self.HELP_2_2)
+        with patch_sh(mock):
+            assert syncoid_exclude_flag() == "--exclude"
+
+    def test_returns_exclude_when_help_emitted_to_stderr(self):
+        """syncoid emits --help text to stderr, not stdout. Helper must
+        check both fields so detection works regardless of which side
+        the version chose to use."""
+        mock = MockShell()
+        mock.on("syncoid --help").fails(self.HELP_2_3)  # rc!=0, output via stderr
+        with patch_sh(mock):
+            assert syncoid_exclude_flag() == "--exclude-datasets"
 
 
 # ═════════════════════════════════════════════════════════════════════════

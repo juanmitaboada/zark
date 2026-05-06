@@ -13,7 +13,7 @@ from lib import sh
 from lib.config import Config, DriveInfo
 from lib.drives import get_drive_id, get_drive_info, validate_external_block_device
 from lib.log import Log
-from lib.zfs import ZFS
+from lib.zfs import ZFS, syncoid_exclude_flag
 
 
 def run(
@@ -103,9 +103,12 @@ def run(
     log.info(f"~{rpool_used} to transfer")
 
     # Syncoid raw send (excludes keystore — sent separately).
+    # syncoid 2.3.0+ uses --exclude-datasets; older Ubuntu releases
+    # (22.04 - 25.10, sanoid 2.1.0 - 2.2.0-2) only know --exclude.
+    excl = syncoid_exclude_flag()
     r = sh.run(
         "syncoid --recursive --no-privilege-elevation --sendoptions=w "
-        + "--exclude-datasets=rpool/keystore "
+        + f"{excl}=rpool/keystore "
         + f"rpool {new_pool}/rpool",
         log=log,
     )
