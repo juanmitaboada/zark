@@ -227,11 +227,14 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 
 - **Ubuntu 24.04 LTS** — uses initramfs-tools hooks for keystore unlock.
 - **Ubuntu 25.04 / 25.10** — uses dracut module (89keystore) with systemd-ask-password integration. zark detects which generator the system has at recovery time.
+- **Ubuntu 26.04 LTS** — same dracut path as 25.04+, plus shim 15.8 (`.signed.latest`) pinning during recovery to avoid the SBAT revocation that affects fresh subiquity installs left pointing at `.signed.previous`.
+- **Cross-host recovery** — backups are portable across machines: a backup taken on machine A can be restored onto machine B with a different drive layout / firmware. zark rewrites every `--fs-uuid` reference in `grub.cfg` (including those carrying `--hint-bios` / `--hint-efi` / `--hint-baremetal` options) so the recovered system boots regardless of where its disks land in the new BIOS enumeration.
 - **ZFS encryption** — AES-256-GCM with `keyformat=raw`, encryption key on a LUKS-encrypted zvol (the keystore).
+- **bpool features** — restricted to the GRUB-readable subset documented in `/usr/share/zfs/compatibility.d/grub2`. zark explicitly does not enable `head_errlog` or `vdev_zaps_v2` on bpool: even GRUB 2.14 (Ubuntu 26.04) cannot read either, and activating them produces an unbootable system. rpool is unaffected and uses whatever features the running ZFS supports.
 - **Secure Boot** — full compliance via signed GRUB chain (shimx64 → grubx64.signed → kernel).
 - **Hardware tested:**
   - MINISFORUM UM890 (Ubuntu 24.04 + 25.10 + 26.04) — primary development system.
-  - Secondary Dell XPS 9315 with NVMe (Ubuntu 25.10) — backup/recover validated.
+  - Dell XPS 9315 with NVMe (Ubuntu 25.10) — secondary, used for cross-host validation against the MINISFORUM.
   - Disk-failure recovery on a separate Ubuntu 24.04 system, restoring from a syncoid backup.
 - **CI/test:** end-to-end QEMU/OVMF integration harness validates Phase 1 (create + backup), Phase 2 (recover), and Phase 3 (boot the recovered disk).
 
