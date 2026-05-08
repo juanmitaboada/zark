@@ -25,6 +25,7 @@ class PoolInfo:  # pylint: disable=too-many-instance-attributes
     avail: str = ""
     used_bytes: int = 0
     avail_bytes: int = 0
+    size_bytes: int = 0
     pct_used: int = 0
 
 
@@ -72,6 +73,12 @@ class ZFS:
                 used_b = int(bp[0].strip())
                 avail_b = int(bp[1].strip())
 
+        # `total` is the sum of used + free as reported by `zfs list -p`.
+        # On healthy pools this equals the pool's logical capacity, which
+        # we expose as `size_bytes` (a numeric companion to the human-
+        # formatted `size` field returned by `zpool list`). Used by
+        # callers that need to compare pool capacities arithmetically
+        # (see backup.py preventive ENOSPC guard).
         total = used_b + avail_b
         pct = (used_b * 100 // total) if total > 0 else 0
 
@@ -84,6 +91,7 @@ class ZFS:
             avail=parts[5],
             used_bytes=used_b,
             avail_bytes=avail_b,
+            size_bytes=total,
             pct_used=pct,
         )
 
@@ -254,6 +262,21 @@ class ZFS:
     def dataset_exists(self, name: str) -> bool:
         """Check if a dataset exists. Note: this does not check if it's mounted."""
         return run(f"zfs list {name}").ok
+
+    def dataset_used_bytes(self, name: str) -> int:
+        """Return `used` for a dataset in raw bytes, or 0 on failure.
+
+        Wraps `zfs list -H -p -o used <name>`. Used by recover's
+        preventive disk-size check, which needs to compare a dataset's
+        size in bytes against the physical capacity of the target disk.
+        """
+        r = run(f"zfs list -H -p -o used {name}")
+        if not r.ok:
+            return 0
+        try:
+            return int(r.output.strip())
+        except (ValueError, AttributeError):
+            return 0
 
     def get_property(self, dataset: str, prop: str) -> str:
         """Get a specific property value for a dataset. Returns empty string if not found."""

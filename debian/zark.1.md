@@ -107,13 +107,28 @@ for the canonical end-to-end sequences.
     **rpool/keystore** zvol, and registers the new pool in
     **known_drives.json**.
 
-**backup**
+**backup** \[**--no-snapshot**\]
 :   Run an incremental backup to the connected, registered backup drive.
     Auto-detects which known drive is plugged in, imports the pool,
-    triggers a **sanoid**(8) snapshot pass on the source, and uses
-    **syncoid**(8) raw send to transfer the new snapshots. Then synchronises
-    **bpool**, exports the backup pool cleanly and (if the desktop
-    environment is running) emits a **notify-send**(1) summary.
+    triggers a fresh **sanoid**(8) snapshot pass on the source, and
+    uses **syncoid**(8) raw send to transfer the new snapshots. Then
+    synchronises **bpool**, exports the backup pool cleanly and (if the
+    desktop environment is running) emits a **notify-send**(1)
+    summary.
+
+    **Snapshot policy.** **sanoid**(8) takes snapshots automatically
+    via its systemd timer (enabled by **zark setup**), typically
+    hourly. To make sure the backup drive holds the most current
+    state of the source pool, **backup** runs `sanoid
+    --take-snapshots` itself before each replication, regardless of
+    when the timer last fired. This is cheap (no I/O on the backup
+    drive, idempotent within sanoid's retention windows) so it is
+    the default.
+
+    **--no-snapshot** skips the sanoid stage and replicates whatever
+    snapshots already exist. Useful for re-runs after a transient
+    failure, or for invocations that have already taken snapshots
+    by other means.
 
     **backup** refuses to run from an Ubuntu Live USB: the live filesystem
     is not the system the user means to back up, and confusing the two
@@ -185,23 +200,42 @@ for the canonical end-to-end sequences.
     a final **update-grub**(8) and initramfs regeneration without the
     backup drive present, so the resulting **grub.cfg** is clean.
 
-**simulate** \[*device*\] \[**--ro**\]
+**simulate** \[*device*\] \[**--rw**\] \[**--display** *WxH*\]
 :   Boot a recovered (or live) disk in **qemu-system-x86_64**(1) under
     OVMF UEFI firmware to verify the boot chain without rebooting the
-    physical machine. With no arguments, boots */dev/nvme0n1*; pass a
-    different **/dev/...** path to override.
+    physical machine. With no arguments, presents an interactive menu
+    of eligible disks (the host's in-use disks are filtered out for
+    safety); pass a **/dev/...** path to skip the menu.
 
-    With **--ro**, QEMU is started with **-snapshot**, so writes are
-    discarded at shutdown and the underlying disk is never modified — the
-    recommended mode for verifying that a freshly restored system can
-    actually boot. Without **--ro**, QEMU writes to the physical disk
-    just like a real boot would; this is occasionally useful (for
+    **Read-only is the default.** QEMU is started with **-snapshot**
+    so any writes are discarded at shutdown and the underlying disk
+    is never modified — the recommended mode for verifying that a
+    freshly restored system can actually boot.
+
+    **--rw** opts into read-write mode. QEMU writes to the physical
+    disk just like a real boot would. This is occasionally useful (for
     example, to allow first-boot self-healing of the hostid issue
-    described in **NOTES**) but should be reached for deliberately.
+    described in **NOTES**) but requires interactive confirmation —
+    the operator must re-type the target device path verbatim.
 
-    Requires the **qemu-system-x86** and **ovmf** packages, both of which
-    are listed in *Recommends* and which **simulate** offers to install
-    on first use.
+    **--display** *WxH* sets the QEMU display resolution. Default is
+    *2560x1440*, tuned for typical zark-on-Ubuntu hardware (4K-class
+    developer machine). Common overrides: *1920x1080*, *3840x2160*.
+    Both lower- and upper-case **x** are accepted; values above 8K
+    are rejected as probable typos.
+
+    When the host has both a GPU render node (*/dev/dri/renderD\**)
+    and **virtio-vga-gl** support in **qemu-system-x86_64**, simulate
+    automatically uses GL-accelerated rendering with a resizable GTK
+    window. Otherwise it falls back to software rendering with a
+    warning naming the missing capability.
+
+    For backwards compatibility **--ro** is silently accepted as a
+    no-op (read-only is the default now).
+
+    Requires the **qemu-system-x86** and **ovmf** packages, both of
+    which are listed in *Recommends* and which **simulate** offers
+    to install on first use.
 
 ## Maintenance
 
@@ -255,7 +289,7 @@ into the recovered system and run:
 
 To verify a recovery without rebooting:
 
-    sudo zark simulate --ro
+    sudo zark simulate
 
 # FILES
 
@@ -395,7 +429,7 @@ Recover a dead laptop from an Ubuntu Live USB:
 
 Verify the recovery in QEMU before rebooting, without writing to disk:
 
-    sudo zark simulate --ro
+    sudo zark simulate
 
 # BUGS
 

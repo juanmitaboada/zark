@@ -111,9 +111,12 @@ sudo ./zark prepare   # initialize a blank drive as a backup target
 ```bash
 # Connect your backup drive, then:
 sudo ./zark backup
+
+# Or skip the snapshot pass (e.g. re-run after a transient failure):
+sudo ./zark backup --no-snapshot
 ```
 
-zark detects the backup drive by GUID, creates an atomic ZFS snapshot, and sends all datasets via encrypted raw send. A typical incremental backup takes seconds.
+zark detects the backup drive by GUID, takes a fresh `sanoid` snapshot pass on the source pool, and replicates all datasets via encrypted raw send. A typical incremental backup takes seconds.
 
 ### Recover from scratch
 
@@ -147,10 +150,11 @@ sudo ./zark finish    # regenerate grub.cfg, finalize Secure Boot chain
 ### Test the recovered boot without rebooting
 
 ```bash
-sudo ./zark simulate --ro    # boot the internal disk in QEMU, read-only overlay
+sudo ./zark simulate                          # boot the internal disk in QEMU (read-only by default)
+sudo ./zark simulate --display 1920x1080      # override the default 2560×1440 resolution
 ```
 
-Useful as a coherence check after `recover` (or any boot-chain change) without committing to a real reboot.
+Useful as a coherence check after `recover` (or any boot-chain change) without committing to a real reboot. By default, QEMU is started with `-snapshot` so any writes are discarded at shutdown and the underlying disk is never modified. Pass `--rw` (with explicit confirmation) if you actually want changes to persist.
 
 ---
 

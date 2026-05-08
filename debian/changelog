@@ -1,3 +1,73 @@
+zark (1.0.8-1) unstable; urgency=medium
+
+  * Out-of-space handling: preventive guards plus reactive detection in
+    backup and recover, replacing silent fall-through with clear fatals.
+  * Backup: preventive guard before syncoid (refuses if target free
+    space is below max(source.used / 100, 1 GiB)); reactive ENOSPC
+    detection at the rpool, bpool incremental, and bpool from-scratch
+    resync sites. The rpool check runs before the existing partial-
+    success branch so an early ENOSPC no longer falls through into
+    the bpool sync. bpool ENOSPC deliberately does not auto-recreate:
+    destroying a stale bpool target when the drive is full would
+    leave the user with no boot backup at all.
+  * Recover: preventive disk-size check before the YES confirmation
+    (compares target size from lsblk -bdn -o SIZE against rpool.used
+    plus 5% overhead for ESP, bpool, swap and metadata); reactive
+    ENOSPC detection at every send/receive site (raw_send, bpool
+    send/receive, keystore final send) — every ENOSPC fatal because
+    partial recovery is unbootable.
+  * lib.sh.run_pipe() now reports a non-zero return code if either
+    side of the pipeline failed. Previous implementation returned only
+    p2.returncode, hiding p1 failures: a `zfs send` of a deleted
+    snapshot followed by clean EOF on the receiver was reported as
+    success and downstream code proceeded as if the transfer had
+    worked. The fix waits explicitly for p1, captures both stderr
+    streams, concatenates them, and picks the most informative
+    non-zero return code (p2 takes precedence when both fail).
+  * New helpers: lib.sh.is_enospc() with case-insensitive markers
+    calibrated against real ZFS / kernel output ("no space left on
+    device", "out of space", "enospc", "disk quota exceeded");
+    lib.sh.humanize_bytes() for IEC-formatted sizes used in fatal
+    messages; lib.zfs.dataset_used_bytes() and PoolInfo.size_bytes
+    as numeric companions to the existing string fields.
+  * backup: fresh snapshots before every replication. Backup now
+    invokes `sanoid --take-snapshots` automatically before running
+    syncoid (previously relied on the sanoid systemd timer, which
+    meant interactive backups could replicate state up to ~1 hour
+    old). Snapshotting is cheap (no I/O on the backup drive,
+    idempotent within sanoid retention) so it's the default. The
+    new --no-snapshot flag skips this stage for re-runs after a
+    transient failure or for invocations that have triggered sanoid
+    by other means. A failure of sanoid is non-fatal: backup
+    proceeds with whatever snapshots already exist. Backup is now
+    a 9-step process (was 8); the new step 6 sits between
+    "Loading encryption key" and "Running syncoid".
+  * simulate: GL acceleration auto-detect — when the host has both
+    /dev/dri/renderD* and virtio-vga-gl in qemu-system-x86_64 -device
+    help, uses -device virtio-vga-gl,edid=on -display gtk,gl=on for
+    a resizable, hardware-accelerated GTK window. Falls back to
+    -device virtio-vga,edid=on -display gtk with a warning naming
+    the missing capability when either probe fails. New --display
+    WxH flag overrides the default 2560x1440 EDID-advertised
+    resolution; values above 8K are rejected. Documentation updated
+    to reflect that read-only is the default and --rw is the
+    explicit opt-in (the manpage and README previously documented
+    a --ro flag that has long been a no-op for backwards
+    compatibility).
+  * Tests: 214 unit tests (up from 147), all passing, ruff clean,
+    pylint 10.00/10. New coverage for run_pipe (5), is_enospc (7),
+    humanize_bytes (8), dataset_used_bytes (3), backup preventive
+    guard (8), backup --no-snapshot parsing (3), recover disk-size
+    check (9), and simulate --display parsing (extended from 5
+    to 12). New `make test-enospc-real` target running
+    tests/test_enospc_real.sh — opt-in empirical calibration of
+    the ENOSPC markers against the running kernel's actual ZFS
+    error strings. Root-only, not invoked by `make fulltest`, not
+    in CI; run after upgrading zfsutils-linux or moving to a new
+    distro.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Fri, 08 May 2026 14:35:00 +0200
+
 zark (1.0.7-1) unstable; urgency=medium
 
   * Cross-host recovery, Secure Boot fixes, syncoid version

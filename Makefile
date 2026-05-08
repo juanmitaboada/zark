@@ -76,6 +76,25 @@ test-phase3: ## Run Phase 3 only (boot recovered target.img — no ISO needed)
 test-cleanup: ## Remove all integration test artifacts (source/backup/target images)
 	$(PYTHON) tests/test_integration.py --cleanup
 
+test-enospc-real: ## Calibrate ENOSPC markers against real ZFS (root, opt-in, NOT in fulltest)
+	@# Empirically validates that lib/sh.is_enospc() recognises the
+	@# stderr emitted by this machine's ZFS / kernel when a `zfs send |
+	@# zfs receive` runs out of space. NOT part of `make fulltest` and
+	@# NOT part of CI: it requires root and the ZFS kernel module. Run
+	@# manually after upgrading zfsutils-linux or moving to a new distro.
+	@#
+	@# The script creates two LOOP-BACKED pools in /tmp with unique names
+	@# (zark_enospc_{src,dst}_<pid>_<rand>) and `cachefile=none`, so it
+	@# cannot collide with rpool/bpool/backup/etc. A pre-flight check
+	@# refuses to run if leftover loops or pools from a previous run
+	@# remain. Cleanup is idempotent and runs on EXIT/INT/TERM.
+	@if [ "$$(id -u)" -ne 0 ]; then \
+		echo "  test-enospc-real requires root (ZFS ioctls). Run with:"; \
+		echo "    sudo make test-enospc-real"; \
+		exit 1; \
+	fi
+	bash tests/test_enospc_real.sh
+
 test-all: test check ## Run unit tests and syntax check (no QEMU required)
 
 # ── Static analysis ──────────────────────────────────────────────────────

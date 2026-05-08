@@ -15,6 +15,7 @@ the user to run ``zark repair-divergent`` interactively.
 """
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from lib import repair, sh
@@ -23,7 +24,7 @@ from lib.config import Config
 from lib.drives import scan_connected_drives, select_drive
 from lib.keystore import Keystore
 from lib.log import Log
-from lib.zfs import ZFS, syncoid_exclude_flag
+from lib.zfs import ZFS, PoolInfo, syncoid_exclude_flag
 
 
 def _detect_live_usb() -> bool:
@@ -49,11 +50,144 @@ def _notify(title: str, message: str):
         )
 
 
+# Free-space margin: 1% of the source's used data, with a 1 GiB floor.
+# Lax by design — only fires when the target is essentially full, where
+# any incremental will fail. The reactive ENOSPC handler in run() catches
+# in-flight exhaustion. This guard avoids starting a long syncoid run
+# that is mathematically guaranteed to fail.
+_ENOSPC_GUARD_FLOOR_BYTES = 1024**3  # 1 GiB
+_ENOSPC_GUARD_PCT_OF_SOURCE = 100  # divisor: used_bytes // 100 == 1%
+
+
+def _check_target_space(
+    src_info: PoolInfo | None,
+    dst_info: PoolInfo | None,
+    pool_name: str,
+    source_pool: str,
+    log: Log,
+) -> None:
+    """Coherence + preventive ENOSPC checks before starting a backup.
+
+    Two distinct checks:
+
+    1. Coherence (warn only): the backup invariant is that the destination
+       drive is at least as large as the source pool. A smaller target
+       will eventually run out of space even with a perfect retention
+       policy. Warn — the operator may know what they're doing (testing
+       on a small loop, compression headroom, etc.).
+
+    2. Preventive ENOSPC (fatal): if the target's free space is below
+       1% of the source's used data (with a 1 GiB floor), refuse to
+       start. This prevents kicking off a long syncoid run that is
+       guaranteed to ENOSPC mid-stream.
+
+    Either check is silently skipped when the corresponding PoolInfo
+    is None or carries zero-valued bytes (transient zpool list failure,
+    or a pool we couldn't measure for any reason). The reactive ENOSPC
+    handler still catches in-flight exhaustion in those cases.
+    """
+    if src_info is None or dst_info is None:
+        return
+
+    # Check 1 — coherence warn
+    if (
+        dst_info.size_bytes > 0
+        and src_info.size_bytes > 0
+        and dst_info.size_bytes < src_info.size_bytes
+    ):
+        log.warn(
+            f"Target {pool_name} ({dst_info.size}) is smaller than source "
+            f"{source_pool} ({src_info.size}) — backup may eventually fail",
+        )
+
+    # Check 2 — preventive ENOSPC fatal
+    if src_info.used_bytes <= 0:
+        return  # cannot compute threshold, defer to reactive handler
+
+    threshold = max(
+        src_info.used_bytes // _ENOSPC_GUARD_PCT_OF_SOURCE,
+        _ENOSPC_GUARD_FLOOR_BYTES,
+    )
+    if dst_info.avail_bytes < threshold:
+        log.fatal(
+            f"Insufficient free space on {pool_name}",
+            causes=[
+                f"Source {source_pool}: used={src_info.used} "
+                f"({sh.humanize_bytes(src_info.used_bytes)})",
+                f"Target {pool_name}: avail={dst_info.avail} "
+                f"({sh.humanize_bytes(dst_info.avail_bytes)})",
+                f"Required margin: ≥ {sh.humanize_bytes(threshold)} " "(1% of source, min 1 GiB)",
+            ],
+            solutions=[
+                "Purge old snapshots on target: sudo ./zark purge",
+                "Source has grown — consider a larger backup drive",
+            ],
+        )
+
+
+# ── Snapshot policy ─────────────────────────────────────────────────────
+#
+# Sanoid takes snapshots automatically via its systemd timer (enabled
+# by `zark setup`), typically hourly. That means when an operator
+# runs `zark backup` they may be replicating state that is up to ~1
+# hour old. Since taking a snapshot is cheap (seconds, no I/O on the
+# backup drive, idempotent — sanoid won't duplicate within the same
+# retention window), backup now invokes `sanoid --take-snapshots`
+# before every replication. Result: the backup drive always holds
+# the most current state of the source pool.
+#
+# `--no-snapshot` exists as an escape hatch. Realistic uses are
+# narrow (re-running backup after a transient failure when the
+# operator already triggered sanoid by hand, or pure paranoia about
+# triple-tagging a pool that's tightly bounded by retention) but the
+# flag is cheap to keep and lets a script declare its intent
+# explicitly.
+
+
+@dataclass
+class BackupArgs:
+    """Parsed backup command-line arguments."""
+
+    take_snapshots: bool = True  # default: always take snapshots before syncoid
+
+
+def _parse_args(args: list[str]) -> BackupArgs:
+    """Parse backup's command-line arguments.
+
+    Recognised arguments (all optional, any order):
+      --no-snapshot    skip the sanoid snapshot stage and replicate
+                       whatever snapshots already exist
+
+    Unknown flags are ignored, consistent with the rest of the
+    codebase.
+    """
+    parsed = BackupArgs()
+    if "--no-snapshot" in args:
+        parsed.take_snapshots = False
+    return parsed
+
+
+def _take_snapshots(log: Log) -> None:
+    """Run `sanoid --take-snapshots` with friendly logging.
+
+    A failure here is non-fatal: sanoid may emit warnings about a few
+    datasets while still snapshotting the rest, and we'd rather
+    proceed with backup than abort because of a noisy edge case. The
+    operator sees the warning in the log either way.
+    """
+    log.info("Taking fresh snapshots via sanoid...")
+    r = sh.run("sanoid --take-snapshots", timeout=300, log=log)
+    if r.ok:
+        log.ok("Sanoid snapshots taken")
+    else:
+        log.warn("sanoid --take-snapshots had errors — proceeding with backup anyway")
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
     """Main backup function."""
-    del args  # Unused; backup doesn't take arguments
+    opts = _parse_args(args)
     log = Log()
     cfg = Config.load()
     zfs = ZFS(log)
@@ -74,7 +208,7 @@ def run(
         )
 
     # ── Find and select drive ────────────────────────────────────────────
-    log.step(1, 8, "Scanning for known backup drives...")
+    log.step(1, 9, "Scanning for known backup drives...")
     drives = scan_connected_drives(cfg, log)
     known = [d for d in drives if d.known]
 
@@ -101,7 +235,7 @@ def run(
     pool_guid = drive.guid
 
     # ── Import pool ──────────────────────────────────────────────────────
-    log.step(2, 8, f"Importing pool {pool_name}...")
+    log.step(2, 9, f"Importing pool {pool_name}...")
 
     device = None
     if drive.drive_id != "<unknown>":
@@ -140,7 +274,7 @@ def run(
     log.ok(f"Pool {pool_name} imported (GUID: {actual_guid} ✓)")
 
     # ── Check health ─────────────────────────────────────────────────────
-    log.step(3, 8, "Checking pool health...")
+    log.step(3, 9, "Checking pool health...")
 
     for pool in (cfg.source_pool, pool_name):
         health = zfs.pool_health(pool)
@@ -157,10 +291,12 @@ def run(
             log.fatal(f"{pool} is {health}", solutions=[f"Run: zpool status {pool}"])
 
     # ── Pool info summary ────────────────────────────────────────────────
-    log.step(4, 8, "Gathering pool info...")
+    log.step(4, 9, "Gathering pool info...")
 
     src_info = zfs.pool_info(cfg.source_pool)
     dst_info = zfs.pool_info(pool_name)
+
+    _check_target_space(src_info, dst_info, pool_name, cfg.source_pool, log)
 
     if dst_info and dst_info.pct_used >= 90:
         log.warn(f"Target is {dst_info.pct_used}% full — consider pruning snapshots")
@@ -180,7 +316,7 @@ def run(
     )
 
     # ── Load encryption key ──────────────────────────────────────────────
-    log.step(5, 8, "Loading encryption key...")
+    log.step(5, 9, "Loading encryption key...")
 
     keystatus = zfs.get_property(f"{pool_name}/rpool", "keystatus")
     ks = Keystore(log)
@@ -209,8 +345,15 @@ def run(
             )
         log.ok(f"Encryption key loaded ({loaded} datasets)")
 
+    # ── Take fresh snapshots ─────────────────────────────────────────────
+    log.step(6, 9, "Taking fresh snapshots before backup...")
+    if opts.take_snapshots:
+        _take_snapshots(log)
+    else:
+        log.info("--no-snapshot: replicating existing snapshots")
+
     # ── Run syncoid ──────────────────────────────────────────────────────
-    log.step(6, 8, "Running syncoid (this may take a while)...")
+    log.step(7, 9, "Running syncoid (this may take a while)...")
     log.info("Tip: run 'sudo ./zark monitor' in another terminal for progress")
 
     _notify("🔄 Backup started", f"Syncing {cfg.source_pool} → {pool_name}...")
@@ -267,6 +410,24 @@ def run(
 
     # syncoid returns non-zero on partial success; check actual transfers
     if not r.ok:
+        # Reactive ENOSPC: must be checked BEFORE the "sent > 0 → warn"
+        # branch below, otherwise a syncoid that managed to copy the
+        # first dataset and then ran out of space would fall through
+        # as a "partial success" and continue to bpool sync (which
+        # would also ENOSPC). Checking here turns it into a clean fatal.
+        if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+            log.fatal(
+                f"Backup ran out of space on {pool_name} after {mins}m",
+                causes=[
+                    f"{pool_name} filled up during transfer",
+                    "Incremental was larger than estimated, or target was already nearly full",
+                ],
+                solutions=[
+                    "Purge old snapshots on target: sudo ./zark purge",
+                    "Connect a larger backup drive",
+                    "Then re-run: sudo ./zark backup (syncoid resumes)",
+                ],
+            )
         sent = r.stdout.count("Sending") + r.stdout.count("INFO: Sending")
         if sent > 0:
             log.warn(f"Syncoid had warnings but transferred {sent} dataset(s)")
@@ -287,7 +448,7 @@ def run(
     log.ok(f"rpool synced in {mins}m {secs}s")
 
     # ── Sync bpool ───────────────────────────────────────────────────────
-    log.step(7, 8, "Syncing bpool (kernels + grub)...")
+    log.step(8, 9, "Syncing bpool (kernels + grub)...")
 
     if zfs.pool_exists("bpool"):
         bpool_syncoid_cmd = (
@@ -297,6 +458,25 @@ def run(
         r = sh.run(bpool_syncoid_cmd, log=log)
         if r.ok:
             log.ok("bpool synced")
+        elif sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+            # bpool ENOSPC: do not auto-recreate. Auto-recreate destroys
+            # the stale target and re-sends from scratch — but if rpool
+            # already filled the drive, bpool will not fit either, and
+            # destroying the stale bpool leaves the user with no boot
+            # backup at all. Fatal here, preserving whatever bpool data
+            # is still on the target.
+            log.fatal(
+                f"bpool backup ran out of space on {pool_name}",
+                causes=[
+                    f"{pool_name} has no room for bpool after rpool sync",
+                    "rpool likely consumed the headroom intended for bpool",
+                ],
+                solutions=[
+                    "Purge old snapshots on target: sudo ./zark purge",
+                    "Connect a larger backup drive",
+                    "Then re-run: sudo ./zark backup",
+                ],
+            )
         elif "no snapshots matching" in r.stdout.lower():
             # bpool is small (~150MB) and recover regenerates initrd via
             # dracut anyway, so destroying the stale target and resending
@@ -319,6 +499,17 @@ def run(
                 r = sh.run(bpool_syncoid_cmd, log=log)
                 if r.ok:
                     log.ok("bpool resynced from scratch ✓")
+                elif sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+                    # Same reasoning as above: ENOSPC during a from-scratch
+                    # bpool resync means the drive is full. Fatal.
+                    log.fatal(
+                        f"bpool resync ran out of space on {pool_name}",
+                        causes=[f"{pool_name} is full after rpool sync"],
+                        solutions=[
+                            "Purge old snapshots: sudo ./zark purge",
+                            "Connect a larger backup drive",
+                        ],
+                    )
                 else:
                     log.warn(
                         "bpool resync failed — bpool backup is stale "
@@ -334,7 +525,7 @@ def run(
         log.dbg("No bpool found — skipping")
 
     # ── Sync properties ──────────────────────────────────────────────────
-    log.step(8, 8, "Syncing ZFS properties...")
+    log.step(9, 9, "Syncing ZFS properties...")
 
     # Find ubuntu dataset name
     ubuntu_ds = sh.run(

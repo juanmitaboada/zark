@@ -32,13 +32,21 @@ from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa:
 
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
-from commands.backup import _detect_live_usb  # pylint: disable=wrong-import-position # noqa: E402
+from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
+    _check_target_space,
+    _detect_live_usb,
+)
+from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
+    _parse_args as _backup_parse_args,
+)
 from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
 from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
     _UBUNTU_ROOT_CHILDREN_ALL,
     _abort_missing_keystore,
     _apply_root_children_canmount,
+    _check_target_disk_size,
     _detect_root_children,
+    _disk_size_bytes,
     _emit_dataset_layout_warnings,
     _force_latest_signed_alternative,
 )
@@ -53,6 +61,10 @@ from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E4
 )
 from commands.simulate import (  # pylint: disable=wrong-import-position # noqa: E402
     OVMF_CODE_CANDIDATES,
+    _detect_gl,
+    _disk_in_use_reasons,
+    _list_candidate_disks,
+    _parse_args,
 )
 from lib import repair  # pylint: disable=wrong-import-position # noqa: E402
 from lib.cleanup import Cleanup  # pylint: disable=wrong-import-position # noqa: E402
@@ -72,6 +84,7 @@ from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
     DatasetInfo,
+    PoolInfo,
     fix_grub_bpool_uuid,
     syncoid_exclude_flag,
 )
@@ -334,6 +347,129 @@ class TestSh:  # pylint: disable=missing-function-docstring
         assert r.returncode == 127
 
 
+class TestShRunPipe:  # pylint: disable=missing-function-docstring
+    """Tests for run_pipe() pipeline behavior, especially p1-side failures."""
+
+    def test_pipe_both_succeed(self):
+        r = _sh.run_pipe("echo hello world", "tr a-z A-Z")
+        assert r.ok
+        assert r.output == "HELLO WORLD"
+
+    def test_pipe_p2_fails(self):
+        # p2 (false) exits non-zero; result must be non-zero
+        r = _sh.run_pipe("echo data", "false")
+        assert not r.ok
+        assert r.returncode == 1
+
+    def test_pipe_p1_fails_p2_clean_eof(self):
+        # p1 fails AFTER writing some output; p2 reads it and exits clean.
+        # Pre-fix run_pipe missed this case (returncode came only from p2).
+        # The 'sh -c' wrapper writes one line to stdout, then exits 7.
+        r = _sh.run_pipe("sh -c 'echo partial; exit 7'", "cat")
+        assert not r.ok, "p1 failure must surface as non-zero returncode"
+        assert r.returncode == 7
+
+    def test_pipe_combines_stderr(self):
+        # Both sides write to stderr; the combined stderr must contain both.
+        r = _sh.run_pipe(
+            "sh -c 'echo p1err 1>&2; echo data'",
+            "sh -c 'cat; echo p2err 1>&2'",
+        )
+        assert r.ok  # both exit 0
+        assert "p1err" in r.stderr
+        assert "p2err" in r.stderr
+
+    def test_pipe_p2_takes_precedence_when_both_fail(self):
+        # If both sides fail, the downstream (p2) returncode is what
+        # the caller usually cares about — it's the more direct symptom.
+        r = _sh.run_pipe(
+            "sh -c 'echo data; exit 5'",
+            "sh -c 'cat >/dev/null; exit 9'",
+        )
+        assert not r.ok
+        assert r.returncode == 9
+
+
+class TestShIsEnospc:  # pylint: disable=missing-function-docstring
+    """Tests for is_enospc() marker detection."""
+
+    def test_empty(self):
+        assert not _sh.is_enospc("")
+        assert not _sh.is_enospc(None)  # type: ignore[arg-type]
+
+    def test_unrelated_error(self):
+        assert not _sh.is_enospc("permission denied")
+        assert not _sh.is_enospc("cannot import 'rpool': pool already exists")
+
+    def test_no_space_left_on_device(self):
+        assert _sh.is_enospc("write: No space left on device")
+        # case-insensitive
+        assert _sh.is_enospc("WRITE: NO SPACE LEFT ON DEVICE")
+
+    def test_zfs_receive_out_of_space(self):
+        assert _sh.is_enospc(
+            "cannot receive incremental stream: out of space",
+        )
+        assert _sh.is_enospc(
+            "cannot receive new filesystem stream: out of space",
+        )
+
+    def test_enospc_literal(self):
+        assert _sh.is_enospc("ENOSPC")
+        assert _sh.is_enospc("syncoid: error: ENOSPC reported by zfs receive")
+
+    def test_disk_quota_exceeded(self):
+        assert _sh.is_enospc("write: Disk quota exceeded")
+
+    def test_in_combined_pipeline_stderr(self):
+        # Realistic combined stderr from `zfs send | zfs receive`
+        combined = (
+            "warning: cannot send 'rpool/foo@x': bla\n"
+            "cannot receive incremental stream: out of space\n"
+        )
+        assert _sh.is_enospc(combined)
+
+
+class TestShHumanizeBytes:  # pylint: disable=missing-function-docstring
+    """Tests for humanize_bytes() byte-count formatting (IEC units)."""
+
+    def test_zero(self):
+        assert _sh.humanize_bytes(0) == "0B"
+
+    def test_bytes_no_decimal(self):
+        # Sub-KiB values: integer formatting, no decimal point
+        assert _sh.humanize_bytes(1) == "1B"
+        assert _sh.humanize_bytes(512) == "512B"
+        assert _sh.humanize_bytes(1023) == "1023B"
+
+    def test_kib_boundary(self):
+        # Exactly 1024 = 1.0K
+        assert _sh.humanize_bytes(1024) == "1.0K"
+
+    def test_kib_range(self):
+        assert _sh.humanize_bytes(1536) == "1.5K"
+        assert _sh.humanize_bytes(2048) == "2.0K"
+
+    def test_mib(self):
+        assert _sh.humanize_bytes(1024**2) == "1.0M"
+        assert _sh.humanize_bytes(int(1.5 * 1024**2)) == "1.5M"
+
+    def test_gib(self):
+        assert _sh.humanize_bytes(1024**3) == "1.0G"
+        # 10 GiB — typical "1% of 1 TB" backup margin from our preventive
+        # ENOSPC guard. Coherence-checks the formatting at that scale.
+        assert _sh.humanize_bytes(10 * 1024**3) == "10.0G"
+
+    def test_tib(self):
+        assert _sh.humanize_bytes(1024**4) == "1.0T"
+        assert _sh.humanize_bytes(2 * 1024**4) == "2.0T"
+
+    def test_negative(self):
+        # Used defensively (e.g. arithmetic underflow in callers)
+        assert _sh.humanize_bytes(-512) == "-512B"
+        assert _sh.humanize_bytes(-(2 * 1024**3)) == "-2.0G"
+
+
 class TestShPart:  # pylint: disable=missing-function-docstring
     """Tests for part() function that generates partition device names."""
 
@@ -388,6 +524,11 @@ class TestZFS:  # pylint: disable=missing-function-docstring
             assert info.guid == "12345"
             assert info.health == "ONLINE"
             assert info.pct_used == 27  # 536G / (536G+1418G)
+            # Numeric byte fields parsed from `zfs list -p` (raw bytes).
+            # size_bytes = used_bytes + avail_bytes.
+            assert info.used_bytes == 536870912000
+            assert info.avail_bytes == 1418440704000
+            assert info.size_bytes == 536870912000 + 1418440704000
 
     def test_pool_info_not_imported(self):
         mock, zfs = make_mock_zfs()
@@ -477,6 +618,26 @@ class TestZFS:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             assert zfs.dataset_exists("rpool/keystore")
             assert not zfs.dataset_exists("rpool/nonexistent")
+
+    def test_dataset_used_bytes(self):
+        mock, zfs = make_mock_zfs()
+        # `zfs list -H -p -o used` returns raw bytes
+        mock.on("zfs list -H -p -o used backup/rpool").succeeds("536870912000")
+        with patch_sh(mock):
+            assert zfs.dataset_used_bytes("backup/rpool") == 536870912000
+
+    def test_dataset_used_bytes_failure(self):
+        mock, zfs = make_mock_zfs()
+        mock.on("zfs list -H -p -o used backup/missing").fails()
+        with patch_sh(mock):
+            assert zfs.dataset_used_bytes("backup/missing") == 0
+
+    def test_dataset_used_bytes_unparseable(self):
+        mock, zfs = make_mock_zfs()
+        # Defensive: if the output isn't parseable as int, return 0
+        mock.on("zfs list -H -p -o used backup/weird").succeeds("not-a-number")
+        with patch_sh(mock):
+            assert zfs.dataset_used_bytes("backup/weird") == 0
 
     def test_get_set_property(self):
         mock, zfs = make_mock_zfs()
@@ -793,6 +954,144 @@ class TestBackupLiveUSBDetection:  # pylint: disable=missing-function-docstring
             assert not _detect_live_usb()
 
 
+class TestBackupCheckTargetSpace:  # pylint: disable=missing-function-docstring
+    """Tests for the preventive ENOSPC guard in backup (_check_target_space)."""
+
+    @staticmethod
+    def _make_pool_info(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        name: str,
+        used_bytes: int,
+        avail_bytes: int,
+        used: str = "",
+        avail: str = "",
+        size: str = "",
+    ) -> PoolInfo:
+        return PoolInfo(
+            name=name,
+            used=used or _sh.humanize_bytes(used_bytes),
+            avail=avail or _sh.humanize_bytes(avail_bytes),
+            size=size or _sh.humanize_bytes(used_bytes + avail_bytes),
+            used_bytes=used_bytes,
+            avail_bytes=avail_bytes,
+            size_bytes=used_bytes + avail_bytes,
+        )
+
+    def test_passes_when_plenty_of_space(self):
+        """A target with abundant free space neither warns nor fatal."""
+        src = self._make_pool_info("rpool", used_bytes=100 * 1024**3, avail_bytes=400 * 1024**3)
+        dst = self._make_pool_info(
+            "backup",
+            used_bytes=200 * 1024**3,
+            avail_bytes=1024 * 1024**3,  # 1 TiB free
+        )
+        log = make_log()
+        # No raise expected
+        _check_target_space(src, dst, "backup", "rpool", log)
+
+    def test_fatal_when_below_floor(self):
+        """Below the 1 GiB floor, fatal is raised even for a tiny source."""
+        # Source uses only 10 MB (1% would be 100 KB). Floor of 1 GiB
+        # dominates. Target has 500 MiB free → below floor → fatal.
+        src = self._make_pool_info("rpool", used_bytes=10 * 1024**2, avail_bytes=100 * 1024**3)
+        dst = self._make_pool_info("backup", used_bytes=10 * 1024**3, avail_bytes=500 * 1024**2)
+        log = make_log()
+        # log.fatal() raises SystemExit after an input() prompt; we patch
+        # input() to short-circuit the prompt under pytest's stdin capture.
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            try:
+                _check_target_space(src, dst, "backup", "rpool", log)
+            except SystemExit:
+                return
+        raise AssertionError("Expected SystemExit from log.fatal()")
+
+    def test_fatal_when_below_one_pct_of_source(self):
+        """1% of a 1 TiB source dominates the 1 GiB floor → 10 GiB margin."""
+        # Source uses ~1 TiB; 1% threshold = ~10.24 GiB.
+        # Target has 5 GiB free → below threshold → fatal.
+        src = self._make_pool_info("rpool", used_bytes=1024**4, avail_bytes=200 * 1024**3)
+        dst = self._make_pool_info("backup", used_bytes=900 * 1024**3, avail_bytes=5 * 1024**3)
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            try:
+                _check_target_space(src, dst, "backup", "rpool", log)
+            except SystemExit:
+                return
+        raise AssertionError("Expected SystemExit from log.fatal()")
+
+    def test_passes_just_above_threshold(self):
+        """Boundary: 1% of 1 TiB source ≈ 10.24 GiB; 11 GiB free passes."""
+        src = self._make_pool_info("rpool", used_bytes=1024**4, avail_bytes=200 * 1024**3)
+        dst = self._make_pool_info("backup", used_bytes=900 * 1024**3, avail_bytes=11 * 1024**3)
+        log = make_log()
+        # No raise expected
+        _check_target_space(src, dst, "backup", "rpool", log)
+
+    def test_warns_when_target_smaller(self):
+        """Target smaller than source warns (not fatal) — operator override."""
+        # Source 2 TiB, target 1 TiB. Avail still > threshold → no fatal,
+        # only the coherence warn fires.
+        src = self._make_pool_info("rpool", used_bytes=100 * 1024**3, avail_bytes=2 * 1024**4)
+        dst = self._make_pool_info(
+            "backup",
+            used_bytes=10 * 1024**3,
+            avail_bytes=900 * 1024**3,
+        )
+        # dst.size_bytes ≈ 910 GiB < src.size_bytes ≈ 2148 GiB → warn
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _check_target_space(src, dst, "backup", "rpool", log)
+        out = buf.getvalue()
+        assert "smaller than source" in out, f"Expected coherence warn, got: {out!r}"
+
+    def test_silent_when_src_info_none(self):
+        """If we cannot measure source, defer to the reactive handler — no fatal."""
+        dst = self._make_pool_info("backup", used_bytes=10 * 1024**3, avail_bytes=1024**2)  # 1 MiB
+        log = make_log()
+        # Even with a near-empty target, no fatal: src_info is None
+        _check_target_space(None, dst, "backup", "rpool", log)
+
+    def test_silent_when_dst_info_none(self):
+        """If we cannot measure target, defer to the reactive handler — no fatal."""
+        src = self._make_pool_info("rpool", used_bytes=1024**4, avail_bytes=200 * 1024**3)
+        log = make_log()
+        _check_target_space(src, None, "backup", "rpool", log)
+
+    def test_silent_when_used_bytes_zero(self):
+        """If source used_bytes is unknown (zero), defer to reactive handler."""
+        src = self._make_pool_info("rpool", used_bytes=0, avail_bytes=0)
+        dst = self._make_pool_info("backup", used_bytes=0, avail_bytes=0)
+        log = make_log()
+        _check_target_space(src, dst, "backup", "rpool", log)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/backup.py — argument parsing
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupParseArgs:  # pylint: disable=missing-function-docstring
+    """Tests for backup's lightweight argument parser.
+
+    Default behaviour: take_snapshots=True (sanoid runs before syncoid).
+    --no-snapshot is the only way to opt out — for cron/automation that
+    has already taken snapshots by other means, or for re-runs after
+    a transient failure where extra snapshots are unwanted.
+    """
+
+    def test_no_args_defaults_to_taking_snapshots(self):
+        opts = _backup_parse_args([])
+        assert opts.take_snapshots is True
+
+    def test_no_snapshot_flag_disables(self):
+        opts = _backup_parse_args(["--no-snapshot"])
+        assert opts.take_snapshots is False
+
+    def test_unknown_flags_ignored(self):
+        opts = _backup_parse_args(["--whatever", "garbage", "--no-snapshot"])
+        assert opts.take_snapshots is False
+
+
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/drives.py — validate_external_block_device (shared by prepare/purge)
 # ═════════════════════════════════════════════════════════════════════════
@@ -850,6 +1149,349 @@ class TestSimulate:  # pylint: disable=missing-function-docstring,too-few-public
         """OVMF candidate paths are defined."""
         assert len(OVMF_CODE_CANDIDATES) > 0
         assert any("OVMF_CODE" in p for p in OVMF_CODE_CANDIDATES)
+
+
+class TestSimulateArgs:  # pylint: disable=missing-function-docstring
+    """Tests for simulate argument parsing."""
+
+    def test_no_args(self):
+        opts = _parse_args([])
+        assert opts.disk is None
+        assert opts.rw is False
+        # Defaults present
+        assert opts.display_w > 0 and opts.display_h > 0
+
+    def test_disk_only(self):
+        opts = _parse_args(["/dev/sdb"])
+        assert opts.disk == "/dev/sdb"
+        assert opts.rw is False
+
+    def test_rw_flag_alone(self):
+        opts = _parse_args(["--rw"])
+        assert opts.disk is None
+        assert opts.rw is True
+
+    def test_disk_and_rw(self):
+        opts = _parse_args(["/dev/sdc", "--rw"])
+        assert opts.disk == "/dev/sdc"
+        assert opts.rw is True
+
+    def test_ro_flag_silently_accepted(self):
+        # --ro is a no-op now (read-only is the default), but the parser
+        # should not choke on it for backwards compatibility.
+        opts = _parse_args(["/dev/sdd", "--ro"])
+        assert opts.disk == "/dev/sdd"
+        assert opts.rw is False
+
+    def test_display_custom(self):
+        opts = _parse_args(["--display", "1920x1080"])
+        assert opts.display_w == 1920
+        assert opts.display_h == 1080
+
+    def test_display_4k(self):
+        opts = _parse_args(["--display", "3840x2160"])
+        assert opts.display_w == 3840
+        assert opts.display_h == 2160
+
+    def test_display_uppercase_x(self):
+        # Common typo — the parser should accept either x or X
+        opts = _parse_args(["--display", "1920X1080"])
+        assert opts.display_w == 1920
+        assert opts.display_h == 1080
+
+    def test_display_combined_with_disk_and_rw(self):
+        opts = _parse_args(["/dev/sdb", "--rw", "--display", "2560x1440"])
+        assert opts.disk == "/dev/sdb"
+        assert opts.rw is True
+        assert opts.display_w == 2560
+        assert opts.display_h == 1440
+
+    def test_display_bad_format(self):
+        try:
+            _parse_args(["--display", "lol"])
+        except ValueError:
+            return
+        raise AssertionError("Expected ValueError for malformed --display spec")
+
+    def test_display_zero_dimension(self):
+        try:
+            _parse_args(["--display", "0x1080"])
+        except ValueError:
+            return
+        raise AssertionError("Expected ValueError for zero dimension")
+
+    def test_display_too_large(self):
+        # 16K is sci-fi territory — reject as a probable typo
+        try:
+            _parse_args(["--display", "15360x8640"])
+        except ValueError:
+            return
+        raise AssertionError("Expected ValueError for >8K dimensions")
+
+    def test_display_default_when_flag_absent(self):
+        opts = _parse_args(["/dev/sdb"])
+        # Defaults are sensible (>= HD)
+        assert opts.display_w >= 1920
+        assert opts.display_h >= 1080
+
+
+class TestSimulateInUseDetection:  # pylint: disable=missing-function-docstring
+    """Tests for _disk_in_use_reasons() — the safety-layer-1 detector."""
+
+    def test_disk_with_zfs_root_pool(self):
+        """A disk hosting the imported root ZFS pool is reported as in use."""
+        mock = MockShell()
+        # Live root is on rpool (ZFS dataset)
+        mock.on("findmnt -no SOURCE /").succeeds("rpool/ROOT/ubuntu_xxx")
+        # zpool status shows rpool backed by /dev/nvme0n1p4
+        mock.on("zpool status -P rpool").succeeds(
+            "  pool: rpool\n"
+            " state: ONLINE\n"
+            "config:\n"
+            "\tNAME              STATE\n"
+            "\trpool             ONLINE\n"
+            "\t  /dev/nvme0n1p4  ONLINE\n",
+        )
+        # Parent of nvme0n1p4 is nvme0n1
+        mock.on("lsblk -no PKNAME /dev/nvme0n1p4").succeeds("nvme0n1")
+        # Partitions of nvme0n1
+        mock.on("lsblk -lnp -o NAME,TYPE /dev/nvme0n1").succeeds(
+            "/dev/nvme0n1   disk\n"
+            "/dev/nvme0n1p1 part\n"
+            "/dev/nvme0n1p2 part\n"
+            "/dev/nvme0n1p3 part\n"
+            "/dev/nvme0n1p4 part\n",
+        )
+        # No mounts on those partitions (root is via ZFS dataset, not a part)
+        mock.on("findmnt -rno SOURCE").succeeds("rpool/ROOT/ubuntu_xxx\nrpool/USERDATA/foo")
+        # zpool status -P (no args) lists the same vdev
+        mock.on("zpool status -P").succeeds(
+            "  pool: rpool\n\t  /dev/nvme0n1p4  ONLINE",
+        )
+        mock.on("cat /proc/swaps").succeeds(
+            "Filename    Type    Size    Used    Priority\n",
+        )
+        with patch_sh(mock):
+            reasons = _disk_in_use_reasons("/dev/nvme0n1")
+        # At least one reason fired (root, or zfs-imported); both legitimate
+        assert reasons, f"Expected at least one in-use reason, got {reasons}"
+        joined = " | ".join(reasons)
+        assert "live system root" in joined or "imported ZFS pools" in joined
+
+    def test_disk_with_mounted_partition(self):
+        """A disk with a mounted ext4 partition is reported as in use."""
+        mock = MockShell()
+        mock.on("findmnt -no SOURCE /").succeeds("/dev/nvme0n1p3")
+        mock.on("lsblk -no PKNAME /dev/nvme0n1p3").succeeds("nvme0n1")
+        mock.on("lsblk -lnp -o NAME,TYPE /dev/sdb").succeeds(
+            "/dev/sdb  disk\n/dev/sdb1 part\n",
+        )
+        mock.on("findmnt -rno SOURCE").succeeds("/dev/sdb1\n/dev/nvme0n1p3")
+        mock.on("zpool status -P").fails()
+        mock.on("cat /proc/swaps").succeeds("Filename Type Size Used Priority\n")
+        with patch_sh(mock):
+            reasons = _disk_in_use_reasons("/dev/sdb")
+        assert any("mounted partitions" in r for r in reasons)
+
+    def test_disk_with_active_swap(self):
+        """A disk with an active swap partition is reported as in use."""
+        mock = MockShell()
+        mock.on("findmnt -no SOURCE /").succeeds("/dev/nvme0n1p3")
+        mock.on("lsblk -no PKNAME /dev/nvme0n1p3").succeeds("nvme0n1")
+        mock.on("lsblk -lnp -o NAME,TYPE /dev/sdc").succeeds(
+            "/dev/sdc  disk\n/dev/sdc1 part\n",
+        )
+        mock.on("findmnt -rno SOURCE").succeeds("/dev/nvme0n1p3")
+        mock.on("zpool status -P").fails()
+        mock.on("cat /proc/swaps").succeeds(
+            "Filename       Type            Size       Used   Priority\n"
+            "/dev/sdc1      partition       8388604    0      -2\n",
+        )
+        with patch_sh(mock):
+            reasons = _disk_in_use_reasons("/dev/sdc")
+        assert any("active swap" in r for r in reasons)
+
+    def test_clean_disk_passes(self):
+        """A spare disk with no mounts/pools/swap is reported as available."""
+        mock = MockShell()
+        # Root is on a different disk
+        mock.on("findmnt -no SOURCE /").succeeds("/dev/nvme0n1p3")
+        mock.on("lsblk -no PKNAME /dev/nvme0n1p3").succeeds("nvme0n1")
+        # Spare disk with one untouched partition
+        mock.on("lsblk -lnp -o NAME,TYPE /dev/sdz").succeeds(
+            "/dev/sdz  disk\n/dev/sdz1 part\n",
+        )
+        # Nothing mounted from sdz
+        mock.on("findmnt -rno SOURCE").succeeds("/dev/nvme0n1p3")
+        # No imported pool uses sdz
+        mock.on("zpool status -P").succeeds("  pool: rpool\n\t  /dev/nvme0n1p4  ONLINE\n")
+        # No swap on sdz
+        mock.on("cat /proc/swaps").succeeds("Filename Type Size Used Priority\n")
+        with patch_sh(mock):
+            reasons = _disk_in_use_reasons("/dev/sdz")
+        assert not reasons, f"Expected clean disk, got reasons: {reasons}"
+
+
+class TestSimulateCandidateList:  # pylint: disable=missing-function-docstring
+    """Tests for _list_candidate_disks() — only eligible disks must be listed."""
+
+    @staticmethod
+    def _patch_devices_exist():
+        """Pretend every '/dev/...' path exists during the test.
+
+        _list_candidate_disks() guards against stale entries from lsblk
+        with Path(dev).exists(). Under the unit tests there is no real
+        /dev/sdz; we patch Path.exists to True for /dev/* paths so the
+        gate doesn't filter our synthetic candidates.
+        """
+        return patch(
+            "commands.simulate.Path.exists",
+            new=lambda self: str(self).startswith("/dev/"),
+        )
+
+    def test_excludes_in_use_disk(self):
+        """The in-use root disk must NOT appear in the candidate list."""
+        mock = MockShell()
+        # Two disks: nvme0n1 (in use) and sdz (clean).
+        mock.on("lsblk -dn -o NAME,SIZE,MODEL").succeeds(
+            "nvme0n1 1.8T NVMe Internal\nsdz     2.0T Spare USB\n",
+        )
+        # Wide-net responses for the in-use detection of each disk.
+        mock.on("findmnt -no SOURCE /").succeeds("/dev/nvme0n1p3")
+        mock.on("lsblk -no PKNAME /dev/nvme0n1p3").succeeds("nvme0n1")
+        mock.on("lsblk -lnp -o NAME,TYPE /dev/nvme0n1").succeeds(
+            "/dev/nvme0n1   disk\n/dev/nvme0n1p3 part\n",
+        )
+        mock.on("lsblk -lnp -o NAME,TYPE /dev/sdz").succeeds(
+            "/dev/sdz  disk\n/dev/sdz1 part\n",
+        )
+        mock.on("findmnt -rno SOURCE").succeeds("/dev/nvme0n1p3")
+        mock.on("zpool status -P").fails()
+        mock.on("cat /proc/swaps").succeeds("Filename Type Size Used Priority\n")
+        with patch_sh(mock), self._patch_devices_exist():
+            cands = _list_candidate_disks()
+        names = [d for d, _ in cands]
+        assert "/dev/sdz" in names
+        assert (
+            "/dev/nvme0n1" not in names
+        ), "In-use disk leaked into candidate list — safety layer 2 broken"
+
+    def test_skips_loop_and_zd(self):
+        """Loops and ZFS volumes (zd*) are filtered out of candidates."""
+        mock = MockShell()
+        mock.on("lsblk -dn -o NAME,SIZE,MODEL").succeeds(
+            "loop0 100M\nzd0   8G\nsda   500G ExternalSpare\n",
+        )
+        # Make sda look completely clean
+        mock.on("findmnt -no SOURCE /").succeeds("/dev/nvme0n1p3")
+        mock.on("lsblk -no PKNAME /dev/nvme0n1p3").succeeds("nvme0n1")
+        mock.on("lsblk -lnp -o NAME,TYPE /dev/sda").succeeds("/dev/sda disk\n")
+        mock.on("findmnt -rno SOURCE").succeeds("/dev/nvme0n1p3")
+        mock.on("zpool status -P").fails()
+        mock.on("cat /proc/swaps").succeeds("Filename Type Size Used Priority\n")
+        with patch_sh(mock), self._patch_devices_exist():
+            cands = _list_candidate_disks()
+        names = [d for d, _ in cands]
+        assert "/dev/loop0" not in names
+        assert "/dev/zd0" not in names
+
+
+class TestSimulateGLDetection:  # pylint: disable=missing-function-docstring
+    """Tests for _detect_gl() — host capability probe for virtio-vga-gl."""
+
+    # Minimal fake `qemu-system-x86_64 -device help` output. Real output
+    # is hundreds of lines; we keep just enough to exercise the substring
+    # match in both directions.
+    _DEVICE_HELP_WITH_GL = (
+        "Display devices:\n"
+        'name "VGA"\n'
+        'name "virtio-vga"\n'
+        'name "virtio-vga-gl"\n'
+        'name "virtio-gpu-pci"\n'
+    )
+    _DEVICE_HELP_WITHOUT_GL = (
+        "Display devices:\n" + 'name "VGA"\n' + 'name "virtio-vga"\n' + 'name "virtio-gpu-pci"\n'
+    )
+
+    @staticmethod
+    def _patch_dri(present: bool, have_render_node: bool = True):
+        """Patch /dev/dri inspection.
+
+        present=True  → /dev/dri exists as a directory.
+        have_render_node=True → it contains a 'renderD128' entry.
+        """
+        # Build a fake iterdir result of pathlib.Path-like objects with
+        # a .name attribute. Path's iterdir yields Path instances; for
+        # the purposes of _detect_gl() only the .name attribute is read.
+        fake_entries = []
+        if have_render_node:
+
+            class _FakeEntry:  # pylint: disable=too-few-public-methods
+                name = "renderD128"
+
+            fake_entries = [_FakeEntry()]
+
+        def _is_dir_for_dri(self):
+            return present if str(self) == "/dev/dri" else False
+
+        def _iterdir_for_dri(self):
+            if str(self) == "/dev/dri":
+                return iter(fake_entries)
+            return iter([])
+
+        return (
+            patch.object(Path, "is_dir", _is_dir_for_dri),
+            patch.object(Path, "iterdir", _iterdir_for_dri),
+        )
+
+    def test_gl_available_full_stack(self):
+        """Happy path: render node + virtio-vga-gl in QEMU build."""
+        mock = MockShell()
+        mock.on("qemu-system-x86_64 -device help").succeeds(self._DEVICE_HELP_WITH_GL)
+        is_dir_p, iterdir_p = self._patch_dri(present=True, have_render_node=True)
+        with patch_sh(mock), is_dir_p, iterdir_p:
+            ok, reason = _detect_gl()
+        assert ok is True, f"GL should be available, got reason: {reason!r}"
+        assert reason == ""
+
+    def test_gl_unavailable_no_dri_directory(self):
+        """No /dev/dri at all (e.g. headless/container host)."""
+        mock = MockShell()
+        # qemu probe should not even be reached — dri is checked first
+        is_dir_p, iterdir_p = self._patch_dri(present=False)
+        with patch_sh(mock), is_dir_p, iterdir_p:
+            ok, reason = _detect_gl()
+        assert ok is False
+        assert "/dev/dri" in reason
+
+    def test_gl_unavailable_no_render_node(self):
+        """/dev/dri exists but has no renderD* node (rare but possible)."""
+        mock = MockShell()
+        is_dir_p, iterdir_p = self._patch_dri(present=True, have_render_node=False)
+        with patch_sh(mock), is_dir_p, iterdir_p:
+            ok, reason = _detect_gl()
+        assert ok is False
+        assert "renderD" in reason
+
+    def test_gl_unavailable_qemu_minimal_build(self):
+        """Render node OK, but the QEMU build lacks virtio-vga-gl."""
+        mock = MockShell()
+        mock.on("qemu-system-x86_64 -device help").succeeds(self._DEVICE_HELP_WITHOUT_GL)
+        is_dir_p, iterdir_p = self._patch_dri(present=True, have_render_node=True)
+        with patch_sh(mock), is_dir_p, iterdir_p:
+            ok, reason = _detect_gl()
+        assert ok is False
+        assert "virtio-vga-gl" in reason
+
+    def test_gl_unavailable_qemu_help_fails(self):
+        """`qemu-system-x86_64 -device help` itself fails for some reason."""
+        mock = MockShell()
+        mock.on("qemu-system-x86_64 -device help").fails("boom")
+        is_dir_p, iterdir_p = self._patch_dri(present=True, have_render_node=True)
+        with patch_sh(mock), is_dir_p, iterdir_p:
+            ok, reason = _detect_gl()
+        assert ok is False
+        assert "device help" in reason
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -1356,6 +1998,111 @@ class TestRecoverDatasetLayout:
         assert children == {"usr", "var/lib", "var/log"}
         # Parent itself is excluded
         assert f"rpool/ROOT/{self.UBUNTU}" not in children
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/recover.py — preventive disk-size guard
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestRecoverDiskSize:  # pylint: disable=missing-function-docstring
+    """Tests for _disk_size_bytes() and _check_target_disk_size()."""
+
+    def test_disk_size_bytes_ok(self):
+        mock = MockShell()
+        # 2 TB NVMe in raw bytes
+        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds("2000398934016")
+        with patch_sh(mock):
+            assert _disk_size_bytes("/dev/nvme0n1") == 2000398934016
+
+    def test_disk_size_bytes_failure(self):
+        mock = MockShell()
+        mock.on("lsblk -bdn -o SIZE /dev/missing").fails()
+        with patch_sh(mock):
+            assert _disk_size_bytes("/dev/missing") == 0
+
+    def test_disk_size_bytes_unparseable(self):
+        mock = MockShell()
+        mock.on("lsblk -bdn -o SIZE /dev/weird").succeeds("not-a-number")
+        with patch_sh(mock):
+            assert _disk_size_bytes("/dev/weird") == 0
+
+    def test_check_target_disk_size_passes_when_large_enough(self):
+        # Source uses 100 GiB; 5% overhead → threshold 105 GiB.
+        # Target is 200 GiB → fits.
+        mock, zfs = make_mock_zfs()
+        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(200 * 1024**3))
+        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(100 * 1024**3))
+        log = make_log()
+        with patch_sh(mock):
+            # No raise expected
+            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
+
+    def test_check_target_disk_size_fatal_when_too_small(self):
+        # Source uses 200 GiB; 5% overhead → threshold 210 GiB.
+        # Target is 100 GiB → fatal.
+        mock, zfs = make_mock_zfs()
+        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(100 * 1024**3))
+        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(200 * 1024**3))
+        log = make_log()
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch("builtins.input", return_value=""),
+        ):
+            try:
+                _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
+            except SystemExit:
+                return
+        raise AssertionError("Expected SystemExit from log.fatal()")
+
+    def test_check_target_disk_size_silent_when_lsblk_fails(self):
+        # Cannot measure target → defer silently to reactive handler
+        mock, zfs = make_mock_zfs()
+        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").fails()
+        log = make_log()
+        with patch_sh(mock):
+            # No raise even though the rpool used would dominate
+            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
+
+    def test_check_target_disk_size_silent_when_used_unknown(self):
+        # Cannot measure backup/rpool → defer silently
+        mock, zfs = make_mock_zfs()
+        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(100 * 1024**3))
+        mock.on("zfs list -H -p -o used backup/rpool").fails()
+        log = make_log()
+        with patch_sh(mock):
+            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
+
+    def test_check_target_disk_size_boundary_just_above(self):
+        # Exactly 5% above source.used → just passes
+        used = 100 * 1024**3
+        threshold = used * 105 // 100  # 105 GiB
+        mock, zfs = make_mock_zfs()
+        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(threshold))
+        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(used))
+        log = make_log()
+        with patch_sh(mock):
+            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
+
+    def test_check_target_disk_size_boundary_just_below(self):
+        # One byte below threshold → fatal
+        used = 100 * 1024**3
+        threshold = used * 105 // 100
+        mock, zfs = make_mock_zfs()
+        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(threshold - 1))
+        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(used))
+        log = make_log()
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch("builtins.input", return_value=""),
+        ):
+            try:
+                _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
+            except SystemExit:
+                return
+        raise AssertionError("Expected SystemExit from log.fatal()")
 
 
 # ═════════════════════════════════════════════════════════════════════════

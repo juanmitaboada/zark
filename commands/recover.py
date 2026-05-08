@@ -159,6 +159,82 @@ def _is_live_usb() -> bool:
     return sh.run("test -d /rofs").ok or sh.run("test -d /cow").ok
 
 
+# Free-space margin for the preventive disk-size check. The target NVMe
+# is wiped and freshly partitioned, but ~5% is consumed by the EFI System
+# Partition (1 GiB), bpool (2 GiB), swap (8 GiB) and ZFS pool metadata.
+# Using a flat 5% multiplier on src.used_bytes is a coarse but sufficient
+# approximation: the reactive ENOSPC handler in _raw_send catches anything
+# the preventive guard misses.
+_RECOVER_TARGET_OVERHEAD_PCT = 5  # added to src.used_bytes for the threshold
+
+
+def _disk_size_bytes(disk: str) -> int:
+    """Return the size of a block device in bytes, or 0 on failure.
+
+    Uses `lsblk -bdn -o SIZE` (bytes, no header, no children). Returns 0
+    if the device is missing, lsblk is unavailable, or the output cannot
+    be parsed — in which case the preventive check defers silently to
+    the reactive ENOSPC handler.
+    """
+    r = sh.run(f"lsblk -bdn -o SIZE {disk}")
+    if not r.ok:
+        return 0
+    try:
+        return int(r.output.strip())
+    except (ValueError, AttributeError):
+        return 0
+
+
+def _check_target_disk_size(
+    target_disk: str,
+    pool_name: str,
+    log: Log,
+    zfs: ZFS,
+) -> None:
+    """Refuse recovery if the target disk is too small for the backup data.
+
+    Compares the target NVMe's physical size against the backup's
+    rpool used_bytes plus a 5% overhead margin (EFI/bpool/swap/metadata).
+    If the target cannot fit even the bare data, fatal — recovery is
+    guaranteed to ENOSPC mid-stream and waste the operator's time.
+
+    Silently skipped if either size measurement returns 0 (transient
+    failure of lsblk or zfs list); the reactive _raw_send ENOSPC
+    handler will still catch in-flight exhaustion.
+    """
+    target_size = _disk_size_bytes(target_disk)
+    if target_size <= 0:
+        log.dbg(f"Could not measure {target_disk} size — skipping preventive check")
+        return
+
+    # The data we are going to copy is everything under {pool_name}/rpool.
+    # That's a dataset, not a pool, so we use `zfs list -p -o used`, not
+    # `zpool list`. used here includes all child datasets and snapshots
+    # (the recursive accounting that `zfs list` reports).
+    src_used = zfs.dataset_used_bytes(f"{pool_name}/rpool")
+    if src_used <= 0:
+        log.dbg(
+            f"Could not measure {pool_name}/rpool used_bytes — skipping preventive check",
+        )
+        return
+
+    threshold = src_used * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
+    if target_size < threshold:
+        log.fatal(
+            f"Target disk {target_disk} too small to fit backup",
+            causes=[
+                f"Backup {pool_name}/rpool: used={sh.humanize_bytes(src_used)}",
+                f"Target {target_disk}: {sh.humanize_bytes(target_size)}",
+                f"Required: ≥ {sh.humanize_bytes(threshold)} "
+                f"(used + {_RECOVER_TARGET_OVERHEAD_PCT}% overhead)",
+            ],
+            solutions=[
+                "Recover to a larger disk",
+                "Or shrink the backup by purging snapshots before recovery",
+            ],
+        )
+
+
 def _raw_send(src: str, dst: str, snap: str, log: Log) -> bool:
     """Raw send a single dataset@snap to dst."""
     r = sh.run(f"zfs list -H -o name -t snapshot {src}")
@@ -182,6 +258,24 @@ def _raw_send(src: str, dst: str, snap: str, log: Log) -> bool:
     if r.ok:
         log.dbg(f"  raw send OK: {dst}")
         return True
+    # Reactive ENOSPC: ENOSPC during recover is always fatal — there is
+    # no point in continuing to subsequent datasets when the target is
+    # full; they will all fail the same way. The non-ENOSPC `return False`
+    # path below is preserved for genuinely optional dataset failures
+    # (callers at the rpool/ROOT/USERDATA loops use `_ = _raw_send(...)`
+    # to keep going on individual misses).
+    if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+        log.fatal(
+            f"Recovery ran out of space while restoring {dst}",
+            causes=[
+                "Target disk filled up during raw send",
+                "Backup data exceeds target disk capacity (preventive check missed it)",
+            ],
+            solutions=[
+                "Recover to a larger disk",
+                "Or shrink the backup by purging snapshots before retry",
+            ],
+        )
     log.warn(f"  raw send failed: {dst}: {r.stderr.strip()}")
     return False
 
@@ -242,6 +336,21 @@ def _bpool_send_recv(pool_name: str, ubuntu_name: str, log: Log, zfs: ZFS) -> bo
     if r.ok:
         log.ok("bpool received via send/receive ✓")
         return True
+    if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+        # bpool ENOSPC during recover: fatal. Unlike backup, recover has
+        # no "stale data is better than nothing" tradeoff — the target
+        # bpool is freshly created and any partial data is unbootable.
+        log.fatal(
+            "Recovery ran out of space while restoring bpool",
+            causes=[
+                "Target disk filled up during bpool send/receive",
+                "Backup data exceeds target disk capacity (preventive check missed it)",
+            ],
+            solutions=[
+                "Recover to a larger disk",
+                "Or shrink the backup by purging snapshots before retry",
+            ],
+        )
     log.warn(f"bpool send/receive failed: {r.stderr.strip()}")
     return False
 
@@ -804,6 +913,13 @@ def run(
         idx = int(sel) - 1 if sel.isdigit() else 0
         internal_disk = f"/dev/{candidates[idx].split()[0]}"
 
+    # Preventive disk-size check: refuse if the selected disk is too
+    # small for the backup data. Runs BEFORE the YES confirmation so
+    # the operator does not commit to wiping a disk we know is too
+    # small. Silently defers to the reactive ENOSPC handler if either
+    # size measurement is unavailable.
+    _check_target_disk_size(internal_disk, pool_name, log, zfs)
+
     log.blank()
     log.warn(f"This will COMPLETELY ERASE {internal_disk}")
     log.info(f"Restore point: {chosen_snap}")
@@ -1019,6 +1135,22 @@ def run(
         )
         if not r.ok:
             log.error(f"Keystore restore failed: {r.stderr.strip()}")
+            if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+                # Keystore is the very last dataset to receive (~12b). If
+                # ENOSPC fires here, the target disk is full despite the
+                # preventive check passing — bail with an ENOSPC-specific
+                # message rather than the generic "send_failed" causes.
+                log.fatal(
+                    "Recovery ran out of space while restoring keystore",
+                    causes=[
+                        "Target disk filled up during the final keystore send",
+                        "rpool data + keystore zvol exceed target disk capacity",
+                    ],
+                    solutions=[
+                        "Recover to a larger disk",
+                        "Or shrink the backup by purging snapshots before retry",
+                    ],
+                )
             _abort_missing_keystore("send_failed", pool_name, log)
         log.ok("rpool/keystore restored ✓")
 
