@@ -5,6 +5,79 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.9] — 2026-05-12
+
+### Snapshot retention — `template_minimal` raised to ~3 months
+
+The original `template_minimal` policy in `zark setup` retained `daily=2` (two days, no weekly, no monthly) for `rpool`, `rpool/ROOT`, `rpool/var`, and `bpool` — every "container" dataset that barely changes. This was incompatible with any realistic drive-rotation schedule: a backup drive disconnected for more than 48 hours would lose its anchor in source and diverge on every container dataset, leaving the leaves (`rpool/ROOT/<ubuntu>`, `rpool/USERDATA`, all `production`-template) intact while syncoid aborted with `Cowardly refusing to destroy your existing target` on the rest.
+
+- **`template_minimal` is now `daily=14 weekly=8 monthly=3`.** ~3 months of guaranteed overlap, ~25 snapshots per dataset. Container datasets weigh KB to a few MB so the metadata cost of the extra snapshots is negligible. `template_production` is unchanged — it already had ~3 months of headroom on the active leaves.
+- **`zark setup` detects the migration.** The existing diff machinery now compares `[template_minimal]` against the expected values. When they disagree, the diff is shown alongside any other rule changes through the same "Apply these changes?" prompt — no separate flow. Saying "no" leaves the file untouched and re-running `zark setup` will offer the migration again (the choice is not persisted, by design — every setup run gets a fresh chance). Saying "yes" regenerates `sanoid.conf` with `.backup.<ts>` written first, preserving manual sections the user has added under non-managed prefixes (e.g. `[tank/games]`).
+
+### `--no-sync-snap` for syncoid: end of the rotation-warning cascade
+
+When a user rotated between two backup drives, syncoid emitted a long cascade of warnings on the second-to-second-drive run:
+
+```
+could not find any snapshots to destroy; check snapshot names.
+WARNING:  zfs destroy 'blue/rpool'@syncoid_host_<ts> failed: 256 at /usr/sbin/syncoid line 1596.
+```
+
+Repeated for every dataset, every alternation, every backup. The replication itself worked, but the operator was buried in apparent errors. Tracked down to the [`pruneoldsyncsnaps` mechanism in syncoid](https://discourse.practicalzfs.com/t/managing-syncoid-snapshots-with-multiple-destinations/4452): syncoid creates `@syncoid_<host>_<ts>` snapshots on source/target before each transfer and tries to garbage-collect older ones afterwards. With multiple destinations, the run to drive B destroys the source snapshot that drive A still needs as its anchor — the next run to drive A then warns loudly when the matching target snapshot has nothing to delete.
+
+- **`zark backup` now passes `--no-sync-snap` to syncoid for both rpool and bpool transfers.** Syncoid no longer creates its own anchor snapshots; instead it picks the most recent existing snapshot in source as the anchor. Step 6 already takes a fresh `sanoid --take-snapshots` pass before each backup, so a clean anchor is guaranteed.
+- **No filtering of stderr; the bug is fixed at the source.** Future warnings from syncoid (real ones) keep showing up unmuted.
+- **`@syncoid_host_*` snapshots that already exist on drives are left in place.** They're inert — syncoid no longer references or recreates them. They die naturally when the drive is purged.
+- **`--no-snapshot` + missing anchor surfaces a WARN.** When the operator passes `--no-snapshot`, `zark backup` no longer takes a fresh sanoid pass. If sanoid hasn't run independently, source has no recent anchor; the WARN tells the operator that syncoid may abort, but the run continues so syncoid's own (more authoritative) error wins if it does fail.
+
+### Drive staleness reporting
+
+A new `last_backup_at` field per drive in `etc/known_drives.json` records the ISO-8601 UTC timestamp of every successful backup. Reporting is purely informative — there is **no FATAL** based on staleness, because the actual divergence threshold depends on sanoid retention (which the operator can change) and a backup that has crossed the threshold may still succeed if some shared snapshot happens to remain. When syncoid does abort, the existing divergence handling in `lib/repair.py` and `commands/repair_divergent.py` already takes over.
+
+- **Retention horizon is read at runtime from `/etc/sanoid/sanoid.conf`.** New `lib/sanoid_retention.py` parses the file and returns `worst_case_retention_days = max(daily, weekly×7, monthly×30)` over templates actually used by `[rpool*]` or `[bpool*]` sections. Adding the buckets together would double-count: the monthly snapshot, taken once per month, replaces older daily/weekly snapshots once they age past their bucket — so the longest single bucket defines the horizon.
+- **End-of-backup banner gains two informative messages.** After `BACKUP COMPLETED`, if the selected drive was already past the retention horizon when the run started, a WARN explains the situation and points at `sudo ./zark purge && sudo ./zark prepare` (the only thing that actually fixes a fully-aged drive) plus an explicit note that `zark repair-divergent` does **not** fix staleness — it only fixes divergent datasets after a syncoid abort, which is a different problem. Below, an INFO list shows other known drives whose age has reached the danger zone (`≥ retention - 30` days).
+- **`zark repair-divergent` shows the same staleness note** at the end of a run that found nothing divergent but selected a drive in the danger zone — the operator who came expecting a fix is told why this command can't help.
+- **The field auto-populates on first successful backup.** Existing `known_drives.json` files keep parsing without modification; the field is emitted on disk only when populated, keeping the JSON minimal. Failure to persist the timestamp at the end of a backup is a WARN, not fatal — the backup itself succeeded.
+- **No FATAL gate on staleness.** Earlier in development the design called for a 60-day FATAL guard. Discarded after testing because the actual horizon is whatever sanoid retains (90+ days with the new `template_minimal`), and bailing out before syncoid loses information that syncoid itself would surface clearly anyway.
+
+### `zark repair-divergent` — interactive review
+
+The previous `repair-divergent` only handled the "all divergent datasets are ≤ 64 MB" case (auto-destroyed silently) and aborted with FATAL on anything larger, telling the user to "use `zfs destroy` directly." That's the right safety posture for a non-interactive flow but leaves the operator with no zark-supported way to repair real divergence. The command is now a guided review:
+
+- **Per-dataset context block.** For every divergent dataset above 64 MB, prints `used`, snapshot count and the date range on the target, the most recent snapshot suffix shared with source (or `none`), child-dataset count and aggregated `used`, plus a one-line hint classifying the pattern (orphan, container with intact leaves, leaf rotated past target).
+- **Three-choice action prompt: destroy, skip, or abort all.** Default is `skip` — the only fully reversible choice. `abort` walks out without touching anything else, preserving the rest for a later session.
+- **Typed `DESTROY` confirmation above 1 GiB.** When the operator picks `destroy` on a dataset over 1 GiB (`DOUBLE_CONFIRM_BYTES`), a second prompt requires typing the literal string `DESTROY` (case-sensitive). Anything else cancels the destroy. The threshold is hardcoded by explicit user request — no flag.
+- **Mid-flight failure policy, asked once.** When a `zfs destroy` fails (busy zvol, lock contention), the operator is asked once how to handle the rest of the run: `continue`, `abort`, or `keep state and abort` (the third stops immediately and leaves the pool exactly as it is, no further cleanup-driven changes). The choice is sticky for the rest of the session — subsequent failures don't reprompt.
+- **Final summary banner** lists the destroyed and skipped datasets and points at `sudo ./zark backup` (which recreates destroyed datasets via initial replication) plus a re-run hint when anything was skipped.
+
+The 64 MB silent threshold matches `zark backup`'s auto-repair path so the two flows stay symmetric.
+
+### Documentation
+
+- **README: new "Drive rotation and retention policy" section** between Requirements and Testing. Explains the divergence mechanic, the two retention templates with their windows, the staleness reporting model, and the new interactive `repair-divergent`.
+- **README: Apport popup screenshot** added inline at the top of the existing "System program problem detected" troubleshooting section. The image lives at `docs/images/apport-popup.png` (a new tree under the project root, not shipped in the deb).
+
+### Process plumbing
+
+- **`lib/sanoid_retention.py`** (new module) parses `/etc/sanoid/sanoid.conf` with the standard `configparser` and computes the worst-case retention horizon over templates referenced by managed sections. Returns `None` and emits a visible WARN when the file is absent — backup itself does not require sanoid.conf, so staleness reporting becomes unavailable rather than blocking.
+- **`lib.config.now_utc_iso()` and `parse_utc_iso()`.** Single source of truth for the timestamp written to `last_backup_at`, including parse tolerance for both `Z`-suffix and explicit `+00:00`. Tests can monkeypatch the clock without reaching into a command module.
+- **`DriveInfo.last_backup_at: str | None = None`.** Added field with a `None` default so existing call sites that construct `DriveInfo` keep working unchanged.
+- **`drive_staleness_days(info)`, `is_drive_stale(info, threshold_days)`, `drives_in_danger_zone(...)`** in `lib.drives` wrap the timestamp arithmetic and the danger-zone selection. All accept an optional `now` argument so tests can pass a fixed clock.
+
+### Tests
+
+- **281 unit tests**, ruff clean, pylint 10.00/10. New coverage:
+  - `TestConfigTimestamps` (5 tests): now_utc_iso shape, parse round-trip, Z and +00:00 suffix handling, garbage input.
+  - `TestConfigKnownDrivesTimestamp` (5 tests): legacy file load, modern file with field, save omits None, save preserves, ignores non-string field.
+  - `TestDrivesStaleness` (7 tests): None when absent or malformed, integer-day delta when present, threshold boundary at exactly N days (not stale), beyond N (stale), False when field absent.
+  - `TestDrivesInDangerZone` (6 tests): empty, skip without field, include at-or-beyond threshold, exclude below threshold, exclude named drive, sort age-desc.
+  - `TestSetupTemplateDiff` (5 tests): no-diff when matches, diff with old values, missing section, expected constants match generator, _print_diff includes template section.
+  - `TestBackupStalenessReporting` (5 tests): silent when retention unknown, WARN when expired at start, no warn when fresh, lists other drives in danger zone, excludes just-backed-up drive.
+  - `TestSanoidRetention` (6 tests): per-template horizon math, returns largest used template, smaller-when-only-minimal-used, None when file missing, None when no managed sections, ignores zvol sections without use_template.
+  - `TestRepairDivergentHints` (3 tests), `TestRepairDivergentDoubleConfirm` (6), `TestRepairDivergentActionPrompt` (7), `TestRepairDivergentLoop` (7), `TestRepairDivergentSnapshotHelpers` (4): full coverage of interactive flow.
+
+[1.0.9]: #109--2026-05-12
+
 ## [1.0.8] — 2026-05-08
 
 ### Out-of-space handling — backup
@@ -83,10 +156,10 @@ Mirrors the backup story but adapted to recovery's invariants (target NVMe is wi
 
 ### Breaking change
 
-- Pools backed up with v1.0.6 or earlier may have leftover `syncoid_carmen_*` snapshots in source `rpool` and `bpool` (with no useful function). Cleanup is optional and one-shot:
+- Pools backed up with v1.0.6 or earlier may have leftover `syncoid_host_*` snapshots in source `rpool` and `bpool` (with no useful function). Cleanup is optional and one-shot:
   ```
-  sudo zfs list -H -o name -t snapshot -r rpool | grep '@syncoid_carmen_' | xargs -r -n1 sudo zfs destroy
-  sudo zfs list -H -o name -t snapshot -r bpool | grep '@syncoid_carmen_' | xargs -r -n1 sudo zfs destroy
+  sudo zfs list -H -o name -t snapshot -r rpool | grep '@syncoid_host_' | xargs -r -n1 sudo zfs destroy
+  sudo zfs list -H -o name -t snapshot -r bpool | grep '@syncoid_host_' | xargs -r -n1 sudo zfs destroy
   ```
 
 [1.0.7]: #107--2026-05-06

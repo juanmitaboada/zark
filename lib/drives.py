@@ -7,9 +7,10 @@ and provides helpful output for unknown drives.
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from lib.config import Config, DriveInfo
+from lib.config import Config, DriveInfo, parse_utc_iso
 from lib.log import Log
 from lib.sh import run
 
@@ -338,3 +339,91 @@ def validate_external_block_device(dev: str, log: Log, *, command: str) -> None:
     root_dev = run("lsblk -no PKNAME $(findmnt -n -o SOURCE /) 2>/dev/null | head -1").output
     if root_dev and root_dev in dev:
         log.fatal(f"{dev} appears to be the system drive. Refusing.")
+
+
+# ── last_backup_at staleness helpers ─────────────────────────────────────────
+#
+# Backup drives that go unbacked for a long time are at risk of divergence
+# because the source pool's sanoid retention will eventually purge the
+# snapshots that are still on the target. The only authoritative answer
+# to "how long is too long" is the source's actual sanoid retention, so
+# these helpers stay generic over the threshold and let
+# ``commands/backup.py`` (which calls :func:`lib.sanoid_retention.
+# worst_case_retention_days`) decide the value at runtime.
+#
+# The reporting is purely informative: WARN at the end of a successful
+# backup if the selected drive *was* expired when the run started, INFO
+# listing other drives that are getting close. No FATAL — even an
+# expired drive's backup may still succeed (because some shared
+# snapshot might still be there), and when it doesn't, the existing
+# divergence handling in ``commands/backup.py`` and ``lib/repair.py``
+# already takes over.
+
+
+def drive_staleness_days(info: DriveInfo, *, now: datetime | None = None) -> int | None:
+    """Return how many days ago this drive was last backed up.
+
+    Returns ``None`` when the drive has no recorded backup, so callers
+    can distinguish "we don't know" from "we know it's recent". A
+    malformed ``last_backup_at`` value is also treated as ``None`` —
+    we'd rather skip the check than fatal on a typo. ``now`` is exposed
+    only so tests can pass a fixed clock.
+    """
+    if not info.last_backup_at:
+        return None
+    last = parse_utc_iso(info.last_backup_at)
+    if last is None:
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    delta = now - last
+    return max(0, delta.days)
+
+
+def is_drive_stale(
+    info: DriveInfo,
+    threshold_days: int,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """True when the drive's last backup is older than ``threshold_days``.
+
+    Drives without a ``last_backup_at`` (older entries, freshly
+    prepared drives) return False — see module docstring for the
+    rationale.
+    """
+    age = drive_staleness_days(info, now=now)
+    if age is None:
+        return False
+    return age > threshold_days
+
+
+def drives_in_danger_zone(
+    drives: dict[str, DriveInfo],
+    retention_days: int,
+    margin_days: int = 30,
+    *,
+    exclude: str | None = None,
+    now: datetime | None = None,
+) -> list[tuple[str, int]]:
+    """Return ``[(drive_name, age_days), ...]`` for drives close to expiry.
+
+    A drive is in the danger zone when its age is ``≥ (retention_days
+    - margin_days)``. Drives without ``last_backup_at`` are skipped
+    (we can't tell). The caller usually passes ``exclude=<name>`` to
+    omit the drive that just got backed up — its age is now zero and
+    listing it would be misleading. Result is sorted by age desc so
+    the most-at-risk drive shows first.
+    """
+    threshold = max(0, retention_days - margin_days)
+    out: list[tuple[str, int]] = []
+    for name, info in drives.items():
+        if exclude is not None and name == exclude:
+            continue
+        age = drive_staleness_days(info, now=now)
+        if age is None:
+            continue
+        if age >= threshold:
+            out.append((name, age))
+    out.sort(key=lambda pair: pair[1], reverse=True)
+    return out

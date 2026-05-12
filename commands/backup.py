@@ -20,11 +20,22 @@ from pathlib import Path
 
 from lib import repair, sh
 from lib.cleanup import Cleanup
-from lib.config import Config
-from lib.drives import scan_connected_drives, select_drive
+from lib.config import Config, now_utc_iso
+from lib.drives import (
+    drive_staleness_days,
+    drives_in_danger_zone,
+    scan_connected_drives,
+    select_drive,
+)
 from lib.keystore import Keystore
 from lib.log import Log
+from lib.sanoid_retention import worst_case_retention_days
 from lib.zfs import ZFS, PoolInfo, syncoid_exclude_flag
+
+# How many days before retention runs out we start mentioning a drive
+# at the end of a successful backup. With 90-day retention, drives
+# untouched for 60+ days appear in the "danger zone" list.
+_DANGER_ZONE_MARGIN_DAYS = 30
 
 
 def _detect_live_usb() -> bool:
@@ -48,6 +59,79 @@ def _notify(title: str, message: str):
             + f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u {user})/bus "
             + f"notify-send '{title}' '{message}' --icon=drive-harddisk",
         )
+
+
+def _report_staleness_at_end(
+    cfg: Config,
+    pool_name: str,
+    age_at_start: int | None,
+    retention: int | None,
+    log: Log,
+) -> None:
+    """Print staleness reporting *after* the backup completes successfully.
+
+    Two distinct messages, both purely informative (no FATAL):
+
+    1. If the just-backed-up drive was already past the retention horizon
+       when we started this run, WARN the operator that it had crossed
+       the line — the backup we just finished may have only worked
+       because some shared snapshot happened to still exist, and next
+       time around it might not. Also explicitly notes that
+       ``zark repair-divergent`` does NOT fix staleness — it only fixes
+       divergence after a syncoid abort, which is a different problem.
+
+    2. INFO list of *other* known drives whose age has reached the
+       danger zone (``≥ retention - 30 days``), so the operator knows
+       which drive to grab next. The drive we just backed up is
+       intentionally excluded — its age is now zero and listing it
+       would be misleading.
+
+    Both messages are no-ops when ``retention`` is None (sanoid.conf
+    missing or empty) — staleness reporting is unavailable in that
+    case, with no value lost.
+    """
+    if retention is None:
+        return
+
+    # Message 1: drive that was expired at the start of the run.
+    if age_at_start is not None and age_at_start > retention:
+        log.warn(
+            f"Drive '{pool_name}' was {age_at_start} day(s) old when this "
+            f"backup started — past the {retention}-day retention horizon",
+        )
+        log.info(
+            "  This run succeeded, but next time the source's sanoid retention",
+        )
+        log.info(
+            "  may have purged the last shared snapshot. Consider rotating to",
+        )
+        log.info(
+            "  a fresher drive, or fully reinitialize this one:",
+        )
+        log.info(
+            "    sudo ./zark purge /dev/sdX  &&  sudo ./zark prepare /dev/sdX",
+        )
+        log.info(
+            "  Note: 'zark repair-divergent' does NOT fix staleness — it only",
+        )
+        log.info(
+            "  helps after syncoid aborts on actual divergent datasets.",
+        )
+
+    # Message 2: other drives in the danger zone.
+    danger = drives_in_danger_zone(
+        cfg.known_drives,
+        retention,
+        _DANGER_ZONE_MARGIN_DAYS,
+        exclude=pool_name,
+    )
+    if danger:
+        log.info("Other drives approaching retention horizon:")
+        for name, age in danger:
+            remaining = max(0, retention - age)
+            log.info(
+                f"  {name}: {age} day(s) old, ~{remaining} day(s) left before divergence",
+            )
 
 
 # Free-space margin: 1% of the source's used data, with a 1 GiB floor.
@@ -116,7 +200,7 @@ def _check_target_space(
                 f"({sh.humanize_bytes(src_info.used_bytes)})",
                 f"Target {pool_name}: avail={dst_info.avail} "
                 f"({sh.humanize_bytes(dst_info.avail_bytes)})",
-                f"Required margin: ≥ {sh.humanize_bytes(threshold)} " "(1% of source, min 1 GiB)",
+                f"Required margin: ≥ {sh.humanize_bytes(threshold)} (1% of source, min 1 GiB)",
             ],
             solutions=[
                 "Purge old snapshots on target: sudo ./zark purge",
@@ -234,12 +318,26 @@ def run(
     pool_name = drive.name
     pool_guid = drive.guid
 
+    # Capture how old the recorded backup is before we overwrite it. The
+    # value is reported back to the operator at the end of the run if
+    # the drive was already past the retention horizon when we started.
+    selected_info = cfg.known_drives.get(pool_name)
+    age_at_start: int | None = (
+        drive_staleness_days(selected_info) if selected_info is not None else None
+    )
+    if age_at_start is not None:
+        log.dbg(f"Last backup on {pool_name}: {age_at_start} day(s) ago")
+
+    # Worst-case retention horizon from sanoid.conf. Read once per
+    # backup run and reused for the staleness reporting at the end and
+    # for the --no-snapshot anchor check below.
+    retention_days = worst_case_retention_days(log)
+
     # ── Import pool ──────────────────────────────────────────────────────
     log.step(2, 9, f"Importing pool {pool_name}...")
 
     device = None
     if drive.drive_id != "<unknown>":
-
         by_id = Path(f"/dev/disk/by-id/{drive.drive_id}")
         if by_id.exists():
             device = str(by_id)
@@ -351,6 +449,21 @@ def run(
         _take_snapshots(log)
     else:
         log.info("--no-snapshot: replicating existing snapshots")
+        # When --no-snapshot is in effect, this run relies entirely on
+        # whatever snapshots already exist on source. If sanoid hasn't
+        # run recently enough to leave a fresh anchor that is also
+        # present on the target, syncoid will abort. Surface a WARN
+        # here so the operator sees the risk before syncoid emits its
+        # own (much noisier) error. Best-effort: if the check itself
+        # fails, we don't block — syncoid is the authoritative answer.
+        anchor = sh.run(
+            f"zfs list -H -o name -t snapshot -s creation {cfg.source_pool} | tail -1",
+        )
+        if not anchor.ok or not anchor.output.strip():
+            log.warn(
+                "--no-snapshot is set but no recent source snapshot was found; "
+                "syncoid may abort with no shared anchor",
+            )
 
     # ── Run syncoid ──────────────────────────────────────────────────────
     log.step(7, 9, "Running syncoid (this may take a while)...")
@@ -362,12 +475,29 @@ def run(
     start = time.time()
 
     # The base sync command. Held in a variable because we may need to
-    # invoke it twice: once normally, and once after auto-repair if syncoid
-    # aborts with "cowardly refusing" due to divergent datasets.
-    # syncoid 2.3.0+ uses --exclude-datasets; older releases use --exclude.
+    # invoke it twice: once normally, and once after auto-repair if
+    # syncoid aborts with "cowardly refusing" due to divergent datasets.
+    #
+    # ``--no-sync-snap`` tells syncoid not to create its own
+    # ``@syncoid_<host>_<ts>`` snapshots and instead anchor every
+    # incremental on the most recent snapshot it finds in source.
+    # Sanoid (run in step 6) provides those anchors already, so the
+    # extra ``syncoid_*`` snapshot is redundant. More importantly,
+    # without ``--no-sync-snap`` syncoid runs ``pruneoldsyncsnaps``
+    # after each transfer, which destroys *both* the source and
+    # target's previous ``@syncoid_*`` snapshots — including ones the
+    # other backup drives still depend on. The result was the
+    # alternating "could not find any snapshots to destroy / WARNING:
+    # zfs destroy ... failed: 256" cascade visible whenever the user
+    # rotated between drives. Disabling sync-snap eliminates the bug
+    # at the source.
+    #
+    # syncoid 2.3.0+ uses --exclude-datasets; older releases use
+    # --exclude.
     excl = syncoid_exclude_flag()
     rpool_syncoid_cmd = (
-        "syncoid --recursive --no-privilege-elevation --sendoptions=w "
+        "syncoid --recursive --no-privilege-elevation --no-sync-snap "
+        + "--sendoptions=w "
         + f"{excl}=rpool/keystore "
         + f"{cfg.source_pool} {target_pool}"
     )
@@ -452,7 +582,8 @@ def run(
 
     if zfs.pool_exists("bpool"):
         bpool_syncoid_cmd = (
-            "syncoid --recursive --no-privilege-elevation --preserve-properties "
+            "syncoid --recursive --no-privilege-elevation --no-sync-snap "
+            + "--preserve-properties "
             + f"bpool {pool_name}/bpool"
         )
         r = sh.run(bpool_syncoid_cmd, log=log)
@@ -554,6 +685,24 @@ def run(
     ks.umount()
     cleanup.run()
 
+    # ── Persist last_backup_at on the selected drive ─────────────────────
+    # Marks the drive as freshly backed up so future staleness reporting
+    # has a baseline. Done after cleanup so we don't write the timestamp
+    # if cleanup itself failed to export the pool — exporting failures
+    # do not alter the data we just transferred but are worth flagging
+    # in the recorded state, and this ordering keeps the file simple
+    # ("written iff backup truly finished"). A write failure here is a
+    # warn, not fatal: the backup itself succeeded; missing the timestamp
+    # only weakens the next run's reporting by one cycle.
+    info = cfg.known_drives.get(pool_name)
+    if info is not None:
+        info.last_backup_at = now_utc_iso()
+        try:
+            cfg.save_drives()
+            log.dbg(f"Recorded last_backup_at={info.last_backup_at} for {pool_name}")
+        except OSError as e:
+            log.warn(f"Could not persist last_backup_at for {pool_name}: {e}")
+
     # ── Summary ──────────────────────────────────────────────────────────
     dst_info2 = zfs.pool_info(pool_name) if zfs.pool_exists(pool_name) else dst_info
 
@@ -565,5 +714,8 @@ def run(
             f"Available:      {log.W}{dst_info2.avail if dst_info2 else '?'}{log.N}",
         ],
     )
+
+    # ── Staleness reporting (post-banner, informative only) ──────────────
+    _report_staleness_at_end(cfg, pool_name, age_at_start, retention_days, log)
 
     _notify("✅ Backup completed", f"Duration: {mins}m {secs}s")

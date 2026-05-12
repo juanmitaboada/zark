@@ -1,3 +1,96 @@
+zark (1.0.9-1) unstable; urgency=medium
+
+  * Snapshot retention: `template_minimal` raised from `daily=2`
+    (no weekly, no monthly) to `daily=14 weekly=8 monthly=3`
+    — roughly 3 months of guaranteed snapshot overlap. The old
+    values made any drive disconnected for more than 48 hours
+    diverge on every container dataset (rpool, rpool/ROOT,
+    rpool/var, bpool), even when the active leaves remained in
+    sync. The new values cost ~25 extra snapshots per dataset
+    and a few KB of metadata per snapshot. `template_production`
+    is unchanged.
+  * `zark setup` now diffs `[template_minimal]` against the
+    expected values via the existing diff machinery and surfaces
+    the migration through the same "Apply these changes?"
+    prompt as regular rule changes. Saying no leaves the file
+    untouched and re-running setup offers the migration again —
+    the choice is not persisted by design. Saying yes regenerates
+    sanoid.conf with `.backup.<timestamp>` written first,
+    preserving any manual sections under non-managed prefixes
+    (e.g. [tank/games]).
+  * syncoid `--no-sync-snap` for both rpool and bpool transfers.
+    Before this change, rotating between backup drives produced
+    a long cascade of "could not find any snapshots to destroy /
+    WARNING: zfs destroy ... failed: 256" warnings on every other
+    run. Root cause: syncoid's pruneoldsyncsnaps cleanup, run
+    after each transfer, destroys the source's previous
+    @syncoid_<host>_* snapshot — which was still the anchor for
+    the other drive. With --no-sync-snap, syncoid no longer
+    creates its own anchor snapshots and instead uses the most
+    recent existing snapshot in source (the sanoid autosnap_*
+    snapshots, taken in step 6 right before syncoid runs). The
+    bug is fixed at its root; no log filtering. Existing
+    @syncoid_carmen_* snapshots on connected drives are left in
+    place — they're inert with the new flag and die naturally
+    when the drive is purged.
+  * Drive staleness reporting in `zark backup` and
+    `zark repair-divergent`. A new `last_backup_at` field per
+    drive in known_drives.json records the ISO-8601 UTC
+    timestamp of every successful backup. Reporting is purely
+    informative — there is no FATAL based on staleness, because
+    the actual divergence threshold depends on sanoid retention
+    (which the operator can change) and a backup that has
+    crossed the threshold may still succeed if some shared
+    snapshot remains. Retention is read at runtime from
+    /etc/sanoid/sanoid.conf via the new lib/sanoid_retention.py
+    helper and computed as max(daily, weekly*7, monthly*30) over
+    templates actually used by [rpool*]/[bpool*] sections.
+    After a successful backup, if the selected drive was past
+    retention when the run started, a WARN explains the
+    situation and points at purge+prepare (with an explicit note
+    that repair-divergent does NOT fix staleness). Below, an
+    INFO list shows other known drives whose age has reached the
+    danger zone (>= retention - 30 days). repair-divergent shows
+    the same staleness note when no divergent datasets are found
+    but the drive is in the danger zone.
+  * `--no-snapshot` + missing source anchor surfaces a WARN.
+    When the operator passes --no-snapshot, backup no longer
+    takes a fresh sanoid pass; if sanoid hasn't run independently,
+    source has no recent anchor and syncoid may abort. The WARN
+    explains the risk; the run continues so syncoid's own error
+    wins authoritatively if it does fail.
+  * `zark repair-divergent` rewritten as an interactive review.
+    For every divergent dataset above 64 MB, prints a multi-line
+    context block (used, snapshot dates, last shared snapshot
+    with source, child datasets, hint) and asks per dataset to
+    destroy / skip / abort all. Datasets above 1 GiB additionally
+    require typing the literal string DESTROY (case-sensitive)
+    at a second prompt. Mid-flight zfs destroy failures prompt
+    once for the rest-of-session policy (continue / abort / keep
+    state and abort) and the choice sticks — no reprompt per
+    failure. Datasets at or below 64 MB are still auto-destroyed
+    silently, matching backup's threshold.
+  * Config: DriveInfo gains an optional `last_backup_at: str |
+    None` field. Config.load() and save_drives() tolerate the
+    field's absence in older known_drives.json files; the field
+    is emitted on disk only when populated.
+  * Documentation: README gains a new "Drive rotation and
+    retention policy" section between Requirements and
+    Testing, explaining the divergence mechanic, the two
+    retention templates with their windows, the staleness
+    reporting model, and the new interactive repair-divergent.
+    The Apport popup screenshot is added inline to the existing
+    "System program problem detected" troubleshooting section;
+    the image lives under docs/images/ in the source tree
+    (not shipped in the deb).
+  * Tests: 281 unit tests, all passing without root or ZFS.
+    New coverage for timestamps, stale-drive helpers, danger-zone
+    selection, sanoid retention parsing, template diff, backup
+    staleness reporting, and the interactive repair-divergent
+    flow (action prompt, double-confirm, failure policy).
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Fri, 12 May 2026 17:52:00 +0200
+
 zark (1.0.8-1) unstable; urgency=medium
 
   * Out-of-space handling: preventive guards plus reactive detection in

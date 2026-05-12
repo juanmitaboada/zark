@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 
@@ -39,6 +40,9 @@ from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _parse_args as _backup_parse_args,
 )
+from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
+    _report_staleness_at_end,
+)
 from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
 from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
     _UBUNTU_ROOT_CHILDREN_ALL,
@@ -50,13 +54,25 @@ from commands.recover import (  # pylint: disable=wrong-import-position # noqa: 
     _emit_dataset_layout_warnings,
     _force_latest_signed_alternative,
 )
+from commands.repair_divergent import (  # pylint: disable=wrong-import-position # noqa: E402
+    DOUBLE_CONFIRM_BYTES,
+    _destroy_loop,
+    _hint_for,
+    _prompt_action,
+    _prompt_double_confirm,
+    _prompt_failure_policy,
+    _shared_snapshot_with_source,
+    _snapshot_creation_dates,
+)
 from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E402
+    _TEMPLATE_MINIMAL_EXPECTED,
     _classify,
     _diff_rules,
     _discover_rules,
     _format_rule,
     _generate_sanoid_conf,
     _parse_sanoid_conf,
+    _print_diff,
     _signed_alternative_status,
 )
 from commands.simulate import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -68,17 +84,30 @@ from commands.simulate import (  # pylint: disable=wrong-import-position # noqa:
 )
 from lib import repair  # pylint: disable=wrong-import-position # noqa: E402
 from lib.cleanup import Cleanup  # pylint: disable=wrong-import-position # noqa: E402
-from lib.config import Config, DriveInfo  # pylint: disable=wrong-import-position # noqa: E402
+from lib.config import (  # pylint: disable=wrong-import-position # noqa: E402
+    Config,
+    DriveInfo,
+    now_utc_iso,
+    parse_utc_iso,
+)
 from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
     ConnectedDrive,
+    drive_staleness_days,
+    drives_in_danger_zone,
+    is_drive_stale,
     validate_external_block_device,
 )
 from lib.keystore import Keystore  # pylint: disable=wrong-import-position # noqa: E402
 from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
 from lib.repair import (  # pylint: disable=wrong-import-position # noqa: E402
     SIZE_LIMIT_BYTES,
+    DivergentDataset,
     find_divergent,
     is_divergence_error,
+)
+from lib.sanoid_retention import (  # pylint: disable=wrong-import-position # noqa: E402
+    _retention_days_of_template,
+    worst_case_retention_days,
 )
 from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -248,9 +277,9 @@ class TestConfig:
                 patch.object(Path, "is_dir", return_value=False),
             ):
                 result = Config.default_config_dir()
-            assert result == Path("/etc/zark"), (
-                f"system install with no config should default to /etc/zark, " f"got {result}"
-            )
+            assert result == Path(
+                "/etc/zark",
+            ), f"system install with no config should default to /etc/zark, got {result}"
         finally:
             if env_backup is not None:
                 os.environ["ZARK_CONFIG_DIR"] = env_backup
@@ -271,9 +300,9 @@ class TestConfig:
                 patch.object(Path, "is_dir", return_value=False),
             ):
                 result = Config.default_config_dir()
-            assert result == portable_root / "etc", (
-                f"portable run with no config should default to <root>/etc, " f"got {result}"
-            )
+            assert (
+                result == portable_root / "etc"
+            ), f"portable run with no config should default to <root>/etc, got {result}"
         finally:
             if env_backup is not None:
                 os.environ["ZARK_CONFIG_DIR"] = env_backup
@@ -3030,6 +3059,937 @@ class TestSignedAlternativeStatus:  # pylint: disable=missing-function-docstring
             )
         # No path ending in .signed.latest in the query output → None
         assert latest is None
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  lib/config.py — UTC timestamps
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestConfigTimestamps:  # pylint: disable=missing-function-docstring
+    """``now_utc_iso`` / ``parse_utc_iso`` — the single source of truth
+    for the timestamp written to ``last_backup_at``."""
+
+    def test_now_utc_iso_shape(self):
+        """Z-suffix, second precision, ISO-8601, no microseconds."""
+        s = now_utc_iso()
+        # YYYY-MM-DDTHH:MM:SSZ — exactly 20 characters.
+        assert len(s) == 20, f"expected 20 chars, got {len(s)}: {s!r}"
+        assert s.endswith("Z"), f"missing Z suffix: {s!r}"
+        assert s[4] == "-" and s[7] == "-" and s[10] == "T"
+        assert s[13] == ":" and s[16] == ":"
+
+    def test_parse_round_trip(self):
+        """now_utc_iso() output must round-trip through parse_utc_iso()."""
+        s = now_utc_iso()
+        dt = parse_utc_iso(s)
+        assert dt is not None
+        assert dt.tzinfo is not None  # must be tz-aware
+
+    def test_parse_accepts_z_suffix(self):
+        dt = parse_utc_iso("2026-05-08T15:05:57Z")
+        assert dt is not None
+        assert dt.year == 2026 and dt.month == 5 and dt.day == 8
+        assert dt.hour == 15 and dt.minute == 5 and dt.second == 57
+
+    def test_parse_accepts_explicit_offset(self):
+        """``datetime.isoformat()`` emits ``+00:00`` rather than ``Z`` —
+        the parser must accept both for robustness."""
+        dt = parse_utc_iso("2026-05-08T15:05:57+00:00")
+        assert dt is not None
+        assert dt.hour == 15
+
+    def test_parse_returns_none_on_garbage(self):
+        assert parse_utc_iso("not a date") is None
+        assert parse_utc_iso("") is None
+        assert parse_utc_iso("2026-13-99T99:99:99Z") is None
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  lib/config.py — known_drives.json with last_backup_at
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestConfigKnownDrivesTimestamp:  # pylint: disable=missing-function-docstring
+    """``Config.load`` and ``save_drives`` must tolerate the new
+    ``last_backup_at`` field's absence (legacy files) and round-trip
+    it cleanly when present."""
+
+    def test_load_legacy_file_without_field(self):
+        """A known_drives.json without ``last_backup_at`` parses
+        without errors and leaves the field as None."""
+        cfg = make_config()
+        (cfg.config_dir / "known_drives.json").write_text(
+            json.dumps({"black": {"guid": "111", "drive_id": "drv-A"}}) + "\n",
+        )
+        with patch.object(Config, "default_config_dir", return_value=cfg.config_dir):
+            loaded = Config.load()
+        info = loaded.known_drives["black"]
+        assert info.guid == "111"
+        assert info.drive_id == "drv-A"
+        assert info.last_backup_at is None
+
+    def test_load_modern_file_with_field(self):
+        cfg = make_config()
+        (cfg.config_dir / "known_drives.json").write_text(
+            json.dumps(
+                {
+                    "blue": {
+                        "guid": "222",
+                        "drive_id": "drv-B",
+                        "last_backup_at": "2026-05-08T15:05:57Z",
+                    },
+                },
+            )
+            + "\n",
+        )
+        with patch.object(Config, "default_config_dir", return_value=cfg.config_dir):
+            loaded = Config.load()
+        info = loaded.known_drives["blue"]
+        assert info.last_backup_at == "2026-05-08T15:05:57Z"
+
+    def test_save_omits_field_when_none(self):
+        """A drive that has never been backed up successfully must not
+        carry an empty ``last_backup_at`` on disk — keeps the JSON
+        minimal and avoids implying a never-populated field is set."""
+        cfg = make_config()
+        cfg.known_drives["black"] = DriveInfo(
+            name="black",
+            guid="111",
+            drive_id="drv-A",
+            last_backup_at=None,
+        )
+        cfg.save_drives()
+        data = json.loads((cfg.config_dir / "known_drives.json").read_text())
+        assert "last_backup_at" not in data["black"]
+        assert data["black"]["guid"] == "111"
+
+    def test_save_preserves_field_when_set(self):
+        cfg = make_config()
+        cfg.known_drives["blue"] = DriveInfo(
+            name="blue",
+            guid="222",
+            drive_id="drv-B",
+            last_backup_at="2026-05-08T15:05:57Z",
+        )
+        cfg.save_drives()
+        data = json.loads((cfg.config_dir / "known_drives.json").read_text())
+        assert data["blue"]["last_backup_at"] == "2026-05-08T15:05:57Z"
+
+    def test_load_ignores_non_string_field(self):
+        """A garbage ``last_backup_at`` (e.g. None or int from a hand-
+        edited file) is normalized to ``None`` rather than crashing."""
+        cfg = make_config()
+        (cfg.config_dir / "known_drives.json").write_text(
+            json.dumps(
+                {"black": {"guid": "1", "drive_id": "d", "last_backup_at": None}},
+            )
+            + "\n",
+        )
+        with patch.object(Config, "default_config_dir", return_value=cfg.config_dir):
+            loaded = Config.load()
+        assert loaded.known_drives["black"].last_backup_at is None
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  lib/drives.py — staleness helpers
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestDrivesStaleness:  # pylint: disable=missing-function-docstring
+    """``drive_staleness_days`` / ``is_drive_stale`` — the pre-flight
+    arithmetic that gates ``zark backup``."""
+
+    @staticmethod
+    def _info(last: str | None) -> DriveInfo:
+        return DriveInfo(name="x", guid="g", drive_id="d", last_backup_at=last)
+
+    def test_staleness_none_when_field_absent(self):
+        assert drive_staleness_days(self._info(None)) is None
+
+    def test_staleness_none_when_field_malformed(self):
+        """Malformed timestamps must not raise — the user shouldn't be
+        blocked by a typo in known_drives.json."""
+        assert drive_staleness_days(self._info("garbage")) is None
+
+    def test_staleness_zero_when_just_now(self):
+
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        info = self._info("2026-05-08T15:00:00Z")
+        assert drive_staleness_days(info, now=now) == 0
+
+    def test_staleness_counts_days(self):
+
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        info = self._info("2026-04-08T15:00:00Z")  # 30 days earlier
+        assert drive_staleness_days(info, now=now) == 30
+
+    def test_is_stale_at_threshold_boundary_not_stale(self):
+        """At exactly threshold_days, the drive is NOT yet stale —
+        is_drive_stale uses strict ``>`` so the boundary is fresh."""
+
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        info = self._info("2026-03-09T15:00:00Z")  # 60 days earlier
+        assert drive_staleness_days(info, now=now) == 60
+        assert not is_drive_stale(info, 60, now=now)
+
+    def test_is_stale_beyond_threshold(self):
+
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        info = self._info("2026-03-08T15:00:00Z")  # 61 days earlier
+        assert is_drive_stale(info, 60, now=now)
+
+    def test_is_stale_false_when_field_absent(self):
+        """Drives with no ``last_backup_at`` are not considered stale —
+        they auto-populate on first successful backup."""
+        assert not is_drive_stale(self._info(None), 60)
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/setup.py — template_minimal migration diff
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestSetupTemplateDiff:  # pylint: disable=missing-function-docstring
+    """``_diff_rules`` must surface a diff for ``[template_minimal]``
+    when the parsed values disagree with the expected constants.
+    Saying yes to the migration regenerates the file with the new
+    values — verified via a parse-of-generator round-trip."""
+
+    def test_no_diff_when_template_matches(self):
+        """A file generated by the current ``_generate_sanoid_conf``
+        must produce no template diff."""
+        text = _generate_sanoid_conf([])
+        parsed = _parse_sanoid_conf(text)
+        diff = _diff_rules(parsed, [])
+        assert not diff["templates"]
+
+    def test_diff_when_template_is_old_1_0_8_values(self):
+        """A file with the legacy daily=2/no-weekly/no-monthly values
+        must show up as a template diff with daily 2 → 14."""
+        old_text = (
+            "[template_minimal]\n"
+            "frequently = 0\nhourly = 0\ndaily = 2\nweekly = 0\n"
+            "monthly = 0\nyearly = 0\nautoprune = yes\nautosnap = yes\n"
+        )
+        parsed = _parse_sanoid_conf(old_text)
+        diff = _diff_rules(parsed, [])
+        assert len(diff["templates"]) == 1
+        name, before, after = diff["templates"][0]
+        assert name == "template_minimal"
+        assert before["daily"] == "2"
+        assert after["daily"] == "14"
+
+    def test_diff_when_template_section_missing(self):
+        """A file missing ``[template_minimal]`` entirely must surface
+        the migration so regeneration adds the section."""
+        text_no_tm = "[rpool]\nuse_template = minimal\nrecursive = no\n"
+        parsed = _parse_sanoid_conf(text_no_tm)
+        diff = _diff_rules(parsed, [])
+        # current[template_minimal] is missing (= {}) so it cannot equal
+        # the expected map → template diff is reported.
+        assert len(diff["templates"]) == 1
+
+    def test_expected_constants_match_generator(self):
+        """The constant ``_TEMPLATE_MINIMAL_EXPECTED`` must match what
+        ``_generate_sanoid_conf`` actually emits. They are intentionally
+        defined in two places (one is the on-disk source of truth, the
+        other is the comparison target); this test prevents silent
+        drift between them."""
+        text = _generate_sanoid_conf([])
+        parsed = _parse_sanoid_conf(text)
+        assert parsed["template_minimal"] == _TEMPLATE_MINIMAL_EXPECTED
+
+    def test_print_diff_includes_template_section(self):
+        """``_print_diff`` must surface the template diff in its
+        output, not silently drop it."""
+        diff = {
+            "added": [],
+            "removed": [],
+            "changed": [],
+            "manual": [],
+            "templates": [
+                (
+                    "template_minimal",
+                    {"daily": "2", "weekly": "0"},
+                    {"daily": "14", "weekly": "8"},
+                ),
+            ],
+        }
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _print_diff(log, diff)
+        out = buf.getvalue()
+        assert "template_minimal" in out
+        assert "daily" in out
+        assert "14" in out
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/backup.py — staleness reporting (informative only)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupStalenessReporting:  # pylint: disable=missing-function-docstring
+    """``_report_staleness_at_end`` is purely informative — never
+    fatals. Tests check that:
+      - the WARN about the drive being expired at start fires only when
+        ``age_at_start > retention_days``
+      - the INFO list of other drives in danger zone excludes the
+        just-backed-up drive
+      - both messages are skipped when retention is None (sanoid.conf
+        unavailable)
+    """
+
+    @staticmethod
+    def _cfg(*, drives: dict[str, DriveInfo]) -> Config:
+        cfg = make_config()
+        cfg.known_drives.update(drives)
+        return cfg
+
+    def test_silent_when_retention_unknown(self):
+        """``retention=None`` is the "no sanoid.conf" path — no
+        output at all."""
+        cfg = self._cfg(drives={})
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _report_staleness_at_end(cfg, "black", 100, None, log)
+        assert buf.getvalue() == "", "Expected no output when retention is None"
+
+    def test_warn_when_drive_expired_at_start(self):
+        """Selected drive was past retention when run started → WARN +
+        purge+prepare hint + 'repair-divergent does not fix
+        staleness' note."""
+        cfg = self._cfg(drives={})
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _report_staleness_at_end(cfg, "black", age_at_start=100, retention=90, log=log)
+        out = buf.getvalue()
+        assert "100 day(s) old" in out
+        assert "90-day retention" in out
+        assert "purge" in out and "prepare" in out
+        assert "repair-divergent" in out and "does NOT fix staleness" in out
+
+    def test_no_warn_when_drive_was_fresh(self):
+        cfg = self._cfg(drives={})
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _report_staleness_at_end(cfg, "black", age_at_start=10, retention=90, log=log)
+        out = buf.getvalue()
+        assert "past the" not in out
+
+    def test_lists_other_drives_in_danger_zone(self):
+        """Drives other than the backed-up one whose age ≥ (retention -
+        30) appear in the INFO list."""
+        five_days_ago = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        recent = (datetime.now(timezone.utc) - timedelta(days=5)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        cfg = self._cfg(
+            drives={
+                "blue": DriveInfo("blue", "1", "d1", last_backup_at=recent),
+                "green": DriveInfo("green", "2", "d2", last_backup_at=five_days_ago),
+            },
+        )
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _report_staleness_at_end(cfg, "blue", age_at_start=0, retention=90, log=log)
+        out = buf.getvalue()
+        assert "green" in out  # green is at 70 days (> 90 - 30)
+        assert "Other drives approaching" in out
+
+    def test_excludes_just_backed_up_drive_from_danger_list(self):
+        """Drive we just finished backing up has age 0 now; if we
+        included it the user would be confused. Test that ``exclude``
+        works."""
+        old = (datetime.now(timezone.utc) - timedelta(days=80)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        cfg = self._cfg(
+            drives={"black": DriveInfo("black", "1", "d", last_backup_at=old)},
+        )
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            # age_at_start=0 simulates "just-backed-up" semantics.
+            _report_staleness_at_end(cfg, "black", age_at_start=0, retention=90, log=log)
+        out = buf.getvalue()
+        assert "Other drives approaching" not in out
+        assert "black" not in out
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  lib/sanoid_retention.py — config parsing
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestSanoidRetention:  # pylint: disable=missing-function-docstring
+    """``worst_case_retention_days`` parses sanoid.conf and returns
+    the largest retention horizon among templates actually used by
+    rpool/bpool sections. Boundary cases:
+      - file missing: WARN + None
+      - no managed sections: None silent
+      - mixed templates: returns the largest
+      - only the buckets that matter for the horizon contribute
+    """
+
+    @staticmethod
+    def _conf(text: str) -> Path:
+        d = Path(tempfile.mkdtemp())
+        p = d / "sanoid.conf"
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_per_template_horizon_is_max_of_buckets(self):
+        # ``daily=14 weekly=8 monthly=3`` → max(14, 56, 90) = 90
+
+        assert (
+            _retention_days_of_template(
+                {"daily": "14", "weekly": "8", "monthly": "3"},
+            )
+            == 90
+        )
+        # Old template: daily=2, no weekly, no monthly → max(2, 0, 0) = 2
+        assert (
+            _retention_days_of_template(
+                {"daily": "2", "weekly": "0", "monthly": "0"},
+            )
+            == 2
+        )
+        # Production: max(7, 28, 90) = 90
+        assert (
+            _retention_days_of_template(
+                {"daily": "7", "weekly": "4", "monthly": "3"},
+            )
+            == 90
+        )
+
+    def test_returns_largest_used_template(self):
+        """Two templates, one with retention 90 used by rpool, one
+        with retention 2 used by bpool — pick the larger (90)."""
+        text = (
+            "[rpool]\nuse_template = production\nrecursive = no\n"
+            "[bpool]\nuse_template = minimal\nrecursive = no\n"
+            "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
+            "[template_minimal]\ndaily = 2\nweekly = 0\nmonthly = 0\n"
+        )
+        p = self._conf(text)
+        log = make_log()
+
+        assert worst_case_retention_days(log, conf_path=p) == 90
+
+    def test_returns_smaller_when_only_minimal_used(self):
+        """If only the smaller-retention template is referenced, that
+        one defines the horizon."""
+        text = (
+            "[rpool]\nuse_template = minimal\n"
+            "[template_minimal]\ndaily = 2\nweekly = 0\nmonthly = 0\n"
+            "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
+        )
+        p = self._conf(text)
+        log = make_log()
+
+        assert worst_case_retention_days(log, conf_path=p) == 2
+
+    def test_returns_none_when_file_missing(self):
+        """Missing sanoid.conf: WARN + None (silent under tests, but
+        the call must not raise)."""
+        log = make_log()
+
+        with redirect_stdout(StringIO()):
+            result = worst_case_retention_days(
+                log,
+                conf_path=Path("/tmp/zark-test-nonexistent.conf"),
+            )
+            assert result is None
+
+    def test_returns_none_when_no_managed_sections(self):
+        """File present but only template definitions, no [rpool*]/
+        [bpool*] sections referencing them."""
+        text = "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
+        p = self._conf(text)
+        log = make_log()
+
+        assert worst_case_retention_days(log, conf_path=p) is None
+
+    def test_ignores_zvol_sections_without_use_template(self):
+        """``autosnap=no`` zvol sections never define use_template
+        and must not contribute to the horizon."""
+        text = (
+            "[rpool/keystore]\nautosnap = no\nautoprune = no\n"
+            "[rpool]\nuse_template = production\n"
+            "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
+        )
+        p = self._conf(text)
+        log = make_log()
+
+        # Only rpool contributes (daily=7, weekly=4, monthly=3) → 90.
+        assert worst_case_retention_days(log, conf_path=p) == 90
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  lib/drives.py — drives_in_danger_zone
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestDrivesInDangerZone:  # pylint: disable=missing-function-docstring
+    """``drives_in_danger_zone`` returns drives whose age is at or
+    above ``retention - margin``, sorted age-desc, with the named
+    drive optionally excluded."""
+
+    @staticmethod
+    def _drive(name: str, last: str | None) -> DriveInfo:
+        return DriveInfo(name=name, guid="g", drive_id="d", last_backup_at=last)
+
+    def test_empty_when_no_drives(self):
+        result = drives_in_danger_zone({}, retention_days=90, margin_days=30)
+        assert not result
+
+    def test_skips_drives_without_last_backup_at(self):
+        drives = {"black": self._drive("black", None)}
+        assert not drives_in_danger_zone(drives, retention_days=90, margin_days=30)
+
+    def test_includes_drives_at_or_beyond_threshold(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        drives = {"black": self._drive("black", old)}
+        result = drives_in_danger_zone(drives, retention_days=90, margin_days=30)
+        assert len(result) == 1
+        assert result[0][0] == "black"
+        assert result[0][1] >= 60  # 90 - 30 = 60 threshold; 70 days qualifies
+
+    def test_excludes_drives_below_threshold(self):
+        recent = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        drives = {"black": self._drive("black", recent)}
+        result = drives_in_danger_zone(drives, retention_days=90, margin_days=30)
+        assert not result
+
+    def test_excludes_named_drive(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        drives = {
+            "black": self._drive("black", old),
+            "blue": self._drive("blue", old),
+        }
+        result = drives_in_danger_zone(
+            drives,
+            retention_days=90,
+            margin_days=30,
+            exclude="black",
+        )
+        assert len(result) == 1
+        assert result[0][0] == "blue"
+
+    def test_sorts_age_desc(self):
+        d70 = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        d80 = (datetime.now(timezone.utc) - timedelta(days=80)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        drives = {
+            "younger": self._drive("younger", d70),
+            "older": self._drive("older", d80),
+        }
+        result = drives_in_danger_zone(drives, retention_days=90, margin_days=30)
+        assert [name for name, _ in result] == ["older", "younger"]
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  commands/repair_divergent.py — interactive flow
+# ═════════════════════════════════════════════════════════════════════════
+
+
+def _make_div(target: str, used_bytes: int, used_human: str = "") -> DivergentDataset:
+    """Tiny factory for DivergentDataset fixtures."""
+    return DivergentDataset(
+        source=target.split("/", 1)[1] if "/" in target else target,
+        target=target,
+        used_bytes=used_bytes,
+        used_human=used_human or f"{used_bytes}B",
+    )
+
+
+class TestRepairDivergentHints:  # pylint: disable=missing-function-docstring
+    """``_hint_for`` classification — covers the three main cases the
+    operator sees in the per-dataset prompt block."""
+
+    def test_orphan_when_source_missing(self):
+        h = _hint_for("blue/rpool/old", source_exists=False, children=0)
+        assert "orphan" in h
+
+    def test_container_when_has_children(self):
+        h = _hint_for("blue/rpool", source_exists=True, children=5)
+        assert "container" in h
+
+    def test_leaf_when_no_children(self):
+        h = _hint_for("blue/rpool/var/log", source_exists=True, children=0)
+        assert "leaf" in h
+
+
+class TestRepairDivergentDoubleConfirm:  # pylint: disable=missing-function-docstring
+    """``_prompt_double_confirm`` — accepts only the literal string
+    ``DESTROY``. Anything else (yes, y, the dataset name, empty)
+    cancels."""
+
+    def test_accepts_literal_destroy(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="DESTROY"):
+            assert _prompt_double_confirm(log, "blue/rpool", "100G") is True
+
+    def test_rejects_lowercase(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="destroy"):
+            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
+
+    def test_rejects_yes(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="yes"):
+            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
+
+    def test_rejects_y(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="y"):
+            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
+
+    def test_rejects_empty(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
+
+    def test_accepts_destroy_with_whitespace(self):
+        """``.strip()`` on input means surrounding whitespace is OK —
+        the operator who hits space before pressing Enter shouldn't be
+        punished."""
+        log = make_log()
+        with (
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                return_value="  DESTROY  ",
+            ),
+        ):
+            assert _prompt_double_confirm(log, "blue/rpool", "100G") is True
+
+
+class TestRepairDivergentActionPrompt:  # pylint: disable=missing-function-docstring
+    """``_prompt_action`` and ``_prompt_failure_policy`` — verify the
+    selected index maps correctly to the documented sentinel
+    string. ``ask_choice`` reads via ``input()`` so we patch that."""
+
+    def test_action_destroy_first_choice(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="1"):
+            assert _prompt_action(log) == "destroy"
+
+    def test_action_skip_second_choice(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="2"):
+            assert _prompt_action(log) == "skip"
+
+    def test_action_abort_third_choice(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="3"):
+            assert _prompt_action(log) == "abort"
+
+    def test_action_default_skip_on_empty(self):
+        """Default is index=1 (skip) — the only fully reversible
+        choice. Empty input falls back to that."""
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            assert _prompt_action(log) == "skip"
+
+    def test_failure_policy_continue(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="1"):
+            assert _prompt_failure_policy(log) == "continue"
+
+    def test_failure_policy_abort(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="2"):
+            assert _prompt_failure_policy(log) == "abort"
+
+    def test_failure_policy_keep_state_abort(self):
+        log = make_log()
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value="3"):
+            assert _prompt_failure_policy(log) == "keep_state_abort"
+
+
+class TestRepairDivergentLoop:  # pylint: disable=missing-function-docstring
+    """``_destroy_loop`` end-to-end with mocked sh.run + input.
+
+    The loop has three branches under the prompt:
+      - small (≤ 64 MB) auto-destroyed
+      - big (> 64 MB) goes through prompt → destroy / skip / abort
+      - big (> 1 GiB) requires extra DESTROY confirmation
+      - any failed destroy triggers the once-per-session policy prompt
+    """
+
+    @staticmethod
+    def _make_zfs() -> ZFS:
+        return ZFS(make_log())
+
+    def test_auto_destroys_small_datasets(self):
+        """Datasets ≤ 64 MB are destroyed silently, no prompt."""
+        small = _make_div("blue/rpool/var", used_bytes=10 * 1024 * 1024)  # 10 MiB
+        mock = MockShell()
+        mock.on(f"zfs destroy -r {small.target}").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            destroyed, skipped, aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [small],
+            )
+        assert destroyed == [small.target]
+        assert not skipped
+        assert aborted is False
+
+    def test_big_destroy_with_user_confirm(self):
+        """A > 64 MB but ≤ 1 GiB dataset goes through the action
+        prompt. User picks ``destroy`` (option 1) and the destroy
+        succeeds — no double confirm because under 1 GiB."""
+        big = _make_div("blue/rpool", used_bytes=200 * 1024 * 1024)  # 200 MiB
+        mock = MockShell()
+        mock.on(f"zfs destroy -r {big.target}").succeeds()
+        # Children query for the dataset block — return empty.
+        mock.on_prefix("zfs list").succeeds()
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                return_value="1",  # action: destroy
+            ),
+        ):
+            destroyed, skipped, aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [big],
+            )
+        assert destroyed == [big.target]
+        assert not skipped
+        assert aborted is False
+
+    def test_big_skip(self):
+        """User skips — no destroy attempted."""
+        big = _make_div("blue/rpool", used_bytes=200 * 1024 * 1024)
+        mock = MockShell()
+        mock.on_prefix("zfs list").succeeds()
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                return_value="2",  # action: skip
+            ),
+        ):
+            destroyed, skipped, aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [big],
+            )
+        assert not destroyed
+        assert skipped == [big.target]
+        assert aborted is False
+        # No destroy command should have been invoked.
+        assert mock.was_not_called(f"zfs destroy -r {big.target}")
+
+    def test_big_abort_skips_remaining(self):
+        """User aborts on first big dataset — second one not even
+        prompted, both end up in ``skipped``."""
+        d1 = _make_div("blue/rpool", used_bytes=200 * 1024 * 1024)
+        d2 = _make_div("blue/rpool/x", used_bytes=200 * 1024 * 1024)
+        mock = MockShell()
+        mock.on_prefix("zfs list").succeeds()
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                return_value="3",  # action: abort
+            ),
+        ):
+            destroyed, skipped, aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [d1, d2],
+            )
+        assert not destroyed
+        assert sorted(skipped) == sorted([d1.target, d2.target])
+        assert aborted is True
+
+    def test_double_confirm_required_above_1gib(self):
+        """A > 1 GiB destroy is gated by the typed-DESTROY prompt.
+        Two ``input()`` calls happen: action choice (1=destroy), then
+        the literal ``DESTROY``. We use a side_effect list to feed
+        them in order."""
+        huge = _make_div("blue/rpool", used_bytes=2 * 1024**3)  # 2 GiB
+        assert huge.used_bytes > DOUBLE_CONFIRM_BYTES
+        mock = MockShell()
+        mock.on(f"zfs destroy -r {huge.target}").succeeds()
+        mock.on_prefix("zfs list").succeeds()
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                side_effect=["1", "DESTROY"],
+            ),
+        ):
+            destroyed, _skipped, _aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [huge],
+            )
+        assert destroyed == [huge.target]
+
+    def test_double_confirm_cancel_skips_dataset(self):
+        """User picks destroy on a > 1 GiB dataset but types ``yes``
+        (anything other than DESTROY) at the second prompt. Result:
+        nothing is destroyed."""
+        huge = _make_div("blue/rpool", used_bytes=2 * 1024**3)
+        mock = MockShell()
+        mock.on_prefix("zfs list").succeeds()
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                side_effect=["1", "yes"],  # action: destroy, then non-DESTROY answer
+            ),
+        ):
+            destroyed, skipped, _aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [huge],
+            )
+        assert not destroyed
+        assert skipped == [huge.target]
+        assert mock.was_not_called(f"zfs destroy -r {huge.target}")
+
+    def test_failure_policy_continue(self):
+        """Two big datasets, the destroy of the first FAILS, the
+        operator picks ``continue`` (option 1). The second dataset
+        is still attempted."""
+        d1 = _make_div("blue/rpool/a", used_bytes=200 * 1024 * 1024)
+        d2 = _make_div("blue/rpool/b", used_bytes=200 * 1024 * 1024)
+        mock = MockShell()
+        mock.on_prefix("zfs list").succeeds()
+        mock.on(f"zfs destroy -r {d1.target}").fails(stderr="busy")
+        mock.on(f"zfs destroy -r {d2.target}").succeeds()
+        # Inputs in order: action=destroy (1), action=destroy (1),
+        # failure_policy=continue (1).
+        # NOTE: failure prompt fires AFTER the failed destroy of d1,
+        # then we advance to d2's action prompt.
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                side_effect=["1", "1", "1"],
+            ),
+        ):
+            destroyed, skipped, aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [d1, d2],
+            )
+        assert destroyed == [d2.target]
+        assert d1.target in skipped
+        assert aborted is False
+
+    def test_failure_policy_abort(self):
+        """First destroy fails, operator picks ``abort`` (option 2).
+        Second dataset is not touched."""
+        d1 = _make_div("blue/rpool/a", used_bytes=200 * 1024 * 1024)
+        d2 = _make_div("blue/rpool/b", used_bytes=200 * 1024 * 1024)
+        mock = MockShell()
+        mock.on_prefix("zfs list").succeeds()
+        mock.on(f"zfs destroy -r {d1.target}").fails(stderr="busy")
+        # Inputs: action=destroy (1), failure_policy=abort (2).
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                side_effect=["1", "2"],
+            ),
+        ):
+            destroyed, skipped, aborted = _destroy_loop(
+                make_log(),
+                self._make_zfs(),
+                [d1, d2],
+            )
+        assert not destroyed
+        assert sorted(skipped) == sorted([d1.target, d2.target])
+        assert aborted is True
+        assert mock.was_not_called(f"zfs destroy -r {d2.target}")
+
+
+class TestRepairDivergentSnapshotHelpers:  # pylint: disable=missing-function-docstring
+    """``_snapshot_creation_dates`` and ``_shared_snapshot_with_source``
+    — small zfs-list parsers that feed the per-dataset block."""
+
+    def test_creation_dates_parses_tab_output(self):
+        mock = MockShell()
+        # The query that ``_snapshot_creation_dates`` issues — match the
+        # exact prefix to avoid colliding with other zfs list calls.
+        mock.on(
+            "zfs list -H -p -o name,creation -t snapshot -s creation blue/rpool",
+        ).succeeds(
+            "blue/rpool@autosnap_2026-04-01\t1743465600\n"
+            "blue/rpool@autosnap_2026-05-01\t1746057600\n",
+        )
+        with patch_sh(mock):
+            out = _snapshot_creation_dates("blue/rpool")
+        assert len(out) == 2
+        assert out[0][0] == "blue/rpool@autosnap_2026-04-01"
+
+    def test_creation_dates_empty_on_failure(self):
+        mock = MockShell()
+        mock.on_prefix(
+            "zfs list -H -p -o name,creation -t snapshot",
+        ).fails(stderr="no datasets")
+        with patch_sh(mock):
+            assert not _snapshot_creation_dates("blue/rpool")
+
+    def test_shared_snapshot_returns_most_recent_match(self):
+        """If both sides share two snapshots, the most recent
+        (lex-last) wins."""
+        mock = MockShell()
+        # _snapshot_set in lib.repair calls ``zfs list -H -o name -t
+        # snapshot <ds>`` — replicate that for both target and source.
+        mock.on("zfs list -H -o name -t snapshot blue/rpool").succeeds(
+            "blue/rpool@autosnap_2026-04-01\nblue/rpool@autosnap_2026-05-01\n",
+        )
+        mock.on("zfs list -H -o name -t snapshot rpool").succeeds(
+            "rpool@autosnap_2026-04-01\nrpool@autosnap_2026-05-01\n",
+        )
+        with patch_sh(mock):
+            shared = _shared_snapshot_with_source("blue/rpool", "rpool")
+        assert shared == "autosnap_2026-05-01"
+
+    def test_shared_snapshot_none_when_no_overlap(self):
+        mock = MockShell()
+        mock.on("zfs list -H -o name -t snapshot blue/rpool").succeeds(
+            "blue/rpool@autosnap_2025-01-01\n",
+        )
+        mock.on("zfs list -H -o name -t snapshot rpool").succeeds(
+            "rpool@autosnap_2026-05-01\n",
+        )
+        with patch_sh(mock):
+            assert _shared_snapshot_with_source("blue/rpool", "rpool") is None
 
 
 def main() -> int:

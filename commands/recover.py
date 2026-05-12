@@ -390,7 +390,7 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
     normally lives inside the LUKS-encrypted keystore zvol. Without that zvol,
     the recovered system has no way to load its keys at boot.
 
-    Two unsafe fallbacks were considered and deliberately rejected for v1.0.5:
+    Two unsafe fallbacks were considered and deliberately rejected:
 
       (b) Embed system.key in the target rootfs (e.g. /etc/zfs/system.key).
           Trivial to implement but degrades the security model — the raw key

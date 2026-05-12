@@ -1,6 +1,6 @@
 % ZARK(1) zark @VERSION@ | User Commands
 %
-% May 3, 2026
+% May 12, 2026
 
 # NAME
 
@@ -130,6 +130,59 @@ for the canonical end-to-end sequences.
     failure, or for invocations that have already taken snapshots
     by other means.
 
+    **Drive staleness reporting.** A **last_backup_at** field per
+    drive in **known_drives.json** records the ISO-8601 UTC timestamp
+    of every successful backup. Reporting is purely informative —
+    **backup** does not refuse to run on a drive that has not been
+    backed up in a long time, because the actual divergence threshold
+    depends on **sanoid** retention (which the operator can change)
+    and a backup that has crossed the threshold may still succeed if
+    some shared snapshot remains. When **syncoid** does abort, the
+    existing divergence handling in **repair-divergent** takes over.
+
+    The retention horizon is read at runtime from
+    **/etc/sanoid/sanoid.conf** and computed as **max(daily,
+    weekly\\*7, monthly\\*30)** over templates actually used by
+    **\[rpool\\*\]** or **\[bpool\\*\]** sections. After a successful
+    backup, two informative messages may appear after the **BACKUP
+    COMPLETED** banner:
+
+    1. If the selected drive was already past the retention horizon
+       when this run started, a **WARN** explains the situation and
+       points at **purge** + **prepare** (the only remediation that
+       fully reinitializes a drive that has aged past its anchor),
+       with an explicit note that **repair-divergent** does *not* fix
+       staleness — it only fixes divergent datasets after a
+       **syncoid** abort, which is a different problem.
+    2. An **INFO** list shows other known drives whose age has
+       reached the danger zone (**\\>= retention - 30** days), so the
+       operator knows which drive to grab next.
+
+    The field auto-populates on the first successful backup. Drives
+    that have never been backed up since the field was introduced
+    are silently skipped by the reporting. A failure to persist the
+    timestamp at the end of a backup is a warn, not fatal — the
+    backup data itself is already on the target.
+
+    **--no-snapshot anchor check.** When **--no-snapshot** is in
+    effect, **backup** does not take a fresh **sanoid** pass and
+    relies on whatever snapshots already exist in source. If no
+    recent source snapshot is found, **backup** emits a **WARN**
+    that **syncoid** may abort with no shared anchor, then proceeds
+    so **syncoid**'s own (more authoritative) error wins if it does
+    fail.
+
+    **--no-sync-snap.** **backup** invokes **syncoid** with
+    **--no-sync-snap** for both **rpool** and **bpool** transfers,
+    avoiding the rotation-warning cascade that occurred when more
+    than one backup drive shared a source: **syncoid**'s default
+    **pruneoldsyncsnaps** cleanup destroys the source's previous
+    **\@syncoid_\<host\>_\*** snapshot after each transfer, but that
+    snapshot may still be the anchor for another drive. Without
+    creating its own anchor snapshots, **syncoid** uses the most
+    recent existing snapshot in source — typically the
+    **autosnap_\*** snapshots from step 6.
+
     **backup** refuses to run from an Ubuntu Live USB: the live filesystem
     is not the system the user means to back up, and confusing the two
     would destroy good data on the backup drive.
@@ -179,19 +232,30 @@ for the canonical end-to-end sequences.
     layout.
 
 **repair-divergent**
-:   Interactively repair backup datasets whose snapshot history has
-    diverged from the source. Divergence usually appears when the
-    backup drive has been disconnected for longer than the source
-    pool's **sanoid**(8) retention policy, so the snapshot that was
-    once shared between source and target has been pruned on the
-    source. **backup** auto-resolves divergence silently when the
-    affected dataset is under 64 MB (almost always system metadata that
-    can be recreated from the next initial replication); larger
-    datasets are left alone and **backup** aborts with a pointer to
-    this command. **repair-divergent** lists every divergent dataset
-    with its size and asks for confirmation before destroying the
-    target side and queueing it for re-replication on the next
-    **backup** run. No source data is ever touched.
+:   Interactively review and repair backup datasets whose snapshot
+    history has diverged from the source. Divergence usually appears
+    when the backup drive has been disconnected for longer than the
+    source pool's **sanoid**(8) retention policy, so the snapshot
+    that was once shared between source and target has been pruned
+    on the source. **backup** auto-resolves divergence silently when
+    the affected dataset is under 64 MB (almost always system
+    metadata that can be recreated from the next initial
+    replication); larger datasets are left alone and **backup**
+    aborts with a pointer to this command. No source data is ever
+    touched.
+
+    For every divergent dataset above 64 MB, **repair-divergent**
+    prints a context block with the size, snapshot count and date
+    range on the target, the most recent snapshot suffix shared
+    with the source counterpart (or *none*), the child datasets
+    summary and a one-line hint, and asks the operator to choose
+    among **destroy**, **skip**, or **abort all**. Datasets above
+    1 GiB additionally require typing the literal string **DESTROY**
+    (case-sensitive) at a second prompt before being touched. If a
+    **zfs destroy** invocation fails mid-flight (busy zvol, lock
+    contention), the operator is asked once how to handle the rest
+    of the run — the choice (**continue**, **abort**, or **keep state
+    and abort**) sticks for the remainder of the session.
 
 **finish**
 :   Post-recovery finalisation, intended to be run *from inside the

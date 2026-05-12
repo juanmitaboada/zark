@@ -13,18 +13,58 @@ guided to create the file.
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1.0.8"
+VERSION = "1.0.9"
+
+
+def now_utc_iso() -> str:
+    """Current time as ISO-8601 UTC, second precision, ``Z`` suffix.
+
+    Single source of truth for the timestamp written to
+    ``known_drives.json`` under ``last_backup_at``. Kept here (rather
+    than in ``commands/backup.py``) so tests can monkeypatch a fixed
+    clock without reaching into a command module.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc_iso(s: str) -> datetime | None:
+    """Inverse of :func:`now_utc_iso`. Returns ``None`` on any parse error.
+
+    Tolerant of both the ``Z`` suffix and of an explicit ``+00:00``
+    (``datetime.isoformat()`` emits the latter when ``tzinfo`` is set).
+    Anything else returns ``None`` so the caller can decide what to do
+    with a malformed entry without raising into the user's face.
+    """
+    if not s:
+        return None
+    candidate = s.replace("Z", "+00:00") if s.endswith("Z") else s
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 @dataclass
 class DriveInfo:
-    """A known backup drive."""
+    """A known backup drive.
+
+    ``last_backup_at`` is an ISO-8601 UTC string (``YYYY-MM-DDTHH:MM:SSZ``)
+    written by ``zark backup`` when a backup completes successfully.
+    ``None`` means the drive has never been backed up since this field
+    became part of the layout. New entries also start with ``None`` and
+    auto-populate on the first successful backup.
+    """
 
     name: str  # pool name (dict key)
     guid: str  # zpool GUID (decimal string)
     drive_id: str  # /dev/disk/by-id/ identifier
+    last_backup_at: str | None = None  # ISO-8601 UTC, see module docstring
 
 
 @dataclass
@@ -98,6 +138,15 @@ class Config:
                         name=name,
                         guid=str(info["guid"]),
                         drive_id=str(info["drive_id"]),
+                        # Optional field; may be absent on older files
+                        # or freshly-prepared drives. Anything that is
+                        # not a string is normalized to None so
+                        # downstream code can treat it uniformly.
+                        last_backup_at=(
+                            str(info["last_backup_at"])
+                            if isinstance(info.get("last_backup_at"), str)
+                            else None
+                        ),
                     )
             except (json.JSONDecodeError, KeyError, TypeError) as e:
                 # Will be reported by the calling command
@@ -106,12 +155,20 @@ class Config:
         return cfg
 
     def save_drives(self):
-        """Write known_drives.json back to disk."""
+        """Write known_drives.json back to disk.
+
+        ``last_backup_at`` is emitted only when populated; absent fields
+        keep on-disk JSON minimal and avoid implying a never-populated
+        field is set.
+        """
         self.config_dir.mkdir(parents=True, exist_ok=True)
         drives_file = self.config_dir / "known_drives.json"
-        data = {}
+        data: dict[str, dict[str, str]] = {}
         for name, info in self.known_drives.items():
-            data[name] = {"guid": info.guid, "drive_id": info.drive_id}
+            entry: dict[str, str] = {"guid": info.guid, "drive_id": info.drive_id}
+            if info.last_backup_at:
+                entry["last_backup_at"] = info.last_backup_at
+            data[name] = entry
         drives_file.write_text(json.dumps(data, indent=2) + "\n")
 
     @property

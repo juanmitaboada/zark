@@ -240,7 +240,17 @@ def _generate_sanoid_conf(
                 out.append(f"{key} = {value}")
             out.append("")
 
-    # Templates — unchanged from the original config
+    # Templates — ``template_minimal`` retention is intentionally
+    # generous (``daily=14 weekly=8 monthly=3``) so that drive rotation
+    # works without divergence. Container datasets (``rpool``,
+    # ``rpool/ROOT``, ``rpool/var``, ``bpool``) all use this template;
+    # any drive disconnected longer than the worst-case retention loses
+    # its anchor in source and starts diverging on those datasets.
+    # The current values give ~3 months of guaranteed overlap. Cost:
+    # ~25 extra snapshots per container dataset and a few KB of metadata
+    # per snapshot — negligible because container datasets carry only
+    # metadata. ``template_production`` is unchanged from upstream
+    # examples — it already had ~3 months of headroom on active leaves.
     out.extend(
         [
             "[template_production]",
@@ -256,9 +266,9 @@ def _generate_sanoid_conf(
             "[template_minimal]",
             "frequently = 0",
             "hourly = 0",
-            "daily = 2",
-            "weekly = 0",
-            "monthly = 0",
+            "daily = 14",
+            "weekly = 8",
+            "monthly = 3",
             "yearly = 0",
             "autoprune = yes",
             "autosnap = yes",
@@ -300,6 +310,25 @@ def _print_rules_review(log: Log, rules: list[tuple[str, SanoidRule]]) -> None:
 
 
 _MANAGED_PREFIXES = ("rpool", "bpool")
+
+# Expected key/value pairs for ``[template_minimal]``.
+# When ``zark setup`` parses an existing ``sanoid.conf`` and finds the
+# template differs from this, the diff includes a ``template_minimal``
+# entry so the user is shown the migration before being asked to
+# apply it. The values must match what ``_generate_sanoid_conf``
+# emits (hardcoded above) — keeping them in two places is intentional:
+# the generator is the source of truth on disk, this constant is the
+# source of truth for the comparison.
+_TEMPLATE_MINIMAL_EXPECTED: dict[str, str] = {
+    "frequently": "0",
+    "hourly": "0",
+    "daily": "14",
+    "weekly": "8",
+    "monthly": "3",
+    "yearly": "0",
+    "autoprune": "yes",
+    "autosnap": "yes",
+}
 
 
 def _parse_sanoid_conf(text: str) -> dict[str, dict[str, str]]:
@@ -354,12 +383,18 @@ def _diff_rules(
 ) -> dict[str, list]:
     """Compare current sanoid.conf sections against the planned rules.
 
-    Returns four lists:
+    Returns five lists:
       added:   sections that will appear (name, planned_settings)
       removed: sections that will disappear (name, current_settings)
       changed: sections whose settings differ (name, current_settings, planned_settings)
       manual:  sections in current that aren't managed-prefix and aren't templates
                (e.g. user-added [tank/games]) — we won't touch them but we warn.
+      templates: template sections (template_minimal in particular) whose
+                values disagree with the current generator. Format:
+                (name, current_settings, expected_settings). Empty when
+                the templates already match. Distinct from regular rule
+                changes because the value space is different (daily/
+                weekly/monthly counts vs. use_template/recursive).
     """
     planned_map: dict[str, dict[str, str]] = {
         name: _rule_to_settings(rule) for name, rule in planned
@@ -369,6 +404,7 @@ def _diff_rules(
     removed: list[tuple[str, dict[str, str]]] = []
     changed: list[tuple[str, dict[str, str], dict[str, str]]] = []
     manual: list[tuple[str, dict[str, str]]] = []
+    templates: list[tuple[str, dict[str, str], dict[str, str]]] = []
 
     # Inspect current sections
     for name, settings in current.items():
@@ -386,7 +422,24 @@ def _diff_rules(
         if name not in current:
             added.append((name, settings))
 
-    return {"added": added, "removed": removed, "changed": changed, "manual": manual}
+    # Template comparison — only ``template_minimal`` is checked because
+    # ``template_production`` has been stable across releases and zark
+    # has never had a reason to update it. If the user's file lacks
+    # ``[template_minimal]`` entirely (older custom config), we still
+    # surface it as a divergence: regenerating will add it.
+    current_tm = current.get("template_minimal", {})
+    if current_tm != _TEMPLATE_MINIMAL_EXPECTED:
+        templates.append(
+            ("template_minimal", current_tm, dict(_TEMPLATE_MINIMAL_EXPECTED)),
+        )
+
+    return {
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "manual": manual,
+        "templates": templates,
+    }
 
 
 def _format_settings(settings: dict[str, str]) -> str:
@@ -401,12 +454,13 @@ def _format_settings(settings: dict[str, str]) -> str:
     return " ".join(parts) if parts else "(empty)"
 
 
-def _print_diff(log: Log, diff: dict[str, list]) -> None:
+def _print_diff(log: Log, diff: dict[str, list]) -> None:  # pylint: disable=too-many-locals
     """Print a human-readable summary of the diff."""
     added = diff["added"]
     removed = diff["removed"]
     changed = diff["changed"]
     manual = diff["manual"]
+    templates = diff.get("templates", [])
 
     # Compute width across all section names for clean alignment
     all_names: list[str] = (
@@ -414,6 +468,7 @@ def _print_diff(log: Log, diff: dict[str, list]) -> None:
         + [n for n, _ in removed]
         + [n for n, _, _ in changed]
         + [n for n, _ in manual]
+        + [n for n, _, _ in templates]
     )
     width = max(len(n) for n in all_names) if all_names else 30
 
@@ -428,6 +483,21 @@ def _print_diff(log: Log, diff: dict[str, list]) -> None:
         log.info(
             f"  ~ {name:<{width}}  {_format_settings(before)}  →  " + f"{_format_settings(after)}",
         )
+
+    # Template retention diff. Distinct from regular rule changes because
+    # the value space is different (daily/weekly/monthly counts vs.
+    # use_template/recursive). Rendered as a per-key listing so the user
+    # sees exactly which retention numbers move.
+    for name, before, after in templates:
+        log.info(f"  ~ [{name}] retention values:")
+        all_keys = sorted(set(before) | set(after))
+        for key in all_keys:
+            cur_val = before.get(key, "(missing)")
+            new_val = after.get(key, "(removed)")
+            if cur_val == new_val:
+                continue
+            log.info(f"      {key:<12}  {cur_val:<10}  →  {new_val}")
+
     log.info("")
     if manual:
         log.info(
@@ -614,7 +684,9 @@ def run(
         current = _parse_sanoid_conf(current_text)
         diff = _diff_rules(current, rules)
 
-        nothing_changes = not (diff["added"] or diff["removed"] or diff["changed"])
+        nothing_changes = not (
+            diff["added"] or diff["removed"] or diff["changed"] or diff.get("templates")
+        )
         if nothing_changes:
             if diff["manual"]:
                 log.ok("sanoid.conf already matches the policy above")

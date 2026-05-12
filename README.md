@@ -254,6 +254,46 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 
 ---
 
+## Drive rotation and retention policy
+
+zark supports rotating multiple backup drives — one at home, one off-site, an archival copy in a desk drawer — and the way snapshot retention is configured determines how long a drive can stay disconnected before its next backup will fail.
+
+### How divergence happens
+
+When `zark backup` runs, `syncoid` finds the most recent snapshot present on **both** the source pool (`rpool`) and the target backup drive, and replicates the delta from that anchor forwards. If the source's `sanoid` retention has purged every snapshot the target still holds, there is no anchor — `syncoid` aborts with `Cowardly refusing to destroy your existing target`. Container datasets (`rpool`, `rpool/ROOT`, `rpool/var`, `bpool`) are most exposed because they barely change and accumulate fewer snapshots than active leaves like `rpool/USERDATA`.
+
+### Retention windows
+
+`zark setup` writes two sanoid templates to `/etc/sanoid/sanoid.conf`:
+
+| Template | Datasets | Retention |
+|---|---|---|
+| `template_production` | `rpool/ROOT/<ubuntu>`, `rpool/USERDATA`, `bpool/BOOT` | hourly=24, daily=7, weekly=4, monthly=3 |
+| `template_minimal` | `rpool`, `rpool/ROOT`, `rpool/var`, `bpool`, anything new | daily=14, weekly=8, monthly=3 |
+
+Both give a worst-case overlap window of **roughly three months** before snapshots rotate out and the drive starts diverging. `template_minimal` was tightened from the original `daily=2` (no weekly or monthly) precisely because the old values made any drive disconnected for more than two days diverge on every container dataset.
+
+### Drive staleness reporting
+
+To help spot a forgotten drive before it crosses the divergence cliff, `zark backup` records a `last_backup_at` timestamp in `etc/known_drives.json` after every successful run. Reporting is purely informative — `zark backup` does not refuse to run on a drive that has not been backed up in a long time. The actual divergence threshold depends on sanoid's retention (which the operator can change), and a backup that has crossed it may still succeed if some shared snapshot remains. When syncoid does abort, the existing divergence handling in `repair-divergent` already takes over.
+
+The retention horizon is read at runtime from `/etc/sanoid/sanoid.conf` and computed as `max(daily, weekly*7, monthly*30)` over the templates actually used by `[rpool*]`/`[bpool*]` sections. After a successful backup, two informative messages may appear after the **BACKUP COMPLETED** banner:
+
+1. If the selected drive was already past the retention horizon when this run started, a **WARN** explains the situation and points at `zark purge` followed by `zark prepare` as the only remediation that fully reinitializes a drive that has aged past its anchor. The message also notes explicitly that `zark repair-divergent` does **not** fix staleness — it only fixes divergent datasets after a syncoid abort.
+2. An **INFO** list shows other known drives whose age has reached the danger zone (`>= retention - 30` days), so the operator knows which drive to grab next without running another command.
+
+The same staleness note is shown by `zark repair-divergent` when no divergent datasets are found but the selected drive is in the danger zone — an operator who came expecting a fix is told why this command can't help.
+
+### `--no-sync-snap` for syncoid
+
+`zark backup` invokes `syncoid` with `--no-sync-snap` for both `rpool` and `bpool` transfers. Without the flag, syncoid creates `@syncoid_<host>_<ts>` snapshots before each transfer and cleans up older ones afterwards via `pruneoldsyncsnaps` — but with multiple backup drives, this cleanup destroys the source snapshot that the *other* drive still uses as its anchor, producing a long cascade of "could not find any snapshots to destroy / WARNING: zfs destroy ... failed: 256" warnings on every other run. With `--no-sync-snap`, syncoid uses the most recent existing snapshot in source as the anchor (the `autosnap_*` snapshots that step 6 of `zark backup` takes via `sanoid --take-snapshots`), and the cascade is gone at its source.
+
+### `zark repair-divergent`
+
+When divergence happens despite the retention windows, `repair-divergent` walks every divergent dataset, shows size, snapshot dates, the last shared snapshot with the source, and child datasets summary, and asks per dataset whether to destroy, skip, or abort the run. Datasets above 1 GiB require typing the literal string `DESTROY` (case-sensitive) at a second prompt before being touched. The threshold is hardcoded — there is no `--yes` or `--force` flag.
+
+---
+
 ## Testing
 
 zark has two layers of automated testing.
@@ -311,6 +351,8 @@ Tool configuration lives in `pyproject.toml` (mypy, pyright, black, isort, flake
 ## Troubleshooting
 
 ### "System program problem detected" popup
+
+![Apport "System program problem detected" dialog](docs/images/apport-popup.png)
 
 Symptom: while running zark from the Ubuntu live USB, a small dialog appears with a question mark icon, the title `System program problem detected`, the question `Do you want to report the problem now?`, and two buttons: `Cancel` and `Report problem...`.
 
