@@ -13,6 +13,20 @@ One command to back up. One command to recover. Boot chain identical to a fresh 
 
 ---
 
+## ⚠️ Warning
+
+zark performs **destructive operations** on ZFS pools and disk devices, including pool destruction, dataset rollback, partition table rewriting, and boot chain modification.
+
+- **You can lose all data** on the target drives if you misidentify a device.
+- **You can render your system unbootable** if recovery is interrupted or misconfigured.
+- Always test on **non-production hardware** first.
+- Always keep **at least one independent backup** outside of zark's control.
+- The authors assume no responsibility for data loss, hardware damage, or system downtime resulting from the use of this tool.
+
+This software is provided "as is", without warranty of any kind, as detailed in the [Apache License 2.0](LICENSE).
+
+---
+
 ## Why zark?
 
 Recovering a ZFS-on-root Ubuntu system with full-disk encryption is notoriously difficult. The boot chain involves GRUB, EFI, initramfs/dracut, encrypted datasets, keystore volumes, and Secure Boot - all tightly coupled. A single misstep leaves you at an emergency shell with no clear path forward.
@@ -135,7 +149,7 @@ zark will:
 6. Install the GRUB guard and regenerate initrd
 7. Display post-recovery instructions
 
-Total recovery time: approximately one minute, plus the data transfer time itself."
+Total recovery time: approximately one minute, plus the data transfer time itself.
 
 ### After first boot
 
@@ -416,9 +430,23 @@ sudo ./zark repair-boot
 
 ---
 
+## Security notes
+
+- zark handles ZFS encryption passphrases and raw key material at runtime. Passphrases are never written to disk or echoed to stdout. If you suspect a leak (e.g. from `set -x` debug output added during local development), rotate the passphrase via `zfs change-key`.
+- Backup drives contain full copies of your encrypted datasets. Anyone with physical access to a backup drive **and** the passphrase can decrypt all data. Store backup drives physically secured.
+- The keystore zvol holds the raw encryption key in a LUKS-encrypted volume. Its security ultimately reduces to the strength of the LUKS passphrase you set during `zark recover`.
+- zark does not transmit data over the network. All operations are local to the machine and the connected backup drive.
+
+---
+
 ## License
 
-[Apache License Version 2.0](LICENSE)
+zark is licensed under the [Apache License, Version 2.0](LICENSE).
+
+- Full license text: [`LICENSE`](LICENSE)
+- Attribution requirements (propagated by redistributors): [`NOTICE`](NOTICE)
+
+Apache 2.0 includes an explicit patent grant from contributors to users and an "AS IS" disclaimer of warranties. See sections 3 (Grant of Patent License), 7 (Disclaimer of Warranty), and 8 (Limitation of Liability) of the license text for the legal specifics.
 
 ---
 
