@@ -1,4 +1,4 @@
-# Copyright 2026 Juanmi Taboada
+# Copyright 2026 Juanmi Taboada # pylint: disable=too-many-lines
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from lib import grub_guard, sh
-from lib.cleanup import Cleanup
+from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config
 from lib.drives import scan_connected_drives, select_drive
 from lib.keystore import SYSTEM_KEY_PATH, Keystore
@@ -807,6 +807,17 @@ def run(
 
     if not zfs.pool_import(pool_name, no_mount=True):
         log.fatal(f"Cannot import pool {pool_name}")
+
+    # Resolve the underlying device so the end-of-run prompt can offer
+    # an explicit eject of the USB backup drive. Purely a flush-window
+    # concern for the removable drive — never affects the internal disk
+    # we are restoring TO.
+    backup_device: str | None = None
+    if drive.drive_id and drive.drive_id != "<unknown>":
+        by_id = Path(f"/dev/disk/by-id/{drive.drive_id}")
+        if by_id.exists():
+            backup_device = str(by_id)
+
     cleanup.track_pool(pool_name)
 
     passphrase = log.ask_password(f"Passphrase for {pool_name}")
@@ -1484,3 +1495,10 @@ def run(
             f"     {log.W}sudo ./zark repair-boot{log.N}",
         ],
     )
+
+    # By this point the backup pool has been exported (steps 9 and 12)
+    # and any cleanup.run() exports have issued the kernel-side flush.
+    # Offer the eject before the final visible signal. Default "yes":
+    # the next step in the printed instructions above is "remove live
+    # USB and reboot", so the typical operator path is to disconnect.
+    prompt_eject_or_attach(backup_device, pool_name, log, default_eject=True)

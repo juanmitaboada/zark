@@ -1,3 +1,34 @@
+zark (1.0.11-1) stable; urgency=medium
+
+  * Safe USB disconnect: introduce sync + interactive eject + visible
+    banner at every command that finishes with a pool exported.
+    Mitigates pool-FAULTED-on-import when USB-SATA bridges that ignore
+    FUA acknowledge writes from volatile DRAM (observed under v1.0.10
+    on Micron CT2000X10* enclosures).
+  * lib/cleanup: new flush_device_cache() and eject_device() helpers.
+    Cleanup is now device-agnostic; the eject decision is the calling
+    command's, made interactively after the success banner.
+  * Command-specific defaults for the eject prompt: backup, umount,
+    purge, recover default to Y; prepare and repair-divergent default
+    to N so the prepare → backup and repair-divergent → backup flows
+    are preserved without forced unplug/replug. EOF on stdin (cron,
+    systemd, scripted) uses the default.
+  * lib/log: new banner_safe_unplug() (green, after eject) and
+    banner_drive_attached() (cyan, after declined eject) — visually
+    disjoint so the two states cannot be confused.
+  * eject(1) from util-linux issues SCSI SYNCHRONIZE CACHE + STOP UNIT;
+    no new package dependency.
+  * Tests: 20 new cases across TestCleanup, TestFlushAndEjectHelpers,
+    TestPromptEjectOrAttach, TestLog. Full suite at 299, under 2 s.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Thu, 21 May 2026 23:54:29 +0200
+
+zark (1.0.10-1) stable; urgency=medium
+
+  * No info
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Thu, 21 May 2026 23:54:29 +0200
+
 zark (1.0.9-1) unstable; urgency=medium
 
   * Snapshot retention: `template_minimal` raised from `daily=2`

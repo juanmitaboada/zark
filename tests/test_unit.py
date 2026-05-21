@@ -96,7 +96,12 @@ from commands.simulate import (  # pylint: disable=wrong-import-position # noqa:
     _parse_args,
 )
 from lib import repair  # pylint: disable=wrong-import-position # noqa: E402
-from lib.cleanup import Cleanup  # pylint: disable=wrong-import-position # noqa: E402
+from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
+    Cleanup,
+    eject_device,
+    flush_device_cache,
+    prompt_eject_or_attach,
+)
 from lib.config import (  # pylint: disable=wrong-import-position # noqa: E402
     Config,
     DriveInfo,
@@ -349,6 +354,49 @@ class TestLog:
                 log.fatal("test failure")
             except SystemExit as e:
                 assert e.code == 1
+
+    def test_banner_safe_unplug_contains_drive_name(self):
+        """banner_safe_unplug emits a visible message naming the drive.
+        Operators rely on this as the final signal that the USB drive
+        can be physically disconnected."""
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            log.banner_safe_unplug("blue")
+        out = buf.getvalue()
+        assert "Safe to unplug" in out
+        assert "blue" in out
+
+    def test_banner_safe_unplug_writes_to_log_file(self):
+        """The banner also lands in the log file (with ANSI stripped),
+        so post-mortem inspection can confirm whether the operator was
+        told it was safe to unplug."""
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".log") as f:
+            log_path = f.name
+        try:
+            log = Log(log_file=log_path)
+            with redirect_stdout(StringIO()):
+                log.banner_safe_unplug("carmenblue")
+            with open(log_path, encoding="utf-8") as f:
+                contents = f.read()
+            assert "Safe to unplug drive 'carmenblue'" in contents
+        finally:
+            os.unlink(log_path)
+
+    def test_banner_drive_attached_contains_drive_name(self):
+        """banner_drive_attached signals 'flushed but still attached' for
+        the eject-declined path. Operator should see the drive name and
+        the 'still attached' wording so they know the state."""
+        log = make_log()
+        buf = StringIO()
+        with redirect_stdout(buf):
+            log.banner_drive_attached("blue")
+        out = buf.getvalue()
+        assert "still attached" in out
+        assert "blue" in out
+        # Distinct from the safe-to-unplug banner — operators must not
+        # confuse the two states.
+        assert "Safe to unplug" not in out
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -839,9 +887,10 @@ class TestCleanup:
         cleanup.track_mount("/mnt/a")
         cleanup.track_mount("/mnt/b")
 
-        with patch_sh(mock):
-            with patch("pathlib.Path.is_mount", return_value=True):
-                cleanup.run()
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                with patch("pathlib.Path.is_mount", return_value=True):
+                    cleanup.run()
 
         # /mnt/b should be unmounted before /mnt/a (reverse order)
         umount_calls = [c for c in mock.calls if c.startswith("umount")]
@@ -873,6 +922,265 @@ class TestCleanup:
             cleanup.run()
 
         assert mock.was_not_called("zpool export")
+
+    def test_export_followed_by_sync(self):
+        """A successful zpool export must be followed by `sync` before
+        the cleanup returns. Without the sync, kernel write-back buffers
+        for the bridge can be lost on a subsequent unplug.
+        """
+        mock = MockShell()
+        log = make_log()
+        cleanup = Cleanup(log)
+        mock.on("zpool list backup").succeeds()
+        mock.on("zfs unload-key -r backup").succeeds()
+        mock.on("zpool export backup").succeeds()
+        mock.on("sync").succeeds()
+
+        cleanup.track_pool("backup")
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                cleanup.run()
+
+        export_idx = next(i for i, c in enumerate(mock.calls) if c == "zpool export backup")
+        sync_idx = next(i for i, c in enumerate(mock.calls) if c == "sync")
+        assert sync_idx > export_idx
+
+    def test_forced_export_also_flushes(self):
+        """Both export paths (success and forced) must trigger the flush.
+        Forced export was historically unprotected — the regression that
+        motivated the device-flush window."""
+        mock = MockShell()
+        log = make_log()
+        cleanup = Cleanup(log)
+        mock.on("zpool list backup").succeeds()
+        mock.on("zfs unload-key -r backup").succeeds()
+        mock.on("zpool export backup").fails(stderr="busy", rc=1)
+        mock.on("zpool export -f backup").succeeds()
+        mock.on("sync").succeeds()
+
+        cleanup.track_pool("backup")
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                cleanup.run()
+
+        assert mock.was_called("sync")
+
+    def test_cleanup_never_ejects(self):
+        """Cleanup is intentionally device-agnostic — it never issues
+        `eject`. The eject decision is the calling command's, made
+        interactively after the success banner."""
+        mock = MockShell()
+        log = make_log()
+        cleanup = Cleanup(log)
+        mock.on("zpool list blue").succeeds()
+        mock.on("zfs unload-key -r blue").succeeds()
+        mock.on("zpool export blue").succeeds()
+        mock.on("sync").succeeds()
+
+        cleanup.track_pool("blue")
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                cleanup.run()
+
+        assert mock.was_not_called("eject")
+
+    def test_failed_export_no_flush(self):
+        """If both export attempts fail, no flush is issued — the pool
+        is still alive and may have dirty in-flight writes that must not
+        be interrupted by a power-down."""
+        mock = MockShell()
+        log = make_log()
+        cleanup = Cleanup(log)
+        mock.on("zpool list backup").succeeds()
+        mock.on("zfs unload-key -r backup").succeeds()
+        mock.on("zpool export backup").fails(stderr="busy", rc=1)
+        mock.on("zpool export -f backup").fails(stderr="busy", rc=1)
+
+        cleanup.track_pool("backup")
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                cleanup.run()
+
+        assert mock.was_not_called("eject")
+        # `sync` may or may not have been issued (it is not on the
+        # failed-export branch); the critical guarantee is "no eject".
+
+    def test_exported_pools_query(self):
+        """exported_pools() reports drives that were successfully exported
+        — used by callers to know which pools were flushed."""
+        mock = MockShell()
+        log = make_log()
+        cleanup = Cleanup(log)
+        mock.on("zpool list blue").succeeds()
+        mock.on("zfs unload-key -r blue").succeeds()
+        mock.on("zpool export blue").succeeds()
+        mock.on("sync").succeeds()
+
+        cleanup.track_pool("blue")
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                cleanup.run()
+
+        assert cleanup.exported_pools() == ["blue"]
+
+
+class TestFlushAndEjectHelpers:
+    """Tests for the module-level flush primitives used both inside
+    Cleanup and by commands that perform their own teardown
+    (prepare, purge, umount)."""
+
+    def test_flush_device_cache_issues_sync(self):
+        """flush_device_cache() always issues sync(2)."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("sync").succeeds()
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                flush_device_cache(log)
+
+        assert mock.was_called("sync")
+
+    def test_flush_device_cache_does_not_eject(self):
+        """flush_device_cache() never ejects — that's eject_device's job.
+        Splitting the two is what lets commands like prepare leave the
+        drive attached for the followup backup."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("sync").succeeds()
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                flush_device_cache(log)
+
+        assert mock.was_not_called("eject")
+
+    def test_flush_device_cache_handles_sync_failure(self):
+        """A failed sync is WARN, not raise. The on-disk data is already
+        durable from zpool export; sync is belt-and-suspenders for the
+        kernel-side flush window."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("sync").fails(stderr="not enough memory", rc=1)
+
+        with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+            with patch_sh(mock):
+                flush_device_cache(log)
+        # No exception, call returned normally.
+
+    def test_eject_device_returns_true_on_success(self):
+        """eject_device() returns True on a successful eject."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("eject /dev/sdb").succeeds()
+
+        with patch_sh(mock):
+            assert eject_device("/dev/sdb", log) is True
+        assert mock.was_called("eject /dev/sdb")
+
+    def test_eject_device_returns_false_on_failure(self):
+        """eject_device() returns False on failure but does not raise.
+        The on-disk data is already durable from the preceding sync;
+        eject is belt-and-suspenders against the bridge cache layer."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("eject /dev/sdb").fails(stderr="device busy", rc=1)
+
+        with patch_sh(mock):
+            assert eject_device("/dev/sdb", log) is False
+
+
+class TestPromptEjectOrAttach:
+    """Tests for the interactive eject prompt + banner emission."""
+
+    def test_prompt_yes_ejects_and_emits_safe_unplug(self):
+        """Operator answers yes → eject_device called → banner_safe_unplug."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("eject /dev/sdb").succeeds()
+
+        buf = StringIO()
+        with patch_sh(mock):
+            with patch("builtins.input", return_value="y"):
+                with redirect_stdout(buf):
+                    prompt_eject_or_attach("/dev/sdb", "blue", log, default_eject=True)
+
+        assert mock.was_called("eject /dev/sdb")
+        assert "Safe to unplug" in buf.getvalue()
+        assert "still attached" not in buf.getvalue()
+
+    def test_prompt_no_skips_eject_and_emits_attached(self):
+        """Operator answers no → no eject → banner_drive_attached."""
+        mock = MockShell()
+        log = make_log()
+
+        buf = StringIO()
+        with patch_sh(mock):
+            with patch("builtins.input", return_value="n"):
+                with redirect_stdout(buf):
+                    prompt_eject_or_attach("/dev/sdb", "blue", log, default_eject=True)
+
+        assert mock.was_not_called("eject")
+        assert "still attached" in buf.getvalue()
+        assert "Safe to unplug" not in buf.getvalue()
+
+    def test_prompt_default_eject_true_on_eof(self):
+        """Non-interactive run (EOFError on input) uses default=True →
+        eject. Matches `backup` / `umount` / `purge` / `recover` behaviour
+        when invoked from a script or systemd timer."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("eject /dev/sdb").succeeds()
+
+        with patch_sh(mock):
+            with patch("builtins.input", side_effect=EOFError):
+                with redirect_stdout(StringIO()):
+                    prompt_eject_or_attach("/dev/sdb", "blue", log, default_eject=True)
+
+        assert mock.was_called("eject /dev/sdb")
+
+    def test_prompt_default_eject_false_on_eof(self):
+        """Non-interactive run with default=False (prepare / repair-divergent)
+        does NOT eject. Matches the post-prepare workflow where the next
+        step is `backup` against the same drive."""
+        mock = MockShell()
+        log = make_log()
+
+        buf = StringIO()
+        with patch_sh(mock):
+            with patch("builtins.input", side_effect=EOFError):
+                with redirect_stdout(buf):
+                    prompt_eject_or_attach(
+                        "/dev/sdb",
+                        "blue",
+                        log,
+                        default_eject=False,
+                    )
+
+        assert mock.was_not_called("eject")
+        assert "still attached" in buf.getvalue()
+
+    def test_prompt_none_device_skips_and_attaches(self):
+        """No resolvable device → no prompt, just banner_drive_attached
+        with an explanatory WARN. Operator can clean up later via
+        `zark umount`."""
+        mock = MockShell()
+        log = make_log()
+
+        buf = StringIO()
+        # input() must NOT be called when device is None.
+        with patch_sh(mock):
+            with patch("builtins.input", side_effect=AssertionError("must not prompt")):
+                with redirect_stdout(buf):
+                    prompt_eject_or_attach(None, "blue", log, default_eject=True)
+
+        assert mock.was_not_called("eject")
+        assert "still attached" in buf.getvalue()
 
 
 # ═════════════════════════════════════════════════════════════════════════

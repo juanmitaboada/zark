@@ -308,6 +308,55 @@ When divergence happens despite the retention windows, `repair-divergent` walks 
 
 ---
 
+## Safe USB disconnect
+
+ZFS issues writes with FUA (Force Unit Access) on critical metadata — uberblocks and the four redundant pool labels — meaning "do not acknowledge until this byte is on persistent media, not in volatile cache." Many cheap USB-SATA bridge chipsets ignore FUA and acknowledge from internal DRAM. ZFS believes the write is committed and `zpool export` reports success while the bridge still holds dirty pages; if the operator unplugs at that moment the kernel emits a last-ditch `SYNCHRONIZE CACHE` over the disconnecting cable, it fails with `DID_ERROR`, and the pending writes — possibly including the labels — are lost. Result: the pool comes back **FAULTED** on next import with `failed to unpack label 0/1/2/3`. Unrecoverable; not even `zpool import -FX` brings it back.
+
+zark protects against this in two layers at every point where a command finishes with a pool exported:
+
+1. **`sync(2)` + 2-second pause** — pushes the kernel page cache and dirty block-device buffers to the device, then gives the bridge firmware time to drain its internal queue. Always runs, no prompt.
+2. **Interactive `eject` prompt** — `eject(1)` issues SCSI `SYNCHRONIZE CACHE (0x35)` followed by `START STOP UNIT (stop=1)`. SYNCHRONIZE CACHE is the device's most authoritative flush primitive (the bridge sees it as a distinguished operation, distinct from inline FUA — most chipsets that cheat on FUA still honour it). STOP UNIT then powers the controller down.
+
+The eject is **never automatic**. After the success banner, zark asks:
+
+```
+Eject drive 'backup' now? (powers the device down) [Y/n]:
+```
+
+with a command-specific default chosen to match the typical next step:
+
+| Command            | Default eject | Why |
+|--------------------|---------------|-----|
+| `backup`           | yes           | Typical: done backing up, unplug. |
+| `umount`           | yes           | Operator signalled intent to disconnect by running `umount`. |
+| `purge`            | yes           | Drive is being retired or repurposed. |
+| `recover`          | yes           | Next step is unplug + reboot. |
+| `prepare`          | no            | Canonical follow-up is `backup` against the same drive. |
+| `repair-divergent` | no            | Canonical follow-up is `backup` to validate the fix. |
+| `repair-boot`      | n/a           | No removable drive involved; no prompt. |
+
+If the prompt is answered without input (script, cron, systemd timer), the default applies. There is no `--eject` / `--no-eject` flag — the prompt with a sensible default is the only knob.
+
+zark then emits one of two banners depending on the answer:
+
+```
+╔══════════════════════════════════════════════════════════╗
+║  💾  Safe to unplug drive 'backup'                       ║      ← after eject
+╚══════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════╗
+║  🔌  Drive 'backup' flushed, still attached              ║      ← after declining eject
+╚══════════════════════════════════════════════════════════╝
+```
+
+The colours and icons are deliberately disjoint so the two states are never confused.
+
+**Side-effect of STOP UNIT**: after a successful eject the drive **disappears from `/dev`** until physically replugged. This is intentional and lines up with the workflow. If a follow-up command on the same drive is planned, answer `n` and the drive stays in `/dev` — the kernel-side flush has still run, so a clean `umount` or another zark command later will prompt again.
+
+`repair-boot` does not prompt: it touches only the internal rpool/bpool on the system disk, never a removable drive, and refuses to run with external pools imported.
+
+---
+
 ## Testing
 
 zark has two layers of automated testing.

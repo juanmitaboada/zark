@@ -5,6 +5,84 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.11] — 2026-05-21
+
+### Safe USB disconnect — `sync` + sleep + interactive `eject` + visible banner
+
+Hardware validation of v1.0.10 uncovered a class of pool-corruption events that was not zark's fault but happened because zark gave the operator no visible signal of when the underlying device had actually flushed. A backup to drive `black` completed with `[OK] Pool black exported`, the operator extracted the USB drive shortly after, and the pool came back FAULTED on next import — all four redundant labels reported `failed to unpack label 0/1/2/3`. Forensic `dmesg` trace at unplug:
+
+```
+[27338.563] usb 2-1: USB disconnect
+[27338.582] sd 0:0:0:0: [sda] Synchronizing SCSI cache
+[27338.748] sd 0:0:0:0: [sda] Synchronize Cache(10) failed: hostbyte=DID_ERROR
+```
+
+and on attach, the smoking gun:
+
+```
+[27277.040] sd 0:0:0:0: [sda] Write cache: enabled, read cache: enabled,
+                              doesn't support DPO or FUA
+```
+
+ZFS issues writes with FUA (Force Unit Access) on critical metadata — uberblocks and the four redundant pool labels — meaning "do not acknowledge until this byte is on persistent media, not in volatile cache." Many cheap USB-SATA bridge chipsets (including the one in the Micron CT2000X10* enclosures used here) silently ignore FUA: they acknowledge from their internal DRAM buffer before the data has reached NAND. ZFS believes the write is committed and `zpool export` reports success while the bridge still holds dirty pages. The kernel emits a final `SYNCHRONIZE CACHE` SCSI command on USB disconnect, but if the cable is already out it fails with `DID_ERROR` and the pending writes — including possibly the labels — are lost. This is a well-known failure mode of ZFS on USB-SATA; zark is *for* portable backup on pendrive and must therefore make this safe.
+
+v1.0.11 introduces a kernel-side flush at every point where zark exits with a pool exported, plus an **interactive eject prompt** with command-specific defaults so the typical operator workflow — including `prepare` immediately followed by `backup` on the same drive — is preserved.
+
+#### Layer 1 — kernel-side flush, always
+
+A new module-level helper `flush_device_cache(log)` in `lib/cleanup.py` performs:
+
+1. **`sync(2)`** — kernel-side flush. Blocks until the kernel has emitted all dirty buffers to the device. Protects against losing the kernel's write-back cache.
+2. **2-second pause** (`USB_FLUSH_DELAY_SEC`, module-level constant, patchable in tests). Gives the bridge firmware a window to drain its internal write queue.
+
+This happens unconditionally after every successful `zpool export`, via `Cleanup.run()` for commands that go through `Cleanup` (`backup`, `recover`, `repair-divergent`, `repair-boot`) and via direct calls inline for the rest (`prepare`, `purge`, `umount`). Failures are non-fatal: by the time it runs, the on-disk data is already durable; what this layer protects is the operator's option to physically remove the drive a few seconds later without losing what the firmware has not yet confirmed.
+
+#### Layer 2 — interactive eject prompt
+
+A new module-level helper `eject_device(device, log)` issues SCSI `SYNCHRONIZE CACHE (0x35)` followed by `START STOP UNIT (stop=1)` via `eject(1)` (core `util-linux`, no new dependency). SYNCHRONIZE CACHE is the device's most authoritative flush primitive — the bridge sees it as a distinguished operation ("host is asking for a global flush right now") and most chipsets that cheat on inline FUA still honour it. STOP UNIT then powers the controller down so any cache concern is moot.
+
+**The eject is never automatic.** A new `prompt_eject_or_attach()` helper asks the operator after the operation's success banner. The default Y/N reflects the typical workflow:
+
+| Command            | Default eject | Rationale |
+|--------------------|---------------|-----------|
+| `backup`           | **yes**       | Typical end-of-session: one Enter unplugs. Operators rotating multiple backups answer `n` to keep the drive attached for the next run. |
+| `umount`           | **yes**       | The operator already signalled intent to disconnect by running `umount`. |
+| `purge`            | **yes**       | A purged drive is being retired or repurposed — disconnect is the next step. |
+| `recover`          | **yes**       | The printed next-steps tell the operator to unplug the live USB and reboot — they're done with the backup drive too. |
+| `prepare`          | **no**        | Canonical next step is `backup` against the freshly-prepared drive — auto-ejecting would force a pointless unplug/replug cycle. |
+| `repair-divergent` | **no**        | Canonical next step is `backup` to validate the fix. |
+| `repair-boot`      | n/a           | Touches only internal rpool/bpool on the system disk; no removable drive involved. No prompt. |
+
+EOF on stdin (cron / systemd timer / scripted run) uses the default. There is no `--eject` / `--no-eject` flag — the prompt with a sensible default is the only knob, consistent with zark's "explicit confirmation by design" policy.
+
+#### Two banners, distinct intent
+
+- **Green `banner_safe_unplug(drive)`** — `💾 Safe to unplug drive 'X'`. Emitted *after* a successful eject. The unambiguous end-of-output signal that the operator may now disconnect.
+- **Cyan `banner_drive_attached(drive)`** — `🔌 Drive 'X' flushed, still attached`. Emitted when the operator declined the eject. Tells them the kernel-side flush is done but the drive is *still in `/dev`* and a physical unplug now is not recommended — they should run `zark umount` (or accept the eject in a later command) first.
+
+Operators must never see one banner when the other was meant — the colour, icon, and wording are deliberately disjoint.
+
+#### Architecture: `Cleanup` is device-agnostic
+
+The classifier "external vs. internal pool" used to live inside `Cleanup` in earlier drafts of this change. It was moved out: `Cleanup` now does only what its name says — exports pools, unmounts mounts, closes keystores — and always pairs a successful export with `flush_device_cache()`. The eject decision is the calling command's, because only the command knows what the operator is likely to do next. Rejected approaches and their flaws:
+
+- **Auto-eject in `Cleanup`** (the test1 prototype): broke the `prepare → backup` flow by ejecting the drive between the two commands. Recoverable only by unplug/replug. Discarded.
+- **`hdparm -W 0`** to disable write cache permanently: ~3× slower backups, behaviour varies across enclosures, and the setting persists.
+- **`sg_sync` / `sdparm --command=sync`** to flush without STOP UNIT: would let the device stay attached after a flush, but neither is core on a minimal Ubuntu install. `eject` is in `util-linux` — always available — and the STOP UNIT side-effect is fine *because the operator just told us they were about to unplug*.
+- **Detecting USB-only and applying different code**: the FUA-broken behaviour is a property of misbehaving firmware, not USB specifically. The protection is unconditional.
+
+#### Tests
+
+Twenty new test cases in `tests/test_unit.py` across three classes: `TestCleanup` (export/sync/forced-export ordering, no-eject-from-Cleanup invariant, no-flush-on-failed-export, `exported_pools()` query API), `TestFlushAndEjectHelpers` (sync issued, never ejects, sync failure handling, eject_device return contract), `TestPromptEjectOrAttach` (yes/no branches emit the correct banner, default-on-EOF for both `True` and `False` cases, unresolvable device falls through to attached banner without prompting), plus the `banner_safe_unplug` / `banner_drive_attached` assertions in `TestLog`. `USB_FLUSH_DELAY_SEC` is a module-level constant precisely so tests can patch it to 0; the full unit suite (299 tests) runs in under 2 seconds.
+
+#### Operational notes
+
+- After answering "yes" to the eject prompt, the bridge is powered down. The drive **disappears from `/dev`** until physically replugged. This is intentional — the workflow is "we're done, disconnect" — but worth knowing if a follow-up command needs the same drive without replug.
+- After answering "no", the drive stays in `/dev`, the kernel-side flush has run, and the next zark command against the drive will work normally and prompt again at its end.
+
+## [1.0.10] — 2026-05-12
+---
+
 ## [1.0.9] — 2026-05-12
 
 ### Snapshot retention — `template_minimal` raised to ~3 months

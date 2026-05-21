@@ -21,6 +21,7 @@ wipes signatures, destroys partition table.
 from pathlib import Path
 
 from lib import sh
+from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import get_drive_id, get_drive_info, validate_external_block_device
 from lib.log import Log
@@ -121,6 +122,14 @@ def run(
         cfg.save_drives()
         log.ok(f"Removed '{matched_pool}' from known_drives.json")
 
+    # Flush kernel buffers before asking about the bridge power-down.
+    # Even though purge does not leave a pool behind, the dd/wipefs/
+    # sgdisk writes pass through the same write-back caching, and a
+    # dirty unplug here can leave residual signatures on NAND that
+    # confuse a later `prepare`.
+    flush_device_cache(log)
+
+    label = matched_pool if matched_pool else target_dev
     log.banner_ok(
         "DRIVE PURGED",
         [
@@ -128,3 +137,9 @@ def run(
             "Drive is blank and ready for reuse.",
         ],
     )
+
+    # Default to ejecting: a purged drive is, by definition, being
+    # retired or repurposed — the operator is most likely about to
+    # disconnect it. Answering "n" is the escape hatch for the rarer
+    # case of preparing a freshly-purged drive in the same session.
+    prompt_eject_or_attach(target_dev, label, log, default_eject=True)

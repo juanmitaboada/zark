@@ -40,10 +40,11 @@ so that a noisy storage system doesn't trigger a prompt per failure.
 """
 
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from lib import repair, sh
-from lib.cleanup import Cleanup
+from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import drive_staleness_days, scan_connected_drives, select_drive
 from lib.log import Log
@@ -446,6 +447,15 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
             f"Cannot import pool {pool_name}",
             solutions=[f"Try: zpool import -f {pool_name}"],
         )
+
+    # Resolve the underlying device so cleanup can flush + eject the
+    # bridge at the end of the run.
+    backup_device: str | None = None
+    if drive.drive_id and drive.drive_id != "<unknown>":
+        by_id = Path(f"/dev/disk/by-id/{drive.drive_id}")
+        if by_id.exists():
+            backup_device = str(by_id)
+
     cleanup.track_pool(pool_name)
 
     actual_guid = zfs.pool_guid(pool_name)
@@ -486,6 +496,9 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
                     "rotate to a fresher drive or run a fresh backup soon.",
                 )
         cleanup.run()
+        # Default to NOT ejecting: the operator who ran repair-divergent
+        # is typically about to run `zark backup` to confirm the fix.
+        prompt_eject_or_attach(backup_device, pool_name, log, default_eject=False)
         return
 
     # Quick visual table for the operator before we go dataset-by-dataset.
@@ -503,3 +516,6 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
 
     cleanup.run()
     _print_summary(log, destroyed, skipped, aborted=aborted)
+    # Default to NOT ejecting: same rationale as the early-return path —
+    # backup-after-repair is the canonical next step.
+    prompt_eject_or_attach(backup_device, pool_name, log, default_eject=False)

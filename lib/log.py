@@ -158,6 +158,70 @@ class Log:
         print(f"{self.BOLD}{self.G}╚{'═' * w}╝{self.N}")
         self.blank()
 
+    def banner_safe_unplug(self, drive: str):
+        """Distinct prominent banner indicating a drive is safe to unplug.
+
+        Emitted at the very end of a successful operation, *after* the
+        operation's own ``banner_ok`` and *after* the device-flush window
+        (sync + sleep + eject) has elapsed. Serves as the unambiguous
+        end-of-output signal that the operator may now physically
+        disconnect the USB drive without risking pool corruption.
+
+        Without this signal, a hurried operator can act on the
+        operation's success banner and unplug while the device firmware
+        still holds dirty pages in its DRAM cache, with the well-known
+        consequence that the four pool labels never reach NAND and the
+        pool comes back FAULTED on next import.
+        """
+        w = 58
+        text = f"💾  Safe to unplug drive '{drive}'"
+        # Line layout:  "║" + "  " + text + " "*pad + "║"
+        # Visible inner width must equal w. The 💾 emoji takes 2 terminal
+        # columns but Python's len() counts it as 1, so we subtract one
+        # extra column. The "  " leading indent accounts for 2 more.
+        pad = max(0, w - len(text) - 3)
+        self.blank()
+        print(f"{self.BOLD}{self.G}╔{'═' * w}╗{self.N}")
+        print(
+            f"{self.BOLD}{self.G}║{self.N}  "
+            f"{self.W}{text}{self.N}{' ' * pad}{self.BOLD}{self.G}║{self.N}",
+        )
+        print(f"{self.BOLD}{self.G}╚{'═' * w}╝{self.N}")
+        self.blank()
+        self._to_file(f"Safe to unplug drive '{drive}'")
+
+    def banner_drive_attached(self, drive: str):
+        """Banner for the "flushed but still attached" path.
+
+        Counterpart to ``banner_safe_unplug``: when the operator
+        declines the post-operation eject (typical after ``prepare`` if
+        a ``backup`` will follow against the same drive, or after
+        ``backup`` if the operator plans to back up other drives in the
+        same session), the bridge stays powered on and the drive
+        remains visible in ``/dev``. This banner makes that state
+        explicit so the operator knows the kernel-side flush is done
+        but a physical unplug right now is *not* recommended — they
+        should run ``zark umount`` (or accept the eject in a later
+        command) first.
+
+        The cyan colour (matching ``banner()``, distinct from the green
+        of ``banner_safe_unplug``) and the 🔌 icon reinforce
+        "still plugged in" visually.
+        """
+        w = 58
+        text = f"🔌  Drive '{drive}' flushed, still attached"
+        # 🔌 occupies 2 terminal columns; see banner_safe_unplug.
+        pad = max(0, w - len(text) - 3)
+        self.blank()
+        print(f"{self.BOLD}{self.C}╔{'═' * w}╗{self.N}")
+        print(
+            f"{self.BOLD}{self.C}║{self.N}  "
+            f"{self.W}{text}{self.N}{' ' * pad}{self.BOLD}{self.C}║{self.N}",
+        )
+        print(f"{self.BOLD}{self.C}╚{'═' * w}╝{self.N}")
+        self.blank()
+        self._to_file(f"Drive '{drive}' flushed, still attached")
+
     def banner_error(self, title: str, lines: list[str] | None = None):
         """Red error banner."""
         w = 58

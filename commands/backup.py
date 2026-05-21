@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import repair, sh
-from lib.cleanup import Cleanup
+from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config, now_utc_iso
 from lib.drives import (
     drive_staleness_days,
@@ -730,5 +730,14 @@ def run(
 
     # ── Staleness reporting (post-banner, informative only) ──────────────
     _report_staleness_at_end(cfg, pool_name, age_at_start, retention_days, log)
+
+    # By this point cleanup.run() has exported the pool and issued the
+    # kernel-side flush (sync + sleep). Ask the operator whether to also
+    # power the bridge down now. Default is "yes" because the typical
+    # path after a backup is "I'm done, I'll unplug" — Enter ejects. For
+    # operators rotating multiple backups in one session, "n" keeps the
+    # drive in /dev so the next zark command can use it without
+    # unplug/replug.
+    prompt_eject_or_attach(device, pool_name, log, default_eject=True)
 
     _notify("✅ Backup completed", f"Duration: {mins}m {secs}s")

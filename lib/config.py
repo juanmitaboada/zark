@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 
 
 def now_utc_iso() -> str:

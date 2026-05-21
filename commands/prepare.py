@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from lib import sh
+from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config, DriveInfo
 from lib.drives import get_drive_id, get_drive_info, validate_external_block_device
 from lib.log import Log
@@ -185,6 +186,7 @@ def run(
     log.ok(f"Pool GUID: {new_guid}")
 
     _ = zfs.pool_export(new_pool)
+    flush_device_cache(log)
 
     # Auto-register in known_drives.json
     cfg.known_drives[new_pool] = DriveInfo(
@@ -209,3 +211,9 @@ def run(
             f"Run backup: {log.W}sudo ./zark backup{log.N}",
         ],
     )
+
+    # Default to NOT ejecting: the typical workflow after `prepare` is
+    # `zark backup` against the drive that was just prepared. Auto-
+    # ejecting would force a pointless unplug/replug cycle. Operators
+    # who really want to disconnect now can answer "y".
+    prompt_eject_or_attach(target_dev, new_pool, log, default_eject=False)
