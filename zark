@@ -50,9 +50,11 @@ COMMANDS = {
     "finish": "Post-recovery finalization (run from recovered system)",
     "mount": "Mount a backup pool for inspection / chroot / recovery",
     "umount": "Unmount a previously mounted backup pool",
+    "chroot": "Open an interactive chroot into the installed ZFS system (live USB)",
     "explore": "Scan for ZFS pools, show known/unknown status",
     "monitor": "Live progress monitor (run in separate terminal)",
     "clean": "Emergency cleanup: unmount everything, export all pools",
+    "health": "Non-destructive risk checks on a backup drive",
 }
 
 
@@ -133,6 +135,16 @@ def main():
     # Import and run the command. CLI uses kebab-case (e.g. "repair-boot"),
     # Python module names use snake_case (e.g. "repair_boot.py").
     try:
+        # zark's own recovery and setup operations import the backup pool
+        # and/or run apt deliberately; mark them internal so the apt guard
+        # hook (installed on recovered/productive systems) does not block
+        # them — e.g. setup's own dependency install must not be refused by
+        # a guard a previous setup installed. Routine operations (backup,
+        # mount, chroot, prepare) are intentionally left unmarked so the
+        # guard still protects against an accidental kernel/GRUB upgrade
+        # while a backup drive is connected.
+        if cmd_name in ("setup", "recover", "finish", "repair-boot"):
+            os.environ["ZARK_INTERNAL"] = "1"
         mod_name = cmd_name.replace("-", "_")
         mod = __import__(f"commands.{mod_name}", fromlist=[mod_name])
         mod.run(cmd_args)

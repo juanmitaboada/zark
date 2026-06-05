@@ -38,7 +38,7 @@ future is automatically covered the next time setup runs.
 from pathlib import Path
 from typing import TypedDict
 
-from lib import sh
+from lib import apt_guard, sh
 
 # from lib.config import Config
 from lib.log import Log
@@ -767,6 +767,12 @@ def run(
     # older shim variant, which is rejected after SBAT updates.
     log.step(5, 5, "Verifying Secure Boot binaries...")
     _check_secure_boot_alternatives(log)
+
+    # Install the apt guard on this (running) productive system. Unlike the
+    # grub guard — which is a recovery-time tool — this protects the live
+    # system from the unattended-upgrades vector: a background kernel/GRUB
+    # upgrade running while a zark backup drive is plugged in.
+    apt_guard.install(target_root="", log=log)
 
     log.banner_ok(
         "SETUP COMPLETE",

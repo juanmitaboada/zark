@@ -291,3 +291,24 @@ def part(disk: str, num: int) -> str:
     if disk[-1].isdigit():
         return f"{disk}p{num}"
     return f"{disk}{num}"
+
+
+def is_live_usb() -> bool:
+    """True when running from Ubuntu live media rather than an installed system.
+
+    Detection combines the kernel cmdline markers Ubuntu's live media sets
+    (``boot=casper`` / ``boot=live`` / ``live-media``) with the overlay mount
+    points a casper session creates (``/rofs``, ``/cow``). Routed through
+    :func:`run` (rather than reading ``/proc`` directly) so the unit-test mock
+    shell can drive it deterministically.
+
+    Single source of truth for the "are we on live media?" question. ``recover``
+    and ``repair-boot`` both consult it to refuse operating on the *running*
+    installed system, where the supported path is ``zark finish`` instead.
+    Note that an installed ZFS-on-root Ubuntu is **not** live media, so this
+    returns False there — which is exactly the signal those commands want.
+    """
+    r = run("cat /proc/cmdline")
+    if r.ok and any(k in r.output for k in ("boot=casper", "boot=live", "live-media")):
+        return True
+    return run("test -d /rofs").ok or run("test -d /cow").ok

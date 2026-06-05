@@ -85,6 +85,34 @@ for the canonical end-to-end sequences.
     backup is in flight. Reports pool health, the current **syncoid**(8)
     transfer rate and snapshot counts.
 
+**health** \[*device*\]
+:   Interactive drive analysis and debugging tool. With a *device* it checks
+    that device; without one it scans connected non-system drives and lets
+    you pick. It first asks whether to run a *read-only* check (default) or a
+    *destructive* write-and-verify test, gathers any further choices up front,
+    then runs unattended except for a single pause.
+
+    The read-only check inspects kernel/sysfs state for risk factors: a
+    USB-SATA bridge that reports it does not support DPO/FUA, the UAS
+    transport on a bridge that may mishandle it, and the bridge's USB VID:PID
+    against a known-problematic list. It writes nothing and flags *risk*
+    only — it cannot prove a bridge honest, which shows solely under load.
+
+    The destructive test (after explicit confirmation, on a blank drive)
+    creates a throwaway pool and writes with transaction churn — *fast*
+    (~2 GB), *medium* (~15 GB), or *surface* (whole disk, capped) — then
+    re-imports to confirm the writes persisted. An optional *cold* pass
+    powers the device down, waits for you to physically reconnect it, and
+    re-imports, so the read-back comes strictly from NAND rather than the
+    bridge's cache. Time estimates are shown from a measured write speed. The
+    throwaway pool is always destroyed afterwards, leaving the drive blank.
+
+    Whenever a risk or test failure is found, a self-contained diagnostic
+    report is written to */tmp* (environment, drive, bridge VID:PID, findings,
+    dmesg tail) with instructions for filing a GitHub issue; you may choose to
+    obfuscate serials/GUIDs. See the enclosure notes in **docs/HARDWARE.md**.
+    The read-only check also runs at the start of **prepare**.
+
 ## Backup workflow
 
 **setup**
@@ -92,7 +120,9 @@ for the canonical end-to-end sequences.
     **sanoid**(8) snapshot policies. Installs the packages listed in the
     **DEPENDENCIES** section, drops a **sanoid** template tuned for
     Ubuntu-on-ZFS into */etc/sanoid/*, and registers the **sanoid** systemd
-    timer so snapshots are taken automatically.
+    timer so snapshots are taken automatically. Also installs the apt guard
+    (see **NOTES**) on the running system, so a background kernel or GRUB
+    upgrade cannot half-apply while a backup drive is connected.
 
 **prepare** \[*device*\]
 :   Initialise a brand-new external drive as a **zark** backup target. The
@@ -107,6 +137,13 @@ for the canonical end-to-end sequences.
     **rpool/keystore** zvol, and registers the new pool in
     **known_drives.json**.
 
+    Before doing any work, **prepare** runs the same non-destructive risk
+    check as **health** and, if a risk factor is present, warns and asks for
+    confirmation. After the transfer it performs a read-back verification
+    (identical to **backup**'s): because the initial raw send is a full
+    write-under-load, a successful re-import here proves the bridge survives
+    real load. If the read-back fails the drive is **not** registered.
+
 **backup** \[**--no-snapshot**\]
 :   Run an incremental backup to the connected, registered backup drive.
     Auto-detects which known drive is plugged in, imports the pool,
@@ -115,6 +152,20 @@ for the canonical end-to-end sequences.
     synchronises **bpool**, exports the backup pool cleanly and (if the
     desktop environment is running) emits a **notify-send**(1)
     summary.
+
+    **Read-back verification.** After exporting, **backup** drops the
+    kernel page cache and re-imports the pool read-only by its exact
+    device, requiring an **ONLINE** state before reporting the backup
+    as safe. This guards against USB-SATA bridges that misreport cache
+    flushing (FUA): such a bridge can let **zpool export** succeed over
+    a pool that is no longer importable, with labels intact but
+    spacemaps lost (the on-disk symptom is **metaslab_init failed
+    [error=52]** on the next open). When the read-back fails, **backup**
+    prints a **BACKUP NOT VERIFIED** banner and stops before the
+    safe-to-unplug prompt — the transferred data is not trustworthy even
+    though **syncoid** and **export** reported success. The check is
+    always on. See the enclosure notes in the project's
+    **docs/HARDWARE.md**.
 
     **Snapshot policy.** **sanoid**(8) takes snapshots automatically
     via its systemd timer (enabled by **zark setup**), typically
@@ -231,6 +282,23 @@ for the canonical end-to-end sequences.
     drive paths or UUIDs that no longer match the current firmware
     layout.
 
+**chroot** \[*device*\]
+:   Open an interactive **chroot**(1) into the installed ZFS system from a
+    live USB. Imports **rpool** and **bpool** under an alternate root,
+    unlocks the keystore, mounts the boot environment, sets up the
+    **/proc**, **/sys**, **/dev**, **/dev/pts**, **/run**, **efivars** and
+    ESP bind mounts a chroot needs, and starts a login shell inside the
+    system. Inside, ordinary tools (**apt**(8), **update-grub**(8),
+    **dpkg-reconfigure**(8)) behave as on a booted system. On exit the
+    command unmounts everything and exports both pools cleanly, so the next
+    real boot imports them without **-f**.
+
+    The optional *device* is an import hint (for example */dev/nvme0n1* or
+    a */dev/disk/by-id/* path); when omitted, ZFS auto-scans for the pools.
+    **chroot** refuses to run when **rpool** is already imported — if that
+    is the running system you are already inside it, and if it is a
+    leftover from a previous run, **clean** releases it first.
+
 **repair-divergent**
 :   Interactively review and repair backup datasets whose snapshot
     history has diverged from the source. Divergence usually appears
@@ -303,18 +371,29 @@ for the canonical end-to-end sequences.
 
 ## Maintenance
 
-**mount**
+**mount** \[*target*\]
 :   Mount a backup pool for inspection, **chroot**(1) entry or manual
     recovery work. Imports the chosen pool with an alternate root of
     */mnt/zark/<poolname>/* and mounts every dataset there. Asks
     interactively whether to mount read-only (recommended, and the
     default) or read-write.
 
+    With no argument, scans for connected backup drives. With the
+    *target* **local** (aliases **system**, **rpool**) it instead mounts
+    the **installed system's** top-level **rpool**/**bpool** from a live
+    USB — useful for inspecting the local disk without a full **chroot**.
+
     The complementary command is **umount**.
 
-**umount**
+**umount** \[*target*\]
 :   Unmount a previously **mount**-ed backup pool. Walks the dataset tree
     in reverse, closes the LUKS keystore and exports the pool cleanly.
+
+    With the *target* **local** (aliases **system**, **rpool**) it exports
+    the installed system's pools mounted by **mount local**. As a safety
+    measure it refuses to export any pool whose alternate root is not
+    under */mnt/zark/* — that is the guard against exporting the running
+    system's own **rpool**.
 
 **clean**
 :   Emergency cleanup. Forcibly unmounts everything under */mnt/zark/*,
@@ -369,6 +448,17 @@ To verify a recovery without rebooting:
     back to */etc/zark/known_drives.json* only if no local copy exists.
     A documented example is shipped at
     */etc/zark/known_drives.json.example*.
+
+    Each top-level key is a pool name with these fields: **guid** (pool
+    GUID, decimal; required), **drive_id** (stable */dev/disk/by-id/*
+    identifier without the *-part1* suffix; required), **last_backup_at**
+    (ISO-8601 UTC of the last successful backup; auto-written; optional),
+    and **autoeject** (boolean; optional, default false). When
+    **autoeject** is true the eject prompt for that drive shows a
+    10-second countdown and then applies the command's default
+    automatically — any keypress cancels it and restores the normal
+    blocking prompt. **prepare** asks whether to enable it; it can also
+    be toggled by editing the file.
 
 */var/log/zark.log*
 :   Log file for system installs. Portable installs write
@@ -459,11 +549,34 @@ just **zark**-recovered systems; an upstream bug has been filed against
 
 ## update-grub guard
 
-The **prepare** command installs */etc/grub.d/09_zfs_backup_guard*, which
-aborts **update-grub**(8) when a registered **zark** backup drive is
-connected. This prevents the most common cause of post-update boot
-failure: **update-grub** picking up the backup pool and writing its
-UUIDs into **grub.cfg**.
+The **recover**, **repair-boot** and **finish** commands install
+*/etc/grub.d/09_zfs_backup_guard*, which aborts **update-grub**(8) when a
+registered **zark** backup drive is connected. This prevents the most
+common cause of post-update boot failure: **update-grub** picking up the
+backup pool and writing its UUIDs into **grub.cfg**.
+
+## apt guard
+
+**setup** (on the running system) and **recover**/**finish** (on a
+recovered system) install a complementary, earlier line of defence:
+*/usr/local/lib/zark/apt-zfs-backup-guard*, wired in as a
+**DPkg::Pre-Install-Pkgs** hook via
+*/etc/apt/apt.conf.d/09zark-zfs-backup-guard*. APT runs it before
+**dpkg**(1) unpacks anything; if a boot-critical package (**linux-image**,
+**linux-headers**, **grub**, **shim**, **zfs**, …) is being installed
+*while an external ZFS pool is connected*, the hook aborts the whole
+transaction. This stops a background **unattended-upgrades**(8) run from
+half-applying a kernel upgrade — new kernel unpacked, **update-grub**
+blocked by the guard above, old kernel autoremoved — which would leave
+**grub.cfg** pointing at a missing kernel and the system unbootable.
+
+The hook is standalone: it detects pools with **zpool**(8) directly and
+does not require **zark** to be installed, so it keeps protecting a
+recovered system after the live USB is gone. Bypass it once for a
+deliberate operation with **ZARK_INTERNAL=1**; remove
+*/etc/apt/apt.conf.d/09zark-zfs-backup-guard* to disable it entirely. A
+login-time reminder (*/etc/update-motd.d/99-zark-external-pool*) warns when
+an external pool is attached.
 
 # EXAMPLES
 
@@ -490,6 +603,13 @@ Recover a dead laptop from an Ubuntu Live USB:
     sudo ./zark recover
     # ... reboot into the recovered system ...
     sudo zark finish
+
+Drop into the installed system from a live USB to fix it by hand:
+
+    sudo ./zark chroot
+    # inside the chroot:
+    update-grub && exit
+    # zark exports the pools cleanly on exit
 
 Verify the recovery in QEMU before rebooting, without writing to disk:
 

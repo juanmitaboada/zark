@@ -19,7 +19,6 @@ Use when grub.cfg is corrupted (e.g., update-grub ran with backup drive connecte
 """
 
 import getpass
-import os
 from pathlib import Path
 
 from lib import grub_guard, sh
@@ -40,18 +39,32 @@ def run(
     log = Log()
     zfs = ZFS(log)
     cleanup = Cleanup(log)
+    # Register atexit/SIGTERM handlers up front. This is the load-bearing
+    # fix for the "boot still needs -f" problem the operator hit: every exit
+    # path — including log.fatal() mid-operation, after a pool has already
+    # been (possibly force-) imported — now runs Cleanup.run(), which exports
+    # both pools cleanly and flushes the device. Without this, an early fatal
+    # left rpool/bpool imported and marked in-use, so the next real boot's
+    # initramfs import (which carries no -f) failed. A clean export here is
+    # what lets the next boot import without -f at all.
+    cleanup.register()
 
     log.banner("BOOT REPAIR", "Fix grub.cfg and initrd from live USB")
 
     # ── Verify live USB environment ───────────────────────────────────────
-    if zfs.pool_exists("rpool") and Path("/").stat().st_dev == os.stat("/").st_dev:
-        # Check if we're running on a real system (not live USB)
-        running_root_mounted = sh.run("zfs get -H -o value mounted rpool/ROOT 2>/dev/null").output
-        if running_root_mounted:
-            log.fatal(
-                "Looks like you're running on the installed system, not a live USB.\n"
-                + "  Use 'sudo ./zark finish' instead, or boot from a live USB first.",
-            )
+    # repair-boot rewrites the installed system's grub.cfg/initrd from the
+    # outside and import/exports the very rpool/bpool it targets. Doing that
+    # against the *running* installed system is both unnecessary (use
+    # `zark finish`) and unsafe. We warn and require explicit confirmation
+    # rather than a hard abort, so a false-negative on exotic live media
+    # (custom remaster without the usual casper markers) does not lock the
+    # operator out of a legitimate repair.
+    if not sh.is_live_usb():
+        log.warn("This does not look like a live USB session.")
+        log.info("repair-boot is meant to run from live media; on the running")
+        log.info("installed system use 'sudo ./zark finish' instead.")
+        if not log.ask("Continue anyway?", default=False):
+            log.fatal("Aborted — boot a live USB and retry, or use 'zark finish'.")
 
     # ── 1. Check for external pools ───────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Checking for external ZFS pools...")
@@ -72,15 +85,19 @@ def run(
     log.step(2, TOTAL_STEPS, "Importing pools...")
 
     for pool in ("rpool", "bpool"):
-        if not zfs.pool_exists(pool):
-            r = sh.run(f"zpool import -R {REPAIR_MNT} -N {pool}")
-            if r.ok:
-                cleanup.track_pool(pool)
-                log.ok(f"{pool} imported")
-            else:
-                log.fatal(f"Cannot import {pool}: {r.stderr.strip()}")
-        else:
+        if zfs.pool_exists(pool):
             log.ok(f"{pool} already imported")
+            continue
+        # Route through ZFS.pool_import: it attempts a clean import first and
+        # only falls back to `-f` if that fails — exactly the case that brings
+        # the operator here (a pool left "in use" by the unclean shutdown that
+        # broke boot). The operator no longer needs to know to add -f by hand.
+        # The forced state is transient: Cleanup (registered above) exports
+        # both pools cleanly on exit, so the next real boot imports without -f.
+        if zfs.pool_import(pool, altroot=REPAIR_MNT, no_mount=True):
+            cleanup.track_pool(pool)
+        else:
+            log.fatal(f"Cannot import {pool} (tried clean import and -f)")
 
     # ── 3. Open keystore + load keys ──────────────────────────────────────
     log.step(3, TOTAL_STEPS, "Loading encryption keys...")
@@ -226,7 +243,10 @@ def run(
             "grub.cfg regenerated ✓",
             "Grub guard installed ✓",
             "initrd regenerated ✓",
+            "Pools exported cleanly ✓",
             "",
             "Next: remove live USB and reboot.",
+            "If boot later asks to force-import a pool, that's",
+            "benign: boot through, then re-run 'zark repair-boot'.",
         ],
     )

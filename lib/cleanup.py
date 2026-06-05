@@ -52,6 +52,13 @@ from lib.sh import run
 # as a module-level constant so tests can patch it to 0.
 USB_FLUSH_DELAY_SEC = 2
 
+# Countdown applied to the eject prompt when a drive has autoeject enabled.
+# Fixed (not configurable): the per-drive autoeject flag is the on/off knob;
+# the duration is one value for everyone. 10 s is enough for a present
+# operator to react ("press any key to decide") while keeping an unattended
+# run moving.
+EJECT_TIMEOUT_SECONDS = 10
+
 
 def flush_device_cache(log: Log) -> None:
     """Kernel-side flush + grace window.
@@ -117,6 +124,7 @@ def prompt_eject_or_attach(
     pool: str,
     log: Log,
     default_eject: bool,
+    autoeject: bool = False,
 ) -> None:
     """Interactive eject decision after a successful pool export.
 
@@ -153,6 +161,13 @@ def prompt_eject_or_attach(
     No prompt is shown in that case — the banner alone tells the
     operator the drive is still attached and suggests ``zark umount``
     for a later clean disconnect.
+
+    ``autoeject`` (per-drive, from ``known_drives.json``) opts this
+    drive into a timed prompt: a 10 s countdown
+    (``EJECT_TIMEOUT_SECONDS``) after which ``default_eject`` is applied
+    automatically. Any keypress cancels the countdown and falls back to
+    a normal prompt. When ``False`` (default), the prompt waits for the
+    operator indefinitely, exactly as before.
     """
     if device is None:
         log.warn(
@@ -162,7 +177,12 @@ def prompt_eject_or_attach(
         log.banner_drive_attached(pool)
         return
 
-    if log.ask(f"Eject drive '{pool}' now? (powers the device down)", default=default_eject):
+    question = f"Eject drive '{pool}' now? (powers the device down)"
+    if autoeject:
+        decision = log.ask_timeout(question, default_eject, EJECT_TIMEOUT_SECONDS)
+    else:
+        decision = log.ask(question, default=default_eject)
+    if decision:
         eject_device(device, log)
         log.banner_safe_unplug(pool)
     else:

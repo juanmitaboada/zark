@@ -305,7 +305,7 @@ def run(
         )
 
     # ── Find and select drive ────────────────────────────────────────────
-    log.step(1, 9, "Scanning for known backup drives...")
+    log.step(1, 10, "Scanning for known backup drives...")
     drives = scan_connected_drives(cfg, log)
     known = [d for d in drives if d.known]
 
@@ -347,7 +347,7 @@ def run(
     retention_days = worst_case_retention_days(log)
 
     # ── Import pool ──────────────────────────────────────────────────────
-    log.step(2, 9, f"Importing pool {pool_name}...")
+    log.step(2, 10, f"Importing pool {pool_name}...")
 
     device = None
     if drive.drive_id != "<unknown>":
@@ -385,7 +385,7 @@ def run(
     log.ok(f"Pool {pool_name} imported (GUID: {actual_guid} ✓)")
 
     # ── Check health ─────────────────────────────────────────────────────
-    log.step(3, 9, "Checking pool health...")
+    log.step(3, 10, "Checking pool health...")
 
     for pool in (cfg.source_pool, pool_name):
         health = zfs.pool_health(pool)
@@ -402,7 +402,7 @@ def run(
             log.fatal(f"{pool} is {health}", solutions=[f"Run: zpool status {pool}"])
 
     # ── Pool info summary ────────────────────────────────────────────────
-    log.step(4, 9, "Gathering pool info...")
+    log.step(4, 10, "Gathering pool info...")
 
     src_info = zfs.pool_info(cfg.source_pool)
     dst_info = zfs.pool_info(pool_name)
@@ -427,7 +427,7 @@ def run(
     )
 
     # ── Load encryption key ──────────────────────────────────────────────
-    log.step(5, 9, "Loading encryption key...")
+    log.step(5, 10, "Loading encryption key...")
 
     keystatus = zfs.get_property(f"{pool_name}/rpool", "keystatus")
     ks = Keystore(log)
@@ -457,7 +457,7 @@ def run(
         log.ok(f"Encryption key loaded ({loaded} datasets)")
 
     # ── Take fresh snapshots ─────────────────────────────────────────────
-    log.step(6, 9, "Taking fresh snapshots before backup...")
+    log.step(6, 10, "Taking fresh snapshots before backup...")
     if opts.take_snapshots:
         _take_snapshots(log)
     else:
@@ -479,7 +479,7 @@ def run(
             )
 
     # ── Run syncoid ──────────────────────────────────────────────────────
-    log.step(7, 9, "Running syncoid (this may take a while)...")
+    log.step(7, 10, "Running syncoid (this may take a while)...")
     log.info("Tip: run 'sudo ./zark monitor' in another terminal for progress")
 
     _notify("🔄 Backup started", f"Syncing {cfg.source_pool} → {pool_name}...")
@@ -591,7 +591,7 @@ def run(
     log.ok(f"rpool synced in {mins}m {secs}s")
 
     # ── Sync bpool ───────────────────────────────────────────────────────
-    log.step(8, 9, "Syncing bpool (kernels + grub)...")
+    log.step(8, 10, "Syncing bpool (kernels + grub)...")
 
     if zfs.pool_exists("bpool"):
         bpool_syncoid_cmd = (
@@ -669,7 +669,7 @@ def run(
         log.dbg("No bpool found — skipping")
 
     # ── Sync properties ──────────────────────────────────────────────────
-    log.step(9, 9, "Syncing ZFS properties...")
+    log.step(9, 10, "Syncing ZFS properties...")
 
     # Find ubuntu dataset name
     ubuntu_ds = sh.run(
@@ -697,6 +697,38 @@ def run(
     # ── Unmount keystore and cleanup ─────────────────────────────────────
     ks.umount()
     cleanup.run()
+
+    # ── Read-back verification (post-export, pre-success) ────────────────
+    # cleanup.run() has exported the pool and flushed. But on USB-SATA
+    # bridges that lie about FUA, a successful export does NOT prove the
+    # pool is reimportable: the bridge can ack a flush whose data never hit
+    # NAND, leaving spacemaps corrupt (metaslab_init error 52) while labels
+    # and uberblocks survive. The only way to know is to read it back. We
+    # re-import read-only (cache dropped first so we read the device, not
+    # RAM) and require ONLINE before we ever tell the operator the backup is
+    # safe. A failure here means the backup is NOT trustworthy even though
+    # syncoid and export both reported success.
+    if pool_name in cleanup.exported_pools():
+        log.step(10, 10, f"Verifying {pool_name} is reimportable...")
+        if not zfs.verify_exported_pool_readback(pool_name, device=device):
+            log.banner_error(
+                "BACKUP NOT VERIFIED",
+                [
+                    "The pool exported but could NOT be re-imported.",
+                    "Data transfer succeeded but the on-disk pool is not",
+                    "readable back — this is the signature of a USB-SATA",
+                    "bridge that lies about cache flushing (FUA).",
+                    "",
+                    "Do NOT rely on this backup.",
+                    "What to do:",
+                    "  → Check the enclosure / cable (try a different one)",
+                    "  → See docs/HARDWARE.md (UAS quirk for 0634:5604)",
+                    "  → Re-run the backup after addressing the bridge",
+                ],
+            )
+            _notify("❌ Backup NOT verified", f"{pool_name} not reimportable")
+            return
+        log.ok(f"{pool_name} verified reimportable (ONLINE)")
 
     # ── Persist last_backup_at on the selected drive ─────────────────────
     # Marks the drive as freshly backed up so future staleness reporting
@@ -738,6 +770,12 @@ def run(
     # operators rotating multiple backups in one session, "n" keeps the
     # drive in /dev so the next zark command can use it without
     # unplug/replug.
-    prompt_eject_or_attach(device, pool_name, log, default_eject=True)
+    prompt_eject_or_attach(
+        device,
+        pool_name,
+        log,
+        default_eject=True,
+        autoeject=cfg.drive_autoeject(pool_name),
+    )
 
     _notify("✅ Backup completed", f"Duration: {mins}m {secs}s")

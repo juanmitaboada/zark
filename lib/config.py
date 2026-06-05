@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "1.0.11"
+VERSION = "1.0.12"
 
 
 def now_utc_iso() -> str:
@@ -78,6 +78,9 @@ class DriveInfo:
     guid: str  # zpool GUID (decimal string)
     drive_id: str  # /dev/disk/by-id/ identifier
     last_backup_at: str | None = None  # ISO-8601 UTC, see module docstring
+    autoeject: bool = False  # if True, the eject prompt times out and applies
+    #                          the command's default after EJECT_TIMEOUT_SECONDS;
+    #                          if False (default), the prompt waits for input.
 
 
 @dataclass
@@ -160,6 +163,10 @@ class Config:
                             if isinstance(info.get("last_backup_at"), str)
                             else None
                         ),
+                        # Optional opt-in: when true, the eject prompt for
+                        # this drive times out and applies the command's
+                        # default. Absent/!bool -> False (prompt waits).
+                        autoeject=bool(info.get("autoeject", False)),
                     )
             except (json.JSONDecodeError, KeyError, TypeError) as e:
                 # Will be reported by the calling command
@@ -176,11 +183,16 @@ class Config:
         """
         self.config_dir.mkdir(parents=True, exist_ok=True)
         drives_file = self.config_dir / "known_drives.json"
-        data: dict[str, dict[str, str]] = {}
+        data: dict[str, dict[str, str | bool]] = {}
         for name, info in self.known_drives.items():
-            entry: dict[str, str] = {"guid": info.guid, "drive_id": info.drive_id}
+            entry: dict[str, str | bool] = {
+                "guid": info.guid,
+                "drive_id": info.drive_id,
+            }
             if info.last_backup_at:
                 entry["last_backup_at"] = info.last_backup_at
+            if info.autoeject:
+                entry["autoeject"] = True
             data[name] = entry
         drives_file.write_text(json.dumps(data, indent=2) + "\n")
 
@@ -188,6 +200,16 @@ class Config:
     def drives_file_path(self) -> Path:
         """Path to known_drives.json (even if it doesn't exist yet)."""
         return self.config_dir / "known_drives.json"
+
+    def drive_autoeject(self, pool: str) -> bool:
+        """Whether ``pool`` opts into the timed eject prompt.
+
+        False for unregistered pools (recover/mount on a drive not in the
+        registry) and for registered drives that did not enable it — the
+        eject prompt then waits for the operator, as it always has.
+        """
+        info = self.known_drives.get(pool)
+        return bool(info and info.autoeject)
 
     def drive_registration_line(self, name: str, guid: str, drive_id: str) -> str:
         """Human-readable JSON snippet for manual addition."""

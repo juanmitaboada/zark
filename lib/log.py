@@ -22,6 +22,7 @@ import datetime
 import getpass
 import os
 import re
+import select
 import sys
 from typing import NoReturn
 
@@ -257,6 +258,48 @@ class Log:
         if not answer:
             return default
         return answer.startswith("y")
+
+    def ask_timeout(self, question: str, default: bool, timeout: int) -> bool:
+        """Yes/no question that auto-applies ``default`` after ``timeout`` seconds.
+
+        A live countdown is shown on a single line. Any keypress (Enter, or a
+        line of input) cancels the countdown and falls back to a normal
+        :meth:`ask`, so an operator who is present can always answer by hand.
+        With no interactive stdin (cron, systemd timer, scripted run) the
+        default is applied immediately — there is nobody to watch a countdown.
+
+        Returns the boolean decision (True = yes/eject).
+        """
+        prompt = "[Y/n]" if default else "[y/N]"
+        print()
+        print(f"{self.M}  ┌─────────────────────────────────────────────────────┐{self.N}")
+        print(f"{self.M}  │ {self.Y}?{self.N} {question}")
+        print(f"{self.M}  └─────────────────────────────────────────────────────┘{self.N}")
+
+        # No TTY: apply default immediately, like EOF in ask().
+        if not sys.stdin.isatty():
+            return default
+
+        default_word = "yes" if default else "no"
+        for remaining in range(timeout, 0, -1):
+            # \r keeps the countdown on one line; pad to overwrite prior text.
+            sys.stdout.write(
+                f"\r    {prompt} (auto-{default_word} in {remaining:2d}s, "
+                "press any key to decide): ",
+            )
+            sys.stdout.flush()
+            ready, _, _ = select.select([sys.stdin], [], [], 1)
+            if ready:
+                # Operator engaged — stop the countdown and ask normally.
+                sys.stdin.readline()  # consume whatever they typed
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return self.ask(question, default=default)
+        # Timed out: clear the countdown line and apply the default.
+        sys.stdout.write("\r" + " " * 70 + "\r")
+        sys.stdout.flush()
+        self.info(f"No response — applying default ({default_word}).")
+        return default
 
     def ask_input(self, question: str, default: str = "") -> str:
         """Free-text input question."""

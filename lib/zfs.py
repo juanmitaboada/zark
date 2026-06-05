@@ -117,11 +117,22 @@ class ZFS:
         force: bool = False,
     ) -> bool:
         """
-        Import a pool. Tries multiple strategies:
-          1. Auto-scan (no -d) — ZFS searches all devices
-          2. -d /dev/disk/by-id/ — search by-id directory
-          3. -d <device_directory> — search specific device's parent dir
-          4. Force variants of all above
+        Import a pool. Tries multiple strategies, in order:
+          1. -d <exact device> — the precise device path the caller gave us
+             (e.g. /dev/disk/by-id/usb-...-part1), tried first so ZFS opens
+             that exact partition instead of scanning a directory and picking
+             a generic wwn-0x... alias that points at the whole disk (which
+             fails to locate the pool labels and yields insufficient
+             replicas).
+          2. -d <device directory> — fallback: scan the device's parent dir.
+          3. -d /dev/disk/by-id/ — fallback: scan the by-id directory.
+          4. Auto-scan (no -d) — last resort, ZFS searches all devices.
+          Each candidate is attempted without -f first, then with -f.
+
+        Callers that know the device should pass it (see commands/backup.py);
+        the directory/auto-scan fallbacks serve callers that import without a
+        known device (recover/mount/repair), where device is None and only
+        the fallbacks run.
         """
         del force  # currently unused, but could be added as a param to try force first if desired
         if self.pool_exists(name):
@@ -141,22 +152,27 @@ class ZFS:
             cmd += f" {name}"
             return cmd
 
-        # Build list of -d candidates to try
-        dev_args = [""]  # empty = auto-scan (try first)
+        # Ordered list of -d candidates. The exact device, when supplied,
+        # comes first: pointing -d at the precise partition avoids ZFS
+        # resolving the vdev through the bridge's bogus shared WWN alias
+        # (observed identical across enclosures), which both collides between
+        # drives and targets the whole disk rather than the labelled part1.
+        dev_args: list[str] = []
         if device:
-
-            # Add the directory containing the device (not the device itself)
+            dev_args.append(device)  # exact device first
             dev_dir = os.path.dirname(device)
             if dev_dir and dev_dir not in dev_args:
                 dev_args.append(dev_dir)
-            # Also try /dev/disk/by-id/ explicitly
             if "/dev/disk/by-id" not in dev_dir:
                 dev_args.append("/dev/disk/by-id/")
+        dev_args.append("")  # auto-scan, last resort
 
-        # Try each strategy, first without force, then with force
+        # Try each candidate without force first, then with force, so an
+        # exact-device import that merely needs -f is still preferred over a
+        # directory/auto-scan that could latch onto the wrong alias.
         last_err = ""
-        for use_force in (False, True):
-            for darg in dev_args:
+        for darg in dev_args:
+            for use_force in (False, True):
                 cmd = _build_cmd(darg, use_force)
                 r = run(cmd, log=self.log)
                 if r.ok:
@@ -189,6 +205,77 @@ class ZFS:
 
         self.log.warn(f"Could not export {name}")
         return False
+
+    def verify_exported_pool_readback(
+        self,
+        name: str,
+        device: str | None = None,
+    ) -> bool:
+        """Confirm an already-exported pool can be re-imported and reads clean.
+
+        This is the only reliable guard against USB-SATA bridges that lie
+        about FUA: a ``zpool export`` returning 0 does NOT guarantee the pool
+        is reimportable, because the bridge can acknowledge a cache flush
+        whose data never reached NAND. The symptom is a pool whose labels and
+        uberblocks persisted but whose spacemaps did not, so a later import
+        fails deep in ``vdev_load`` with ``metaslab_init failed [error=52]``
+        (EBADE / "Invalid exchange") — discovered only when the backup is
+        finally needed.
+
+        The check, in order:
+          1. ``sync`` then drop the kernel page cache, so the read-back comes
+             from the device (NAND) and not from RAM still holding the data
+             we just wrote — without this we would "verify" against cache and
+             a silently-corrupt pool would pass.
+          2. Re-import read-only, no-mount, by the exact device (so it does
+             not latch onto the bogus shared WWN alias — see ``pool_import``).
+          3. Require health ONLINE.
+          4. Re-export so the caller is left with the pool exported again,
+             exactly as it was on entry.
+
+        Returns True only when the pool re-imported and reported ONLINE.
+        On any failure the pool is left exported (a best-effort export is
+        attempted if the verify-import succeeded but health was bad). The
+        caller MUST treat False as "the backup is not trustworthy — do not
+        tell the operator it is safe to disconnect".
+
+        Note: this performs one extra import/export cycle. That is fine for
+        backup targets; the "no rapid export/import cycles" rule applies only
+        to the live-USB overlay during ``recover``, not to external backup
+        pools.
+        """
+        # 1. Force the read-back to hit the device, not RAM.
+        run("sync")
+        # Best-effort; if drop_caches is unavailable the verify still runs,
+        # it just might read warm cache (weaker guarantee, never wrong-way).
+        run("sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
+
+        # 2. Re-import read-only, no-mount, by exact device.
+        cmd = "zpool import -o readonly=on -N"
+        if device:
+            cmd += f" -d {device}"
+        cmd += f" {name}"
+        r = run(cmd, log=self.log)
+        if not r.ok:
+            # This is the FUA-lie signature: export said OK, re-import fails.
+            self.log.error(
+                f"Read-back verification FAILED for {name}: {r.stderr.strip()}",
+            )
+            return False
+
+        # 3. Health must be ONLINE.
+        health = self.pool_health(name)
+        ok = health == "ONLINE"
+        if not ok:
+            self.log.error(
+                f"Read-back verification FAILED for {name}: health={health}",
+            )
+
+        # 4. Re-export to restore the on-entry state regardless of outcome.
+        if not run(f"zpool export {name}").ok:
+            run(f"zpool export -f {name}")
+        run("sync")
+        return ok
 
     def pool_guid(self, name: str) -> str:
         """Get pool GUID (decimal string)."""

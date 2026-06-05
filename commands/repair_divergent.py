@@ -498,7 +498,13 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
         cleanup.run()
         # Default to NOT ejecting: the operator who ran repair-divergent
         # is typically about to run `zark backup` to confirm the fix.
-        prompt_eject_or_attach(backup_device, pool_name, log, default_eject=False)
+        prompt_eject_or_attach(
+            backup_device,
+            pool_name,
+            log,
+            default_eject=False,
+            autoeject=cfg.drive_autoeject(pool_name),
+        )
         return
 
     # Quick visual table for the operator before we go dataset-by-dataset.
@@ -518,4 +524,10 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
     _print_summary(log, destroyed, skipped, aborted=aborted)
     # Default to NOT ejecting: same rationale as the early-return path —
     # backup-after-repair is the canonical next step.
-    prompt_eject_or_attach(backup_device, pool_name, log, default_eject=False)
+    prompt_eject_or_attach(
+        backup_device,
+        pool_name,
+        log,
+        default_eject=False,
+        autoeject=cfg.drive_autoeject(pool_name),
+    )

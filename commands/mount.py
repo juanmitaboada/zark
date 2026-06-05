@@ -29,21 +29,89 @@ from lib.config import Config
 from lib.drives import scan_connected_drives, select_drive
 from lib.keystore import SYSTEM_KEY_PATH, Keystore
 from lib.log import Log
+from lib.mount import mount_system_pools
 from lib.zfs import ZFS
 
 MNT_BASE = "/mnt/zark"
+SYSTEM_MNT = "/mnt/zark/system"
+SYSTEM_TARGETS = ("local", "system", "rpool")
+
+
+def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
+    """Mount the installed system's rpool/bpool for inspection (live USB).
+
+    The local-disk counterpart to the backup-pool flow below: from a live
+    session it imports the top-level rpool/bpool under an altroot and mounts
+    the boot environment, leaving it mounted for the operator. Read-only by
+    default. Use 'zark umount local' (or 'zark chroot' for a working shell).
+    """
+    if zfs.pool_exists("rpool"):
+        log.fatal(
+            "rpool is already imported — this looks like the running system.\n"
+            "  Boot a live USB to inspect the installed system's pools.",
+        )
+    if not sh.is_live_usb():
+        log.warn("This does not look like a live USB session.")
+        if not log.ask("Continue anyway?", default=False):
+            log.fatal("Aborted — boot a live USB and retry.")
+
+    mode_idx = log.ask_choice(
+        "Mount mode:",
+        [
+            f"Read-only  {log.G}(recommended — safe){log.N}",
+            f"Read-write {log.R}(can modify the system){log.N}",
+        ],
+    )
+    readonly = mode_idx == 0
+    passphrase = log.ask_password("Passphrase for rpool")
+
+    result = mount_system_pools(
+        SYSTEM_MNT,
+        passphrase,
+        log,
+        zfs,
+        Keystore(log),
+        cleanup,
+        readonly=readonly,
+    )
+    if result is None:
+        log.fatal("Could not mount the system — see messages above.")
+    root_path, ubuntu_name = result
+
+    log.banner_ok(
+        f"SYSTEM MOUNTED ({ubuntu_name})",
+        [
+            f"Mount point: {log.W}{root_path}{log.N}",
+            f"Mode:        {log.W}{'read-only' if readonly else 'read-write'}{log.N}",
+            "",
+            f"{log.Y}Browse:{log.N}  ls {root_path}/",
+            f"{log.Y}Chroot:{log.N}  sudo ./zark chroot",
+            "",
+            f"{log.Y}To unmount:{log.N}  sudo ./zark umount local",
+        ],
+    )
+    # Leave it mounted for the operator.
+    cleanup.disable()
 
 
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
     """Mount a backup pool for inspection / chroot / recovery."""
-    del args  # Unused
     log = Log()
     cfg = Config.load()
     zfs = ZFS(log)
     cleanup = Cleanup(log)
     cleanup.register()
+
+    # Local/system target: mount the installed system's pools (live USB),
+    # not a removable backup drive. Kept as an explicit keyword so the
+    # default (no-arg) behaviour — scan backup drives — is unchanged.
+    target = next((a for a in args if not a.startswith("-")), None)
+    if target in SYSTEM_TARGETS:
+        log.banner("MOUNT SYSTEM", "Mount the installed ZFS system (live USB)")
+        _mount_local_system(log, zfs, cleanup)
+        return
 
     log.banner("MOUNT BACKUP POOL", "Mount for inspection / chroot / recovery")
 

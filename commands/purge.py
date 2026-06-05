@@ -142,4 +142,10 @@ def run(
     # retired or repurposed — the operator is most likely about to
     # disconnect it. Answering "n" is the escape hatch for the rarer
     # case of preparing a freshly-purged drive in the same session.
-    prompt_eject_or_attach(target_dev, label, log, default_eject=True)
+    prompt_eject_or_attach(
+        target_dev,
+        label,
+        log,
+        default_eject=True,
+        autoeject=cfg.drive_autoeject(label),
+    )

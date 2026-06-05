@@ -225,6 +225,10 @@ debian/zark/
 debian/zark.substvars
 debian/debhelper-build-stamp
 debian/*.log
+# Generated manpage (built from debian/zark.1.md by `make manpage` and shipped
+# via debian/zark.manpages; the roff output is never committed).
+debian/zark.1
+debian/zark.1.raw
 
 # `make dist` writes the release tarball into the project root before
 # moving it to outputs. `make deb` also writes a sibling .orig.tar.gz

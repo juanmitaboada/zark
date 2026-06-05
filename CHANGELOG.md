@@ -5,6 +5,187 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.12] — 2026-06-04
+
+### Exact-device import + post-export read-back verification — surviving a second FUA-lie corruption mode
+
+v1.0.11 addressed the *catastrophic* form of USB-SATA bridge corruption: all four pool labels lost after unplug. Field use surfaced a second, subtler mode on the same `0634:5604` Micron enclosures, and a device-identity trap that turned a recoverable situation into an hour of misdiagnosis. This release fixes the import path and adds a verification step that converts a silent, deferred backup loss into an immediate, visible failure.
+
+#### The incident
+
+A `zark backup` to drive `black` had completed successfully on a previous run (`[OK] Pool black exported`), yet the next backup failed to import it:
+
+```
+zpool import black
+cannot import 'black': insufficient replicas
+        Destroy and re-create the pool from a backup source.
+```
+
+Forensics told a layered story. `zpool import` (label scan) reported the pool **ONLINE** with all four labels present (`zdb -l … labels = 0 1 2 3`, 32 valid uberblocks, txg 58702→58918 all within a 2-second window — the signature of a syncoid closing burst). But a real open failed deep in `vdev_load`:
+
+```
+spa_load(black): using uberblock with txg=58918
+...
+disk vdev '…': metaslab_init failed [error=52]
+spa_load(black): FAILED: vdev_load failed [error=52]
+zdb: can't open 'black': Invalid exchange
+```
+
+`error=52` is `EBADE`. The labels and uberblocks (fixed-position writes) persisted; the **spacemaps / `metaslab_array`** (written during the closing burst) did not. The bridge had acknowledged a flush whose data never reached NAND — the same FUA lie as v1.0.11, but landing on allocation metadata rather than labels. Because *every* uberblock in the ring references the same corrupt `metaslab_array`, rewind recovery (`-F`, `-FX`, explicit `-t <txg>`) had no consistent transaction to roll back to. The pool was unrecoverable and had to be recreated from source (`rpool` was intact — `black` is a backup *target*).
+
+Two contributing traps were identified and are fixed here.
+
+#### Fix 1 — Import by the exact device, not by scanning a directory
+
+The bridge exposes a **generic, non-unique WWN** (`wwn-0x5000000000000001`) identical across enclosures — both `blue` and `black` presented the same identifier. `commands/backup.py` already computed the precise device path (`…-part1`), but `ZFS.pool_import` discarded it: it passed `os.path.dirname(device)` to `-d`, turning a precise device into a directory scan. ZFS then resolved the vdev through the generic WWN alias, which points at the **whole disk** rather than the labelled partition, contributing to the `insufficient replicas` confusion.
+
+`ZFS.pool_import` now builds an **ordered** candidate list and tries the **exact device first** (without `-f`, then with), falling back to directory scan and finally auto-scan only if the exact device fails:
+
+1. `-d <exact device>` — the precise `…-part1` the caller supplied
+2. `-d <device directory>` — fallback
+3. `-d /dev/disk/by-id/` — fallback
+4. auto-scan (no `-d`) — last resort
+
+The previous loop ordering (all directories without force, then all with force) is replaced by per-candidate `(plain, force)` so that an exact-device import needing only `-f` is still preferred over a directory scan that could latch onto the wrong alias. The public signature is unchanged; callers that import without a device (`recover`, `mount`, `repair-divergent`, all passing `device=None`) are unaffected and keep the fallback-only behaviour.
+
+This was validated live: importing by `…-part1` makes the vdev appear under its unique serial (`usb-Micron_…_<serial>-0:0`) instead of the bogus WWN.
+
+#### Fix 2 — Post-export read-back verification (always on)
+
+The hard lesson: **on these bridges, a `zpool export` that returns 0 does not prove the pool is reimportable.** The only reliable signal is to read it back. A new `ZFS.verify_exported_pool_readback(name, device)` runs after `Cleanup.run()` has exported and flushed, and before the success banner:
+
+1. `sync`, then drop the kernel page cache (`/proc/sys/vm/drop_caches`) — so the read-back comes from NAND, not from RAM still holding what was just written. Without this we would verify against cache and a silently-corrupt pool would pass.
+2. Re-import **read-only, no-mount, by the exact device** (reusing Fix 1).
+3. Require health `ONLINE`.
+4. Re-export, restoring the on-entry state.
+
+If the re-import fails — the `error=52` signature — `backup` now emits a red **`BACKUP NOT VERIFIED`** banner pointing at `docs/HARDWARE.md`, fires a failure notification, and returns *without* reaching the "safe to unplug" prompt. The operator is told the backup is not trustworthy even though syncoid and export both reported success. This is **detection, not prevention**: it cannot stop the bridge lying, but it surfaces the loss while the operator can still act, instead of at restore time months later.
+
+The `backup` flow is renumbered 1/10…10/10 (verification is step 10). The check is unconditional — no flag — because the failure is silent and the cost (one read-only import/export cycle) is seconds. Per-FUA-lie scrubbing was considered and rejected (see below). Note the v1.0.11 "no rapid export/import cycles" rule applies only to the live-USB overlay during `recover`, not to external backup targets, so the extra cycle here is safe.
+
+#### Fix 3 — `zark health` and risk checks in `prepare`
+
+A new non-destructive command, `zark health [device]`, inspects kernel/sysfs state for the conditions correlated with bridge-induced corruption: a bridge that reports `doesn't support DPO or FUA`, the UAS transport on a USB device, and the bridge's VID:PID against a known-problematic list (currently `0634:5604`). It writes nothing, so it flags **risk**, never asserting a drive is safe — that can only be proven under write load. The checks live in `lib/health.py` as a small declarative list (`_check_fua`, `_check_transport`, `_check_known_bridge`) designed to grow as new hardware is identified; `KNOWN_BAD_BRIDGES` is a module constant.
+
+`prepare` now runs the same readonly check before doing any work and, if a risk factor is present, warns and asks for confirmation (default no) rather than aborting — because with the usb-storage quirk such a bridge works correctly, so a hard refusal would block a usable drive. `prepare` also performs a read-back verification at the very end: since `prepare` writes the entire rpool raw send (real write-under-load with transaction churn), its post-export re-import is itself a destructive confirmation that the bridge survives load. If the read-back fails, the drive is **not registered** in `known_drives.json`, even though every prior step reported success.
+
+`zark health` is fully interactive (no flags): it gathers all choices up front, then runs unattended except for one pause. Beyond the read-only checks it offers a **destructive** mode that creates a throwaway pool, writes ~2/15 GB (or whole-disk "surface", capped) with transaction churn, exports, and re-imports to verify the bridge persisted the writes. An optional **cold** pass powers the device down (`eject`), waits for the operator to physically reconnect, and only then re-imports — the only check that reads strictly from NAND rather than possibly from the bridge's own DRAM. Profiles show pessimistic time estimates derived from a measured write speed. The throwaway pool is always destroyed (even on error), leaving the device blank. Whenever any risk or test failure is found, a self-contained diagnostic report (environment, drive, bridge VID:PID, findings, dmesg tail) is written to `/tmp`, with instructions for filing a GitHub issue and an option to obfuscate serials/GUIDs.
+
+#### Per-drive auto-eject (timed eject prompt)
+
+The eject prompt can now time out for drives that opt in. A new per-drive `autoeject` boolean in `known_drives.json` (default false, asked by `prepare`, editable by hand) makes the prompt show a 10-second countdown (`EJECT_TIMEOUT_SECONDS`, a fixed constant — the per-drive flag is the only knob) and then apply the command's existing `default_eject` automatically. Any keypress cancels the countdown and falls back to the normal blocking prompt, so a present operator always keeps control; with no TTY (cron/systemd) the default is applied immediately as before. This is implemented as `Log.ask_timeout` using `select.select` (no signal handlers, no threads). When `autoeject` is false or absent — the default for every existing drive — behaviour is unchanged. The `known_drives.json` schema (including this field) is now documented in the README.
+
+#### Disconnect noise is not a health signal
+
+The kernel always attempts a final cache flush at USB disconnect; on these bridges it routinely "fails". An A/B test on the same hardware showed the `hostbyte` — not the message — is what matters: under UAS with dirty data in flight it is `DID_ERROR` (the corrupting path); at clean unplug of an exported pool it is `DID_NO_CONNECT` (harmless "device gone"). zark therefore must **not** treat `Synchronize Cache failed` as a fault indicator — it appears on every clean disconnect. The authoritative signal is the read-back, which is exactly what Fix 2 implements. This reasoning is documented in `docs/HARDWARE.md`.
+
+#### Documentation
+
+New `docs/HARDWARE.md` records: the offending bridge `idVendor=0634 idProduct=5604`; both corruption modes (lost labels vs. `metaslab_init error 52`); the bogus shared-WWN trap; the `hostbyte` distinction at disconnect; the read-back mitigation; and the system-level `usb-storage quirks=0634:5604:u` quirk that forces the conservative transport (with the caveat that read-back runs unconditionally regardless, because a drive may be used on a machine without the quirk).
+
+#### Rejected approaches and their flaws
+
+- **Rewind recovery (`-F` / `-FX` / `-t <txg>`)** to save the corrupt pool: every uberblock referenced the same broken `metaslab_array`; there was no consistent transaction to return to. Confirmed dead end via `zdb -e`.
+- **`zpool import -m`** (allow missing log device): the corruption was in the main vdev's spacemaps, not a separate log; failed identically.
+- **`zpool scrub` as part of read-back verification:** correct in spirit but far too costly (hours on a 1.8 TB target) for an always-on post-backup step. A read-only re-import already surfaces structural corruption like `error=52` at open time, which is what we need. Left out; could be an opt-in flag later.
+- **Relying on the UAS quirk alone** as the fix: the quirk is a system-level change outside zark's portable, zero-install scope, and does not protect a drive used on another machine. It is documented as a recommended mitigation, but the read-back is the in-tool guarantee.
+- **Treating `Synchronize Cache failed` in `dmesg` as the failure signal:** it fires on every clean disconnect too (`DID_NO_CONNECT`); using it would produce a false positive on every successful backup. Discarded in favour of the read-back.
+
+### `repair-boot` hardening — guaranteed clean export and automatic forced-import fallback
+
+A kernel update applied in the background by `unattended-upgrades` while a backup drive was connected left the system unbootable: the `09_zfs_backup_guard` correctly aborted `update-grub` (external pool visible), but the kernel transaction had already swapped `/boot` contents, so `grub.cfg` ended up referencing a kernel that autoremove had pulled. Recovery with `repair-boot` then hit two latent bugs in the command itself.
+
+#### Bug 1 — `repair-boot` never registered its `Cleanup`, so a mid-run fatal left the pools imported (and forced)
+
+`commands/repair_boot.py` constructed a `Cleanup` but, unlike every other command, never called `cleanup.register()`. `Cleanup.run()` was only invoked explicitly at the final step. Any `log.fatal()` before that point — e.g. the import step failing — exited without exporting `rpool`/`bpool`. A pool left imported is marked in-use by the live host, so the next real boot's initramfs import (which carries no `-f`) failed: `repair-boot` could *manufacture* the very forced-import-at-boot problem it exists to fix. Now `cleanup.register()` runs immediately after construction, so `atexit`/`SIGTERM` guarantee a clean export on every exit path. A clean export is precisely what lets the next boot import without `-f`.
+
+#### Bug 2 — the import lacked a `-f` fallback, so an unclean pool aborted the repair
+
+Step 2 issued a raw `zpool import -R /mnt/repair -N <pool>` with no force fallback and `log.fatal()` on failure. But the operator reaches `repair-boot` *because* the system shut down uncleanly, which is exactly when a pool is left "in use" and a plain import fails — forcing the operator to know to run `zpool import -f` by hand outside zark. The import now routes through `ZFS.pool_import(pool, altroot=…, no_mount=True)`, which already tries a clean import first and only then `-f` (and is regression-tested). The forced state is transient: the guaranteed clean export from Bug 1's fix consumes it, so the next boot imports without `-f`. The end-of-run banner adds a note that a one-off forced-import prompt at the next boot is benign.
+
+#### Bug 3 — tautological live-USB guard
+
+The environment check read `Path("/").stat().st_dev == os.stat("/").st_dev` — comparing a value with itself, always true — and then tested `zfs get … mounted rpool/ROOT`, a container dataset that is never mounted. The guard never did anything. Replaced with `sh.is_live_usb()` plus an explicit confirmation prompt: if we are not on live media, warn and ask before continuing (pointing at `zark finish` for the installed system), rather than either silently proceeding or hard-aborting. The confirmation, not a hard refusal, avoids locking the operator out on exotic/remastered live media where casper markers are absent.
+
+`is_live_usb()` is promoted to `lib/sh.py` as the single source of truth (routed through `run` so it is mock-testable) and `recover.py`'s private copy now delegates to it, removing the duplicated detection logic.
+
+#### Rejected approaches
+
+- **Adding a `--force` flag to `repair-boot`:** violates zark's "explicit confirmation, no `--force`/`--yes`" design, and is unnecessary — the clean-import-then-`-f` fallback inside `pool_import` already does the right thing without operator ceremony, and the guaranteed export neutralises the forced state.
+- **Hard-aborting when not on live media** (the apparent intent of the old guard): rejected for the remastered-media false-negative; a confirmation prompt is safer and still steers the operator to `zark finish`.
+- **Leaving `is_live_usb()` duplicated** in `recover` and `repair-boot`: rejected on the project's no-duplication principle; a single mock-testable helper in `lib/sh.py` is cheaper to keep correct.
+
+### New `zark chroot` command + local-system mount/umount
+
+The recovery toolkit could mount and chroot a *backup* pool (`zark mount` prints chroot instructions for the nested `<pool>/rpool`), but offered no first-class way to chroot the **installed system itself** from a live USB — the exact thing needed to fix a broken boot by hand (run `apt`, `update-grub`, `dpkg-reconfigure` inside the real system). Operators were left assembling `zpool import` / keystore-unlock / bind-mount / `chroot` by hand, getting the import-without-`-f` and clean-export details wrong in precisely the way that breaks the next boot.
+
+#### `zark chroot [device]`
+
+A new interactive command that, from a live session where `rpool`/`bpool` are not imported:
+
+1. Imports both pools under an altroot (`/mnt/zark/chroot`) via `ZFS.pool_import`, inheriting the clean-then-`-f` fallback.
+2. Unlocks the keystore (passphrase) and loads all dataset keys.
+3. Mounts the boot environment and its children, then `bpool/BOOT/<be>` at `/boot`.
+4. Sets up the bind mounts a chroot needs (`/proc`, `/sys`, `/dev`, `/dev/pts`, `/run`), `efivars`, and the ESP at `/boot/efi`.
+5. Drops the operator into `/bin/bash --login` inside the system.
+6. On shell exit (or Ctrl-C, or any fatal) tears everything down and **exports both pools cleanly**, so the next real boot imports without `-f`.
+
+Safety: it refuses when `rpool` is already imported (you are either already inside the running system, or a previous run left it imported — the message points at `zark clean`), and warns+confirms when not on live media. The interactive shell is the one place zark deliberately does not route through `sh.run` (which captures output and would break a live TTY); it execs `chroot … /bin/bash` with the controlling terminal attached, via a fixed argument vector (no shell, no string interpolation).
+
+#### `zark mount local` / `zark umount local`
+
+The "generalised mount/umount" the operator asked for, kept deliberately light: `mount` and `umount` now accept an explicit `local` (alias `system`/`rpool`) target to operate on the installed system's pools rather than a removable backup drive. `zark mount local` imports + unlocks + mounts the system read-only (default) or read-write for inspection and leaves it mounted; `zark umount local` exports it again. The no-argument behaviour of both commands is unchanged (scan backup drives).
+
+`umount local` carries the critical safety discriminator: zark always imports the system under an altroot beneath `/mnt/zark`, whereas the *running* system's `rpool` has `altroot = -`. `umount local` refuses to export any pool whose altroot is not under `/mnt/zark`, so it can never pull the root filesystem out from under a running machine.
+
+#### Shared system-mount helper
+
+The top-level `rpool`/`bpool` mounting logic (distinct from the nested backup-pool layout `MountedPool.mount_rpool` handles) is centralised in `lib/mount.py` as `mount_system_pools()` + `find_system_root_dataset()`, used by both `zark chroot` and `zark mount local`. It mounts via altroot + each dataset's *stored* mountpoint and **never runs `zfs set mountpoint`**, honouring the absolute rule against mountpoint changes while the keystore zvol is imported (`zfs mount <ds>` mounts `canmount=noauto` boot environments without touching properties). `repair-boot`'s own inline mount path is intentionally left as-is — it interleaves grub regeneration and is field-validated — rather than retrofitted in the same change that just hardened it.
+
+#### Rejected approaches
+
+- **Overloading `zark mount` to auto-detect the system pool** (no explicit `local` keyword): rejected — the default scan-backup-drives behaviour must stay predictable, and silently importing the system pool because no backup drive was found would be surprising and risky. An explicit keyword is clearer.
+- **A single generic mount path for both backup (nested) and system (top-level) layouts:** rejected as premature unification; the keystore location, dataset hierarchy and root-dataset discovery differ enough that one branchy function would be harder to reason about than two focused ones.
+- **Refusing `zark chroot` outright when not on live media:** rejected for the same reason as `repair-boot` — a confirmation prompt handles remastered media without locking the operator out — though chroot additionally hard-refuses when `rpool` is already imported, which unambiguously means the running system.
+
+### Test-suite lint cleanup (pylint 10.00/10)
+
+Pulled the `lib.health` imports in the health test classes up to module level and collapsed three identical inline `FakeZFS` helpers into one module-level `_FakeHealthZFS` (with a docstring). These were the last `import-outside-toplevel` (C0415) and `missing-class-docstring` (C0115) findings; with them gone the aggregate `pylint lib commands tests zark` is a clean 10.00/10. No behavioural change — test-only.
+
+### New apt guard — block kernel/GRUB upgrades with an external pool attached
+
+The boot-loss incident this release addresses had a root cause upstream of `repair-boot`: a background `unattended-upgrades` kernel upgrade ran *while a zark backup drive was connected*. The grub guard (`09_zfs_backup_guard`) correctly aborted the `update-grub` step, but by then the kernel package transaction had already swapped `/boot`, and autoremove had pulled the previous kernel — so `grub.cfg` ended up referencing a kernel that no longer existed. The grub guard fires too late in the package lifecycle to prevent this; it can only stop `grub.cfg` regeneration, not the kernel unpack that precedes it.
+
+The new guard moves the defence earlier, to before dpkg unpacks anything.
+
+#### Layer A — `DPkg::Pre-Install-Pkgs` hook (the load-bearing defence)
+
+A new installer module `lib/apt_guard.py` (mirroring `lib/grub_guard.py` as the single source of truth) deposits three standalone files:
+
+- `/usr/local/lib/zark/apt-zfs-backup-guard` — a POSIX `sh` hook. APT runs it before dpkg unpacks (Version 1 protocol: `.deb` paths on stdin); a non-zero exit aborts the entire transaction. The hook collects the boot-critical packages in the transaction first (so ordinary installs exit before paying for any device scan), and only then — if any `linux-image-*` / `linux-headers-*` / `linux-modules-*` / `grub-*` / `shim-*` / `zfs-*` / `zfsutils-*` package is present — checks for an external (non rpool/bpool) pool via `zpool import`. External pool + boot-critical package ⇒ refuse, with a message naming the pool(s) and the `zpool export` fix.
+- `/etc/apt/apt.conf.d/09zark-zfs-backup-guard` — registers the hook.
+- (Layer B, below.)
+
+The hook is **standalone by design**: it detects pools with `zpool` directly and never calls `zark`. This matters because the recovered system runs without zark present — a zark-dependent hook would be inert exactly where the protection is needed. It also helps any ZFS-on-root system, not just zark installs.
+
+A `ZARK_INTERNAL=1` environment escape lets zark's own flows that import the backup pool or run apt deliberately (`recover`, `finish`, `repair-boot`, and `setup` — whose dependency install must not be refused by a guard a previous setup installed) bypass the hook. It is set centrally in the dispatcher for those commands only; routine operations (`backup`, `mount`, `chroot`, `prepare`) are left unmarked so the guard still protects against an accidental upgrade while a drive is connected.
+
+#### Layer B — login-time MOTD reminder (secondary defence)
+
+`/etc/update-motd.d/99-zark-external-pool` prints a one-line warning at login when an external pool is visible, so an interactive operator sees that boot updates are currently blocked even outside an apt run. A full `wall`/`notify-send`-on-attach path (which would need a udev/systemd trigger and fragile graphical-session detection) was deliberately deferred — the apt hook is what actually closes the vector; the MOTD line is a cheap, reliable reminder.
+
+#### Installation
+
+`zark setup` installs the guard on the running productive system (this is the system most exposed to the `unattended-upgrades` vector); `recover` and `finish` install it into the recovered system (`finish` non-clobbering, like the grub guard). `install()` is idempotent: when the three files already hold the canonical content it writes nothing (no mtime churn), so re-running `zark setup` is a true no-op.
+
+#### Rejected approaches
+
+- **Relying on the grub guard alone:** rejected — it fires after the kernel unpack, so it cannot prevent the half-applied state; it can only refuse to regenerate `grub.cfg`, which is what produced the brick in the first place.
+- **A `DPkg::Pre-Invoke` hook (no package list):** rejected — it would have to block *all* apt operations whenever a drive is attached, since it cannot see which packages are involved. `Pre-Install-Pkgs` lets the guard be surgical: only boot-critical operations are refused.
+- **Requesting the Version 2/3 hook protocol:** rejected as unnecessary — the Version 1 `.deb` file list is all the hook needs, and keeps the parsing trivial.
+- **Implementing the hook in Python and invoking `zark`:** rejected for the standalone reason above — the recovered system has no zark, and an apt hook must not depend on a binary that may be absent.
+- **A `systemd`/udev `wall`+`notify-send` notice now (Layer B2):** deferred — added machinery and a fragile graphical-session lookup for marginal gain over the apt hook plus the MOTD line.
+
 ## [1.0.11] — 2026-05-21
 
 ### Safe USB disconnect — `sync` + sleep + interactive `eject` + visible banner

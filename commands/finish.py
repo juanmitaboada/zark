@@ -21,7 +21,7 @@ Fixes hostid, cachefile, ZFS services, GRUB, initramfs.
 import re
 from pathlib import Path
 
-from lib import grub_guard, sh
+from lib import apt_guard, grub_guard, sh
 
 # from lib.config import Config
 from lib.log import Log
@@ -90,6 +90,10 @@ def run(
 
     # Install grub guard (prevents update-grub with backup drive connected)
     grub_guard.install(target_root="", log=log, overwrite=False)
+
+    # Install the apt guard (non-clobbering on first boot of the recovered
+    # system, in case recover already wrote it or the operator edited it).
+    apt_guard.install(target_root="", log=log, overwrite=False)
 
     # Set GRUB_RECORDFAIL_TIMEOUT
     grub_default = Path("/etc/default/grub")

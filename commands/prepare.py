@@ -26,6 +26,7 @@ from lib import sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config, DriveInfo
 from lib.drives import get_drive_id, get_drive_info, validate_external_block_device
+from lib.health import check_device, render_report
 from lib.log import Log
 from lib.zfs import ZFS, syncoid_exclude_flag
 
@@ -56,6 +57,21 @@ def run(
     log.info(f"Model:     {model}")
     log.info(f"Size:      {size}")
     log.info(f"Transport: {transport}")
+
+    # ── Non-destructive risk check ───────────────────────────────────────
+    # Flag bridges/transports correlated with the FUA cache-flush lie BEFORE
+    # any work begins, so the operator can apply mitigations (see
+    # docs/HARDWARE.md) up front. This is a risk signal, not a verdict: with
+    # the usb-storage quirk in place such a bridge works fine, so we warn and
+    # ask rather than abort. The full raw send below, plus the read-back at
+    # the end, is what actually proves the drive survives write load.
+    report = check_device(target_dev)
+    render_report(report, log)
+    if report.has_risk and not log.ask(
+        "Risk factors detected — proceed with preparation anyway?",
+    ):
+        log.info("Aborted — see docs/HARDWARE.md")
+        return
 
     # ── Check drive is empty ─────────────────────────────────────────────
     existing_parts = sh.run(f"lsblk -no NAME {target_dev} | tail -n +2").output
@@ -188,11 +204,45 @@ def run(
     _ = zfs.pool_export(new_pool)
     flush_device_cache(log)
 
+    # ── Read-back verification ───────────────────────────────────────────
+    # prepare has just written the entire rpool raw send (real write load
+    # with transaction churn) and exported. That is exactly the workload
+    # that exposes a bridge lying about FUA, so verify the pool re-imports
+    # ONLINE before we register it as a trusted backup target. If it fails,
+    # do NOT register the drive — the prepared pool is not trustworthy even
+    # though every step above reported success.
+    part1 = Path(f"/dev/disk/by-id/{base_drive_id}-part1")
+    verify_device = str(part1) if part1.exists() else None
+    if not zfs.verify_exported_pool_readback(new_pool, device=verify_device):
+        log.banner_error(
+            "DRIVE NOT VERIFIED",
+            [
+                "The pool was created and filled but could NOT be",
+                "re-imported afterwards — the signature of a USB-SATA",
+                "bridge that lies about cache flushing (FUA).",
+                "",
+                "The drive has NOT been registered.",
+                "What to do:",
+                "  → See docs/HARDWARE.md (UAS quirk for known bridges)",
+                "  → Address the enclosure, then re-run prepare",
+            ],
+        )
+        return
+
+    # Per-drive auto-eject preference. When enabled, this drive's eject
+    # prompt (here and in future backup/umount/... runs) gets a 10 s
+    # countdown that applies the default automatically — handy for
+    # unattended rotation. Default no: the prompt waits for the operator.
+    autoeject = log.ask(
+        "Enable auto-eject (timed eject prompt) for this drive?",
+    )
+
     # Auto-register in known_drives.json
     cfg.known_drives[new_pool] = DriveInfo(
         name=new_pool,
         guid=new_guid,
         drive_id=base_drive_id or "<unknown>",
+        autoeject=autoeject,
     )
     cfg.save_drives()
 
@@ -216,4 +266,10 @@ def run(
     # `zark backup` against the drive that was just prepared. Auto-
     # ejecting would force a pointless unplug/replug cycle. Operators
     # who really want to disconnect now can answer "y".
-    prompt_eject_or_attach(target_dev, new_pool, log, default_eject=False)
+    prompt_eject_or_attach(
+        target_dev,
+        new_pool,
+        log,
+        default_eject=False,
+        autoeject=autoeject,
+    )

@@ -46,7 +46,7 @@ import time
 from pathlib import Path
 from typing import NoReturn
 
-from lib import grub_guard, sh
+from lib import apt_guard, grub_guard, sh
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config
 from lib.drives import scan_connected_drives, select_drive
@@ -166,10 +166,9 @@ def _force_latest_signed_alternative(
 
 
 def _is_live_usb() -> bool:
-    r = sh.run("cat /proc/cmdline")
-    if r.ok and any(k in r.output for k in ("boot=casper", "boot=live", "live-media")):
-        return True
-    return sh.run("test -d /rofs").ok or sh.run("test -d /cow").ok
+    # Thin wrapper kept for call-site readability; the detection logic now
+    # lives in lib.sh as the single source of truth (also used by repair-boot).
+    return sh.is_live_usb()
 
 
 # Free-space margin for the preventive disk-size check. The target NVMe
@@ -1440,6 +1439,10 @@ def run(
     # ZFS pools connected (which corrupts grub.cfg with no kernel entries)
     grub_guard.install(target_root=RECOVER_MNT, log=log)
 
+    # Install the apt guard — stops a later kernel/GRUB/ZFS upgrade on the
+    # recovered system from half-applying while a backup drive is connected.
+    apt_guard.install(target_root=RECOVER_MNT, log=log)
+
     # Regenerate initrd
     if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists():
         log.info("Regenerating initrd (dracut)...")
@@ -1501,4 +1504,10 @@ def run(
     # Offer the eject before the final visible signal. Default "yes":
     # the next step in the printed instructions above is "remove live
     # USB and reboot", so the typical operator path is to disconnect.
-    prompt_eject_or_attach(backup_device, pool_name, log, default_eject=True)
+    prompt_eject_or_attach(
+        backup_device,
+        pool_name,
+        log,
+        default_eject=True,
+        autoeject=cfg.drive_autoeject(pool_name),
+    )

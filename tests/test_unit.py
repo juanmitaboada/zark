@@ -30,6 +30,7 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 import inspect
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -44,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa: E402
 
+import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -95,6 +97,10 @@ from commands.simulate import (  # pylint: disable=wrong-import-position # noqa:
     _list_candidate_disks,
     _parse_args,
 )
+from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E402
+    _umount_local_system,
+)
+from lib import apt_guard  # pylint: disable=wrong-import-position # noqa: E402
 from lib import repair  # pylint: disable=wrong-import-position # noqa: E402
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
     Cleanup,
@@ -115,8 +121,30 @@ from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
     is_drive_stale,
     validate_external_block_device,
 )
+from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
+    INFO,
+    KNOWN_BAD_BRIDGES,
+    OK,
+    PROFILE_FAST,
+    PROFILE_MEDIUM,
+    PROFILE_SURFACE,
+    SURFACE_CAP_BYTES,
+    WARN,
+    Finding,
+    HealthReport,
+    _check_fua,
+    _check_transport,
+    estimate_seconds,
+    generate_report,
+    profile_target_bytes,
+    run_destructive_test,
+)
 from lib.keystore import Keystore  # pylint: disable=wrong-import-position # noqa: E402
 from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
+from lib.mount import (  # pylint: disable=wrong-import-position # noqa: E402
+    find_system_root_dataset,
+    mount_system_pools,
+)
 from lib.repair import (  # pylint: disable=wrong-import-position # noqa: E402
     SIZE_LIMIT_BYTES,
     DivergentDataset,
@@ -1181,6 +1209,95 @@ class TestPromptEjectOrAttach:
 
         assert mock.was_not_called("eject")
         assert "still attached" in buf.getvalue()
+
+    def test_autoeject_non_tty_applies_default_immediately(self):
+        """autoeject=True with no TTY applies the default at once (no
+        countdown), ejecting when default_eject is True."""
+        mock = MockShell()
+        log = make_log()
+        mock.on("eject /dev/sdb").succeeds()
+
+        buf = StringIO()
+        with patch_sh(mock):
+            # ask_timeout checks sys.stdin.isatty(); force it False.
+            with patch("sys.stdin") as fake_stdin:
+                fake_stdin.isatty.return_value = False
+                with redirect_stdout(buf):
+                    prompt_eject_or_attach(
+                        "/dev/sdb",
+                        "blue",
+                        log,
+                        default_eject=True,
+                        autoeject=True,
+                    )
+
+        assert mock.was_called("eject /dev/sdb")
+        assert "Safe to unplug" in buf.getvalue()
+
+    def test_autoeject_false_uses_plain_prompt(self):
+        """autoeject=False keeps the blocking prompt (input is consulted)."""
+        mock = MockShell()
+        log = make_log()
+
+        buf = StringIO()
+        with patch_sh(mock):
+            with patch("builtins.input", return_value="n") as inp:
+                with redirect_stdout(buf):
+                    prompt_eject_or_attach(
+                        "/dev/sdb",
+                        "blue",
+                        log,
+                        default_eject=True,
+                        autoeject=False,
+                    )
+                assert inp.called  # plain prompt path used input()
+        assert mock.was_not_called("eject")
+        assert "still attached" in buf.getvalue()
+
+
+class TestAutoejectConfig:  # pylint: disable=missing-function-docstring
+    """Per-drive autoeject persistence and lookup in lib/config.py."""
+
+    def test_autoeject_roundtrip(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["ZARK_CONFIG_DIR"] = td
+            try:
+                cfg = Config.load()
+                cfg.config_dir = Path(td)
+                cfg.known_drives["blue"] = DriveInfo(
+                    "blue",
+                    "111",
+                    "usb-X-0:0",
+                    autoeject=True,
+                )
+                cfg.known_drives["black"] = DriveInfo("black", "222", "usb-Y-0:0")
+                cfg.save_drives()
+
+                cfg2 = Config.load()
+                assert cfg2.known_drives["blue"].autoeject is True
+                assert cfg2.known_drives["black"].autoeject is False
+            finally:
+                del os.environ["ZARK_CONFIG_DIR"]
+
+    def test_drive_autoeject_lookup(self):
+        cfg = Config()
+        cfg.known_drives["blue"] = DriveInfo("blue", "1", "x", autoeject=True)
+        cfg.known_drives["black"] = DriveInfo("black", "2", "y")
+        assert cfg.drive_autoeject("blue") is True
+        assert cfg.drive_autoeject("black") is False
+        # Unregistered pool -> False (recover/mount outside the registry).
+        assert cfg.drive_autoeject("ghost") is False
+
+    def test_autoeject_absent_defaults_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "known_drives.json"), "w", encoding="utf-8") as f:
+                f.write('{"blue": {"guid": "1", "drive_id": "usb-X-0:0"}}')
+            os.environ["ZARK_CONFIG_DIR"] = td
+            try:
+                cfg = Config.load()
+                assert cfg.known_drives["blue"].autoeject is False
+            finally:
+                del os.environ["ZARK_CONFIG_DIR"]
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -4311,6 +4428,583 @@ class TestRepairDivergentSnapshotHelpers:  # pylint: disable=missing-function-do
         )
         with patch_sh(mock):
             assert _shared_snapshot_with_source("blue/rpool", "rpool") is None
+
+
+class TestPoolImportExactDevice:  # pylint: disable=missing-function-docstring
+    """#4: pool_import must try the exact device path before any fallback.
+
+    Regression guard for the bridge bogus-WWN bug: when a precise device is
+    supplied, ``zpool import -d <device>`` must be the first command issued,
+    so ZFS opens that exact partition rather than scanning a directory and
+    resolving the vdev through a generic ``wwn-0x...`` alias.
+    """
+
+    DEV = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
+
+    def test_exact_device_tried_first(self):
+        mock = MockShell()
+        # Not already imported.
+        mock.on("zpool list black").fails()
+        # Exact-device import succeeds.
+        mock.on(f"zpool import -d {self.DEV} black").succeeds()
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert zfs.pool_import("black", device=self.DEV)
+        import_calls = [c for c in mock.calls if c.startswith("zpool import")]
+        assert import_calls, "no import attempted"
+        # First import attempt must be the exact device, no -f.
+        assert import_calls[0] == f"zpool import -d {self.DEV} black"
+
+    def test_falls_back_when_exact_device_fails(self):
+        mock = MockShell()
+        mock.on("zpool list black").fails()
+        # Exact device (with and without -f) fails…
+        mock.on(f"zpool import -d {self.DEV} black").fails("insufficient replicas")
+        mock.on(f"zpool import -f -d {self.DEV} black").fails("insufficient replicas")
+        # …directory fallback succeeds.
+        mock.on("zpool import -d /dev/disk/by-id black").succeeds()
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert zfs.pool_import("black", device=self.DEV)
+        import_calls = [c for c in mock.calls if c.startswith("zpool import")]
+        # Exact device attempts come strictly before the directory fallback.
+        assert import_calls[0] == f"zpool import -d {self.DEV} black"
+        assert any("/dev/disk/by-id" in c for c in import_calls)
+
+    def test_no_device_uses_fallbacks_only(self):
+        mock = MockShell()
+        mock.on("zpool list black").fails()
+        mock.on("zpool import black").succeeds()
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert zfs.pool_import("black")  # device=None
+        import_calls = [c for c in mock.calls if c.startswith("zpool import")]
+        # No exact-device -d should appear when device is None.
+        assert all("usb-Micron" not in c for c in import_calls)
+
+
+class TestReadbackVerification:  # pylint: disable=missing-function-docstring
+    """#1: verify_exported_pool_readback re-imports read-only and checks health.
+
+    Guards against USB-SATA bridges that lie about FUA — an export that
+    returns 0 over a pool that is no longer importable (``error=52``).
+    """
+
+    DEV = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
+
+    def test_passes_when_reimport_online(self):
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on(f"zpool import -o readonly=on -N -d {self.DEV} black").succeeds()
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("zpool export black").succeeds()
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert zfs.verify_exported_pool_readback("black", device=self.DEV)
+        # Cache must be dropped before the read-back import.
+        assert mock.was_called("drop_caches")
+        # Pool must be left exported again.
+        assert mock.was_called("zpool export black")
+
+    def test_fails_when_reimport_fails(self):
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on(f"zpool import -o readonly=on -N -d {self.DEV} black").fails(
+            "cannot import 'black': insufficient replicas",
+        )
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert not zfs.verify_exported_pool_readback("black", device=self.DEV)
+
+    def test_fails_when_health_not_online(self):
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on(f"zpool import -o readonly=on -N -d {self.DEV} black").succeeds()
+        mock.on("zpool list -H -o health black").succeeds("DEGRADED")
+        mock.on("zpool export black").succeeds()
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert not zfs.verify_exported_pool_readback("black", device=self.DEV)
+        # Even on failure, the pool is re-exported to restore on-entry state.
+        assert mock.was_called("zpool export black")
+
+
+class TestHealthChecks:  # pylint: disable=missing-function-docstring
+    """Non-destructive drive risk checks in lib/health.py."""
+
+    def test_known_bad_bridge_listed(self):
+        assert "0634:5604" in KNOWN_BAD_BRIDGES
+
+    def test_fua_finding_when_dmesg_reports_no_fua(self):
+        mock = MockShell()
+        mock.on("dmesg").succeeds(
+            "[ 1.0] sd 0:0:0:0: [sda] Write cache: enabled, read cache: "
+            "enabled, doesn't support DPO or FUA\n",
+        )
+        with patch_sh(mock):
+            finding = _check_fua("sda")
+        assert finding is not None
+        assert finding.level == WARN
+        assert finding.see_hardware_doc
+
+    def test_fua_no_finding_when_clean(self):
+        mock = MockShell()
+        mock.on("dmesg").succeeds("[ 1.0] sd 0:0:0:0: [sda] Attached SCSI disk\n")
+        with patch_sh(mock):
+            assert _check_fua("sda") is None
+
+    def test_transport_uas_warns(self):
+        mock = MockShell()
+        mock.on("lsblk -dn -o TRAN /dev/sda").succeeds("usb")
+        mock.on("scsi host").succeeds("[ 1.0] scsi host0: uas")
+        with patch_sh(mock):
+            finding = _check_transport("sda")
+        assert finding is not None
+        assert finding.level == WARN
+
+    def test_transport_usb_storage_info(self):
+        mock = MockShell()
+        mock.on("lsblk -dn -o TRAN /dev/sda").succeeds("usb")
+        mock.on("scsi host").succeeds(
+            "[ 1.0] usb 2-1: UAS is ignored for this device, using usb-storage instead",
+        )
+        with patch_sh(mock):
+            finding = _check_transport("sda")
+        assert finding is not None
+        assert finding.level == INFO
+
+    def test_transport_silent_for_non_usb(self):
+        mock = MockShell()
+        mock.on("lsblk -dn -o TRAN /dev/nvme0n1").succeeds("nvme")
+        with patch_sh(mock):
+            assert _check_transport("nvme0n1") is None
+
+    def test_report_worst_level_and_has_risk(self):
+        rep = HealthReport(device="/dev/sda")
+        rep.findings.append(Finding(level=OK, title="t", detail="d"))
+        assert rep.worst_level == OK
+        assert not rep.has_risk
+        rep.findings.append(Finding(level=INFO, title="t", detail="d"))
+        assert rep.worst_level == INFO
+        rep.findings.append(Finding(level=WARN, title="t", detail="d"))
+        assert rep.worst_level == WARN
+        assert rep.has_risk
+
+
+class _FakeHealthZFS:  # pylint: disable=too-few-public-methods
+    """Stand-in ZFS for health destructive tests: pools always report ONLINE."""
+
+    def pool_health(self, _name):
+        """Return a constant healthy status for any pool name."""
+        return "ONLINE"
+
+
+class TestHealthDestructive:  # pylint: disable=missing-function-docstring
+    """Destructive write-and-verify logic in lib/health.py (mocked shell)."""
+
+    def test_profile_target_bytes_fast_medium(self):
+        assert profile_target_bytes(PROFILE_FAST, "/dev/sda") == 2 * 1024**3
+        assert profile_target_bytes(PROFILE_MEDIUM, "/dev/sda") == 15 * 1024**3
+
+    def test_profile_target_bytes_surface_capped(self):
+        mock = MockShell()
+        # Huge disk -> capped.
+        mock.on("lsblk -bdn -o SIZE /dev/sda").succeeds(str(4 * 1024**4))
+        with patch_sh(mock):
+            assert profile_target_bytes(PROFILE_SURFACE, "/dev/sda") == SURFACE_CAP_BYTES
+
+    def test_estimate_seconds_pessimistic(self):
+        # 2 GB at 100 MB/s -> ~20s sequential, *3 factor -> ~60s+.
+        secs = estimate_seconds(PROFILE_FAST, "/dev/sda", 100.0)
+        assert secs > 0
+        # No speed -> no estimate.
+        assert estimate_seconds(PROFILE_FAST, "/dev/sda", 0.0) == 0
+
+    def test_destructive_test_passes_online(self):
+        mock = MockShell()
+        # Make every command succeed by default for this happy path.
+        mock.on("zpool create").succeeds()
+        mock.on("dd").succeeds()
+        mock.on("sync").succeeds()
+        mock.on("zpool export").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on("zpool import").succeeds()
+        mock.on("zpool destroy").succeeds()
+        mock.on("rm -rf").succeeds()
+        with patch_sh(mock):
+            result = run_destructive_test(
+                "/dev/sda",
+                PROFILE_FAST,
+                False,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+            )
+        assert result.passed
+        # The test pool must always be destroyed (finally block).
+        assert mock.was_called("zpool destroy")
+
+    def test_destructive_test_fails_on_reimport(self):
+        mock = MockShell()
+        mock.on("zpool create").succeeds()
+        mock.on("dd").succeeds()
+        mock.on("sync").succeeds()
+        mock.on("zpool export").succeeds()
+        mock.on("drop_caches").succeeds()
+        # Re-import fails with the FUA-lie signature.
+        mock.on("zpool import -o readonly=on").fails(
+            "cannot import: insufficient replicas",
+        )
+        mock.on("zpool destroy").succeeds()
+        mock.on("rm -rf").succeeds()
+        with patch_sh(mock):
+            result = run_destructive_test(
+                "/dev/sda",
+                PROFILE_FAST,
+                False,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+            )
+        assert not result.passed
+        assert mock.was_called("zpool destroy")
+
+    def test_destructive_cold_waits_for_reconnect(self):
+        called = {"reconnect": False, "eject": False}
+
+        def _wait():
+            called["reconnect"] = True
+
+        mock = MockShell()
+        mock.on("zpool create").succeeds()
+        mock.on("dd").succeeds()
+        mock.on("sync").succeeds()
+        mock.on("zpool export").succeeds()
+        mock.on("eject").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on("zpool import").succeeds()
+        mock.on("zpool destroy").succeeds()
+        mock.on("rm -rf").succeeds()
+        with patch_sh(mock):
+            result = run_destructive_test(
+                "/dev/sda",
+                PROFILE_FAST,
+                True,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+                wait_for_reconnect=_wait,
+            )
+        assert result.passed
+        assert called["reconnect"]  # cold pause was hit
+        assert mock.was_called("eject /dev/sda")
+
+    def test_report_obfuscation(self):
+        mock = MockShell()
+        # Minimal environment responses; serial-like token in dmesg.
+        mock.on("zark --version").succeeds("zark v1.0.12")
+        mock.on("lsb_release").succeeds("Ubuntu 25.10")
+        mock.on("zfs version").succeeds("zfs-2.2.6")
+        mock.on("uname").succeeds("Linux carmen")
+        mock.on("lsblk").succeeds("CT2000X10PROSSD9")
+        mock.on("dmesg").succeeds("serial 2449E8CD1F15 attached")
+        with patch_sh(mock):
+            report = HealthReport(device="/dev/sda")
+            clean = generate_report("/dev/sda", report, None, obfuscate=True)
+            raw = generate_report("/dev/sda", report, None, obfuscate=False)
+        assert "2449E8CD1F15" not in clean
+        assert "<redacted>" in clean
+        assert "2449E8CD1F15" in raw
+
+
+class TestIsLiveUsb:  # pylint: disable=missing-function-docstring
+    """lib.sh.is_live_usb — single source of truth for live-media detection."""
+
+    def test_true_on_casper_cmdline(self):
+        mock = MockShell()
+        mock.on("cat /proc/cmdline").succeeds("BOOT_IMAGE=/casper/vmlinuz boot=casper quiet")
+        with patch_sh(mock):
+            assert _sh.is_live_usb()
+
+    def test_true_on_rofs_when_cmdline_silent(self):
+        mock = MockShell()
+        mock.on("cat /proc/cmdline").succeeds("BOOT_IMAGE=/vmlinuz root=ZFS=rpool/ROOT/ubuntu")
+        mock.on("test -d /rofs").succeeds()
+        mock.on("test -d /cow").fails()
+        with patch_sh(mock):
+            assert _sh.is_live_usb()
+
+    def test_false_on_installed_system(self):
+        mock = MockShell()
+        mock.on("cat /proc/cmdline").succeeds("BOOT_IMAGE=/vmlinuz root=ZFS=rpool/ROOT/ubuntu_x")
+        mock.on("test -d /rofs").fails()
+        mock.on("test -d /cow").fails()
+        with patch_sh(mock):
+            assert not _sh.is_live_usb()
+
+
+class TestRepairBootImport:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """repair-boot must import rpool/bpool with a -f fallback, not abort.
+
+    Regression guard for the "boot left without a kernel, repair-boot then
+    failed because the import lacked -f" incident: a pool left in-use by an
+    unclean shutdown must still import (clean attempt first, then forced),
+    routed through ZFS.pool_import so the operator never types -f by hand.
+    """
+
+    def test_forced_import_used_when_clean_fails(self):
+        zfs = ZFS(make_log())
+        mock = MockShell()
+        mock.on("zpool list bpool").fails()  # not yet imported
+        mock.on("zpool import -N -R /mnt/repair bpool").fails("pool was previously in use")
+        mock.on("zpool import -f -N -R /mnt/repair bpool").succeeds()
+        with patch_sh(mock):
+            assert zfs.pool_import("bpool", altroot="/mnt/repair", no_mount=True)
+        import_calls = [c for c in mock.calls if c.startswith("zpool import")]
+        # Clean attempt strictly precedes the forced one.
+        assert import_calls[0] == "zpool import -N -R /mnt/repair bpool"
+        assert "zpool import -f -N -R /mnt/repair bpool" in import_calls
+
+
+class _FakeKeystore:  # pylint: disable=missing-class-docstring,missing-function-docstring,too-few-public-methods # noqa: E501
+    """Minimal stand-in for Keystore in system-mount tests (no real LUKS)."""
+
+    def __init__(self, loaded: int = 2):
+        self._loaded = loaded
+
+    def mount(self, pool, passphrase):  # pylint: disable=unused-argument
+        return True
+
+    def load_pool_keys(self, pool_root):  # pylint: disable=unused-argument
+        return self._loaded
+
+
+class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
+    """lib.mount system-layout helpers used by `zark chroot` / `zark mount local`."""
+
+    def test_find_system_root_dataset(self):
+        mock = MockShell()
+        mock.on("zfs list -H -o name -r rpool/ROOT").succeeds(
+            "rpool/ROOT\nrpool/ROOT/ubuntu_8bt2zy\n",
+        )
+        with patch_sh(mock):
+            assert find_system_root_dataset() == "rpool/ROOT/ubuntu_8bt2zy"
+
+    def test_mount_system_pools_imports_both_and_returns_root(self):
+        mock = MockShell()
+        # Neither pool imported yet.
+        mock.on("zpool list rpool").fails()
+        mock.on("zpool list bpool").fails()
+        # Imports succeed (clean, no -f needed).
+        mock.on("zpool import -N -R /mnt/zark/chroot rpool").succeeds()
+        mock.on("zpool import -N -R /mnt/zark/chroot bpool").succeeds()
+        # Root dataset discovery + mounts.
+        mock.on("zfs list -H -o name -r rpool/ROOT").succeeds(
+            "rpool/ROOT\nrpool/ROOT/ubuntu_x\n",
+        )
+        mock.on("zfs mount rpool/ROOT/ubuntu_x").succeeds()
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x").succeeds("/")
+        # rpool dataset listing: container + BE + keystore zvol + a child.
+        mock.on(
+            "zfs list -H -o name,mountpoint,used,refer,canmount,type -t filesystem,volume -r rpool",
+        ).succeeds(
+            "rpool\t/\t1G\t1G\ton\tfilesystem\n"
+            "rpool/ROOT\tnone\t1G\t1G\toff\tfilesystem\n"
+            "rpool/ROOT/ubuntu_x\t/\t1G\t1G\tnoauto\tfilesystem\n"
+            "rpool/keystore\t-\t20M\t20M\t-\tvolume\n"
+            "rpool/USERDATA\t/home\t1G\t1G\ton\tfilesystem\n",
+        )
+        mock.on("zfs mount rpool/USERDATA").succeeds()
+        mock.on("zfs get -H -o value mountpoint rpool/USERDATA").succeeds("/home")
+        # bpool boot env.
+        mock.on("zfs list bpool/BOOT/ubuntu_x").succeeds("bpool/BOOT/ubuntu_x")
+        mock.on("zfs mount bpool/BOOT/ubuntu_x").succeeds()
+        mock.on("zfs get -H -o value mountpoint bpool/BOOT/ubuntu_x").succeeds("/boot")
+
+        cleanup = Cleanup(make_log())
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            res = mount_system_pools(
+                "/mnt/zark/chroot",
+                "pp",
+                make_log(),
+                ZFS(make_log()),
+                _FakeKeystore(),
+                cleanup,
+            )
+        assert res == ("/mnt/zark/chroot", "ubuntu_x")
+        # Both pools were imported (and thus tracked for clean export).
+        assert mock.was_called("zpool import -N -R /mnt/zark/chroot rpool")
+        assert mock.was_called("zpool import -N -R /mnt/zark/chroot bpool")
+        # Keystore zvol must never be mounted as a filesystem.
+        assert not mock.was_called("zfs mount rpool/keystore")
+        # The helper must never touch mountpoint properties (project rule #1).
+        assert not any("zfs set mountpoint" in c for c in mock.calls)
+
+
+class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
+    """umount local must refuse to export the *running* system's rpool.
+
+    Discriminator: zark imports the system under an altroot beneath
+    /mnt/zark; the live root has altroot '-'. Exporting the latter would
+    pull the filesystem out from under a running machine.
+    """
+
+    def test_refuses_when_no_altroot(self):
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool get -H -o value altroot rpool").succeeds("-")
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                return_value="",
+            ),
+        ):
+            try:
+                _umount_local_system(make_log())
+            except SystemExit:
+                # Must NOT have exported anything.
+                assert not mock.was_called("zpool export")
+                return
+        raise AssertionError("Expected SystemExit refusing to export the running system")
+
+    def test_exports_when_zark_altroot(self):
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
+        mock.on("zpool list bpool").succeeds("bpool")
+        mock.on("zfs unmount -a").succeeds()
+        mock.on("zfs unload-key -r bpool").succeeds()
+        mock.on("zfs unload-key -r rpool").succeeds()
+        mock.on("zpool export bpool").succeeds()
+        mock.on("zpool export rpool").succeeds()
+        mock.on("sync").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            _umount_local_system(make_log())
+        assert mock.was_called("zpool export rpool")
+        assert mock.was_called("zpool export bpool")
+
+
+class TestChrootSafety:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """zark chroot must refuse when rpool is already imported (running system)."""
+
+    def test_refuses_when_rpool_imported(self):
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch(
+                "builtins.input",
+                return_value="",
+            ),
+        ):
+            try:
+                chroot_mod.run([])
+            except SystemExit:
+                return
+        raise AssertionError("Expected SystemExit when rpool is already imported")
+
+
+class TestAptGuard:  # pylint: disable=missing-function-docstring
+    """The standalone apt/dpkg backup guard installed by setup/recover/finish.
+
+    Covers the Python installer (writes three files, correct perms, overwrite
+    semantics) and the cheap exit paths of the shell hook that can run without
+    zpool/dpkg-deb present (the ZARK_INTERNAL escape and the no-sensitive-
+    package short-circuit). The block path — external pool + boot-critical
+    package — needs a real importable pool and is exercised by integration
+    testing, not CI; here it is covered by content assertions on the script.
+    """
+
+    def test_install_writes_three_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            apt_guard.install(target_root=td, log=make_log())
+            hook = Path(td) / apt_guard.HOOK_RELATIVE_PATH
+            conf = Path(td) / apt_guard.APT_CONF_RELATIVE_PATH
+            motd = Path(td) / apt_guard.MOTD_RELATIVE_PATH
+            for p in (hook, conf, motd):
+                assert p.exists(), f"missing {p}"
+                assert p.stat().st_mode & 0o111, f"not executable: {p}"
+            # apt.conf registers the hook via Pre-Install-Pkgs at its abs path.
+            conf_text = conf.read_text(encoding="utf-8")
+            assert "DPkg::Pre-Install-Pkgs" in conf_text
+            assert f"/{apt_guard.HOOK_RELATIVE_PATH}" in conf_text
+            # Hook honours the ZARK_INTERNAL escape and detects external pools.
+            hook_text = hook.read_text(encoding="utf-8")
+            assert "ZARK_INTERNAL" in hook_text
+            assert "zpool import" in hook_text
+
+    def test_sensitive_globs_present_in_hook(self):
+        # Every glob in the single source of truth must appear in the hook's
+        # case pattern, so the constant and the script can never drift.
+        for glob in apt_guard.SENSITIVE_GLOBS:
+            assert glob in apt_guard.HOOK_SCRIPT, f"glob not wired into hook: {glob}"
+        # The categories from the incident must all be covered.
+        joined = " ".join(apt_guard.SENSITIVE_GLOBS)
+        for needed in ("linux-image-*", "grub-*", "shim-*", "zfs-*"):
+            assert needed in joined
+
+    def test_overwrite_false_keeps_existing(self):
+        with tempfile.TemporaryDirectory() as td:
+            hook = Path(td) / apt_guard.HOOK_RELATIVE_PATH
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text("SENTINEL", encoding="utf-8")
+            apt_guard.install(target_root=td, log=make_log(), overwrite=False)
+            assert hook.read_text(encoding="utf-8") == "SENTINEL"
+
+    def test_install_is_noop_when_current(self):
+        # Re-running install on an up-to-date tree must not rewrite anything,
+        # so `zark setup` stays a true no-op (no mtime churn).
+        with tempfile.TemporaryDirectory() as td:
+            apt_guard.install(target_root=td, log=make_log())
+            hook = Path(td) / apt_guard.HOOK_RELATIVE_PATH
+            # First write created it; a second _write with identical content
+            # is a no-op.
+            assert (
+                apt_guard._write(  # pylint: disable=protected-access
+                    hook,
+                    apt_guard.HOOK_SCRIPT,
+                    overwrite=True,
+                )
+                is False
+            )
+
+    def _written_hook(self, td: str) -> str:
+        apt_guard.install(target_root=td, log=make_log())
+        return str(Path(td) / apt_guard.HOOK_RELATIVE_PATH)
+
+    def test_hook_exits_zero_when_internal(self):
+        # ZARK_INTERNAL=1 must short-circuit before any pool scan.
+        with tempfile.TemporaryDirectory() as td:
+            hook = self._written_hook(td)
+            env = {**os.environ, "ZARK_INTERNAL": "1"}
+            proc = subprocess.run(
+                ["sh", hook],
+                input="/var/cache/apt/archives/linux-image-x_1_amd64.deb\n",
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            assert proc.returncode == 0
+
+    def test_hook_exits_zero_for_non_boot_package(self):
+        # A non-boot-critical package must be allowed; the hook short-circuits
+        # before the zpool scan, so this is safe without ZFS present.
+        with tempfile.TemporaryDirectory() as td:
+            hook = self._written_hook(td)
+            env = {k: v for k, v in os.environ.items() if k != "ZARK_INTERNAL"}
+            proc = subprocess.run(
+                ["sh", hook],
+                input="/var/cache/apt/archives/cowsay_3.03_all.deb\n",
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            assert proc.returncode == 0
 
 
 def main() -> int:

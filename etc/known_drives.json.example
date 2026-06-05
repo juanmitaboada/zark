@@ -1,2 +1,12 @@
 {
+  "backup": {
+    "guid": "8963688414852777737",
+    "drive_id": "usb-Vendor_Model_SERIAL-0:0",
+    "last_backup_at": "2026-06-04T04:23:42Z",
+    "autoeject": true
+  },
+  "black": {
+    "guid": "14361060171807873218",
+    "drive_id": "usb-Vendor_Model_OTHERSERIAL-0:0"
+  }
 }

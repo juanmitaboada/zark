@@ -53,12 +53,14 @@ zark automates the entire process:
 | `finish`           | Post-recovery finalization (run from the recovered system)   |
 | `repair-boot`      | Fix boot issues from a live USB without full recovery        |
 | `repair-divergent` | Reset backup datasets that diverged from the source          |
-| `mount`            | Mount backup pool read-only for inspection or chroot         |
-| `umount`           | Unmount a previously mounted backup pool                     |
+| `chroot`           | Open an interactive chroot into the installed system (live USB) |
+| `mount`            | Mount a backup pool — or the local system (`mount local`) — for inspection/chroot |
+| `umount`           | Unmount a backup pool, or the local system (`umount local`)  |
 | `clean`            | Emergency cleanup: unmount everything, export all pools      |
 | `purge`            | Securely wipe a managed backup drive                         |
 | `monitor`          | Live progress monitor (run in a separate terminal)           |
 | `simulate`         | Boot the target disk in QEMU/KVM to verify the boot chain    |
+| `health`           | Non-destructive risk checks on a backup drive                |
 
 ---
 
@@ -161,6 +163,20 @@ sudo ./zark finish    # regenerate grub.cfg, finalize Secure Boot chain
 
 `finish` is idempotent and safe to re-run. It runs `update-grub` internally, so you don't need to invoke it separately.
 
+### Fix a broken boot by hand (chroot)
+
+When the pools are intact but the boot chain is broken — and you want to run a few commands inside the real system rather than a full `recover` — drop into a chroot from a live USB:
+
+```bash
+sudo ./zark chroot          # imports rpool/bpool, unlocks, mounts, chroots in
+# inside the chroot, work as if booted:
+update-grub
+dpkg-reconfigure grub-efi-amd64-signed
+exit                        # zark unmounts and exports both pools cleanly
+```
+
+For a quick look at the installed disk without a working shell, `sudo ./zark mount local` mounts it read-only (and `sudo ./zark umount local` releases it). `repair-boot` remains the one-shot, non-interactive option for the common grub-regeneration case.
+
 ### Test the recovered boot without rebooting
 
 ```bash
@@ -196,8 +212,9 @@ zark/
 │   ├── explore.py           # Pool and drive scanner
 │   ├── setup.py             # Dependency installation, Secure Boot pre-check
 │   ├── prepare.py           # New drive initialization
-│   ├── mount.py             # Backup pool mounting
-│   ├── umount.py            # Backup pool unmounting
+│   ├── mount.py             # Backup pool mounting (+ `mount local` for the system)
+│   ├── umount.py            # Backup pool unmounting (+ `umount local`)
+│   ├── chroot.py            # Interactive chroot into the installed system (live USB)
 │   ├── clean.py             # Emergency cleanup
 │   ├── purge.py             # Secure drive wipe
 │   ├── monitor.py           # Live progress display
@@ -227,6 +244,12 @@ zark uses syncoid (from sanoid) as its replication engine, but adds everything s
 When an external ZFS backup pool is connected, Ubuntu's `10_linux_zfs` GRUB script auto-imports all visible pools and attempts to mount their encrypted datasets. When this fails (no key loaded), it generates a `grub.cfg` with zero kernel entries - an unbootable system.
 
 zark installs `09_zfs_backup_guard`, a lightweight script that detects external pools and blocks `update-grub` with a clear error message before any damage occurs.
+
+### The apt guard
+
+The GRUB guard fires late: it can refuse to regenerate `grub.cfg`, but by then a kernel package upgrade has already unpacked the new kernel into `/boot` and autoremove may have pulled the old one — leaving a `grub.cfg` that points at a kernel which no longer exists. This is exactly how a background `unattended-upgrades` run, with a backup drive still connected, can brick a system.
+
+To close that vector, `setup` (on the running system) and `recover`/`finish` (on a recovered system) install an apt guard: a standalone `/usr/local/lib/zark/apt-zfs-backup-guard` script wired in as a `DPkg::Pre-Install-Pkgs` hook. APT runs it *before* dpkg unpacks anything; when a boot-critical package (`linux-image-*`, `linux-headers-*`, `grub-*`, `shim-*`, `zfs-*`) is being installed while an external ZFS pool is connected, the hook aborts the entire transaction. It detects pools with `zpool` directly — no dependency on zark itself — so it keeps protecting a recovered system after the live USB is gone. zark's own recovery flows set `ZARK_INTERNAL=1` to bypass it; a login-time MOTD reminder (`/etc/update-motd.d/99-zark-external-pool`) warns when an external pool is attached.
 
 ### Boot chain integrity
 
@@ -267,6 +290,34 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 - An external drive for backup storage
 
 ---
+
+## Configuration: `known_drives.json`
+
+Registered backup drives live in `known_drives.json` (under `/etc/zark/` on a system install, or `etc/` in a portable checkout; overridable with `ZARK_CONFIG_DIR`). Each top-level key is a pool name; `prepare` creates entries automatically, but you can edit the file by hand. Fields per drive:
+
+| Field            | Type    | Required | Meaning |
+|------------------|---------|----------|---------|
+| `guid`           | string  | yes      | The pool GUID (decimal). zark matches the connected drive by this. |
+| `drive_id`       | string  | yes      | The stable `/dev/disk/by-id/` identifier (model + serial), without the `-part1` suffix. zark imports the pool by this exact device. |
+| `last_backup_at` | string  | no       | ISO-8601 UTC of the last successful backup; auto-written by `zark backup`. Drives the staleness reporting. |
+| `autoeject`      | boolean | no       | When `true`, the eject prompt for this drive shows a 10-second countdown and then applies the command's default automatically (any keypress cancels it and lets you answer by hand). Useful for unattended rotation. Absent or `false` (the default) means the prompt waits for you indefinitely, as it always has. `prepare` asks whether to enable this; you can also toggle it by editing the file. |
+
+Example:
+
+```json
+{
+  "backup": {
+    "guid": "8963688414852777737",
+    "drive_id": "usb-Vendor_Model_SERIAL-0:0",
+    "last_backup_at": "2026-06-04T04:23:42Z",
+    "autoeject": true
+  },
+  "black": {
+    "guid": "14361060171807873218",
+    "drive_id": "usb-Vendor_Model_OTHERSERIAL-0:0"
+  }
+}
+```
 
 ## Drive rotation and retention policy
 
@@ -354,6 +405,16 @@ The colours and icons are deliberately disjoint so the two states are never conf
 **Side-effect of STOP UNIT**: after a successful eject the drive **disappears from `/dev`** until physically replugged. This is intentional and lines up with the workflow. If a follow-up command on the same drive is planned, answer `n` and the drive stays in `/dev` — the kernel-side flush has still run, so a clean `umount` or another zark command later will prompt again.
 
 `repair-boot` does not prompt: it touches only the internal rpool/bpool on the system disk, never a removable drive, and refuses to run with external pools imported.
+
+### Read-back verification
+
+A clean `zpool export` is not proof that the pool survived. The same FUA-lying bridges can also lose **spacemaps** while the labels persist, so the pool scans as `ONLINE` but fails a real open deep in `vdev_load` with `metaslab_init failed [error=52]` — discovered only when you finally need the backup. To catch this immediately, `backup` re-imports the pool **read-only** after export (dropping the page cache first so the read comes from the device, not RAM) and requires `ONLINE` before declaring the backup safe. If the re-import fails it prints **`BACKUP NOT VERIFIED`** and stops short of the safe-to-unplug prompt: the data is not trustworthy even though `syncoid` and `export` reported success. This is always on.
+
+### Known-bad enclosures and the UAS quirk
+
+The bridge chipsets that cause all of the above are documented, with their USB IDs, exact kernel signatures, and the system-level `usb-storage` quirk that forces the conservative transport, in [**`docs/HARDWARE.md`**](docs/HARDWARE.md). If you hit `BACKUP NOT VERIFIED`, an import that fails with `insufficient replicas` on a healthy-looking drive, or `Synchronize Cache(10) failed: DID_ERROR` under load, read that first.
+
+To check a drive's risk factors up front without writing anything, run `zark health [/dev/sdX]`. It is fully interactive: it asks whether you want a read-only check (default) or a destructive write-and-verify test, gathers any further choices, then runs unattended. The read-only check inspects the bridge's reported cache semantics, the active USB transport (UAS vs usb-storage), and the bridge model against a known-problematic list. The destructive test creates a throwaway pool, writes with transaction churn (fast ~2 GB, medium ~15 GB, or whole-disk "surface"), and re-imports to confirm the bridge actually persisted the data; an optional cold pass powers the device down and has you physically reconnect it before re-importing, so the read-back comes strictly from NAND. `prepare` runs the same read-only check before doing any work and asks for confirmation if a risk factor is present. Whenever a risk or test failure is found, a diagnostic report is written to `/tmp` with instructions for filing a GitHub issue. Note that a non-destructive check can only flag *risk* — it cannot prove a bridge is honest, since that only shows under write load. The authoritative proof is the read-back that `prepare`, `backup`, and the destructive test perform after writing.
 
 ---
 

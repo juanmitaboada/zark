@@ -26,6 +26,46 @@ from lib.keystore import Keystore
 from lib.log import Log
 
 MNT_BASE = "/mnt/zark"
+SYSTEM_TARGETS = ("local", "system", "rpool")
+
+
+def _umount_local_system(log: Log) -> None:
+    """Export the installed system's rpool/bpool mounted by 'zark mount local'.
+
+    Safety discriminator: zark always imports the system under an altroot
+    beneath ``/mnt/zark`` (see mount_system_pools). The *running* system's
+    rpool has no altroot (``altroot = -``). We refuse to export anything
+    whose altroot is not under ``/mnt/zark`` — that is the guard against
+    pulling the live root out from under a running machine.
+    """
+    if not sh.run("zpool list rpool").ok:
+        log.warn("rpool is not imported — nothing to unmount.")
+        return
+
+    altroot = sh.run("zpool get -H -o value altroot rpool").output.strip()
+    if not altroot.startswith(MNT_BASE):
+        log.fatal(
+            "rpool was not imported by zark under an altroot "
+            f"(altroot={altroot or '-'}).\n"
+            "  Refusing to export — this looks like the running system, not a\n"
+            "  live-USB inspection mount.",
+        )
+
+    log.info("Unmounting system datasets...")
+    sh.run("zfs unmount -a")
+
+    for pool in ("bpool", "rpool"):  # bpool first (it sits under /boot)
+        if not sh.run(f"zpool list {pool}").ok:
+            continue
+        sh.run(f"zfs unload-key -r {pool}")
+        if sh.run(f"zpool export {pool}").ok:
+            log.ok(f"Pool {pool} exported ✓")
+        elif sh.run(f"zpool export -f {pool}").ok:
+            log.ok(f"Pool {pool} exported (forced) ✓")
+        else:
+            log.warn(f"Could not export {pool} — run: zpool export {pool}")
+    flush_device_cache(log)
+    log.banner_ok("SYSTEM UNMOUNTED", ["rpool/bpool exported cleanly ✓"])
 
 
 def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements # noqa: E501
@@ -34,9 +74,17 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     """
     Unmount a previously mounted backup pool.
     """
-    del args  # Unused
     log = Log()
     cfg = Config.load()
+
+    # Local/system target: export the installed system's pools (the
+    # counterpart to 'zark mount local'). Explicit keyword so the default
+    # backup-drive behaviour is unchanged.
+    target = next((a for a in args if not a.startswith("-")), None)
+    if target in SYSTEM_TARGETS:
+        log.banner("UNMOUNT SYSTEM")
+        _umount_local_system(log)
+        return
 
     log.banner("UNMOUNT BACKUP POOL")
 
@@ -141,6 +189,12 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
         # branch covers operators who only wanted to release the mount
         # for a different reason (e.g. about to re-mount under another
         # path).
-        prompt_eject_or_attach(device_for_eject, selected, log, default_eject=True)
+        prompt_eject_or_attach(
+            device_for_eject,
+            selected,
+            log,
+            default_eject=True,
+            autoeject=cfg.drive_autoeject(selected),
+        )
     else:
         log.blank()

@@ -1,3 +1,93 @@
+zark (1.0.12-1) stable; urgency=medium
+
+  * backup: import the backup pool by its exact device path
+    (/dev/disk/by-id/...-part1) before any directory scan. Some
+    USB-SATA bridges expose a non-unique wwn-0x... alias (identical
+    across enclosures) that points at the whole disk, causing
+    "insufficient replicas" and colliding between drives. lib/zfs
+    pool_import now tries the precise device first (plain, then -f),
+    falling back to directory/auto-scan only when it fails. Callers
+    that import without a device (recover, mount, repair-divergent)
+    are unaffected.
+  * backup: add post-export read-back verification. On bridges that
+    lie about FUA, a successful zpool export does not prove the pool
+    is reimportable (spacemaps can be lost while labels survive ->
+    metaslab_init error 52 / EBADE on next open). lib/zfs
+    verify_exported_pool_readback() drops the page cache, re-imports
+    read-only by exact device, and requires ONLINE before reporting
+    the backup safe. On failure backup shows BACKUP NOT VERIFIED and
+    stops short of the safe-to-unplug prompt. Always on; no scrub.
+  * docs/HARDWARE.md: document the offending bridge (0634:5604), both
+    corruption modes, the bogus shared-WWN trap, the DID_ERROR vs
+    DID_NO_CONNECT distinction at disconnect, the read-back
+    mitigation, and the usb-storage quirks=0634:5604:u system quirk.
+  * health: new fully-interactive command `zark health [device]` for
+    drive analysis and debugging. Read-only mode inspects risk factors
+    (no-FUA bridge, UAS transport, known-problematic bridge VID:PID).
+    Destructive mode (explicit confirmation, blank drive) creates a
+    throwaway pool, writes with transaction churn (fast/medium/surface
+    profiles with measured-speed estimates), and re-imports to verify
+    persistence; an optional cold pass powers the device down and has
+    the operator physically reconnect before re-import (reads strictly
+    from NAND). The throwaway pool is always destroyed. On any risk or
+    failure a diagnostic report is written to /tmp (environment, drive,
+    bridge VID:PID, dmesg) with issue-filing instructions and optional
+    serial/GUID obfuscation. lib/health.py holds the extensible check
+    and test logic. prepare runs the read-only check up front (warn +
+    confirm) and a read-back at the end — since prepare writes the full
+    raw send, it confirms the bridge survives write load before
+    registering the drive in known_drives.json.
+  * eject prompt: optional per-drive auto-eject. A new `autoeject`
+    boolean in known_drives.json (default false, asked by prepare,
+    editable by hand) makes the eject prompt show a 10-second countdown
+    (fixed EJECT_TIMEOUT_SECONDS) and then apply the command's default
+    automatically; any keypress cancels it and falls back to the normal
+    prompt, and a non-interactive run applies the default at once.
+    Implemented as Log.ask_timeout via select.select. Absent/false
+    leaves the prompt blocking exactly as before. The known_drives.json
+    schema is now documented in the README.
+  * Tests: 25 new cases total (TestPoolImportExactDevice,
+    TestReadbackVerification, TestHealthChecks, TestHealthDestructive,
+    TestAutoejectConfig, plus autoeject prompt cases). Full suite at 324.
+  * repair-boot: harden against the half-applied-kernel boot loss. Three
+    fixes: register Cleanup at entry so every exit path (including an
+    early fatal) exports pools cleanly; import rpool/bpool via
+    ZFS.pool_import so an unclean pool still imports (clean attempt,
+    then -f) instead of aborting; and fix a tautological live-USB guard
+    that never triggered. is_live_usb() is now a single mock-testable
+    helper in lib/sh shared with recover.
+  * chroot: new command `zark chroot [device]` — import rpool/bpool
+    under an altroot from a live USB, unlock the keystore, mount the
+    boot environment with the bind mounts a chroot needs (proc/sys/dev/
+    dev-pts/run, efivars, ESP), and drop into a login shell inside the
+    installed system. On exit it exports both pools cleanly so the next
+    real boot needs no -f. Refuses when rpool is already imported.
+  * mount/umount: accept a `local` (alias system/rpool) target to
+    mount/export the installed system's pools from a live USB, distinct
+    from the backup-drive flow. umount local refuses to export any pool
+    whose altroot is not under /mnt/zark (guard against exporting the
+    running system). Shared system-mount helper in lib/mount
+    (mount_system_pools) used by chroot and mount local; it relies on
+    altroot + stored mountpoints and never runs `zfs set mountpoint`.
+  * apt guard: install /usr/local/lib/zark/apt-zfs-backup-guard as a
+    DPkg::Pre-Install-Pkgs hook (via /etc/apt/apt.conf.d/
+    09zark-zfs-backup-guard) that aborts a transaction before dpkg
+    unpacks when a boot-critical package (linux-image/headers/modules,
+    grub, shim, zfs) is installed while an external ZFS pool is
+    connected — closing the unattended-upgrades vector the grub guard
+    catches too late. Standalone (detects pools with zpool, no zark
+    dependency), with a ZARK_INTERNAL=1 escape for zark's own recovery
+    flows and a login-time MOTD reminder. Installed by setup (running
+    system) and recover/finish (recovered system). lib/apt_guard.py is
+    the single source of truth, mirroring lib/grub_guard.py.
+  * lint: test suite now passes pylint 10.00/10 (health-test imports
+    raised to module level, duplicate inline fakes unified).
+  * Tests: full suite at 338 (TestIsLiveUsb, TestRepairBootImport,
+    TestSystemMountHelpers, TestUmountLocalSafety, TestChrootSafety,
+    TestAptGuard).
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Thu, 04 Jun 2026 12:00:00 +0200
+
 zark (1.0.11-1) stable; urgency=medium
 
   * Safe USB disconnect: introduce sync + interactive eject + visible
