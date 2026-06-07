@@ -1212,8 +1212,8 @@ class TestPromptEjectOrAttach:
         assert "still attached" in buf.getvalue()
 
     def test_autoeject_non_tty_applies_default_immediately(self):
-        """autoeject=True with no TTY applies the default at once (no
-        countdown), ejecting when default_eject is True."""
+        """autoeject=True with no TTY ejects at once (no countdown), even when
+        the command's own default is no-eject (the prepare/repair case)."""
         mock = MockShell()
         log = make_log()
         mock.on("eject /dev/sdb").succeeds()
@@ -1228,8 +1228,8 @@ class TestPromptEjectOrAttach:
                         "/dev/sdb",
                         "blue",
                         log,
-                        default_eject=True,
-                        autoeject=True,
+                        default_eject=False,  # command says no-eject...
+                        autoeject=True,  # ...but auto-eject overrides to eject
                     )
 
         assert mock.was_called("eject /dev/sdb")
