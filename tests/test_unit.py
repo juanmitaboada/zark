@@ -5008,6 +5008,36 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         assert mock.was_called("zpool export rpool")
         assert mock.was_called("zpool export bpool")
 
+    def test_closes_keystore_before_export(self):
+        """umount local must close the LUKS keystore (cryptsetup) before
+        exporting rpool, else the held zvol hangs the export in taskq_wait.
+        Regression for the live-USB hang found on hardware."""
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
+        mock.on("zpool list bpool").succeeds("bpool")
+        mock.on("zfs unmount -a").succeeds()
+        mock.on("zfs unload-key -r bpool").succeeds()
+        mock.on("zfs unload-key -r rpool").succeeds()
+        mock.on("zpool export bpool").succeeds()
+        mock.on("zpool export rpool").succeeds()
+        mock.on("umount").succeeds()
+        mock.on("cryptsetup close").succeeds()
+        mock.on("sync").succeeds()
+        # Pretend the keystore LUKS mapper is open (opened by a prior
+        # `zark mount local`) and its mountpoint is active.
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch("lib.keystore.Path") as fake_path,
+        ):
+            inst = fake_path.return_value
+            inst.exists.return_value = True
+            inst.is_mount.return_value = True
+            _umount_local_system(make_log())
+        # The cryptsetup mapping must have been torn down before the export.
+        assert mock.was_called("cryptsetup close")
+
 
 class TestChrootSafety:  # pylint: disable=missing-function-docstring,too-few-public-methods
     """zark chroot must refuse when rpool is already imported (running system)."""

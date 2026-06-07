@@ -54,6 +54,17 @@ def _umount_local_system(log: Log) -> None:
     log.info("Unmounting system datasets...")
     sh.run("zfs unmount -a")
 
+    # Close the rpool keystore (LUKS over the keystore zvol) BEFORE exporting.
+    # `zfs unmount -a` and `unload-key` do not close the cryptsetup mapping, so
+    # without this the zvol keeps a device-mapper holder and `zpool export
+    # rpool` hangs in taskq_wait waiting for the zvol to be released. This is
+    # the same teardown the chroot path performs on exit.
+    if sh.run("zpool list rpool").ok:
+        log.info("Closing keystore...")
+        ks = Keystore(log)
+        ks.attach_to_pool("rpool")
+        ks.umount()
+
     for pool in ("bpool", "rpool"):  # bpool first (it sits under /boot)
         if not sh.run(f"zpool list {pool}").ok:
             continue

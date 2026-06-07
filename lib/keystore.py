@@ -58,9 +58,20 @@ class Keystore:
         Prepare this Keystore instance to operate on an already-open keystore
         belonging to `pool`. Use when `umount()` needs to be called without a
         prior `mount()` in this process — e.g. cleaning up after a previous
-        zark run that left the LUKS device open.
+        zark run that left the LUKS device open, or closing a keystore opened
+        by an earlier `zark mount`/`zark mount local` invocation.
+
+        Detects the real on-system state: if the LUKS mapper for this pool is
+        actually open, marks the instance as mounted so a following
+        :meth:`umount` proceeds to unmount and close it (otherwise ``umount``
+        would early-return on ``_mounted=False`` and silently leave the zvol
+        held, which hangs a subsequent ``zpool export`` in ``taskq_wait``).
         """
         self._mapper_name = Keystore.mapper_name_for(pool)
+        # If the device-mapper node exists, the keystore is open from a prior
+        # invocation; reflect that so umount() actually tears it down.
+        if Path(f"/dev/mapper/{self._mapper_name}").exists():
+            self._mounted = True
 
     def find_zvol_for_pool(self, pool: str) -> str | None:
         """
