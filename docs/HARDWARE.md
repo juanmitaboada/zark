@@ -99,12 +99,25 @@ VID:PID, forcing the more conservative `usb-storage` transport. This is a
 **system** change, outside zark's portable scope, but it is the most effective
 prevention.
 
-Observed offending bridge: `idVendor=0634 idProduct=5604`
-(seen on Micron CT2000X10PROSSD9 in USB-SATA enclosures).
+Observed offending bridges (same vendor, different products, both seen on
+Micron CT2000X10* SSDs in USB-SATA enclosures):
+
+  * `idVendor=0634 idProduct=5604` — CT2000X10PROSSD9 enclosure. Confirmed to
+    corrupt a pool under write load (the original incident).
+  * `idVendor=0634 idProduct=5607` — CT2000X10SSD9 enclosure. Same family:
+    reports no FUA, defaults to UAS, and shows `DID_ERROR` on the disconnect
+    cache flush. Treated as corruption-prone for the same reasons, even though
+    a given backup may happen to survive.
+
+Note these are two distinct bridges, not one shared chipset; they do, however,
+both expose the same bogus generic WWN (`wwn-0x5000000000000001`), so the
+exact-device import rule matters for telling the drives apart.
+
+Disable UAS for both with a single quirk line:
 
 ```sh
 # /etc/modprobe.d/uas-quirk.conf
-options usb-storage quirks=0634:5604:u
+options usb-storage quirks=0634:5604:u,0634:5607:u
 ```
 
 Then reload the modules (with the enclosure disconnected):

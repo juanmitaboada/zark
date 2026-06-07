@@ -49,8 +49,15 @@ from lib.sh import run
 # entry when a bridge is confirmed problematic, with a short note.
 KNOWN_BAD_BRIDGES: dict[str, str] = {
     "0634:5604": (
-        "Micron CT2000X10* USB-SATA enclosure — ignores FUA, can corrupt "
-        "pools under write load (spacemap loss -> metaslab_init error 52)."
+        "Micron CT2000X10PROSSD9 USB-SATA enclosure — ignores FUA, can "
+        "corrupt pools under write load (spacemap loss -> metaslab_init "
+        "error 52). Use a usb-storage quirk to disable UAS."
+    ),
+    "0634:5607": (
+        "Micron CT2000X10SSD9 USB-SATA enclosure — same vendor as 0634:5604, "
+        "also reports no FUA and defaults to UAS; shows DID_ERROR on the "
+        "disconnect cache flush. Treat as corruption-prone under write load; "
+        "use a usb-storage quirk to disable UAS."
     ),
 }
 
@@ -267,6 +274,13 @@ class TestResult:
     write_mb_s: float
     passed: bool
     detail: str = ""
+    # Kernel transport errors (DID_ERROR, UAS aborts/resets, failed cache
+    # flushes) observed on the device *during* the test. A test can pass the
+    # data read-back yet still log these — the signature of a bridge that
+    # happened to persist this time but is failing at the bus level and may
+    # corrupt on another run. Non-empty means "passed, but the enclosure is
+    # not trustworthy".
+    transport_errors: list[str] = field(default_factory=list)
 
 
 def device_size_bytes(dev: str) -> int:
@@ -369,6 +383,60 @@ def _write_churn(  # pylint: disable=too-many-locals
     return written
 
 
+# Kernel log patterns that signal a transport-level failure on a USB-SATA
+# bridge — distinct from a data-integrity failure. These can appear even when
+# the pool reads back ONLINE (the bridge persisted this time but the bus
+# stalled), so they are reported as a strong caution rather than a hard fail.
+_TRANSPORT_ERROR_PATTERNS = (
+    "DID_ERROR",
+    "uas_eh_abort",
+    "uas_eh_device_reset",
+    "Synchronize Cache(10) failed",
+    "command aborted",
+    "reset SuperSpeed",
+)
+
+
+def _dmesg_now_ts() -> float:
+    """Return the timestamp (kernel seconds) of the latest dmesg line, or 0.0.
+
+    Used to mark a point before the test so we can scan only the lines emitted
+    *during* it. dmesg timestamps are seconds since boot in brackets.
+    """
+    r = run("sh -c 'dmesg | tail -1'")
+    if not r.ok:
+        return 0.0
+    m = re.match(r"\[\s*([0-9]+\.[0-9]+)\]", r.output)
+    return float(m.group(1)) if m else 0.0
+
+
+def _transport_errors_since(base: str, since_ts: float) -> list[str]:
+    """Return kernel transport-error lines for ``base`` newer than ``since_ts``.
+
+    Scans dmesg for lines mentioning the device (``[sdX]`` or its host) that
+    match a known transport-failure pattern and whose timestamp is after the
+    marker. DID_NO_CONNECT (a clean unplug) is deliberately not in the pattern
+    list, so a normal disconnect does not raise a false alarm.
+    """
+    r = run("sh -c 'dmesg'")
+    if not r.ok:
+        return []
+    hits: list[str] = []
+    for line in r.output.splitlines():
+        m = re.match(r"\[\s*([0-9]+\.[0-9]+)\]", line)
+        if not m or float(m.group(1)) <= since_ts:
+            continue
+        if base not in line and "scsi host" not in line and "uas" not in line:
+            continue
+        # A failed cache flush with DID_NO_CONNECT is the harmless "device
+        # already unplugged" case, not a transport fault — never flag it.
+        if "DID_NO_CONNECT" in line:
+            continue
+        if any(p in line for p in _TRANSPORT_ERROR_PATTERNS):
+            hits.append(line.strip())
+    return hits
+
+
 def run_destructive_test(
     dev: str,
     profile: str,
@@ -395,6 +463,9 @@ def run_destructive_test(
     target = profile_target_bytes(profile, dev)
     cycles = _PROFILE_CYCLES.get(profile, 1)
     bytes_written = 0
+    # Mark the kernel-log position so we can later report only the transport
+    # errors emitted during this test.
+    dmesg_mark = _dmesg_now_ts()
     try:
         log.info(f"Creating throwaway test pool '{test_pool}'...")
         r = run(
@@ -410,6 +481,7 @@ def run_destructive_test(
                 write_mb_s,
                 False,
                 f"could not create test pool: {r.stderr.strip()}",
+                _transport_errors_since(base, dmesg_mark),
             )
 
         log.info(f"Writing ~{target // (1024**3)} GB with churn ({cycles} cycle(s))...")
@@ -435,6 +507,10 @@ def run_destructive_test(
             f"zpool import -o readonly=on -N -d /dev/disk/by-id {test_pool}",
             log=log,
         )
+        # Transport errors are read AFTER the re-import attempt so the import's
+        # own bus traffic (which is where a flaky bridge tends to stumble) is
+        # included in the window.
+        terrs = _transport_errors_since(base, dmesg_mark)
         if not imp.ok:
             return TestResult(
                 profile,
@@ -443,22 +519,37 @@ def run_destructive_test(
                 write_mb_s,
                 False,
                 f"re-import failed: {imp.stderr.strip()}",
+                terrs,
             )
         health = zfs.pool_health(test_pool)
         passed = health == "ONLINE"
+        detail = "ONLINE" if passed else f"health={health}"
+        if passed and terrs:
+            # Data survived this time, but the bus stumbled — flag it loudly.
+            detail = (
+                "ONLINE, but transport errors were logged during the test "
+                "(the bridge persisted this run but is failing at the bus "
+                "level and may corrupt on another)"
+            )
         return TestResult(
             profile,
             cold,
             bytes_written,
             write_mb_s,
             passed,
-            "ONLINE" if passed else f"health={health}",
+            detail,
+            terrs,
         )
     finally:
-        # Always destroy the test pool and leave the device empty.
+        # Always destroy the test pool AND wipe the device, so it is left
+        # genuinely blank — not with orphan zfs_member partitions that would
+        # make it look like it holds real data (and that the empty-drive check
+        # would later reject).
         run(f"zpool import -N -d /dev/disk/by-id {test_pool} 2>/dev/null")
         run(f"zpool destroy -f {test_pool} 2>/dev/null")
         run(f"rm -rf {mountpoint}")
+        run(f"wipefs -a /dev/{base} 2>/dev/null")
+        run(f"sgdisk --zap-all /dev/{base} 2>/dev/null")
         run("sync")
 
 
@@ -536,6 +627,11 @@ def generate_report(  # pylint: disable=too-many-locals
             f"Result       : {'PASS' if test.passed else 'FAIL'}",
             f"Detail       : {test.detail}",
         ]
+        if test.transport_errors:
+            lines.append(
+                f"Transport errors during test ({len(test.transport_errors)}):",
+            )
+            lines += [f"  {_redact(e)}" for e in test.transport_errors]
 
     lines += [
         "",

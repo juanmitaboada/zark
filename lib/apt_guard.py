@@ -39,6 +39,15 @@ zark's own recovery flows import the backup pool on purpose; they export
 ``ZARK_INTERNAL=1`` so the hook does not block them.
 """
 
+# pylint: disable=duplicate-code
+# The external-pool detection block (ALLOWED_POOLS + the loop that filters
+# rpool/bpool out of `zpool import`) is intentionally duplicated between
+# apt_guard and grub_guard. Both emit *standalone* POSIX-sh scripts that are
+# installed into the system and must run with zark absent, so they cannot
+# share a runtime helper. Factoring the shell snippet into a shared Python
+# constant would couple the two guards against their by-design autonomy for
+# no runtime benefit, so the duplication is kept and documented here.
+
 from pathlib import Path
 
 from lib.log import Log

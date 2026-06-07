@@ -134,6 +134,7 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
     HealthReport,
     _check_fua,
     _check_transport,
+    _transport_errors_since,
     estimate_seconds,
     generate_report,
     profile_target_bytes,
@@ -1253,6 +1254,54 @@ class TestPromptEjectOrAttach:
                 assert inp.called  # plain prompt path used input()
         assert mock.was_not_called("eject")
         assert "still attached" in buf.getvalue()
+
+    def test_ask_timeout_expires_applies_default(self):
+        """No input during the countdown -> default is applied, prompt shown
+        exactly once (regression: it used to re-prompt)."""
+        log = make_log()
+        buf = StringIO()
+        with patch("sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = True
+            # select never reports ready -> countdown runs out.
+            with patch("lib.log.select.select", return_value=([], [], [])):
+                with redirect_stdout(buf):
+                    result = log.ask_timeout("Eject?", default=True, timeout=2)
+        out = buf.getvalue()
+        assert result is True
+        assert "applying default (yes)" in out
+        # The question banner must appear exactly once (no re-prompt).
+        assert out.count("Eject?") == 1
+
+    def test_ask_timeout_keypress_is_the_answer(self):
+        """A line typed during the countdown IS the answer; no second prompt
+        and no banner redraw (regression for the double-prompt bug)."""
+        log = make_log()
+        buf = StringIO()
+        with patch("sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = True
+            fake_stdin.readline.return_value = "n\n"
+            # First tick reports stdin ready.
+            with patch("lib.log.select.select", return_value=([fake_stdin], [], [])):
+                with redirect_stdout(buf):
+                    result = log.ask_timeout("Eject?", default=True, timeout=10)
+        out = buf.getvalue()
+        assert result is False  # "n" -> no
+        assert out.count("Eject?") == 1  # banner shown once only
+        assert "applying default" not in out  # did not fall through to timeout
+
+    def test_ask_timeout_empty_line_is_default(self):
+        """Pressing Enter (empty line) during the countdown applies the
+        default, like a normal prompt."""
+        log = make_log()
+        buf = StringIO()
+        with patch("sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = True
+            fake_stdin.readline.return_value = "\n"
+            with patch("lib.log.select.select", return_value=([fake_stdin], [], [])):
+                with redirect_stdout(buf):
+                    result = log.ask_timeout("Eject?", default=False, timeout=10)
+        assert result is False  # empty -> default (False here)
+        assert buf.getvalue().count("Eject?") == 1
 
 
 class TestAutoejectConfig:  # pylint: disable=missing-function-docstring
@@ -4536,7 +4585,9 @@ class TestHealthChecks:  # pylint: disable=missing-function-docstring
     """Non-destructive drive risk checks in lib/health.py."""
 
     def test_known_bad_bridge_listed(self):
+        # Both Micron CT2000X10* enclosure bridges are catalogued.
         assert "0634:5604" in KNOWN_BAD_BRIDGES
+        assert "0634:5607" in KNOWN_BAD_BRIDGES
 
     def test_fua_finding_when_dmesg_reports_no_fua(self):
         mock = MockShell()
@@ -4698,6 +4749,78 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         assert result.passed
         assert called["reconnect"]  # cold pause was hit
         assert mock.was_called("eject /dev/sda")
+
+    def test_destructive_pass_with_transport_errors(self):
+        """A pool that reads back ONLINE but logged DID_ERROR during the test
+        is reported as passed-but-with-transport-errors (the flaky-bridge
+        case observed on 0634:5604 under UAS)."""
+        mock = MockShell()
+        mock.on("zpool create").succeeds()
+        mock.on("dd").succeeds()
+        mock.on("sync").succeeds()
+        mock.on("zpool export").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on("zpool import").succeeds()
+        mock.on("zpool destroy").succeeds()
+        mock.on("rm -rf").succeeds()
+        mock.on("wipefs").succeeds()
+        mock.on("sgdisk").succeeds()
+        # First dmesg call (the marker, tail -1) — old timestamp.
+        # Subsequent dmesg call (the scan) — contains a DID_ERROR after it.
+        mock.on("dmesg | tail -1").succeeds("[ 100.0] sd 0:0:0:0: [sda] ready")
+        mock.on("dmesg").succeeds(
+            "[ 100.0] sd 0:0:0:0: [sda] ready\n"
+            "[ 200.5] sd 0:0:0:0: [sda] Synchronize Cache(10) failed: "
+            "Result: hostbyte=DID_ERROR driverbyte=DRIVER_OK\n",
+        )
+        with patch_sh(mock):
+            result = run_destructive_test(
+                "/dev/sda",
+                PROFILE_FAST,
+                False,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+            )
+        assert result.passed  # data survived
+        assert result.transport_errors  # but the bus stumbled
+        assert "transport errors" in result.detail.lower()
+
+    def test_destructive_wipes_device_in_cleanup(self):
+        """The finally block wipes signatures and the partition table so the
+        device is left genuinely blank (no orphan zfs_member partitions)."""
+        mock = MockShell()
+        mock.on("zpool create").succeeds()
+        mock.on("dd").succeeds()
+        mock.on("sync").succeeds()
+        mock.on("zpool export").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on("zpool import").succeeds()
+        mock.on("zpool destroy").succeeds()
+        mock.on("rm -rf").succeeds()
+        mock.on("wipefs").succeeds()
+        mock.on("sgdisk").succeeds()
+        mock.on("dmesg").succeeds("")
+        with patch_sh(mock):
+            run_destructive_test(
+                "/dev/sda",
+                PROFILE_FAST,
+                False,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+            )
+        assert mock.was_called("wipefs -a /dev/sda")
+        assert mock.was_called("sgdisk --zap-all /dev/sda")
+
+    def test_transport_errors_ignores_clean_disconnect(self):
+        """DID_NO_CONNECT (a clean unplug) must NOT be flagged as an error."""
+        mock = MockShell()
+        mock.on("dmesg").succeeds(
+            "[ 300.0] sd 0:0:0:0: [sda] Synchronize Cache(10) failed: "
+            "Result: hostbyte=DID_NO_CONNECT driverbyte=DRIVER_OK\n",
+        )
+        with patch_sh(mock):
+            errs = _transport_errors_since("sda", since_ts=100.0)
+        assert not errs  # clean disconnect is not a transport error
 
     def test_report_obfuscation(self):
         mock = MockShell()

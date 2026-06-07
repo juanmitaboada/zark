@@ -94,22 +94,29 @@ def eject_device(device: str, log: Log) -> bool:
     ``SYNCHRONIZE CACHE (0x35)`` followed by ``START STOP UNIT``
     (stop=1). SYNCHRONIZE CACHE is the device's most authoritative
     flush primitive — distinct from inline FUA — and most bridges that
-    cheat on FUA still honour it. STOP UNIT then powers the controller
-    down so any remaining cache concern is moot.
+    cheat on FUA still honour it. STOP UNIT then asks the controller to
+    power down; note that some USB-SATA bridges ignore it and keep the
+    device enumerated, so a successful eject does not guarantee the
+    device left the bus.
 
     Returns True on success, False otherwise. A failure is reported as
     WARN, never fatal: the on-disk data is already durable from the
     preceding sync; eject is belt-and-suspenders against the
     bridge-specific cache layer.
 
-    Side effect: after a successful eject the device disappears from
-    ``/dev`` until physically replugged. This is intentional — the
-    operator just told us they were going to unplug — but worth
-    knowing.
+    Side effect: after a successful eject the device usually disappears
+    from ``/dev`` until physically replugged — though bridges that
+    ignore STOP UNIT may keep it present. This is fine either way: the
+    operator just told us they were going to unplug, and the data is
+    durable.
     """
     r = run(f"eject {device}")
     if r.ok:
-        log.ok(f"Device {device} ejected — caches flushed, controller stopped")
+        log.ok(
+            f"Device {device} eject sent — caches flushed (some USB bridges "
+            "ignore the controller-stop request, so the device may stay "
+            "powered; the data is already durable either way)",
+        )
         return True
     log.warn(
         f"eject {device} failed (rc={r.returncode}); data is durable but "

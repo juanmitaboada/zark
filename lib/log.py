@@ -262,11 +262,11 @@ class Log:
     def ask_timeout(self, question: str, default: bool, timeout: int) -> bool:
         """Yes/no question that auto-applies ``default`` after ``timeout`` seconds.
 
-        A live countdown is shown on a single line. Any keypress (Enter, or a
-        line of input) cancels the countdown and falls back to a normal
-        :meth:`ask`, so an operator who is present can always answer by hand.
-        With no interactive stdin (cron, systemd timer, scripted run) the
-        default is applied immediately — there is nobody to watch a countdown.
+        A live countdown is shown on a single line. The first line the operator
+        submits during the countdown IS the answer (empty line = the default,
+        like a normal prompt); the countdown then stops. With no interactive
+        stdin (cron, systemd timer, scripted run) the default is applied
+        immediately — there is nobody to watch a countdown.
 
         Returns the boolean decision (True = yes/eject).
         """
@@ -285,16 +285,19 @@ class Log:
             # \r keeps the countdown on one line; pad to overwrite prior text.
             sys.stdout.write(
                 f"\r    {prompt} (auto-{default_word} in {remaining:2d}s, "
-                "press any key to decide): ",
+                "Enter/y/n to decide): ",
             )
             sys.stdout.flush()
             ready, _, _ = select.select([sys.stdin], [], [], 1)
             if ready:
-                # Operator engaged — stop the countdown and ask normally.
-                sys.stdin.readline()  # consume whatever they typed
+                # The operator typed something — that line IS the answer.
+                # Do not re-prompt or redraw the banner; just interpret it.
+                answer = sys.stdin.readline().strip().lower()
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-                return self.ask(question, default=default)
+                if not answer:
+                    return default
+                return answer.startswith("y")
         # Timed out: clear the countdown line and apply the default.
         sys.stdout.write("\r" + " " * 70 + "\r")
         sys.stdout.flush()

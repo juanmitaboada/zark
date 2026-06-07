@@ -174,7 +174,7 @@ class Config:
 
         return cfg
 
-    def save_drives(self):
+    def save_drives(self) -> None:
         """Write known_drives.json back to disk.
 
         ``last_backup_at`` is emitted only when populated; absent fields
