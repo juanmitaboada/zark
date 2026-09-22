@@ -24,6 +24,7 @@ zvol by matching its LUKS UUID or by pool relationship, NOT by assuming
 """
 
 from pathlib import Path
+from typing import Protocol
 
 from lib.log import Log
 from lib.sh import run
@@ -31,6 +32,34 @@ from lib.sh import run
 # Standard Ubuntu path where system.key is expected
 KEYSTORE_MOUNT = "/run/keystore/rpool"
 SYSTEM_KEY_PATH = f"{KEYSTORE_MOUNT}/system.key"
+
+
+# pylint and basedpyright disagree about the body of a Protocol stub:
+# without the `...` basedpyright reads the docstring-only body as
+# `return None`, which contradicts the declared return type; with it,
+# pylint calls the ellipsis unnecessary. The ellipsis is the one the
+# type checkers need, so W2301 is silenced here.
+class KeystoreLike(Protocol):
+    """The slice of :class:`Keystore` that callers outside this module use.
+
+    ``lib.mount.mount_system_pools`` unlocks the keystore and loads the
+    pool keys, then hands the object to ``Cleanup.track_keystore``, which
+    calls ``umount()`` on exit — so ``umount`` belongs in this protocol
+    even though mount_system_pools never calls it itself.
+    """
+
+    # pylint: disable=unnecessary-ellipsis
+    def mount(self, pool: str, passphrase: str) -> bool:
+        """Mount the keystore LUKS volume for a pool."""
+        ...
+
+    def load_pool_keys(self, pool_root: str) -> int:
+        """Load encryption keys for all datasets under pool_root."""
+        ...
+
+    def umount(self):
+        """Unmount keystore and close LUKS."""
+        ...
 
 
 class Keystore:

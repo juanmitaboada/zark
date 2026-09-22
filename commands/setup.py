@@ -42,7 +42,7 @@ from lib import apt_guard, sh
 
 # from lib.config import Config
 from lib.log import Log
-from lib.zfs import ZFS, DatasetInfo
+from lib.zfs import ZFS, DatasetInfo, ZFSQuery
 
 DEPS = {
     "syncoid": "sanoid",
@@ -204,7 +204,7 @@ def _format_rule(name: str, rule: SanoidRule) -> list[str]:
     return lines
 
 
-def _discover_rules(zfs: ZFS, ubuntu_name: str) -> list[tuple[str, SanoidRule]]:
+def _discover_rules(zfs: ZFSQuery, ubuntu_name: str) -> list[tuple[str, SanoidRule]]:
     """
     Return a list of (dataset_name, rule) for every dataset that should appear
     in sanoid.conf, in the order they should be written.

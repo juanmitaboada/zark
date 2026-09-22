@@ -4914,6 +4914,11 @@ class _FakeKeystore:  # pylint: disable=missing-class-docstring,missing-function
     def load_pool_keys(self, pool_root):  # pylint: disable=unused-argument
         return self._loaded
 
+    def umount(self):
+        """Never reached in these tests, but Cleanup.track_keystore will
+        call it if the cleanup handler ever runs — so the stub must have
+        it, and the KeystoreLike protocol now says so."""
+
 
 class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
     """lib.mount system-layout helpers used by `zark chroot` / `zark mount local`."""

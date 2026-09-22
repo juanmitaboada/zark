@@ -21,6 +21,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from lib.log import Log
 from lib.sh import run
@@ -54,6 +55,30 @@ class DatasetInfo:  # pylint: disable=too-many-instance-attributes
     keystatus: str = ""
     encryption: str = ""
     type: str = ""  # "filesystem" or "volume"
+
+
+# pylint and basedpyright disagree about the body of a Protocol stub:
+# without the `...` basedpyright reads the docstring-only body as
+# `return None`, which contradicts the declared return type; with it,
+# pylint calls the ellipsis unnecessary. The ellipsis is the one the
+# type checkers need, so W2301 is silenced here.
+class ZFSQuery(Protocol):
+    """The read-only slice of :class:`ZFS` that dataset discovery needs.
+
+    ``commands.setup._discover_rules`` only ever calls these two methods.
+    Asking for the whole ZFS class there would be over-specifying: it
+    forces every caller to build a real one, and it is why the test stub
+    that implements exactly these two methods did not type-check.
+    """
+
+    # pylint: disable=unnecessary-ellipsis
+    def pool_exists(self, name: str) -> bool:
+        """Check if a pool is currently imported."""
+        ...
+
+    def list_datasets(self, root: str, recursive: bool = True) -> list["DatasetInfo"]:
+        """List datasets under a root."""
+        ...
 
 
 class ZFS:

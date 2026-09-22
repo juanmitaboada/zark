@@ -27,7 +27,7 @@ Used by:
 from pathlib import Path
 
 from lib.cleanup import Cleanup
-from lib.keystore import Keystore
+from lib.keystore import KeystoreLike
 from lib.log import Log
 from lib.sh import run
 from lib.zfs import ZFS
@@ -56,7 +56,7 @@ def mount_system_pools(
     passphrase: str,
     log: Log,
     zfs: ZFS,
-    keystore: Keystore,
+    keystore: KeystoreLike,
     cleanup: Cleanup,
     *,
     readonly: bool = False,
@@ -170,7 +170,7 @@ class MountedPool:
         mount_root: str,
         log: Log,
         zfs: ZFS,
-        keystore: Keystore,
+        keystore: KeystoreLike,
         cleanup: Cleanup,
     ):
         self.pool_name = pool_name

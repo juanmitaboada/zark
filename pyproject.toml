@@ -107,6 +107,14 @@ line-ending           = "auto"
 python_version = "3.12"
 files          = ["lib", "commands", "tests", "zark"]
 
+# Without this, mypy skips the BODY of every unannotated function. Every
+# test here is a bare `def test_x(self):`, so the whole 346-test suite was
+# going unchecked: the two test doubles that did not match the signatures
+# they were passed to were invisible to mypy and only basedpyright saw
+# them. With the protocols in place this costs nothing and keeps the
+# tests honest.
+check_untyped_defs = true
+
 # ── basedpyright / pyright ───────────────────────────────────────────────
 #
 # NOT part of the lint gate yet. basedpyright currently reports 42 findings

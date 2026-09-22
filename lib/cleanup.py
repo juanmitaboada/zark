@@ -40,7 +40,7 @@ import signal
 import time
 from pathlib import Path
 
-from lib.keystore import Keystore
+from lib.keystore import KeystoreLike
 from lib.log import Log
 from lib.sh import run
 
@@ -213,7 +213,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self.log = log
         self._pools: list[str] = []  # pools to export
         self._mounts: list[str] = []  # mount points to unmount (LIFO)
-        self._keystores: list[Keystore] = []  # keystores to close
+        self._keystores: list[KeystoreLike] = []  # keystores to close
         self._dirs: list[str] = []  # temp dirs to remove
         self._exported_pools: list[str] = []  # populated by run() — query via exported_pools()
         self._registered = False
@@ -254,7 +254,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         if path not in self._mounts:
             self._mounts.append(path)
 
-    def track_keystore(self, ks: Keystore):
+    def track_keystore(self, ks: KeystoreLike):
         """Track a keystore for closing on exit. Call after opening."""
         if ks not in self._keystores:
             self._keystores.append(ks)
