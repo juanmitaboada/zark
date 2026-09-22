@@ -192,12 +192,12 @@ def scan_connected_drives(  # pylint: disable=too-many-locals,too-many-branches,
 
 
 def _process_blkid_entry(
-    entry: dict,
+    entry: dict[str, str],
     cfg: Config,
-    known_by_name: dict,
-    known_by_guid: dict,
-    seen: set,
-    results: list,
+    known_by_name: dict[str, DriveInfo],
+    known_by_guid: dict[str, DriveInfo],
+    seen: set[str],
+    results: list[ConnectedDrive],
     log: Log,
 ):
     devname = entry.get("devname", "")
@@ -230,10 +230,10 @@ def _add_pool(  # pylint: disable=too-many-arguments,too-many-locals,too-many-po
     guid: str,
     drive_id: str,
     cfg: Config,  # pylint: disable=unused-argument
-    known_by_name: dict,
-    known_by_guid: dict,
-    seen: set,
-    results: list,
+    known_by_name: dict[str, DriveInfo],
+    known_by_guid: dict[str, DriveInfo],
+    seen: set[str],
+    results: list[ConnectedDrive],
     log: Log,  # pylint: disable=unused-argument
     state: str = "exported",
     dev_path: str = "",

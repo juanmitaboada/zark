@@ -437,7 +437,7 @@ class ZFS:
 
     # ── Discovery (no pool import needed) ────────────────────────────────
 
-    def scan_zfs_members(self) -> list[dict]:
+    def scan_zfs_members(self) -> list[dict[str, str]]:
         """
         Scan all ZFS member partitions via blkid.
         Returns list of {devname, uuid, label} dicts.
@@ -446,8 +446,8 @@ class ZFS:
         if not r.ok:
             return []
 
-        results = []
-        current: dict = {}
+        results: list[dict[str, str]] = []
+        current: dict[str, str] = {}
         for line in r.stdout.splitlines():
             line = line.strip()
             if not line:
@@ -567,7 +567,7 @@ def fix_grub_bpool_uuid(grub_cfg: Path, new_bpool_hex: str, log: Log) -> bool:
     # Substitute only hex values that follow `fs-uuid --set=...`. Using
     # re.sub instead of str.replace keeps us from touching any unrelated
     # 16-hex tokens that might appear elsewhere in the file.
-    def _sub(match: re.Match) -> str:
+    def _sub(match: re.Match[str]) -> str:
         prefix, old_hex = match.group(1), match.group(2)
         if old_hex == new_bpool_hex:
             return match.group(0)

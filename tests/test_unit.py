@@ -77,6 +77,7 @@ from commands.repair_divergent import (  # pylint: disable=wrong-import-position
 )
 from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E402
     _TEMPLATE_MINIMAL_EXPECTED,
+    SanoidDiff,
     SanoidRule,
     _classify,
     _diff_rules,
@@ -3802,7 +3803,7 @@ class TestSetupTemplateDiff:  # pylint: disable=missing-function-docstring
     def test_print_diff_includes_template_section(self):
         """``_print_diff`` must surface the template diff in its
         output, not silently drop it."""
-        diff = {
+        diff: SanoidDiff = {
             "added": [],
             "removed": [],
             "changed": [],

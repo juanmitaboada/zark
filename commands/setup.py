@@ -82,6 +82,38 @@ class SanoidRule(TypedDict):
     explain: str
 
 
+# One sanoid.conf section's settings: {"use_template": "minimal", ...}.
+SectionSettings = dict[str, str]
+
+
+class SanoidDiff(TypedDict):
+    """What ``_diff_rules`` found between the current sanoid.conf and the
+    rules zark would generate now.
+
+    The five lists do not share an element type, which is why this is a
+    TypedDict and not a ``dict[str, list]``: added/removed/manual carry
+    (name, settings), while changed/templates carry
+    (name, before, after).
+
+      added:     sections that will appear
+      removed:   sections that will disappear
+      changed:   sections whose settings differ
+      manual:    sections in the current file that are neither
+                 managed-prefix nor templates (e.g. a user-added
+                 [tank/games]). zark does not touch them, but warns.
+      templates: template sections whose values disagree with the current
+                 generator. Kept apart from `changed` because the value
+                 space is different (daily/weekly/monthly counts vs.
+                 use_template/recursive). Empty when they already match.
+    """
+
+    added: list[tuple[str, SectionSettings]]
+    removed: list[tuple[str, SectionSettings]]
+    changed: list[tuple[str, SectionSettings, SectionSettings]]
+    manual: list[tuple[str, SectionSettings]]
+    templates: list[tuple[str, SectionSettings, SectionSettings]]
+
+
 def _detect_ubuntu_ds() -> str:
     r = sh.run(
         "zfs list -H -o name -r rpool/ROOT "
@@ -395,33 +427,22 @@ def _is_managed_section(name: str) -> bool:
 
 
 def _diff_rules(
-    current: dict[str, dict[str, str]],
+    current: dict[str, SectionSettings],
     planned: list[tuple[str, SanoidRule]],
-) -> dict[str, list]:
+) -> SanoidDiff:
     """Compare current sanoid.conf sections against the planned rules.
 
-    Returns five lists:
-      added:   sections that will appear (name, planned_settings)
-      removed: sections that will disappear (name, current_settings)
-      changed: sections whose settings differ (name, current_settings, planned_settings)
-      manual:  sections in current that aren't managed-prefix and aren't templates
-               (e.g. user-added [tank/games]) — we won't touch them but we warn.
-      templates: template sections (template_minimal in particular) whose
-                values disagree with the current generator. Format:
-                (name, current_settings, expected_settings). Empty when
-                the templates already match. Distinct from regular rule
-                changes because the value space is different (daily/
-                weekly/monthly counts vs. use_template/recursive).
+    See ``SanoidDiff`` for what each of the five lists holds.
     """
-    planned_map: dict[str, dict[str, str]] = {
+    planned_map: dict[str, SectionSettings] = {
         name: _rule_to_settings(rule) for name, rule in planned
     }
 
-    added: list[tuple[str, dict[str, str]]] = []
-    removed: list[tuple[str, dict[str, str]]] = []
-    changed: list[tuple[str, dict[str, str], dict[str, str]]] = []
-    manual: list[tuple[str, dict[str, str]]] = []
-    templates: list[tuple[str, dict[str, str], dict[str, str]]] = []
+    added: list[tuple[str, SectionSettings]] = []
+    removed: list[tuple[str, SectionSettings]] = []
+    changed: list[tuple[str, SectionSettings, SectionSettings]] = []
+    manual: list[tuple[str, SectionSettings]] = []
+    templates: list[tuple[str, SectionSettings, SectionSettings]] = []
 
     # Inspect current sections
     for name, settings in current.items():
@@ -471,13 +492,13 @@ def _format_settings(settings: dict[str, str]) -> str:
     return " ".join(parts) if parts else "(empty)"
 
 
-def _print_diff(log: Log, diff: dict[str, list]) -> None:  # pylint: disable=too-many-locals
+def _print_diff(log: Log, diff: SanoidDiff) -> None:  # pylint: disable=too-many-locals
     """Print a human-readable summary of the diff."""
     added = diff["added"]
     removed = diff["removed"]
     changed = diff["changed"]
     manual = diff["manual"]
-    templates = diff.get("templates", [])
+    templates = diff["templates"]
 
     # Compute width across all section names for clean alignment
     all_names: list[str] = (
@@ -702,7 +723,7 @@ def run(
         diff = _diff_rules(current, rules)
 
         nothing_changes = not (
-            diff["added"] or diff["removed"] or diff["changed"] or diff.get("templates")
+            diff["added"] or diff["removed"] or diff["changed"] or diff["templates"]
         )
         if nothing_changes:
             if diff["manual"]:
