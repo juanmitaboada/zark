@@ -6,11 +6,11 @@
 #            on the unit-test suite (tests/test_unit.py). Three parallel
 #            jobs so a per-version regression is visible immediately.
 #
-#   lint   — single job pinned to Python 3.12, runs `tox -e lint`:
-#              mypy + pylint + ruff (RUF027 only).
-#            Versions of mypy/pylint/ruff come from pyproject.toml under
-#            [dependency-groups].dev (PEP 735), so tox and CI share a
-#            single source of truth.
+#   lint   — single job pinned to Python 3.12, runs `tox -e lint`
+#            (mypy + pylint + ruff check + ruff format --check) and then
+#            `tox -e types` (basedpyright).
+#            Versions come from pyproject.toml under [dependency-groups]
+#            (PEP 735), so tox and CI share a single source of truth.
 #
 # What this workflow does NOT cover
 # ─────────────────────────────────
@@ -68,7 +68,7 @@ jobs:
         # tox env name has no dot: 3.12 → py312
         run: tox -e py$(echo "${{ matrix.python }}" | tr -d .)
 
-  # ── Static analysis (mypy + pylint + ruff RUF027) ────────────────────
+  # ── Static analysis (mypy + pylint + ruff + basedpyright) ────────────
   lint:
     name: lint
     runs-on: ubuntu-latest
@@ -84,8 +84,14 @@ jobs:
       - name: Install tox
         run: python -m pip install --upgrade pip tox
 
-      - name: Run lint suite (mypy + pylint + ruff RUF027)
+      - name: Run lint suite (mypy + pylint + ruff)
         run: tox -e lint
+
+      - name: Run basedpyright
+        # Separate tox env so a failure here is distinguishable in the
+        # job log from a mypy/pylint/ruff failure, and so the lint env
+        # stays free of the npm-backed package.
+        run: tox -e types
 
   # ── Debian packaging smoke build (tags only) ─────────────────────────
   #

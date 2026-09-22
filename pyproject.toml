@@ -117,11 +117,11 @@ check_untyped_defs = true
 
 # ── basedpyright / pyright ───────────────────────────────────────────────
 #
-# NOT part of the lint gate yet. basedpyright currently reports 42 findings
-# on this codebase (26 TypedDict, 14 missing type arguments, 2 test
-# doubles); it runs via `make basedpyright` / `tox -e types` and is
-# deliberately absent from pre-commit and from tox's envlist until those
-# are cleaned up. Promote it to a blocking hook once it reaches zero.
+# Part of the lint gate: `make lint`, `make fulltest`, `tox` (the `types`
+# env, in envlist) and CI all run it, and it reports clean. It is kept out
+# of pre-commit on purpose — it is an npm-backed package that checks the
+# whole project rather than the changed files, so it belongs in the gate
+# that runs once, not on every commit.
 #
 # The section is named [tool.pyright], not [tool.basedpyright], on purpose:
 # basedpyright reads [tool.basedpyright] ONLY when [tool.pyright] is
@@ -135,16 +135,17 @@ extraPaths       = ["."]
 pythonVersion    = "3.12"
 typeCheckingMode = "standard"
 
-# "standard" turns this one off, but it is the most useful thing
-# basedpyright says about this codebase: 14 bare `dict` / `list` / `set`
-# annotations in lib/drives.py, lib/zfs.py and commands/setup.py. Turn it
-# back on explicitly — mypy benefits from those annotations too.
+# "standard" turns this one off, but it was the most useful thing
+# basedpyright had to say about this codebase: it found 14 bare `dict` /
+# `list` / `set` annotations in lib/drives.py, lib/zfs.py and
+# commands/setup.py. Keep it on — mypy benefits from those annotations too.
 reportMissingTypeArgument = "error"
 
 # basedpyright's own strict preset demands full annotation of everything
 # and flags idioms that are not defects. Measured on this codebase these
-# eight families alone accounted for 1024 of 1068 findings, none of them
-# a bug, so they are off; what remains is signal.
+# families alone accounted for 1024 of the original 1068 findings, none of
+# them a bug, so they are off; what remains is signal. The 42 that
+# remained after switching them off were all fixed rather than silenced.
 reportUnusedCallResult            = false  # 417: ignored non-None returns
 reportUnknownVariableType         = false  # 139
 reportUnknownArgumentType         = false  #  87

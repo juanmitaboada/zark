@@ -40,15 +40,39 @@ deliberately untouched, so a `.deb` built from this tree is still
 
 ### Added
 
-- **basedpyright**, configured under `[tool.pyright]` and run via
-  `make basedpyright` or `tox -e types`. Advisory only — 42 known findings,
-  so it is absent from pre-commit and from tox's `envlist` until they are
-  cleaned up.
+- **basedpyright**, configured under `[tool.pyright]` and run by
+  `make lint`, `make fulltest`, `tox -e types` (in `envlist`) and CI. Its
+  own strict preset is mostly noise here — those rule families are off,
+  and the 42 findings that remained were fixed rather than silenced (see
+  *Fixed*). It stays out of pre-commit: it checks the whole project rather
+  than the files being committed.
 - **codespell** as a pre-commit hook, and `check-toml` alongside the other
   standard hooks.
+- `check_untyped_defs` for mypy. Every test is an unannotated
+  `def test_x(self):`, so mypy had been skipping all 346 test bodies —
+  which is why the two mismatched test doubles below were invisible to it.
 
 ### Fixed
 
+- `SanoidRule` was declared `total=False` purely so that `_classify`'s
+  skip case could `return {}`, which made the type lie about the seven
+  populated returns that every consumer indexes unconditionally. It is now
+  total, and skipping is `None`. Behaviour is unchanged; the checker now
+  verifies each populated return sets all three keys.
+- `_diff_rules` returned `dict[str, list]` for five fixed keys holding
+  three different element types. Replaced by a `SanoidDiff` TypedDict,
+  which immediately caught a test building its diff as an unchecked dict
+  literal.
+- The bare `dict` / `list` / `set` annotations in `lib/drives.py`,
+  `lib/zfs.py` and `commands/setup.py` are parameterized; the helpers
+  simply had not carried down the types their only caller already declared.
+- `FakeZFS` and `_FakeKeystore` are now typed by the `ZFSQuery` and
+  `KeystoreLike` protocols rather than being passed where the concrete
+  classes were declared. `_FakeKeystore` gained the `umount()` that
+  `Cleanup.track_keystore` would have called on it.
+- `test_strict_mode` raised its "should have raised" guard inside the very
+  `try` whose `except AssertionError` was meant to catch the expected
+  failure. Moved to an `else` clause.
 - `datetime.timezone.utc` → `datetime.UTC` (17 occurrences) and
   `assert False` → `raise AssertionError(...)` in three tests, where
   `python -O` would have removed the assertion and let the test pass

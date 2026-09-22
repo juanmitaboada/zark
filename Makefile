@@ -149,10 +149,10 @@ format: ## Reformat and auto-fix the whole project with ruff (rewrites files)
 	ruff check --fix lib commands tests zark
 	ruff format lib commands tests zark
 
-basedpyright: ## Run basedpyright (advisory — NOT part of `make lint`)
-	@# Deliberately outside the lint gate: 42 findings today, see
-	@# [tool.pyright] in pyproject.toml for the breakdown and the
-	@# rationale. Promote it into `lint` once it reaches zero.
+basedpyright: ## Run basedpyright (strict type checking, beyond mypy)
+	@# Configured in pyproject.toml under [tool.pyright]: basedpyright's
+	@# own strict preset is mostly noise on this codebase, so the noisy
+	@# rule families are switched off there and what remains is signal.
 	@command -v basedpyright >/dev/null || { \
 		echo "  basedpyright not installed. Install with:"; \
 		echo "    pip install basedpyright --break-system-packages"; \
@@ -169,9 +169,9 @@ pre-commit: ## Run all pre-commit hooks against every tracked file
 	}
 	pre-commit run --all-files
 
-lint: check ruff format-check mypy pylint ## Run all static checks (compile + ruff + mypy + pylint)
+lint: check ruff format-check mypy pylint basedpyright ## Run all static checks (compile + ruff + mypy + pylint + basedpyright)
 
-tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint (in isolated venvs)
+tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint + types (in isolated venvs)
 	@command -v $(TOX) >/dev/null || { \
 		echo "  tox not installed. Install with: pip install tox --break-system-packages"; \
 		exit 1; \
@@ -426,7 +426,7 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 		fi
 	@echo "  OK: dpkg-source -b . succeeds"
 
-fulltest: check ruff format-check mypy pylint test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
+fulltest: check ruff format-check mypy pylint basedpyright test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
 	@# fulltest is the "before-commit" gate. Make's default fail-fast
 	@# behaviour gives us free short-circuit semantics: the moment any
 	@# dependency fails, the rest is skipped.
@@ -436,11 +436,13 @@ fulltest: check ruff format-check mypy pylint test manpage-lint dist-check tox d
 	@#   ruff         — full ruleset incl. RUF027, ~1s
 	@#   format-check — ruff format --check, ~1s
 	@#   mypy        — ~10-15s (cold) / ~2-3s (warm)
+	@#   basedpyright — ~4s
 	@#   pylint      — ~15-20s
 	@#   test        — 94 unit tests, ~1-2s
 	@#   manpage-lint — pandoc + sed + awk + mandoc + groff, ~1s
 	@#   dist-check  — make dist + dpkg-source -b, ~3-5s
-	@#   tox         — tests on python3.12/3.13/3.14 in venvs, ~30-60s
+	@#   tox         — tests on python3.12/3.13/3.14 + lint + types in
+	@#                 venvs, ~40-70s
 	@#                 (tox-uv downloads any missing interpreter; see the
 	@#                  `tox` target and tox.ini)
 	@#   deb         — full debuild -b (binary .deb), ~10-15s
@@ -456,8 +458,6 @@ fulltest: check ruff format-check mypy pylint test manpage-lint dist-check tox d
 	@#                   place; not "non-invasive". `format-check` above
 	@#                   covers the read-only half. Run separately when
 	@#                   desired.
-	@#   - basedpyright: advisory only, 42 known findings. `make
-	@#                   basedpyright` / `tox -e types`.
 	@#   - make deb-source / deb-ppa : require the GPG signing key and
 	@#                   are part of the release flow, not the pre-commit
 	@#                   gate.

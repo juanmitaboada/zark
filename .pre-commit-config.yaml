@@ -6,11 +6,11 @@
 # mechanisms and cannot share a single source of truth, so when bumping a
 # version in either place, also bump the matching one in the other file.
 #
-# NOTE on basedpyright: deliberately NOT a hook. It reports 42 findings on
-# this codebase today and would block every commit. It is configured in
-# pyproject.toml under [tool.pyright] and run on demand via
-# `make basedpyright` / `tox -e types`; promote it here once it reaches
-# zero.
+# NOTE on basedpyright: deliberately NOT a hook, even though it now reports
+# clean. It is an npm-backed package that checks the whole project rather
+# than the files being committed, so it runs in the gate that runs once —
+# `make lint`, `make fulltest`, `tox -e types` and CI — instead of on every
+# commit. It is configured in pyproject.toml under [tool.pyright].
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
