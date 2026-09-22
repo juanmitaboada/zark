@@ -77,6 +77,7 @@ from commands.repair_divergent import (  # pylint: disable=wrong-import-position
 )
 from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E402
     _TEMPLATE_MINIMAL_EXPECTED,
+    SanoidRule,
     _classify,
     _diff_rules,
     _discover_rules,
@@ -2714,6 +2715,19 @@ class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
 # ═════════════════════════════════════════════════════════════════════════
 
 
+def _classified(name: str, ubuntu: str, type_: str = "filesystem") -> SanoidRule:
+    """``_classify`` for a dataset that is expected NOT to be skipped.
+
+    ``_classify`` returns None for datasets a parent's recursive rule
+    already covers. Tests that go on to index the rule need that None
+    narrowed away first; doing it here keeps the assertion out of every
+    single test.
+    """
+    rule = _classify(DatasetInfo(name=name, type=type_), ubuntu)
+    assert rule is not None, f"{name} should have produced a rule, not a skip"
+    return rule
+
+
 class TestSanoidClassification:  # pylint: disable=missing-function-docstring
     """Verify that _classify produces the right rule for each dataset shape.
 
@@ -2728,29 +2742,29 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
         return DatasetInfo(name=name, type=type_)
 
     def test_pool_root_is_minimal_non_recursive(self):
-        rule = _classify(self._ds("rpool"), self.UBUNTU)
+        rule = _classified("rpool", self.UBUNTU)
         assert rule["template"] == "minimal"
         assert rule["recursive"] is False
 
     def test_bpool_root_is_minimal_non_recursive(self):
-        rule = _classify(self._ds("bpool"), self.UBUNTU)
+        rule = _classified("bpool", self.UBUNTU)
         assert rule["template"] == "minimal"
         assert rule["recursive"] is False
 
     def test_live_system_is_production_recursive(self):
-        rule = _classify(self._ds(f"rpool/ROOT/{self.UBUNTU}"), self.UBUNTU)
+        rule = _classified(f"rpool/ROOT/{self.UBUNTU}", self.UBUNTU)
         assert rule["template"] == "production"
         assert rule["recursive"] is True
 
     def test_userdata_is_production_recursive(self):
-        rule = _classify(self._ds("rpool/USERDATA"), self.UBUNTU)
+        rule = _classified("rpool/USERDATA", self.UBUNTU)
         assert rule["template"] == "production"
         assert rule["recursive"] is True
 
     def test_bpool_boot_is_production_recursive(self):
         """bpool/BOOT holds kernels and grub config — same retention horizon
         as user data so the user can roll back ~3 months after a bad update."""
-        rule = _classify(self._ds("bpool/BOOT"), self.UBUNTU)
+        rule = _classified("bpool/BOOT", self.UBUNTU)
         assert rule["template"] == "production"
         assert rule["recursive"] is True
 
@@ -2758,10 +2772,10 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
         """Children of bpool/BOOT (the named boot environment) must be
         skipped because the recursive rule on bpool/BOOT covers them."""
         rule = _classify(self._ds(f"bpool/BOOT/{self.UBUNTU}"), self.UBUNTU)
-        assert not rule
+        assert rule is None
 
     def test_root_container_is_minimal_non_recursive(self):
-        rule = _classify(self._ds("rpool/ROOT"), self.UBUNTU)
+        rule = _classified("rpool/ROOT", self.UBUNTU)
         assert rule["template"] == "minimal"
         assert rule["recursive"] is False
 
@@ -2771,7 +2785,7 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
         The keystore zvol is replicated by prepare/recover, not by sanoid.
         Snapshotting it accumulates useless snapshots that nobody consults.
         """
-        rule = _classify(self._ds("rpool/keystore", type_="volume"), self.UBUNTU)
+        rule = _classified("rpool/keystore", self.UBUNTU, type_="volume")
         assert rule["template"] is None  # signals autosnap=no
 
     def test_discovered_filesystem_is_minimal_recursive(self):
@@ -2781,7 +2795,7 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
         to configure sanoid for new datasets they create.
         """
         for name in ("rpool/var", "rpool/libvirt", "rpool/data"):
-            rule = _classify(self._ds(name), self.UBUNTU)
+            rule = _classified(name, self.UBUNTU)
             assert rule["template"] == "minimal", f"failed for {name}"
             assert rule["recursive"] is True, f"failed for {name}"
 
@@ -2793,7 +2807,7 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
         """
         for name in ("rpool/USERDATA/home_xyz", "rpool/USERDATA/root_xyz"):
             rule = _classify(self._ds(name), self.UBUNTU)
-            assert not rule, f"{name} should be skipped, got {rule}"
+            assert rule is None, f"{name} should be skipped, got {rule}"
 
     def test_live_system_children_are_skipped(self):
         for name in (
@@ -2801,24 +2815,24 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
             f"rpool/ROOT/{self.UBUNTU}/var/lib/docker",
         ):
             rule = _classify(self._ds(name), self.UBUNTU)
-            assert not rule
+            assert rule is None
 
     def test_other_boot_environment_is_skipped(self):
         """If the user has an alternate BE (e.g. rpool/ROOT/ubuntu_old),
         we should NOT generate a rule for it — the named ubuntu_* rule
         only covers the live one."""
         rule = _classify(self._ds("rpool/ROOT/ubuntu_old"), self.UBUNTU)
-        assert not rule
+        assert rule is None
 
     def test_format_zvol_rule_emits_autosnap_no(self):
-        rule = _classify(self._ds("rpool/keystore", type_="volume"), self.UBUNTU)
+        rule = _classified("rpool/keystore", self.UBUNTU, type_="volume")
         lines = _format_rule("rpool/keystore", rule)
         assert lines[0] == "[rpool/keystore]"
         assert "autosnap = no" in lines
         assert "autoprune = no" in lines
 
     def test_format_filesystem_rule_emits_template(self):
-        rule = _classify(self._ds(f"rpool/ROOT/{self.UBUNTU}"), self.UBUNTU)
+        rule = _classified(f"rpool/ROOT/{self.UBUNTU}", self.UBUNTU)
         lines = _format_rule(f"rpool/ROOT/{self.UBUNTU}", rule)
         assert lines[0] == f"[rpool/ROOT/{self.UBUNTU}]"
         assert "use_template = production" in lines
@@ -2928,7 +2942,7 @@ class TestSanoidDiff:  # pylint: disable=missing-function-docstring
         for name, type_ in names:
             ds = DatasetInfo(name=name, type=type_)
             rule = _classify(ds, self.UBUNTU)
-            if rule:
+            if rule is not None:
                 rules.append((name, rule))
         return rules
 
@@ -3052,7 +3066,7 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
         for name, type_ in names:
             ds = DatasetInfo(name=name, type=type_)
             rule = _classify(ds, self.UBUNTU)
-            if rule:
+            if rule is not None:
                 rules.append((name, rule))
         return rules
 
@@ -3123,7 +3137,7 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
 
         # Now simulate that we discovered an extra dataset: rpool/var
         new_rules = self._planned() + [
-            ("rpool/var", _classify(DatasetInfo(name="rpool/var", type="filesystem"), self.UBUNTU)),
+            ("rpool/var", _classified("rpool/var", self.UBUNTU)),
         ]
         v2 = _generate_sanoid_conf(new_rules, preserve_manual=manual)
         parsed = _parse_sanoid_conf(v2)

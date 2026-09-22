@@ -57,15 +57,21 @@ DEPS = {
 }
 
 
-class SanoidRule(TypedDict, total=False):
+class SanoidRule(TypedDict):
     """A single sanoid policy rule for one dataset.
 
-    Returned by ``_classify``. An empty dict ({}) means "skip this dataset"
-    (e.g. children covered by a parent's recursive rule). All keys are
-    optional from the type checker's perspective (``total=False``) so the
-    skip case validates without populating any fields.
+    Returned by ``_classify``, which returns ``None`` instead when the
+    dataset is to be skipped (e.g. children covered by a parent's
+    recursive rule).
 
-    When populated:
+    Every key is required. This used to be a ``total=False`` TypedDict so
+    that ``_classify``'s skip case could ``return {}``, but that made the
+    type lie about the populated case: every consumer here
+    (``_format_rule``, ``_print_rules_review``, ``_rule_to_settings``)
+    indexes all three keys unconditionally, and only ever receives fully
+    populated rules. Separating "no rule" into ``None`` lets the type
+    checker verify that each populated return really does set all three.
+
       template:   "production" | "minimal" | None  (None ⇒ autosnap=no)
       recursive:  whether the rule applies to descendants
       explain:    short human-readable reason shown in the review table
@@ -90,11 +96,11 @@ def _detect_ubuntu_ds() -> str:
 def _classify(  # pylint: disable=too-many-return-statements
     ds: DatasetInfo,
     ubuntu_name: str,
-) -> SanoidRule:
+) -> SanoidRule | None:
     """
-    Return the sanoid rule for a single dataset, or an empty dict to skip.
+    Return the sanoid rule for a single dataset, or None to skip it.
 
-    See ``SanoidRule`` for the shape of populated returns.
+    See ``SanoidRule`` for the shape of a returned rule.
     """
     name = ds.name
 
@@ -121,7 +127,7 @@ def _classify(  # pylint: disable=too-many-return-statements
     # Children of rpool/ROOT (the boot environment itself, not the named ubuntu_*)
     # are already covered by the recursive rule on rpool/ROOT/<ubuntu>; skip.
     if name.startswith("rpool/ROOT/") and name != f"rpool/ROOT/{ubuntu_name}":
-        return {}
+        return None
 
     # Children covered recursively by their parent's rule — skip to avoid
     # overlapping rules that confuse sanoid (see issue 627 upstream).
@@ -131,7 +137,7 @@ def _classify(  # pylint: disable=too-many-return-statements
         "bpool/BOOT/",
     )
     if name.startswith(covered_prefixes):
-        return {}
+        return None
 
     # bpool/BOOT holds kernels, initramfs, grub config — content the user
     # may legitimately want to roll back months in time after a bad
@@ -190,7 +196,7 @@ def _discover_rules(zfs: ZFS, ubuntu_name: str) -> list[tuple[str, SanoidRule]]:
                 continue
             seen.add(ds.name)
             rule = _classify(ds, ubuntu_name)
-            if rule:
+            if rule is not None:
                 initial.append((ds.name, rule))
 
     rules_by_name = dict(initial)
@@ -200,7 +206,7 @@ def _discover_rules(zfs: ZFS, ubuntu_name: str) -> list[tuple[str, SanoidRule]]:
         for i in range(1, len(parts)):
             ancestor = "/".join(parts[:-i])
             anc_rule = rules_by_name.get(ancestor)
-            if anc_rule and anc_rule.get("recursive"):
+            if anc_rule is not None and anc_rule["recursive"]:
                 return anc_rule
         return None
 
@@ -213,9 +219,7 @@ def _discover_rules(zfs: ZFS, ubuntu_name: str) -> list[tuple[str, SanoidRule]]:
         # The ancestor's recursive rule already covers this dataset.
         # Drop our entry only if its policy is the same; otherwise keep
         # it as an explicit override (e.g. zvol under recursive filesystem).
-        if anc.get("template") == rule.get("template") and anc.get("recursive") == rule.get(
-            "recursive",
-        ):
+        if anc["template"] == rule["template"] and anc["recursive"] == rule["recursive"]:
             continue  # redundant — drop
         pruned.append((name, rule))
 
