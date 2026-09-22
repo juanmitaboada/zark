@@ -2078,11 +2078,16 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
     def test_strict_mode(self):
         mock = MockShell(strict=True)
         with patch_sh(mock):
+            # The guard lives in `else`, not inside the `try`. Raising it
+            # from the try body would hand it straight to this very
+            # `except AssertionError`, which is the clause meant to catch
+            # the failure we are testing for.
             try:
                 _sh.run("unknown_command")
-                raise AssertionError("Should have raised")
             except AssertionError as e:
                 assert "unexpected command" in str(e)
+            else:
+                raise AssertionError("strict MockShell should have rejected the command")
 
     def test_was_called(self):
         mock = MockShell()
