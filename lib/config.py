@@ -26,7 +26,7 @@ guided to create the file.
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 VERSION = "1.0.12"
@@ -40,7 +40,7 @@ def now_utc_iso() -> str:
     than in ``commands/backup.py``) so tests can monkeypatch a fixed
     clock without reaching into a command module.
     """
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_utc_iso(s: str) -> datetime | None:
@@ -59,7 +59,7 @@ def parse_utc_iso(s: str) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 

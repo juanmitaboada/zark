@@ -284,8 +284,7 @@ class Log:
         for remaining in range(timeout, 0, -1):
             # \r keeps the countdown on one line; pad to overwrite prior text.
             sys.stdout.write(
-                f"\r    {prompt} (auto-{default_word} in {remaining:2d}s, "
-                "Enter/y/n to decide): ",
+                f"\r    {prompt} (auto-{default_word} in {remaining:2d}s, Enter/y/n to decide): ",
             )
             sys.stdout.flush()
             ready, _, _ = select.select([sys.stdin], [], [], 1)

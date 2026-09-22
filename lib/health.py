@@ -34,7 +34,7 @@ possible future addition).
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from lib.log import Log
@@ -318,7 +318,7 @@ def measure_write_speed(dev: str, log: Log, sample_bytes: int = 1024**3) -> floa
     count = max(1, sample_bytes // (1024**2))
     start = time.time()
     r = run(
-        f"dd if=/dev/zero of=/dev/{base} bs=1M count={count} " "oflag=direct conv=fdatasync",
+        f"dd if=/dev/zero of=/dev/{base} bs=1M count={count} oflag=direct conv=fdatasync",
         log=log,
     )
     elapsed = time.time() - start
@@ -469,8 +469,7 @@ def run_destructive_test(
     try:
         log.info(f"Creating throwaway test pool '{test_pool}'...")
         r = run(
-            f"zpool create -f -o ashift=12 -O atime=off "
-            f"-m {mountpoint} {test_pool} /dev/{base}",
+            f"zpool create -f -o ashift=12 -O atime=off -m {mountpoint} {test_pool} /dev/{base}",
             log=log,
         )
         if not r.ok:
@@ -577,7 +576,7 @@ def generate_report(  # pylint: disable=too-many-locals
         # Redact long hex/serial-like tokens.
         return re.sub(r"[0-9A-Fa-f]{8,}", "<redacted>", text)
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     zver = run("./zark --version 2>/dev/null || zark --version 2>/dev/null").output
     ubuntu = run("lsb_release -d 2>/dev/null").output
     zfsver = run("zfs version 2>/dev/null").output
@@ -657,7 +656,7 @@ def generate_report(  # pylint: disable=too-many-locals
 
 def write_report_file(content: str) -> str:
     """Write a report to /tmp and return its path."""
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     path = f"/tmp/zark-health-report-{ts}.txt"
     Path(path).write_text(content, encoding="utf-8")
     return path

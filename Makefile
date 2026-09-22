@@ -2,7 +2,7 @@
         test test-real test-deps test-all \
         test-phase1 test-phase2 test-phase3 test-cleanup \
         setup clean version \
-        check mypy pylint ruff ruff-strict format pre-commit lint tox \
+        check mypy pylint ruff format format-check basedpyright pre-commit lint tox \
         manpage manpage-view manpage-lint manpage-clean \
         dist dist-check fulltest fulltest-clean deb deb-source deb-ppa deb-ppa-test deb-ppa-resume
 
@@ -130,25 +130,36 @@ ruff: ## Run ruff (full ruleset, as configured in pyproject.toml)
 	}
 	ruff check .
 
-ruff-strict: ## Run ruff with --select=RUF027 --preview (matches the CI lint job)
-	@# CI's lint job runs only RUF027 (the stripped-`f`-string rule that
-	@# caused the v1.0.4 regression) under --preview. Keeping a separate
-	@# target makes the CI behaviour reproducible locally without having to
-	@# remember the flag combination.
+format-check: ## Check formatting without rewriting anything (what CI does)
 	@command -v ruff >/dev/null || { \
 		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
 	}
-	ruff check --select=RUF027 --preview --no-fix lib commands tests zark
+	ruff format --check lib commands tests zark
 
-format: ## Run black + isort on the whole project
-	@command -v black >/dev/null && command -v isort >/dev/null || { \
-		echo "  black or isort missing. Install with:"; \
-		echo "    pip install black isort --break-system-packages"; \
+format: ## Reformat and auto-fix the whole project with ruff (rewrites files)
+	@# Replaces the former black + isort + pyupgrade + add-trailing-comma
+	@# chain: `ruff check --fix` covers the import sort (rule I), the
+	@# syntax upgrades (UP) and the trailing commas (COM), and
+	@# `ruff format` covers what black used to do.
+	@command -v ruff >/dev/null || { \
+		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
 	}
-	isort lib commands tests zark
-	black lib commands tests zark
+	ruff check --fix lib commands tests zark
+	ruff format lib commands tests zark
+
+basedpyright: ## Run basedpyright (advisory — NOT part of `make lint`)
+	@# Deliberately outside the lint gate: 42 findings today, see
+	@# [tool.pyright] in pyproject.toml for the breakdown and the
+	@# rationale. Promote it into `lint` once it reaches zero.
+	@command -v basedpyright >/dev/null || { \
+		echo "  basedpyright not installed. Install with:"; \
+		echo "    pip install basedpyright --break-system-packages"; \
+		echo "  or run it in an isolated env with: tox -e types"; \
+		exit 1; \
+	}
+	basedpyright --project .
 
 pre-commit: ## Run all pre-commit hooks against every tracked file
 	@command -v pre-commit >/dev/null || { \
@@ -158,7 +169,7 @@ pre-commit: ## Run all pre-commit hooks against every tracked file
 	}
 	pre-commit run --all-files
 
-lint: check mypy pylint ## Run all static checks (compile + mypy + pylint)
+lint: check ruff format-check mypy pylint ## Run all static checks (compile + ruff + mypy + pylint)
 
 tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint (in isolated venvs)
 	@command -v $(TOX) >/dev/null || { \
@@ -166,9 +177,14 @@ tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint (in isolated venvs)
 		exit 1; \
 	}
 	# --skip-missing-interpreters=false makes the run fail loudly if any of
-	# python3.12 / python3.13 / python3.14 is not on PATH. This is the
-	# explicit guarantee `make tox` provides over plain `tox` (which would
-	# silently skip missing interpreters per tox.ini default).
+	# python3.12 / python3.13 / python3.14 is missing. This is the explicit
+	# guarantee `make tox` provides over plain `tox` (which would silently
+	# skip missing interpreters per tox.ini default).
+	#
+	# You no longer need all three interpreters installed by hand: tox.ini
+	# declares `requires = tox-uv`, so tox provisions the plugin and uv
+	# downloads any missing CPython on first use. See tox.ini for the
+	# caveat about python-build-standalone vs. the distro interpreter.
 	$(TOX) --skip-missing-interpreters=false
 
 # ── Documentation ────────────────────────────────────────────────────────
@@ -410,23 +426,23 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 		fi
 	@echo "  OK: dpkg-source -b . succeeds"
 
-fulltest: check ruff ruff-strict mypy pylint test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
+fulltest: check ruff format-check mypy pylint test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
 	@# fulltest is the "before-commit" gate. Make's default fail-fast
 	@# behaviour gives us free short-circuit semantics: the moment any
 	@# dependency fails, the rest is skipped.
 	@#
 	@# Order is fast→slow so failures surface early:
-	@#   check       — py_compile, milliseconds
-	@#   ruff        — full ruleset, ~1s
-	@#   ruff-strict — RUF027 only (CI subset), ~1s
+	@#   check        — py_compile, milliseconds
+	@#   ruff         — full ruleset incl. RUF027, ~1s
+	@#   format-check — ruff format --check, ~1s
 	@#   mypy        — ~10-15s (cold) / ~2-3s (warm)
 	@#   pylint      — ~15-20s
 	@#   test        — 94 unit tests, ~1-2s
 	@#   manpage-lint — pandoc + sed + awk + mandoc + groff, ~1s
 	@#   dist-check  — make dist + dpkg-source -b, ~3-5s
 	@#   tox         — tests on python3.12/3.13/3.14 in venvs, ~30-60s
-	@#                 (requires all three Pythons on PATH; install with
-	@#                  pyenv or deadsnakes if missing)
+	@#                 (tox-uv downloads any missing interpreter; see the
+	@#                  `tox` target and tox.ini)
 	@#   deb         — full debuild -b (binary .deb), ~10-15s
 	@#                 LAST on purpose: it stages the install tree under
 	@#                 debian/zark/, which would confuse mypy in tox -e lint
@@ -436,8 +452,12 @@ fulltest: check ruff ruff-strict mypy pylint test manpage-lint dist-check tox de
 	@# What fulltest does NOT cover and why:
 	@#   - dpkg -i     : would alter the local zark installation.
 	@#   - test-real   : QEMU integration tests need root and ZFS modules.
-	@#   - pre-commit  : black/isort would rewrite files in place; not
-	@#                   "non-invasive". Run separately when desired.
+	@#   - pre-commit  : the ruff hooks run with --fix and rewrite files in
+	@#                   place; not "non-invasive". `format-check` above
+	@#                   covers the read-only half. Run separately when
+	@#                   desired.
+	@#   - basedpyright: advisory only, 42 known findings. `make
+	@#                   basedpyright` / `tox -e types`.
 	@#   - make deb-source / deb-ppa : require the GPG signing key and
 	@#                   are part of the release flow, not the pre-commit
 	@#                   gate.

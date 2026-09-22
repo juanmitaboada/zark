@@ -556,7 +556,7 @@ def fix_grub_bpool_uuid(grub_cfg: Path, new_bpool_hex: str, log: Log) -> bool:
     content = grub_cfg.read_text()
     matches = _GRUB_FS_UUID_RE.findall(content)
     if not matches:
-        log.warn(f"No fs-uuid --set= references in {grub_cfg.name} " "— bpool UUID not updated")
+        log.warn(f"No fs-uuid --set= references in {grub_cfg.name} — bpool UUID not updated")
         return True
 
     old_uuids = {hex_ for _, hex_ in matches if hex_ != new_bpool_hex}

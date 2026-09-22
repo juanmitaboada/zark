@@ -34,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 
@@ -51,11 +51,7 @@ import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
     _detect_live_usb,
-)
-from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _parse_args as _backup_parse_args,
-)
-from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _report_staleness_at_end,
 )
 from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
@@ -100,8 +96,10 @@ from commands.simulate import (  # pylint: disable=wrong-import-position # noqa:
 from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E402
     _umount_local_system,
 )
-from lib import apt_guard  # pylint: disable=wrong-import-position # noqa: E402
-from lib import repair  # pylint: disable=wrong-import-position # noqa: E402
+from lib import (  # pylint: disable=wrong-import-position # noqa: E402
+    apt_guard,
+    repair,
+)
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
     Cleanup,
     eject_device,
@@ -298,9 +296,9 @@ class TestConfig:
                     patch("lib.config.Path", side_effect=_path_factory),
                 ):
                     result = Config.default_config_dir()
-                assert (
-                    result == fake_etc_zark
-                ), f"Expected fallback to /etc/zark (= {fake_etc_zark}), got {result}"
+                assert result == fake_etc_zark, (
+                    f"Expected fallback to /etc/zark (= {fake_etc_zark}), got {result}"
+                )
             finally:
                 if env_backup is not None:
                     os.environ["ZARK_CONFIG_DIR"] = env_backup
@@ -347,9 +345,9 @@ class TestConfig:
                 patch.object(Path, "is_dir", return_value=False),
             ):
                 result = Config.default_config_dir()
-            assert (
-                result == portable_root / "etc"
-            ), f"portable run with no config should default to <root>/etc, got {result}"
+            assert result == portable_root / "etc", (
+                f"portable run with no config should default to <root>/etc, got {result}"
+            )
         finally:
             if env_backup is not None:
                 os.environ["ZARK_CONFIG_DIR"] = env_backup
@@ -1632,7 +1630,7 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
                                 log,
                                 command="prepare",
                             )
-                            assert False, "Should have called fatal"
+                            raise AssertionError("Should have called fatal")
                         except SystemExit:
                             pass  # Expected — fatal raises SystemExit
 
@@ -1648,7 +1646,7 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
                         log,
                         command="prepare",
                     )
-                    assert False, "Should have called fatal"
+                    raise AssertionError("Should have called fatal")
                 except SystemExit:
                     pass
 
@@ -1888,9 +1886,9 @@ class TestSimulateCandidateList:  # pylint: disable=missing-function-docstring
             cands = _list_candidate_disks()
         names = [d for d, _ in cands]
         assert "/dev/sdz" in names
-        assert (
-            "/dev/nvme0n1" not in names
-        ), "In-use disk leaked into candidate list — safety layer 2 broken"
+        assert "/dev/nvme0n1" not in names, (
+            "In-use disk leaked into candidate list — safety layer 2 broken"
+        )
 
     def test_skips_loop_and_zd(self):
         """Loops and ZFS volumes (zd*) are filtered out of candidates."""
@@ -2080,7 +2078,7 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             try:
                 _sh.run("unknown_command")
-                assert False, "Should have raised"
+                raise AssertionError("Should have raised")
             except AssertionError as e:
                 assert "unexpected command" in str(e)
 
@@ -2897,9 +2895,9 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
         names = [n for n, _ in rules]
         rules_dict = dict(rules)
         assert "rpool/data" in names
-        assert (
-            "rpool/data/swap" in names
-        ), "zvol must keep its explicit rule even under a recursive parent"
+        assert "rpool/data/swap" in names, (
+            "zvol must keep its explicit rule even under a recursive parent"
+        )
         # Verify it kept the right policy
         assert rules_dict["rpool/data/swap"]["template"] is None  # autosnap=no
 
@@ -3701,13 +3699,13 @@ class TestDrivesStaleness:  # pylint: disable=missing-function-docstring
 
     def test_staleness_zero_when_just_now(self):
 
-        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=UTC)
         info = self._info("2026-05-08T15:00:00Z")
         assert drive_staleness_days(info, now=now) == 0
 
     def test_staleness_counts_days(self):
 
-        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=UTC)
         info = self._info("2026-04-08T15:00:00Z")  # 30 days earlier
         assert drive_staleness_days(info, now=now) == 30
 
@@ -3715,14 +3713,14 @@ class TestDrivesStaleness:  # pylint: disable=missing-function-docstring
         """At exactly threshold_days, the drive is NOT yet stale —
         is_drive_stale uses strict ``>`` so the boundary is fresh."""
 
-        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=UTC)
         info = self._info("2026-03-09T15:00:00Z")  # 60 days earlier
         assert drive_staleness_days(info, now=now) == 60
         assert not is_drive_stale(info, 60, now=now)
 
     def test_is_stale_beyond_threshold(self):
 
-        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=UTC)
         info = self._info("2026-03-08T15:00:00Z")  # 61 days earlier
         assert is_drive_stale(info, 60, now=now)
 
@@ -3872,10 +3870,10 @@ class TestBackupStalenessReporting:  # pylint: disable=missing-function-docstrin
     def test_lists_other_drives_in_danger_zone(self):
         """Drives other than the backed-up one whose age ≥ (retention -
         30) appear in the INFO list."""
-        five_days_ago = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+        five_days_ago = (datetime.now(UTC) - timedelta(days=70)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
-        recent = (datetime.now(timezone.utc) - timedelta(days=5)).strftime(
+        recent = (datetime.now(UTC) - timedelta(days=5)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
         cfg = self._cfg(
@@ -3896,7 +3894,7 @@ class TestBackupStalenessReporting:  # pylint: disable=missing-function-docstrin
         """Drive we just finished backing up has age 0 now; if we
         included it the user would be confused. Test that ``exclude``
         works."""
-        old = (datetime.now(timezone.utc) - timedelta(days=80)).strftime(
+        old = (datetime.now(UTC) - timedelta(days=80)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
         cfg = self._cfg(
@@ -4044,7 +4042,7 @@ class TestDrivesInDangerZone:  # pylint: disable=missing-function-docstring
         assert not drives_in_danger_zone(drives, retention_days=90, margin_days=30)
 
     def test_includes_drives_at_or_beyond_threshold(self):
-        old = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+        old = (datetime.now(UTC) - timedelta(days=70)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
         drives = {"black": self._drive("black", old)}
@@ -4054,7 +4052,7 @@ class TestDrivesInDangerZone:  # pylint: disable=missing-function-docstring
         assert result[0][1] >= 60  # 90 - 30 = 60 threshold; 70 days qualifies
 
     def test_excludes_drives_below_threshold(self):
-        recent = (datetime.now(timezone.utc) - timedelta(days=10)).strftime(
+        recent = (datetime.now(UTC) - timedelta(days=10)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
         drives = {"black": self._drive("black", recent)}
@@ -4062,7 +4060,7 @@ class TestDrivesInDangerZone:  # pylint: disable=missing-function-docstring
         assert not result
 
     def test_excludes_named_drive(self):
-        old = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+        old = (datetime.now(UTC) - timedelta(days=70)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
         drives = {
@@ -4079,10 +4077,10 @@ class TestDrivesInDangerZone:  # pylint: disable=missing-function-docstring
         assert result[0][0] == "blue"
 
     def test_sorts_age_desc(self):
-        d70 = (datetime.now(timezone.utc) - timedelta(days=70)).strftime(
+        d70 = (datetime.now(UTC) - timedelta(days=70)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
-        d80 = (datetime.now(timezone.utc) - timedelta(days=80)).strftime(
+        d80 = (datetime.now(UTC) - timedelta(days=80)).strftime(
             "%Y-%m-%dT%H:%M:%SZ",
         )
         drives = {

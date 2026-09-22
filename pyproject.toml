@@ -1,14 +1,45 @@
 # zark — project metadata and tool configuration.
 #
-# Single source of truth for tool settings. Tools that don't yet read
-# pyproject.toml (notably pylint, which uses .pylintrc) keep their own file.
+# Single source of truth for every tool zark uses: ruff (linter AND
+# formatter), mypy, pylint, basedpyright and the development dependency
+# groups all live in this file. There is no .pylintrc, .flake8, .isort.cfg
+# or setup.cfg any more.
+#
+# Tool consolidation (2026-09, v1.0.13):
+#   black              -> ruff format
+#   blackdoc           -> removed (no Python in docstrings to format)
+#   isort              -> ruff (rule I)
+#   flake8             -> ruff (rules E, F, W, B) + flake8-pyproject dropped
+#   pyupgrade          -> ruff (rule UP)
+#   add-trailing-comma -> ruff (rule COM)
+#   .pylintrc          -> [tool.pylint.*] below
+#
+# ── Project metadata ─────────────────────────────────────────────────────
+#
+# The [project] table exists so that `requires-python` can be declared once
+# (see the note in [tool.ruff]). zark is still NOT a pip-installable
+# package: there is deliberately no [build-system] table, tox runs with
+# `no_package = true`, and debian/rules installs the tree verbatim instead
+# of going through dh-python/pybuild.
+[project]
+name = "zark"
+# Placeholder, never read by anything. zark's real version lives in
+# lib/config.py (VERSION) and is read from there by the Makefile,
+# debian/rules and the manpage build. Keeping a second real version number
+# here would only create drift.
+version         = "0"
+description     = "Full bare-metal ZFS recovery for Ubuntu Encrypted ZFS"
+requires-python = ">=3.12"
 
 # ── Dev dependencies (PEP 735) ───────────────────────────────────────────
 #
-# Used by tox (and downstream CI) via `dependency_groups = dev` to install
-# the static-analysis stack into the lint environment. zark itself is a
-# portable script with no runtime dependencies; this group is purely for
-# development tooling.
+# `dev` is installed by tox into the `lint` environment via
+# `dependency_groups = dev`; `types` is installed into `types` the same
+# way. They are split so the fast lint env does not pull in basedpyright
+# (a ~30 MB npm-backed package) on every run.
+#
+# zark itself is a portable script with no runtime dependencies; these
+# groups are purely development tooling.
 #
 # Versions here are duplicated with `.pre-commit-config.yaml` because pre-
 # commit installs hook tools by git rev (a different mechanism) and cannot
@@ -16,38 +47,165 @@
 # corresponding hook in .pre-commit-config.yaml.
 [dependency-groups]
 dev = [
-    "mypy==1.19.1",
-    "pylint==3.3.9",
-    "ruff==0.15.12",
+    "mypy==2.3.1",
+    "pylint==4.0.8",
+    "ruff==0.16.8",
+]
+types = [
+    "basedpyright==1.40.1",
 ]
 
-[tool.pyright]
-include       = ["lib", "commands", "tests"]
-extraPaths    = ["."]
-pythonVersion = "3.12"  # Pyright's "pythonVersion" is the minimum supported version, not the target version.
+# ── Ruff — linter and formatter ──────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+# target-version is deduced from [project].requires-python above. Do NOT
+# declare it here.
+#
+# IMPORTANT: ruff is the ONLY one of the three that does this deduction.
+# Verified against mypy 2.3.1 and pylint 4.0.8: both ignore
+# requires-python entirely, so they carry an explicit `python_version` /
+# `py-version` below. When requires-python changes, change those two too.
 
+[tool.ruff.lint]
+# Equivalence with the flake8 setup this replaces (--select=B,C,E,F,W,T4,B9):
+#   E, W -> pycodestyle     F -> pyflakes      B -> flake8-bugbear
+#   I    -> isort           UP -> pyupgrade    COM -> flake8-commas
+# Not ported: T4 (flake8-mypy, dead plugin) and B9 (opinionated bugbear
+# warnings ruff does not implement). C (mccabe) is not enabled because
+# flake8's --max-complexity was commented out, so it never actually ran.
+#
+# RUF027 (missing-f-string-syntax) is the rule that caught the v1.0.4
+# regression — a log line that lost its `f` prefix and silently printed
+# `{var}` literally. It is still a preview rule, hence `preview = true`.
+# Measured on this codebase: enabling preview adds no other findings, so
+# the separate `ruff --select=RUF027` invocation the Makefile, tox and
+# pre-commit used to carry has been folded into this one config.
+preview = true
+select  = ["E", "F", "W", "B", "I", "UP", "COM", "RUF027"]
+
+ignore = [
+    # ruff-format already manages trailing commas; the rule conflicts.
+    "COM812",
+    # Note: E203 and W503, which the old flake8 config ignored, do not
+    # exist as ruff rules. Do not re-add them.
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party  = ["lib", "commands", "tests"]
+
+[tool.ruff.format]
+quote-style           = "double"
+indent-style          = "space"
+docstring-code-format = false
+line-ending           = "auto"
+
+# ── Mypy ─────────────────────────────────────────────────────────────────
 [tool.mypy]
+# Explicit on purpose: mypy does NOT read [project].requires-python.
+# Keep in sync with it.
 python_version = "3.12"
 files          = ["lib", "commands", "tests", "zark"]
 
-[tool.black]
-line-length    = 100
-target-version = ["py312"]
-include        = '\.pyi?$'
+# ── basedpyright / pyright ───────────────────────────────────────────────
+#
+# NOT part of the lint gate yet. basedpyright currently reports 42 findings
+# on this codebase (26 TypedDict, 14 missing type arguments, 2 test
+# doubles); it runs via `make basedpyright` / `tox -e types` and is
+# deliberately absent from pre-commit and from tox's envlist until those
+# are cleaned up. Promote it to a blocking hook once it reaches zero.
+#
+# The section is named [tool.pyright], not [tool.basedpyright], on purpose:
+# basedpyright reads [tool.basedpyright] ONLY when [tool.pyright] is
+# absent, and plain pyright (what an editor's LSP usually runs) tolerates
+# the basedpyright-only keys below. One section therefore serves both.
+[tool.pyright]
+include          = ["lib", "commands", "tests"]
+extraPaths       = ["."]
+# Pyright's "pythonVersion" is the minimum supported version, not the
+# target version. Keep in sync with [project].requires-python.
+pythonVersion    = "3.12"
+typeCheckingMode = "standard"
 
-[tool.isort]
-profile           = "black"
-line_length       = 100
-known_first_party = ["lib", "commands", "tests"]
+# "standard" turns this one off, but it is the most useful thing
+# basedpyright says about this codebase: 14 bare `dict` / `list` / `set`
+# annotations in lib/drives.py, lib/zfs.py and commands/setup.py. Turn it
+# back on explicitly — mypy benefits from those annotations too.
+reportMissingTypeArgument = "error"
 
-[tool.flake8]
-# Requires the flake8-pyproject plugin (added to .pre-commit-config.yaml).
-max-line-length = 100
-select          = ["B", "C", "E", "F", "W", "T4", "B9"]
-ignore          = ["E203", "W503"]
+# basedpyright's own strict preset demands full annotation of everything
+# and flags idioms that are not defects. Measured on this codebase these
+# eight families alone accounted for 1024 of 1068 findings, none of them
+# a bug, so they are off; what remains is signal.
+reportUnusedCallResult            = false  # 417: ignored non-None returns
+reportUnknownVariableType         = false  # 139
+reportUnknownArgumentType         = false  #  87
+reportImplicitStringConcatenation = false  #  74: adjacent string literals
+reportUnknownParameterType        = false  #  62
+reportAny                         = false  #  58
+reportMissingParameterType        = false  #  50
+reportPrivateUsage                = false  #  48: tests exercising _helpers
+reportUnknownMemberType           = false  #  43
+reportUnannotatedClassAttribute   = false  #  39
+reportUnknownLambdaType           = false  #   2
 
-[tool.ruff]
-line-length = 100
+# ── Pylint ───────────────────────────────────────────────────────────────
+#
+# Migrated verbatim from the former .pylintrc. Verified equivalent: the
+# output of `pylint --generate-toml-config` before and after the migration
+# differs in zero lines. Every default-valued setting the old file spelled
+# out was dropped; only the knobs that actually deviate from pylint's
+# defaults survive here.
+[tool.pylint.main]
+# jobs = 1 (pylint's default) on purpose: parallel workers reorder
+# messages, and this codebase lints in ~15s single-threaded anyway.
+jobs       = 1
+persistent = true
+fail-under = 10
+# Explicit on purpose: pylint does NOT read [project].requires-python.
+# Keep in sync with it.
+py-version = "3.12"
 
-[tool.ruff.lint]
-select = ["E", "F", "W"]
+ignore          = ["CVS"]
+ignore-patterns = ["^\\.#"]
+
+[tool.pylint."messages control"]
+confidence = [
+    "HIGH",
+    "CONTROL_FLOW",
+    "INFERENCE",
+    "INFERENCE_FAILURE",
+    "UNDEFINED",
+]
+disable = [
+    "raw-checker-failed",
+    "bad-inline-option",
+    "locally-disabled",
+    "file-ignored",
+    "suppressed-message",
+    "useless-suppression",
+    "deprecated-pragma",
+    "use-symbolic-message-instead",
+    # zark compares against "" and 0 explicitly in several parsers, where
+    # the implicit-booleaness rewrite would change meaning for None.
+    "use-implicit-booleaness-not-comparison-to-string",
+    "use-implicit-booleaness-not-comparison-to-zero",
+]
+
+[tool.pylint.format]
+max-line-length  = 100
+max-module-lines = 1500
+# Never wrap a bare URL in a comment.
+ignore-long-lines = "^\\s*(# )?<?https?://\\S+>?$"
+
+[tool.pylint.design]
+max-args                 = 8
+max-positional-arguments = 8
+max-public-methods       = 25
+max-statements           = 60
+
+[tool.pylint.similarities]
+min-similarity-lines = 7
+
+[tool.pylint.logging]
+logging-format-style = "old"

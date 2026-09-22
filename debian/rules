@@ -3,10 +3,18 @@
 # zark — Debian build rules.
 #
 # zark is a portable Python script suite, NOT an installable Python
-# package. There is no [project] table in pyproject.toml (a deliberate
-# choice: see v1.0.5 design). We therefore do NOT use dh-python /
-# pybuild — they would try to treat zark as a pip-installable package
-# and fail.
+# package. We therefore do NOT use dh-python / pybuild — they would try
+# to treat zark as a pip-installable package and fail.
+#
+# pyproject.toml does now carry a [project] table (added in v1.0.13 so
+# that requires-python is declared once and ruff can deduce its
+# target-version from it), but it carries NO [build-system] table, which
+# is what keeps the tree non-installable. This changes nothing here:
+# `pybuild --detect` already returned "pyproject" before that table
+# existed — it keys off the file, not the table — and a full
+# `dpkg-buildpackage -b` with dh-python installed was verified to build
+# the .deb unchanged. The overrides below are what actually keep pybuild
+# out of the way.
 #
 # Instead, we copy the project tree into /usr/share/zark/ verbatim and
 # expose the entry point as /usr/bin/zark via a symlink (debian/links).

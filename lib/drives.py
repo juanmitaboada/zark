@@ -20,7 +20,7 @@ and provides helpful output for unknown drives.
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from lib.config import Config, DriveInfo, parse_utc_iso
@@ -388,7 +388,7 @@ def drive_staleness_days(info: DriveInfo, *, now: datetime | None = None) -> int
     if last is None:
         return None
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
     delta = now - last
     return max(0, delta.days)
 

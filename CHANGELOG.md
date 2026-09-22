@@ -5,6 +5,57 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Development tooling only. No change to zark's behaviour: the shipped
+program is byte-for-byte the one in 1.0.12 apart from the two cosmetic
+fixes listed under *Fixed*. `lib/config.py` and `debian/changelog` are
+deliberately untouched, so a `.deb` built from this tree is still
+`1.0.12-1`.
+
+### Changed
+
+- Consolidated the linting stack on **ruff**: `black`, `blackdoc`, `isort`,
+  `flake8` (plus `flake8-pyproject`), `pyupgrade` and `add-trailing-comma`
+  are gone, replaced by `ruff check` (rules `E`, `F`, `W`, `B`, `I`, `UP`,
+  `COM`, `RUF027`) and `ruff format`. The separate RUF027-only invocation
+  in the Makefile, tox and pre-commit is folded into the main one.
+- Moved the 638-line `.pylintrc` into `[tool.pylint.*]` in `pyproject.toml`
+  and deleted the file. Verified equivalent: the output of
+  `pylint --generate-toml-config` is identical before and after, so only
+  the ~45 settings that actually deviate from pylint's defaults survive.
+- Added a `[project]` table so `requires-python = ">=3.12"` is declared
+  once. Only ruff deduces its target version from it — mypy and pylint do
+  not, and keep explicit `python_version` / `py-version` values that must
+  be kept in sync. There is still no `[build-system]`, which is what keeps
+  the tree non-installable; `debian/rules` documents why that is safe.
+- `tox.ini` declares `requires = tox-uv`. `make tox` no longer needs
+  python3.12, 3.13 and 3.14 installed by hand: tox provisions the plugin
+  and uv supplies any missing interpreter.
+- Bumped mypy 1.19.1 → 2.3.1, pylint 3.3.9 → 4.0.8, ruff 0.15.12 → 0.16.8,
+  and the matching pre-commit revs.
+- `make format` now runs `ruff check --fix` + `ruff format`; new
+  `make format-check` (read-only, used by `make lint` and `make fulltest`)
+  and `make basedpyright`.
+
+### Added
+
+- **basedpyright**, configured under `[tool.pyright]` and run via
+  `make basedpyright` or `tox -e types`. Advisory only — 42 known findings,
+  so it is absent from pre-commit and from tox's `envlist` until they are
+  cleaned up.
+- **codespell** as a pre-commit hook, and `check-toml` alongside the other
+  standard hooks.
+
+### Fixed
+
+- `datetime.timezone.utc` → `datetime.UTC` (17 occurrences) and
+  `assert False` → `raise AssertionError(...)` in three tests, where
+  `python -O` would have removed the assertion and let the test pass
+  silently.
+- Spelling of *eligible* in a `commands/simulate.py` comment, found by the
+  new codespell hook.
+
 ## [1.0.12] — 2026-06-04
 
 ### Exact-device import + post-export read-back verification — surviving a second FUA-lie corruption mode

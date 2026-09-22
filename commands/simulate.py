@@ -532,7 +532,7 @@ def run(
     os.chmod(ovmf_vars_tmp, 0o600)
     log.dbg(f"OVMF vars copy: {ovmf_vars_tmp}")
 
-    # ── Select disk: explicit, or interactive among elegible ─────────────
+    # ── Select disk: explicit, or interactive among eligible ─────────────
     target_disk: str
     if disk_arg:
         if not Path(disk_arg).exists():

@@ -419,7 +419,7 @@ def phase_3(workdir):
 
     target_img = os.path.join(workdir, TARGET_IMG)
     if not os.path.exists(target_img):
-        fail(f"Target image not found: {target_img}\n  " "Run phases 1 and 2 first.")
+        fail(f"Target image not found: {target_img}\n  Run phases 1 and 2 first.")
 
     ovmf_code, ovmf_vars = find_ovmf(workdir, "_phase3")
 

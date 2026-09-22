@@ -5,6 +5,12 @@
 # by tox and CI via PEP 735). pre-commit and PEP 735 use different install
 # mechanisms and cannot share a single source of truth, so when bumping a
 # version in either place, also bump the matching one in the other file.
+#
+# NOTE on basedpyright: deliberately NOT a hook. It reports 42 findings on
+# this codebase today and would block every commit. It is configured in
+# pyproject.toml under [tool.pyright] and run on demand via
+# `make basedpyright` / `tox -e types`; promote it here once it reaches
+# zero.
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -13,6 +19,7 @@ repos:
     -   id: check-ast
     -   id: check-merge-conflict
     -   id: check-json
+    -   id: check-toml
     -   id: check-xml
     -   id: check-yaml
     -   id: debug-statements
@@ -20,54 +27,36 @@ repos:
     -   id: trailing-whitespace
     -   id: destroyed-symlinks
     -   id: detect-private-key
--   repo: https://github.com/psf/black
-    rev: 26.3.1
+
+# Ruff replaces black, blackdoc, isort, flake8, pyupgrade and
+# add-trailing-comma. Both hooks read [tool.ruff] in pyproject.toml, so the
+# rules, the line length and the RUF027 preview rule need no args here.
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.8
     hooks:
-    -   id: black
-        args:
-          - --line-length=100
-          - --include='\.pyi?$'
--   repo: https://github.com/keewis/blackdoc
-    rev: v0.4.6
-    hooks:
-    -   id: blackdoc
-        args: ["-l", "99"]
-        exclude: ^doc/.*
--   repo: https://github.com/PyCQA/isort
-    rev: 8.0.1
-    hooks:
-    -   id: isort
-        name: isort
-        args: [--profile, black, --line-length, "100"]
--   repo: https://github.com/asottile/add-trailing-comma
-    rev: v4.0.0
-    hooks:
-    -   id: add-trailing-comma
--   repo: https://github.com/pycqa/flake8
-    rev: 7.3.0
-    hooks:
-    - id: flake8
-      additional_dependencies: [flake8-pyproject]
-      args:
-        - "--max-line-length=100"
-        - "--select=B,C,E,F,W,T4,B9"
-        - "--ignore=E203,W503"
-        # - "--max-complexity=18"
+    -   id: ruff-check
+        name: ruff (lint)
+        args: [--fix]
+    -   id: ruff-format
+        name: ruff (format)
+
 -   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: 'v1.19.1'
+    rev: 'v2.3.1'
     hooks:
       - id: mypy
         alias: mypy
         name: mypy
--   repo: https://github.com/asottile/pyupgrade
-    rev: v3.21.2
+
+-   repo: https://github.com/pycqa/pylint
+    rev: v4.0.8
     hooks:
-    -   id: pyupgrade
-        args: [--keep-percent-format]
+    - id: pylint
+
 -   repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.11.0.1
+    rev: v0.11.0.1-1
     hooks:
     -   id: shellcheck
+
 -   repo: https://github.com/get-woke/woke
     rev: v0.19.0
     # add GOFLAGS="-buildvcs=false" when woke is being installed
@@ -76,26 +65,35 @@ repos:
         exclude: >
           (?x)(
               CHANGELOG
-            | .pylintrc
           )
+
 -   repo: https://github.com/PyCQA/bandit
     rev: 1.9.4
     hooks:
     -   id: bandit
         args: ["-r", "-lll"]
 
--   repo: https://github.com/pycqa/pylint
-    rev: v3.3.9
+# codespell looks for KNOWN misspellings rather than validating every word
+# against a dictionary, which is what makes it usable here: pylint's own
+# spelling checker (--spelling-dict=en_US) reports 1335 hits on this
+# codebase because it does not know rpool, bpool, zvol, dracut, syncoid or
+# altroot. codespell reports one real typo and needs no system dictionary.
+#
+# -L is its ignore list. Every entry is a real term used in this repo, not a
+# mistake, so nothing here is a file-level exclusion — new text in these
+# files still gets checked:
+#   anc          — the `_nearest_recursive_ancestor` local in commands/setup.py
+#   ans          — the `read -r -p ... ans` shell variable in the Makefile
+#   fpr          — GPG's colon-format record type, parsed by the awk in
+#                  the Makefile's deb-source / deb-ppa targets
+#   renderD      — the /dev/dri/renderD* DRM render nodes in commands/simulate.py
+#   unparseable  — the variant spelling used in test names
+#                  (test_dataset_used_bytes_unparseable and friends)
+-   repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
     hooks:
-    - id: pylint
--   repo: https://github.com/astral-sh/ruff-pre-commit
-    # Ruff is used here ONLY for the RUF027 rule (missing-f-string-syntax),
-    # which detects strings that look like f-strings but lack an f/F prefix.
-    rev: v0.15.12
-    hooks:
-    -   id: ruff-check
-        name: ruff (RUF027 missing f-string syntax)
-        args: [--select=RUF027, --preview, --no-fix]
+    -   id: codespell
+        args: ["-L", "anc,ans,fpr,renderD,unparseable"]
 exclude: >
   (?x)(
       \.env
