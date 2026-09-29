@@ -73,6 +73,7 @@ from lib.mount_props import (
     effective_mountpoint,
     parse_list_cache,
     receive_options,
+    rpool_root_mountpoint,
 )
 from lib.restore_points import Point, Snap, parse_snapshots, resolve, restore_points
 from lib.zfs import ZFS, fix_grub_bpool_uuid
@@ -490,6 +491,8 @@ class RestorePlan:  # pylint: disable=too-many-instance-attributes
     keystore_snap: str
     keystore_bytes: int
     hostid: str = ""  # 8 hex digits, big-endian as zgenhostid expects
+    rpool_mountpoint: str = "/"
+    rpool_mountpoint_source: str = "ubuntu"
 
     def row(self, rel: str) -> RestoreRow | None:
         """Row of ``rel``, if any."""
@@ -661,7 +664,8 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
     zark = _zark_props(pool)
     children = {ds for ds in types for other in types if other.startswith(f"{ds}/")}
 
-    effective: dict[str, str] = {**CREATED_CONTAINERS, **BPOOL_CONTAINERS}
+    root_mp, root_src = rpool_root_mountpoint(cache)
+    effective: dict[str, str] = {"rpool": root_mp, **CREATED_CONTAINERS, **BPOOL_CONTAINERS}
     claimed: dict[str, str] = {}  # guessed mountpoint → dataset that got it
     rows: list[RestoreRow] = []
     for ds in wanted:
@@ -705,7 +709,31 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
     ks = sh.run(f"zfs list -Hp -t snapshot -o name,createtxg -s createtxg {pool}/keystore")
     ks_snap = ks.lines[-1].split("\t")[0] if ks.ok and ks.lines else ""
     ks_bytes = _referenced([ks_snap]).get(ks_snap, -1) if ks_snap else -1
-    return RestorePlan(pool, device, be, point, rows, ks_snap, ks_bytes, hostid)
+    return RestorePlan(
+        pool,
+        device,
+        be,
+        point,
+        rows,
+        ks_snap,
+        ks_bytes,
+        hostid,
+        rpool_mountpoint=root_mp,
+        rpool_mountpoint_source=root_src,
+    )
+
+
+def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str) -> str:
+    """``zpool create`` for the encrypted rpool, root mountpoint as in origin."""
+    return (
+        "zpool create -f -o ashift=12 -o autotrim=on "
+        + "-O acltype=posixacl -O xattr=sa -O dnodesize=auto "
+        + "-O normalization=formD -O relatime=on "
+        + f"-O canmount=off -O mountpoint={mountpoint} "
+        + "-O encryption=aes-256-gcm -O keyformat=raw "
+        + f"-O keylocation=file://{key_file} "
+        + f"-R {RECOVER_MNT} rpool {vdev}"
+    )
 
 
 def _fmt_delta(seconds: int) -> str:
@@ -722,6 +750,10 @@ def _show_plan(plan: RestorePlan, log: Log) -> None:
     """The restore table (hallazgo 3): what each dataset will be restored from."""
     log.info(f"Restore point: {plan.point.label_utc()} ({plan.point.family.rstrip('_')})")
     log.raw(f"  {'DATASET':44} {'SNAPSHOT':44} {'Δ POINT':>9} {'SIZE':>7}  MOUNT")
+    log.raw(
+        f"  {'rpool (pool root)':44} {'(created)':44} {'':>9} {'':>7}  "
+        + f"off {plan.rpool_mountpoint} [{plan.rpool_mountpoint_source}]",
+    )
     for r in plan.rows:
         if not r.restored:
             log.raw(f"  {log.Y}{r.rel:44} NOT RESTORED — {r.note}{log.N}")
@@ -1251,16 +1283,14 @@ def run(
     cleanup.track_pool("bpool")
     log.ok("bpool created")
 
+    # Set at create time: the backup pool (with its keystore zvol) is still
+    # imported, so a later `zfs set mountpoint` is forbidden (chase.c:648).
+    # zpool create refuses a non-empty <altroot><mountpoint>, even with -f.
+    root_dir = Path(f"{RECOVER_MNT}{plan.rpool_mountpoint}")
+    if root_dir.is_dir() and any(root_dir.iterdir()):
+        log.fatal(f"{root_dir} is not empty — zpool create would refuse rpool's mountpoint")
     r = sh.run(
-        "zpool create -f -o ashift=12 -o autotrim=on "
-        + "-O acltype=posixacl -O xattr=sa -O dnodesize=auto "
-        + "-O normalization=formD -O relatime=on "
-        + "-O canmount=off -O mountpoint=none -m none "
-        + "-O encryption=aes-256-gcm -O keyformat=raw "
-        + f"-O keylocation=file://{tmp_key} "
-        + f"-R {RECOVER_MNT} "
-        + f"rpool {sh.part(internal_disk, 4)}",
-        log=log,
+        _rpool_create_cmd(plan.rpool_mountpoint, tmp_key, sh.part(internal_disk, 4)), log=log
     )
     if not r.ok:
         log.fatal("Failed to create rpool container")

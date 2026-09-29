@@ -28,6 +28,7 @@ from lib.config import Config, DriveInfo
 from lib.drives import validate_external_block_device
 from lib.health import check_device, render_report
 from lib.log import Log
+from lib.mount import warn_rpool_mountpoint_lost
 from lib.zfs import ZFS, backup_altroot, syncoid_exclude_flag
 
 
@@ -45,6 +46,7 @@ def run(
     target_dev = ident.disk
 
     log.banner("PREPARE NEW BACKUP DRIVE")
+    warn_rpool_mountpoint_lost(log)
 
     # ── Verify rpool keystore accessible ─────────────────────────────────
     if not Path("/run/keystore/rpool/system.key").exists():

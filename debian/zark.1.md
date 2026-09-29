@@ -391,6 +391,21 @@ for the canonical end-to-end sequences.
     which are listed in *Recommends* and which **simulate** offers
     to install on first use.
 
+**fix-rpool-mountpoint**
+:   Give a restored **rpool** back the Ubuntu installer's
+    *mountpoint=/* (with *canmount=off*). **recover** up to 2.0.0-rc1
+    created **rpool** with *mountpoint=none*: datasets created later
+    directly under **rpool** then never mount, and drives prepared
+    from that system cannot be browsed with **mount**. **backup**,
+    **prepare** and **finish** warn when they detect it.
+
+    Runs from a live USB only. It sets the **zvol_inhibit_dev** module
+    parameter before importing **rpool** (**-N**, under an altroot, no
+    key loaded), so no zvol device exists while the mountpoint is
+    changed; lists the datasets that inherit their mountpoint from
+    **rpool**; asks for *YES*; exports **rpool** and restores the
+    parameter on every exit path.
+
 ## Maintenance
 
 **mount** \[*target*\]

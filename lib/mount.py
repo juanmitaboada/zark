@@ -162,3 +162,31 @@ def mount_system_pools(
         log.ok("System mounted read-only")
 
     return altroot, ubuntu_name
+
+
+def rpool_mountpoint_lost() -> bool:
+    """True when rpool carries the mountpoint=none left by zark recover ≤ 2.0.0-rc1.
+
+    The Ubuntu installer creates rpool with canmount=off, mountpoint=/.
+    Only that layout (rpool/ROOT present, canmount=off, a *local* none) is
+    reported, so a pool deliberately set up otherwise is left alone.
+    """
+    r = run("zfs get -H -o property,value,source mountpoint,canmount rpool")
+    if not r.ok:
+        return False
+    props = {f[0]: (f[1], f[2]) for f in (line.split("\t") for line in r.lines) if len(f) == 3}
+    return (
+        props.get("mountpoint") == ("none", "local")
+        and props.get("canmount", ("", ""))[0] == "off"
+        and run("zfs list -H -o name rpool/ROOT").ok
+    )
+
+
+def warn_rpool_mountpoint_lost(log: Log) -> None:
+    """Explain rpool's lost mountpoint and how to fix it, when it applies."""
+    if not rpool_mountpoint_lost():
+        return
+    log.warn("rpool has mountpoint=none; the Ubuntu installer sets / (zark recover ≤ 2.0.0-rc1)")
+    log.info("  New datasets directly under rpool will not mount, and backup drives")
+    log.info("  prepared from this system cannot be browsed with 'zark mount'.")
+    log.info("  Fix it from a live USB: sudo ./zark fix-rpool-mountpoint")

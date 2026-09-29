@@ -48,6 +48,7 @@ from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa:
 
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -171,12 +172,14 @@ from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
 from lib.mount import (  # pylint: disable=wrong-import-position # noqa: E402
     find_system_root_dataset,
     mount_system_pools,
+    rpool_mountpoint_lost,
 )
 from lib.mount_props import (  # pylint: disable=wrong-import-position # noqa: E402
     MountProps,
     choose as choose_props,
     parse_list_cache,
     receive_options,
+    rpool_root_mountpoint,
 )
 from lib.registry import (  # pylint: disable=wrong-import-position # noqa: E402
     RegistryError,
@@ -5773,7 +5776,9 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
     def test_first_level_tree_is_restored_with_origin_properties(self):
         plan = _run_plan(cache=True)
         rows = {r.rel: r for r in plan.rows}
-        assert rows["rpool/var"].options == ["-o canmount=off", "-o mountpoint=/var"]
+        # rpool is created with mountpoint=/, so /var is inherited, not set.
+        assert rows["rpool/var"].options == ["-o canmount=off"]
+        assert rows["rpool/var"].effective == "/var"
         assert rows["rpool/var/lib"].options == ["-o canmount=off"]
         assert rows["rpool/var/lib/docker"].options == ["-o canmount=on"]
         assert rows["rpool/var/lib/docker"].effective == "/var/lib/docker"
@@ -5793,7 +5798,9 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         rows = {r.rel: r for r in plan.rows}
         assert rows["rpool/var"].props is not None
         assert rows["rpool/var"].props.source == "inferred"
-        assert rows["rpool/var"].options == ["-o canmount=off", "-o mountpoint=/var"]
+        # rpool is created with mountpoint=/, so /var is inherited, not set.
+        assert rows["rpool/var"].options == ["-o canmount=off"]
+        assert rows["rpool/var"].effective == "/var"
         assert rows["rpool/var/lib"].options == ["-o canmount=off"]
         assert rows["rpool/var/lib/docker"].options == ["-o canmount=on"]
         assert rows[f"rpool/ROOT/{_BE}/var"].options == ["-o canmount=off"]
@@ -6322,6 +6329,134 @@ class TestReviewFindings:  # pylint: disable=missing-function-docstring
         rows = {r.rel: r for r in plan.rows}
         assert rows["rpool/USERDATA/home_cgx8je"].options[0] == "-o canmount=on"
         assert rows["rpool/USERDATA/home_zzz"].options[0] == "-o canmount=noauto"
+
+
+class TestRpoolRootMountpoint:  # pylint: disable=missing-function-docstring
+    """G4 on eli: recover left rpool at mountpoint=none; the installer uses /."""
+
+    def test_root_mountpoint_from_cache_or_ubuntu_layout(self):
+        assert rpool_root_mountpoint({"rpool": ("off", "/")}) == ("/", "cache")
+        # none in origin's cache is what a pre-rc2 recover left behind
+        assert rpool_root_mountpoint({"rpool": ("off", "none")}) == ("/", "ubuntu")
+        assert rpool_root_mountpoint({}) == ("/", "ubuntu")
+        assert rpool_root_mountpoint({"rpool": ("off", "/srv/x")}) == ("/srv/x", "cache")
+
+    def test_rpool_is_created_with_the_root_mountpoint(self):
+        cmd = recover_mod._rpool_create_cmd(  # pylint: disable=protected-access
+            "/",
+            "/tmp/k",
+            "/dev/sda4",
+        )
+        assert "-O canmount=off -O mountpoint=/ " in cmd
+        assert "mountpoint=none" not in cmd and "-m none" not in cmd
+        assert cmd.endswith("-R /mnt/recover rpool /dev/sda4")
+
+    @staticmethod
+    def _lost(get_out: str, has_root: bool = True) -> bool:
+        mock = MockShell()
+        mock.on("zfs get -H -o property,value,source mountpoint,canmount rpool").succeeds(get_out)
+        if has_root:
+            mock.on("zfs list -H -o name rpool/ROOT").succeeds("rpool/ROOT")
+        else:
+            mock.on("zfs list -H -o name rpool/ROOT").fails("does not exist")
+        with patch_sh(mock):
+            return rpool_mountpoint_lost()
+
+    def test_detects_only_the_recover_artefact(self):
+        lost = "mountpoint\tnone\tlocal\ncanmount\toff\tlocal"
+        assert self._lost(lost)
+        assert not self._lost("mountpoint\t/\tlocal\ncanmount\toff\tlocal")
+        assert not self._lost("mountpoint\tnone\tdefault\ncanmount\toff\tlocal")
+        assert not self._lost("mountpoint\tnone\tlocal\ncanmount\ton\tdefault")
+        assert not self._lost(lost, has_root=False)
+
+
+class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
+    """fix-rpool-mountpoint: live only, no zvol devices, YES, always restores."""
+
+    @staticmethod
+    def _run(  # pylint: disable=too-many-arguments,too-many-locals
+        *,
+        answer: str = "YES",
+        imported: bool = False,
+        zvols: list[str] | None = None,
+        before: tuple[str, str] = ("none", "local"),
+        after: tuple[str, str] = ("/", "local"),
+    ) -> tuple[MockShell, str, bool, list[str], str]:
+        mock = MockShell()
+        mock.on("zfs set mountpoint=/ rpool").succeeds()
+        mock.on("modprobe zfs").succeeds()
+        events: list[str] = []
+        with tempfile.TemporaryDirectory() as td:
+            param = Path(td) / "zvol_inhibit_dev"
+            param.write_text("0\n", encoding="utf-8")
+
+            def fake_import(*_a: object, **_k: object) -> bool:
+                events.append(f"import(inhibit={param.read_text(encoding='utf-8')})")
+                return True
+
+            def fake_export(*_a: object, **_k: object) -> bool:
+                events.append(f"export(inhibit={param.read_text(encoding='utf-8')})")
+                return True
+
+            props = [
+                {"mountpoint": before, "canmount": ("off", "local")},
+                {"mountpoint": after, "canmount": ("off", "local")},
+            ]
+            buf = StringIO()
+            exited = False
+            patches: list[AbstractContextManager[object]] = [
+                patch_sh(mock),
+                patch.object(fix_rpool_mod, "ZVOL_INHIBIT", param),
+                patch.object(fix_rpool_mod.sh, "is_live_usb", return_value=True),
+                patch.object(fix_rpool_mod.glob, "glob", return_value=zvols or []),
+                patch.object(fix_rpool_mod, "_props", side_effect=props),
+                patch.object(fix_rpool_mod, "_inheriting_from_rpool", return_value=[]),
+                patch.object(ZFS, "pool_exists", return_value=imported),
+                patch.object(ZFS, "pool_import", side_effect=fake_import),
+                patch.object(ZFS, "pool_export", side_effect=fake_export),
+                patch.object(ZFS, "dataset_exists", return_value=True),
+                patch("builtins.input", return_value=answer),
+                redirect_stdout(buf),
+            ]
+            with ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                try:
+                    fix_rpool_mod.run([])
+                except SystemExit:
+                    exited = True
+            final = param.read_text(encoding="utf-8")
+        return mock, buf.getvalue(), exited, events, final
+
+    def test_sets_mountpoint_with_zvols_inhibited_and_restores_the_parameter(self):
+        mock, out, exited, events, final = self._run()
+        assert events == ["import(inhibit=1)", "export(inhibit=1)"]
+        assert mock.was_called("zfs set mountpoint=/ rpool")
+        assert final == "0" and not exited
+        assert "RPOOL MOUNTPOINT FIXED" in out
+
+    def test_refuses_when_rpool_is_imported(self):
+        mock, _, exited, events, final = self._run(imported=True)
+        assert exited and not events
+        assert mock.was_not_called("zfs set")
+        assert final == "0\n"  # never touched
+
+    def test_no_answer_changes_nothing_but_still_exports_and_restores(self):
+        mock, out, exited, events, final = self._run(answer="NO")
+        assert mock.was_not_called("zfs set")
+        assert events[-1] == "export(inhibit=1)" and final == "0"
+        assert exited and "RPOOL MOUNTPOINT NOT FIXED" in out
+
+    def test_aborts_if_a_zvol_device_appears(self):
+        mock, _, exited, events, final = self._run(zvols=["/dev/zd0"])
+        assert exited
+        assert mock.was_not_called("zfs set")
+        assert events[-1] == "export(inhibit=1)" and final == "0"
+
+    def test_success_is_judged_by_the_property_not_the_exit_code(self):
+        _, out, exited, _, _ = self._run(after=("none", "local"))
+        assert exited and "RPOOL MOUNTPOINT NOT FIXED" in out
 
 
 def main() -> int:

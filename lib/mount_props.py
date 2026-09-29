@@ -59,8 +59,12 @@ UBUNTU_ROOT_CHILDREN_ON = frozenset(
 )
 
 # Datasets recover creates itself (not received), with these effective values.
-CREATED_CONTAINERS = {"rpool": "none", "rpool/ROOT": "none", "rpool/USERDATA": "none"}
+# rpool's own mountpoint comes from rpool_root_mountpoint().
+CREATED_CONTAINERS = {"rpool/ROOT": "none", "rpool/USERDATA": "none"}
 BPOOL_CONTAINERS = {"bpool": "none", "bpool/BOOT": "none"}
+
+# The Ubuntu installer creates rpool with canmount=off, mountpoint=/.
+UBUNTU_RPOOL_MOUNTPOINT = "/"
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,19 @@ def parse_list_cache(text: str) -> dict[str, tuple[str, str]]:
         if len(fields) >= 3 and fields[0]:
             out[fields[0]] = (fields[2], fields[1])
     return out
+
+
+def rpool_root_mountpoint(cache: dict[str, tuple[str, str]]) -> tuple[str, str]:
+    """(mountpoint, source) for the pool root recover creates.
+
+    ``none`` in origin's cache is not trusted: zark recover up to
+    2.0.0-rc1 created rpool with mountpoint=none, so a system restored by it
+    carries that value into its own cache and every later backup.
+    """
+    mountpoint = cache.get("rpool", ("", ""))[1]
+    if mountpoint and mountpoint not in ("none", "legacy", "-"):
+        return (mountpoint, "cache")
+    return (UBUNTU_RPOOL_MOUNTPOINT, "ubuntu")
 
 
 def ubuntu_layout(rel: str, be: str) -> tuple[str, str] | None:  # pylint: disable=too-many-return-statements

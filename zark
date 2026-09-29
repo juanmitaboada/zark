@@ -56,6 +56,7 @@ COMMANDS = {
     "clean": "Emergency cleanup: unmount everything, export all pools",
     "health": "Non-destructive risk checks on a backup drive",
     "registry": "List, forget or fix entries in known_drives.json",
+    "fix-rpool-mountpoint": "Give a restored rpool back mountpoint=/ (live USB)",
 }
 
 
@@ -86,8 +87,9 @@ def print_help():
     log.info(f"Usage:  {prefix}{cmd} <command> [options]")
     print()
     log.info("Commands:")
+    width = max(len(name) for name in COMMANDS)
     for name, desc in COMMANDS.items():
-        print(f"    {log.W}{name:<12}{log.N} {desc}")
+        print(f"    {log.W}{name:<{width}}{log.N} {desc}")
     print()
     log.info(f"Config: {Config.default_config_dir()}/known_drives.json")
     log.info("Log:    /var/log/zark.log")

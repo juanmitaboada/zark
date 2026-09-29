@@ -43,6 +43,7 @@ from lib.drives import (
 from lib.identity import by_id_names, preferred_by_id, whole_disk
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
+from lib.mount import warn_rpool_mountpoint_lost
 from lib.sanoid_retention import worst_case_retention_days
 from lib.zfs import ZFS, PoolInfo, syncoid_exclude_flag
 
@@ -333,6 +334,8 @@ def run(
             ],
             solutions=["Boot into your installed system and run backup from there"],
         )
+
+    warn_rpool_mountpoint_lost(log)
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, 10, "Scanning for known backup drives...")

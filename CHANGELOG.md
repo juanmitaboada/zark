@@ -30,6 +30,14 @@ consolidation that preceded it.
 - `lib/restore_points.py`, `lib/mount_props.py`, `lib/initrd.py` (below).
 - `tests/fixtures/phase0-stick-manifest.txt`: the frozen Phase 0 stick,
   used by the recover planner tests.
+- `zark fix-rpool-mountpoint` (live USB only) gives a restored rpool back
+  `mountpoint=/`. It sets the `zvol_inhibit_dev` module parameter before
+  importing rpool (`-N`, altroot, no key loaded), so no zvol device exists
+  while the mountpoint changes (chase.c:648); it lists the datasets that
+  inherit from rpool, asks for YES, judges success by the stored property,
+  and exports rpool and restores the parameter on every exit path.
+  `backup`, `prepare` and `finish` warn when rpool has the local
+  `mountpoint=none` of the Ubuntu layout.
 
 #### Changed
 
@@ -117,6 +125,16 @@ consolidation that preceded it.
   small and destroyed the dataset. (hallazgo 5)
 - `ask_choice` looped forever when stdin was closed. (hallazgo 22)
 - repair-boot ran `zfs set mountpoint` with the keystore zvol imported.
+- recover created rpool with `mountpoint=none` (since the first import of
+  the code, no recorded reason) where the Ubuntu installer uses `/`. On a
+  restored system, datasets created later directly under rpool never
+  mounted, and `prepare`'s mountpoint sync (it reads only rpool's own
+  value) copied nothing, so drives prepared there had every dataset at
+  `none` and `zark mount` mounted 0 (G4 on eli). recover now creates rpool
+  with origin's value from the boot environment's `zfs-list.cache`, or `/`
+  when that is absent or `none` (a `none` there is what the old recover
+  left). It is set at `zpool create` (the backup pool and its keystore zvol
+  are imported, so no later `zfs set`) and shown in the plan table.
 - repair-boot ran `update-grub` before regenerating the initrds, so with
   missing initrds (found on eli by deleting them) `10_linux_zfs` listed no
   kernel; it then restored a `grub.cfg.pre-repair` left by an earlier run
