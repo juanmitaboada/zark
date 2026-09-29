@@ -49,6 +49,7 @@ import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # 
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -5744,6 +5745,68 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
             except SystemExit:
                 return
         raise AssertionError("prepare must refuse to register <unknown>")
+
+
+class TestRegistryCommand:  # pylint: disable=missing-function-docstring
+    """I24: supported way to inspect and repair the registry."""
+
+    @staticmethod
+    def _cfg_dir(entries: dict[str, dict[str, str]]) -> Path:
+        d = Path(tempfile.mkdtemp())
+        registry_write_atomic(d / "known_drives.json", entries)
+        return d
+
+    def test_fix_rewrites_unknown_drive_id_from_connected_disk(self):
+        d = self._cfg_dir({"blue": {"guid": "777", "drive_id": "<unknown>"}})
+        mock = MockShell()
+        mock.on("blkid -t TYPE=zfs_member -o export").succeeds(
+            "DEVNAME=/dev/sdb1\nLABEL=blue\nUUID=777\nTYPE=zfs_member\n",
+        )
+        mock.on("zpool list -H -o name").succeeds("")
+        mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sdb1").succeeds(
+            _LSBLK_SDB1,
+        )
+        mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sdb").succeeds(
+            _LSBLK_SDB,
+        )
+        mock.on_prefix("find /dev/disk/by-id/").succeeds(_BY_ID_LISTING)
+        with (
+            patch_sh(mock),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch("lib.identity.os.path.realpath", side_effect=lambda p: p),
+            redirect_stdout(StringIO()),
+        ):
+            registry_mod.run(["fix"])
+        data = json.loads((d / "known_drives.json").read_text())
+        assert data["blue"]["drive_id"] == _KINGSTON_ID
+        assert data["blue"]["autoeject"] is False
+
+    def test_forget_removes_only_that_entry(self):
+        d = self._cfg_dir(
+            {"blue": {"guid": "1", "drive_id": "a"}, "black": {"guid": "2", "drive_id": "b"}},
+        )
+        with (
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch("lib.log.Log.ask", return_value=True),
+            redirect_stdout(StringIO()),
+        ):
+            registry_mod.run(["forget", "blue"])
+        assert list(json.loads((d / "known_drives.json").read_text())) == ["black"]
+
+    def test_forget_refuses_on_malformed_registry(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "known_drives.json").write_text("{bad")
+        with (
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                registry_mod.run(["forget", "blue"])
+            except SystemExit:
+                assert (d / "known_drives.json").read_text() == "{bad"
+                return
+        raise AssertionError("expected SystemExit")
 
 
 def main() -> int:

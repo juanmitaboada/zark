@@ -55,6 +55,7 @@ COMMANDS = {
     "monitor": "Live progress monitor (run in separate terminal)",
     "clean": "Emergency cleanup: unmount everything, export all pools",
     "health": "Non-destructive risk checks on a backup drive",
+    "registry": "List, forget or fix entries in known_drives.json",
 }
 
 
