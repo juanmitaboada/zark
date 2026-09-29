@@ -162,7 +162,8 @@ def auto_repair_under_64mb(
     if not divergent:
         return True, []
 
-    too_big = [d for d in divergent if d.used_bytes > SIZE_LIMIT_BYTES]
+    # used=-1 means the size could not be read: fail closed (hallazgo 5).
+    too_big = [d for d in divergent if d.used_bytes < 0 or d.used_bytes > SIZE_LIMIT_BYTES]
     if too_big:
         return False, too_big
 

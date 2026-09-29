@@ -18,17 +18,38 @@ Imports rpool/bpool, mounts the system, regenerates grub.cfg and initrd.
 Use when grub.cfg is corrupted (e.g., update-grub ran with backup drive connected).
 """
 
-import getpass
 from pathlib import Path
 
 from lib import grub_guard, sh
 from lib.cleanup import Cleanup
+from lib.identity import disks_under
+from lib.initrd import regenerate_initrd
 from lib.keystore import Keystore
 from lib.log import Log
+from lib.mount import mount_system_pools
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 REPAIR_MNT = "/mnt/repair"
 TOTAL_STEPS = 7
+
+
+_ESP_PARTTYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+
+def _esp_of_rpool_disk() -> str:
+    """EFI System Partition on the disk holding rpool's vdev, or ""."""
+    vdevs = sh.run("zpool list -vHP rpool")
+    for line in vdevs.lines[1:] if vdevs.ok else []:
+        path = line.strip().split("\t")[0]
+        if not path.startswith("/dev/"):
+            continue
+        for disk in sorted(disks_under(path)):
+            parts = sh.run(f"lsblk -nr -o NAME,PARTTYPE {disk}")
+            for p in parts.lines if parts.ok else []:
+                fields = p.split()
+                if len(fields) == 2 and fields[1].lower() == _ESP_PARTTYPE:
+                    return f"/dev/{fields[0]}"
+    return ""
 
 
 def run(
@@ -81,75 +102,22 @@ def run(
         if answer != "y":
             log.fatal("Aborted — disconnect external drives and retry.")
 
-    # ── 2. Import rpool + bpool ───────────────────────────────────────────
+    # ── 2-4. Import rpool + bpool, unlock, mount (all tracked by Cleanup) ──
+    # mount_system_pools imports under the altroot (clean first, then -f for
+    # a pool left "in use" by the unclean shutdown that brought the operator
+    # here), asks the passphrase with retries, and registers every pool,
+    # mount and the keystore with Cleanup, so the final export unmounts
+    # /boot and every dataset before exporting rpool (P0-6). Mountpoints are
+    # never changed: the stored ones are mounted under the altroot.
     log.step(2, TOTAL_STEPS, "Importing pools...")
-
-    for pool in ("rpool", "bpool"):
-        if zfs.pool_exists(pool):
-            log.ok(f"{pool} already imported")
-            continue
-        # Route through ZFS.pool_import: it attempts a clean import first and
-        # only falls back to `-f` if that fails — exactly the case that brings
-        # the operator here (a pool left "in use" by the unclean shutdown that
-        # broke boot). The operator no longer needs to know to add -f by hand.
-        # The forced state is transient: Cleanup (registered above) exports
-        # both pools cleanly on exit, so the next real boot imports without -f.
-        if zfs.pool_import(pool, altroot=REPAIR_MNT, no_mount=True):
-            cleanup.track_pool(pool)
-        else:
-            log.fatal(f"Cannot import {pool} (tried clean import and -f)")
-
-    # ── 3. Open keystore + load keys ──────────────────────────────────────
     log.step(3, TOTAL_STEPS, "Loading encryption keys...")
-
-    print()
-    print("  ┌─────────────────────────────────────────────────────┐")
-    print("  │ 🔑 Passphrase for rpool")
-    print("  └─────────────────────────────────────────────────────┘")
-    passphrase = getpass.getpass("    Passphrase: ")
-
-    ks = Keystore(log)
-    if not ks.mount("rpool", passphrase):
-        log.fatal("Cannot open keystore — check passphrase")
-    cleanup.track_keystore(ks)
-
-    loaded = ks.load_pool_keys("rpool")
-    log.ok(f"Loaded {loaded} key(s)")
-
-    # ── 4. Mount system ───────────────────────────────────────────────────
     log.step(4, TOTAL_STEPS, "Mounting system...")
+    result = mount_system_pools(REPAIR_MNT, None, log, zfs, Keystore(log), cleanup)
+    if result is None:
+        log.fatal("Could not import and mount the system — see messages above.")
+    _, ubuntu_name = result
+    log.ok(f"Boot environment: {ubuntu_name}")
 
-    # Find root dataset
-    root_ds: str | None = None
-    for ds in sh.run("zfs list -H -o name -r rpool/ROOT").lines:
-        ds = ds.strip()
-        if ds and ds != "rpool/ROOT" and "@" not in ds and "/" not in ds.split("rpool/ROOT/")[1]:
-            root_ds = ds
-            break
-
-    if not root_ds:
-        log.fatal("Cannot find root dataset under rpool/ROOT")
-
-    ubuntu_name = root_ds.split("/")[-1]
-    log.ok(f"Root dataset: {root_ds}")
-
-    # Set mountpoints and mount
-    _ = sh.run(f"zfs set mountpoint=/ {root_ds}")
-    _ = sh.run(f"zfs mount {root_ds}")
-
-    # Mount child datasets
-    for ds in sh.run("zfs list -H -o name -r rpool").lines:
-        ds = ds.strip()
-        if ds and ds != "rpool" and ds != root_ds and "@" not in ds and "keystore" not in ds:
-            mp = sh.run(f"zfs get -H -o value mountpoint {ds}").output.strip()
-            if mp and mp != "none" and mp != "-":
-                _ = sh.run(f"zfs mount {ds} 2>/dev/null", check=False)
-
-    # Mount bpool
-    _ = sh.run(f"zfs set mountpoint=/boot bpool/BOOT/{ubuntu_name}")
-    _ = sh.run(f"zfs mount bpool/BOOT/{ubuntu_name}")
-
-    # Check kernel files exist
     kernels = list(Path(f"{REPAIR_MNT}/boot").glob("vmlinuz-*"))
     if kernels:
         log.ok(f"System mounted at {REPAIR_MNT} ({len(kernels)} kernel(s))")
@@ -165,19 +133,15 @@ def run(
         _ = sh.run(f"mount --bind /{d} {REPAIR_MNT}/{d}")
         cleanup.track_mount(f"{REPAIR_MNT}/{d}")
 
-    # EFI
-    internal_disk = sh.run(
-        'lsblk -dn -o NAME,TYPE | awk \'$2=="disk"{print "/dev/"$1}\' | grep nvme | head -1',
-    ).output.strip()
-    if internal_disk:
-        efi_part = sh.part(internal_disk, 1)
-    else:
-        efi_part = sh.run("blkid -t TYPE=vfat | grep -i efi | head -1 | cut -d: -f1").output.strip()
-
+    # EFI: the ESP on the disk that holds rpool (never "the first vfat",
+    # which on a live session can be the live USB's own ESP)
+    efi_part = _esp_of_rpool_disk()
     if efi_part:
         _ = sh.run(f"mkdir -p {REPAIR_MNT}/boot/efi")
-        _ = sh.run(f"mount {efi_part} {REPAIR_MNT}/boot/efi")
-        cleanup.track_mount(f"{REPAIR_MNT}/boot/efi")
+        if sh.run(f"mount {efi_part} {REPAIR_MNT}/boot/efi", log=log).ok:
+            cleanup.track_mount(f"{REPAIR_MNT}/boot/efi")
+    else:
+        log.warn("No EFI System Partition found on rpool's disk — /boot/efi not mounted")
 
     _ = sh.run(f"mkdir -p {REPAIR_MNT}/sys/firmware/efi/efivars")
     _ = sh.run(
@@ -225,28 +189,26 @@ def run(
 
     grub_guard.install(target_root=REPAIR_MNT, log=log)
 
-    if Path(f"{REPAIR_MNT}/usr/bin/dracut").exists():
-        _ = sh.run(f"chroot {REPAIR_MNT} dracut --force --regenerate-all", log=log)
-        log.ok("initrd regenerated (dracut) ✓")
-    elif Path(f"{REPAIR_MNT}/usr/sbin/update-initramfs").exists():
-        _ = sh.run(f"chroot {REPAIR_MNT} update-initramfs -u -k all", log=log)
-        log.ok("initrd regenerated ✓")
+    initrd_failures = regenerate_initrd(REPAIR_MNT, log)
 
     # ── 7. Cleanup ────────────────────────────────────────────────────────
     log.step(7, TOTAL_STEPS, "Cleanup...")
 
     cleanup.run()
 
-    log.banner_ok(
-        "BOOT REPAIR COMPLETE",
-        [
-            "grub.cfg regenerated ✓",
-            "Grub guard installed ✓",
-            "initrd regenerated ✓",
-            "Pools exported cleanly ✓",
-            "",
-            "Next: remove live USB and reboot.",
-            "If boot later asks to force-import a pool, that's",
-            "benign: boot through, then re-run 'zark repair-boot'.",
-        ],
-    )
+    exported = cleanup.exported_pools()
+    still = [p for p in ("rpool", "bpool") if p not in exported and zfs.pool_exists(p)]
+    lines = [
+        "grub.cfg regenerated ✓",
+        "Grub guard installed ✓",
+        *(["initrd regenerated ✓"] if not initrd_failures else []),
+        *(f"✗ {f}" for f in initrd_failures),
+        *(["Pools exported cleanly ✓"] if not still else []),
+        *(f"✗ {p} is still imported — run: sudo zpool export {p}" for p in still),
+        "",
+        "Next: remove live USB and reboot.",
+    ]
+    if still or initrd_failures:
+        log.banner_error("BOOT REPAIR INCOMPLETE", lines)
+        raise SystemExit(1)
+    log.banner_ok("BOOT REPAIR COMPLETE", lines)

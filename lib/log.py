@@ -158,6 +158,15 @@ class Log:
             )
         print(f"{self.BOLD}{self.G}╚{'═' * w}╝{self.N}")
         self.blank()
+        self._verdict_to_file("OK", title, lines)
+
+    def _verdict_to_file(self, kind: str, title: str, lines: list[str] | None) -> None:
+        """Record a verdict banner in the log file (I19): the terminal is not
+        the audit trail."""
+        self._to_file(f"[{kind}] ══ {title} ══")
+        for line in lines or []:
+            if self._strip(line).strip():
+                self._to_file(f"[{kind}]    {line}")
 
     def banner_safe_unplug(self, drive: str):
         """Distinct prominent banner indicating a drive is safe to unplug.
@@ -241,6 +250,11 @@ class Log:
             )
         print(f"{self.BOLD}{self.R}╚{'═' * w}╝{self.N}")
         self.blank()
+        self._verdict_to_file("FAIL", title, lines)
+
+    def _answer_to_file(self, question: str, answer: str) -> None:
+        """Record an interactive prompt and the operator's answer (I19)."""
+        self._to_file(f"[PROMPT]  {self._strip(question)} → {answer!r}")
 
     # ── Interactive ──────────────────────────────────────────────────────
 
@@ -255,9 +269,9 @@ class Log:
             answer = input(f"    {prompt}: ").strip().lower()
         except EOFError:
             answer = ""
-        if not answer:
-            return default
-        return answer.startswith("y")
+        result = default if not answer else answer.startswith("y")
+        self._answer_to_file(question, f"{answer or '<default>'} ({'yes' if result else 'no'})")
+        return result
 
     def ask_timeout(self, question: str, default: bool, timeout: int) -> bool:
         """Yes/no question that auto-applies ``default`` after ``timeout`` seconds.
@@ -278,6 +292,7 @@ class Log:
 
         # No TTY: apply default immediately, like EOF in ask().
         if not sys.stdin.isatty():
+            self._answer_to_file(question, f"<no tty> ({'yes' if default else 'no'})")
             return default
 
         default_word = "yes" if default else "no"
@@ -294,13 +309,16 @@ class Log:
                 answer = sys.stdin.readline().strip().lower()
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-                if not answer:
-                    return default
-                return answer.startswith("y")
+                result = default if not answer else answer.startswith("y")
+                self._answer_to_file(
+                    question, f"{answer or '<default>'} ({'yes' if result else 'no'})"
+                )
+                return result
         # Timed out: clear the countdown line and apply the default.
         sys.stdout.write("\r" + " " * 70 + "\r")
         sys.stdout.flush()
         self.info(f"No response — applying default ({default_word}).")
+        self._answer_to_file(question, f"<timeout> ({default_word})")
         return default
 
     def ask_input(self, question: str, default: str = "") -> str:
@@ -324,6 +342,7 @@ class Log:
             answer = input("    > ").strip()
         except EOFError:
             answer = ""
+        self._answer_to_file(question, answer or f"<default> {default}")
         return answer or default
 
     def ask_password(self, question: str) -> str:
@@ -333,6 +352,7 @@ class Log:
         print(f"{self.M}  ┌─────────────────────────────────────────────────────┐{self.N}")
         print(f"{self.M}  │ {self.Y}🔑{self.N} {question}")
         print(f"{self.M}  └─────────────────────────────────────────────────────┘{self.N}")
+        self._to_file(f"[PROMPT]  {self._strip(question)} → (passphrase, not logged)")
         return getpass.getpass("    Passphrase: ")
 
     def ask_choice(self, question: str, options: list[str], default: int = 0) -> int:
@@ -347,13 +367,18 @@ class Log:
         while True:
             try:
                 raw = input(f"    Select [1-{len(options)}, default={default + 1}]: ").strip()
-                if not raw:
-                    return default
+            except EOFError:
+                # No operator (stdin closed): never loop forever, never guess.
+                self._answer_to_file(question, "<EOF>")
+                self.error("No input available (stdin closed) — aborting")
+                raise SystemExit(1) from None
+            if not raw:
+                self._answer_to_file(question, f"<default> {options[default]}")
+                return default
+            if raw.isdigit() and 0 <= int(raw) - 1 < len(options):
                 sel = int(raw) - 1
-                if 0 <= sel < len(options):
-                    return sel
-            except (ValueError, EOFError):
-                pass
+                self._answer_to_file(question, f"{raw} {options[sel]}")
+                return sel
             print(f"    {self.R}Invalid selection — try again{self.N}")
 
     # ── Fatal (stops execution) ──────────────────────────────────────────

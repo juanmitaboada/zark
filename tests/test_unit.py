@@ -51,6 +51,7 @@ import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position 
 import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -5961,6 +5962,131 @@ class TestInitrd:  # pylint: disable=missing-function-docstring
         assert failures == ["dracut failed for 7.0.0-34-generic (rc=1)"]
         assert mock.was_not_called("--regenerate-all")
         assert mock.was_not_called("7.0.0-14")
+
+
+class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
+    """P0-6: every mount is tracked, /boot goes before rpool, banner is truthful."""
+
+    @staticmethod
+    def _run(export_rpool_ok: bool) -> tuple[MockShell, str, bool]:
+        mock = MockShell()
+        mock.on("zpool import").succeeds("")
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool list bpool").succeeds("bpool")
+        if export_rpool_ok:
+            mock.on("zpool export rpool").succeeds()
+        else:
+            mock.on("zpool export rpool").fails("pool is busy")
+            mock.on("zpool export -f rpool").fails("pool is busy")
+        mock.on("zpool export bpool").succeeds()
+        mock.on("zpool list -vHP rpool").succeeds("rpool\t1G\n\t/dev/sda4\t1G")
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/sda4").succeeds("sda4 part\nsda disk")
+        mock.on("lsblk -nr -o NAME,PARTTYPE /dev/sda").succeeds(
+            "sda\nsda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n"
+            "sda4 6a898cc3-1dd2-11b2-99a6-080020736631",
+        )
+        mock.on("chroot /mnt/repair update-grub").fails()
+        mock.on("mount /dev/sda1 /mnt/repair/boot/efi").succeeds()
+        exported_after_rpool_state = {"rpool": export_rpool_ok}
+
+        def fake_mount(_alt, _pw, _log, _zfs, _ks, cleanup):
+            cleanup.track_pool("rpool")
+            cleanup.track_pool("bpool")
+            cleanup.track_mount("/mnt/repair")
+            cleanup.track_mount("/mnt/repair/boot")
+            return ("/mnt/repair", "ubuntu_x")
+
+        buf = StringIO()
+        exited = False
+        patches: list[AbstractContextManager[object]] = [
+            patch_sh(mock),
+            patch.object(repair_boot_mod.Cleanup, "register"),
+            patch.object(repair_boot_mod.sh, "is_live_usb", return_value=True),
+            patch.object(repair_boot_mod, "mount_system_pools", side_effect=fake_mount),
+            patch.object(repair_boot_mod, "regenerate_initrd", return_value=[]),
+            patch.object(repair_boot_mod.grub_guard, "install"),
+            patch.object(repair_boot_mod, "fix_grub_bpool_uuid"),
+            patch.object(repair_boot_mod.Path, "glob", return_value=[Path("vmlinuz-7")]),
+            patch("lib.cleanup.Path.is_mount", return_value=True),
+            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+            patch.object(
+                ZFS,
+                "pool_exists",
+                side_effect=lambda p: p == "rpool" and not exported_after_rpool_state["rpool"],
+            ),
+            redirect_stdout(buf),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            try:
+                repair_boot_mod.run([])
+            except SystemExit:
+                exited = True
+        return mock, buf.getvalue(), exited
+
+    def test_boot_unmounted_before_rpool_export_and_success_banner(self):
+        mock, out, exited = self._run(export_rpool_ok=True)
+        calls = mock.calls
+        assert calls.index("umount /mnt/repair/boot") < calls.index("zpool export rpool")
+        assert calls.index("umount /mnt/repair/boot/efi") < calls.index("umount /mnt/repair/boot")
+        assert mock.was_called("mount /dev/sda1 /mnt/repair/boot/efi")
+        assert "BOOT REPAIR COMPLETE" in out and not exited
+        assert not any("zfs set mountpoint" in c for c in calls)
+
+    def test_banner_does_not_lie_when_rpool_stays_imported(self):
+        _, out, exited = self._run(export_rpool_ok=False)
+        assert exited
+        assert "BOOT REPAIR INCOMPLETE" in out
+        assert "Pools exported cleanly" not in out
+        assert "rpool is still imported" in out
+
+
+class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
+    """Hallazgo 5 (used=-1), hallazgo 22 (ask_choice EOF), I19 (log file)."""
+
+    def test_unreadable_size_is_never_auto_destroyed(self):
+        d = DivergentDataset("rpool/var", "blue/rpool/var", -1, "?")
+        with (
+            patch.object(repair, "find_divergent", return_value=[d]),
+            patch("lib.repair.sh.run") as run_mock,
+            redirect_stdout(StringIO()),
+        ):
+            ok, too_big = repair.auto_repair_under_64mb(
+                ZFS(make_log()), "rpool", "blue", make_log()
+            )
+        assert not ok and too_big == [d]
+        run_mock.assert_not_called()
+
+    def test_ask_choice_aborts_on_eof(self):
+        with (
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                make_log().ask_choice("Pick", ["a", "b"])
+            except SystemExit:
+                return
+        raise AssertionError("ask_choice must abort on EOF, not loop")
+
+    def test_verdicts_and_prompts_reach_the_log_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.log")
+            log = Log(log_file=path)
+            with (
+                patch("builtins.input", return_value="y"),
+                patch("lib.log.getpass.getpass", return_value="secret"),
+                redirect_stdout(StringIO()),
+            ):
+                log.ask("Destroy the pool?")
+                log.ask_password("Passphrase for blue")
+                log.banner_ok("BACKUP COMPLETED", ["Duration: 1m"])
+                log.banner_error("BACKUP NOT VERIFIED", ["do not rely on it"])
+            text = Path(path).read_text(encoding="utf-8")
+        assert "Destroy the pool? → 'y (yes)'" in text
+        assert "Passphrase for blue" in text and "secret" not in text
+        assert "[OK] ══ BACKUP COMPLETED ══" in text
+        assert "[FAIL] ══ BACKUP NOT VERIFIED ══" in text
 
 
 def main() -> int:

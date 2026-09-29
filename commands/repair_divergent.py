@@ -285,8 +285,9 @@ def _destroy_loop(  # pylint: disable=too-many-branches,too-many-locals
     aborted = False
     failure_policy: _FailurePolicy | None = None  # asked once, then sticky
 
-    auto_small = [d for d in divergent if d.used_bytes <= SIZE_LIMIT_BYTES]
-    big = [d for d in divergent if d.used_bytes > SIZE_LIMIT_BYTES]
+    # used=-1 (unreadable size) is never auto-destroyed (hallazgo 5).
+    auto_small = [d for d in divergent if 0 <= d.used_bytes <= SIZE_LIMIT_BYTES]
+    big = [d for d in divergent if d.used_bytes < 0 or d.used_bytes > SIZE_LIMIT_BYTES]
 
     if auto_small:
         log.info(
@@ -331,7 +332,7 @@ def _destroy_loop(  # pylint: disable=too-many-branches,too-many-locals
             continue
 
         # action == "destroy"
-        if d.used_bytes > DOUBLE_CONFIRM_BYTES:
+        if d.used_bytes < 0 or d.used_bytes > DOUBLE_CONFIRM_BYTES:
             if not _prompt_double_confirm(log, d.target, d.used_human):
                 log.info(f"  cancelled — {d.target} NOT destroyed")
                 skipped.append(d.target)

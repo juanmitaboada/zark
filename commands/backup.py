@@ -41,10 +41,18 @@ from lib.drives import (
     select_drive,
 )
 from lib.identity import by_id_names, preferred_by_id, whole_disk
-from lib.keystore import Keystore
+from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.sanoid_retention import worst_case_retention_days
 from lib.zfs import ZFS, PoolInfo, syncoid_exclude_flag
+
+# Remediation for a full backup drive. `zark purge` erases the whole drive,
+# so it is never the answer to "out of space" (hallazgo 8).
+_FREE_SPACE_HINT = (
+    "Free space on the drive: destroy old destination snapshots by exact name, "
+    "keeping each dataset's newest one (never a % range) — "
+    "zfs list -t snapshot -o name,used -s creation -r <pool>"
+)
 
 # How many days before retention runs out we start mentioning a drive
 # at the end of a successful backup. With 90-day retention, drives
@@ -217,7 +225,7 @@ def _check_target_space(
                 f"Required margin: ≥ {sh.humanize_bytes(threshold)} (1% of source, min 1 GiB)",
             ],
             solutions=[
-                "Purge old snapshots on target: sudo ./zark purge",
+                _FREE_SPACE_HINT,
                 "Source has grown — consider a larger backup drive",
             ],
         )
@@ -455,13 +463,14 @@ def run(
         if not log.ask("Key already loaded. Proceed with backup?", default=True):
             log.fatal("Aborted by user")
     else:
-        passphrase = log.ask_password(f"Enter passphrase for {pool_name}")
-
-        if not ks.mount(pool_name, passphrase):
+        if not open_keystore(ks, pool_name, log):
             log.fatal(
                 "Cannot open keystore",
-                causes=["Wrong passphrase", "Keystore not found"],
-                solutions=["Re-prepare the drive: sudo ./zark prepare /dev/sdX"],
+                causes=["Wrong passphrase (3 attempts)", "Keystore zvol not found"],
+                solutions=[
+                    "Retry with the passphrase of the system this drive backs up",
+                    "Test the passphrase read-only: sudo ./zark mount",
+                ],
             )
 
         cleanup.track_keystore(ks)
@@ -584,7 +593,7 @@ def run(
                     "Incremental was larger than estimated, or target was already nearly full",
                 ],
                 solutions=[
-                    "Purge old snapshots on target: sudo ./zark purge",
+                    _FREE_SPACE_HINT,
                     "Connect a larger backup drive",
                     "Then re-run: sudo ./zark backup (syncoid resumes)",
                 ],
@@ -634,7 +643,7 @@ def run(
                     "rpool likely consumed the headroom intended for bpool",
                 ],
                 solutions=[
-                    "Purge old snapshots on target: sudo ./zark purge",
+                    _FREE_SPACE_HINT,
                     "Connect a larger backup drive",
                     "Then re-run: sudo ./zark backup",
                 ],
@@ -668,7 +677,7 @@ def run(
                         f"bpool resync ran out of space on {pool_name}",
                         causes=[f"{pool_name} is full after rpool sync"],
                         solutions=[
-                            "Purge old snapshots: sudo ./zark purge",
+                            _FREE_SPACE_HINT,
                             "Connect a larger backup drive",
                         ],
                     )
