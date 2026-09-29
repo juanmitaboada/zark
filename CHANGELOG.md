@@ -114,6 +114,13 @@ consolidation that preceded it.
   small and destroyed the dataset. (hallazgo 5)
 - `ask_choice` looped forever when stdin was closed. (hallazgo 22)
 - repair-boot ran `zfs set mountpoint` with the keystore zvol imported.
+- recover ran `zpool destroy -f rpool bpool` before partitioning. With
+  the new target filter those pools can only belong to another disk, so
+  recover now refuses to start while they are imported instead.
+- recover mounts the restored root explicitly before bpool (a
+  `canmount=noauto` boot environment is skipped by `zfs mount -a`, and a
+  bpool mounted first is shadowed by the root) and stops if either
+  mount fails.
 
 #### Removed
 

@@ -151,6 +151,7 @@ def run(
         backup_device(drive),
         altroot=mnt_point,
         readonly=readonly,
+        guid=drive.guid,
     ):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)

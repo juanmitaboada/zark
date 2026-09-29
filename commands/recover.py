@@ -548,15 +548,16 @@ def _list_datasets(pool: str) -> dict[str, str]:
 
 def _zark_props(pool: str) -> dict[str, tuple[str, str]]:
     """org.zark:canmount / org.zark:mountpoint recorded on the destination (M2+)."""
-    r = sh.run(
-        "zfs get -Hp -s local -o name,property,value "
-        + f"org.zark:canmount,org.zark:mountpoint -r {pool}/rpool {pool}/bpool",
-    )
     found: dict[str, dict[str, str]] = {}
-    for line in r.lines if r.ok else []:
-        fields = line.split("\t")
-        if len(fields) == 3 and fields[0].startswith(f"{pool}/"):
-            found.setdefault(fields[0][len(pool) + 1 :], {})[fields[1]] = fields[2]
+    for root in (f"{pool}/rpool", f"{pool}/bpool"):  # one query each: bpool may be absent
+        r = sh.run(
+            "zfs get -Hp -s local -o name,property,value "
+            + f"org.zark:canmount,org.zark:mountpoint -r {root}",
+        )
+        for line in r.lines if r.ok else []:
+            fields = line.split("\t")
+            if len(fields) == 3 and fields[0].startswith(f"{pool}/"):
+                found.setdefault(fields[0][len(pool) + 1 :], {})[fields[1]] = fields[2]
     return {
         ds: (p["org.zark:canmount"], p["org.zark:mountpoint"])
         for ds, p in found.items()
@@ -661,6 +662,7 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
     children = {ds for ds in types for other in types if other.startswith(f"{ds}/")}
 
     effective: dict[str, str] = {**CREATED_CONTAINERS, **BPOOL_CONTAINERS}
+    claimed: dict[str, str] = {}  # guessed mountpoint → dataset that got it
     rows: list[RestoreRow] = []
     for ds in wanted:
         snap = resolved[ds]
@@ -681,6 +683,15 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
         needs_probe = ds not in zark and ds not in cache and ds in children
         empty = bool(needs_probe and _empty_root(full))
         row.props = choose(ds, be, zark=zark, cache=cache, empty_with_children=empty)
+        target = effective_mountpoint(row.props, effective[parent], leaf)
+        if row.props.source in ("ubuntu", "inferred") and row.props.canmount == "on":
+            if target in claimed:
+                # e.g. a second home_* from a reinstall: never stack two
+                # datasets on one mountpoint by guesswork.
+                log.warn(f"{ds}: {target} already taken by {claimed[target]} — noauto")
+                row.props = MountProps("noauto", row.props.mountpoint, row.props.source)
+            else:
+                claimed[target] = ds
         row.options = receive_options(row.props, effective[parent], leaf)
         row.effective = effective_mountpoint(row.props, effective[parent], leaf)
         effective[ds] = row.effective
@@ -809,8 +820,21 @@ def _select_target(backup_disk: str, log: Log) -> str:
     return candidates[idx][0]
 
 
+def _refuse_imported_system_pools(log: Log) -> None:
+    """An imported rpool/bpool lives on a disk that is never a candidate (its
+    vdevs protect it), so it is another system's pool: refuse, never destroy."""
+    imported = [p for p in ("rpool", "bpool") if sh.run(f"zpool list {p}").ok]
+    if imported:
+        log.fatal(
+            f"{' and '.join(imported)} already imported in this live session",
+            causes=["They belong to a disk that is not the restore target"],
+            solutions=[f"Export them first: sudo zpool export {' '.join(imported)}"],
+        )
+
+
 def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
     """Everything that can fail without the disk being erased (hallazgo 15)."""
+    _refuse_imported_system_pools(log)
     tools = ("sgdisk", "mkfs.vfat", "cryptsetup", "zgenhostid", "partprobe")
     missing = [t for t in tools if not sh.run(f"which {t}").ok]
     if missing:
@@ -818,6 +842,8 @@ def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
     be_row = plan.row(f"rpool/ROOT/{plan.be}")
     if be_row is None or not be_row.restored:
         log.fatal("The boot environment has no snapshot at this point")
+    if not sh.run(f"zfs list {plan.pool}/keystore").ok:
+        _abort_missing_keystore("no_dataset", plan.pool, log)
     if not plan.keystore_snap:
         _abort_missing_keystore("no_snapshot", plan.pool, log)
     bpool_row = plan.row(f"bpool/BOOT/{plan.be}")
@@ -849,6 +875,7 @@ def _export_verified(pool: str, log: Log) -> None:
     _ = sh.run(f"zfs unload-key -r {pool}")
     if not sh.run(f"zpool export {pool}", log=log).ok:
         _ = sh.run(f"zpool export -f {pool}", log=log)
+    _ = sh.run("udevadm settle --timeout=10")  # /dev/zvol symlinks go away via udev
     still = sh.run(f"zpool list {pool}").ok or sh.run(f"test -e /dev/zvol/{pool}").ok
     if still:
         log.fatal(
@@ -857,6 +884,34 @@ def _export_verified(pool: str, log: Log) -> None:
             solutions=[f"Check: zpool status {pool}; fuser -vm /dev/zvol/{pool}/keystore"],
         )
     log.ok(f"{pool} exported — its zvols are gone")
+
+
+def _mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> None:
+    """Mount the restored system under RECOVER_MNT, root first.
+
+    Receives were ``-u``, so nothing is mounted yet. The root is mounted
+    explicitly (``zfs mount -a`` skips a ``canmount=noauto`` boot
+    environment), then bpool on its ``/boot``, then everything else. A
+    bpool mounted before the root would be shadowed by it.
+    """
+    root_ok = sh.run(f"zfs mount rpool/ROOT/{ubuntu_name}", log=log).ok
+    if not root_ok or not Path(f"{RECOVER_MNT}/usr/bin/bash").exists():
+        log.fatal(
+            f"Cannot mount the restored root at {RECOVER_MNT}",
+            solutions=["Boot the live USB again and run: sudo ./zark repair-boot"],
+        )
+    if bpool_received:
+        boot_ok = sh.run(f"zfs mount bpool/BOOT/{ubuntu_name}", log=log).ok
+        if not boot_ok or not sh.run(f"findmnt -n {RECOVER_MNT}/boot").ok:
+            log.fatal(
+                f"Cannot mount the restored bpool at {RECOVER_MNT}/boot",
+                solutions=["Boot the live USB again and run: sudo ./zark repair-boot"],
+            )
+        kernel_count = len(list(Path(f"{RECOVER_MNT}/boot").glob("vmlinuz*")))
+        log.ok(f"bpool mounted at {RECOVER_MNT}/boot ✓  ({kernel_count} kernel(s))")
+    _ = sh.run("zfs mount -a")
+    mounted = sh.run(f"zfs mount | grep -c {RECOVER_MNT}").output
+    log.ok(f"System mounted at {RECOVER_MNT} ({mounted} datasets)")
 
 
 def _install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
@@ -1099,7 +1154,7 @@ def run(
 
     # ── 2. Import (read-only) and unlock backup pool ─────────────────────
     log.step(2, TOTAL_STEPS, f"Importing pool {pool_name} read-only...")
-    if not zfs.import_backup_pool(pool_name, device, readonly=True):
+    if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
     backup_disk = whole_disk(device)
@@ -1142,6 +1197,7 @@ def run(
 
     # ── 5. Select internal disk + pre-flight ─────────────────────────────
     log.step(5, TOTAL_STEPS, "Selecting internal disk...")
+    _refuse_imported_system_pools(log)
     internal_disk = _select_target(backup_disk, log)
     _preflight(plan, internal_disk, log)
 
@@ -1166,9 +1222,6 @@ def run(
 
     # ── 6. Cleanup + partition ───────────────────────────────────────────
     log.step(6, TOTAL_STEPS, "Cleaning up and partitioning...")
-    for pool in ("rpool", "bpool"):
-        _ = sh.run(f"zpool export -f {pool}")
-        _ = sh.run(f"zpool destroy -f {pool}")
     _ = sh.run(f"rm -rf {RECOVER_MNT}")
     _ = sh.run(f"mkdir -p {RECOVER_MNT}")
 
@@ -1290,7 +1343,7 @@ def run(
     # ── 12. Reimport backup pool → bpool → keystore → export ─────────────
     # Neither bpool nor the keystore dataset is encrypted: no key is loaded.
     log.step(12, TOTAL_STEPS, "Reimporting backup pool for bpool + keystore restore...")
-    if not zfs.import_backup_pool(pool_name, device, readonly=True):
+    if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
         log.fatal(
             f"Cannot reimport {pool_name} to restore bpool and the keystore",
             causes=["Without the keystore the recovered system cannot unlock rpool"],
@@ -1342,23 +1395,9 @@ def run(
     _export_verified(pool_name, log)
     cleanup.untrack_pool(pool_name)
 
-    # ── 12c. Mount bpool (its mountpoint came with the receive)
-    if bpool_received:
-        _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot")
-        if not sh.run(f"zfs mount bpool/BOOT/{ubuntu_name}", log=log).ok:
-            errors.append("bpool: could not be mounted at /boot")
-        kernel_count = len(list(Path(f"{RECOVER_MNT}/boot").glob("vmlinuz*")))
-        log.ok(f"bpool mounted at {RECOVER_MNT}/boot ✓  ({kernel_count} kernel(s))")
-
     # ── 13. Mount system ─────────────────────────────────────────────────
     log.step(13, TOTAL_STEPS, "Mounting system...")
-    _ = sh.run("zfs mount -a")
-
-    if not Path(f"{RECOVER_MNT}/usr/bin/bash").exists():
-        log.warn("Cannot see /usr/bin/bash — rpool mount may be incomplete")
-
-    mounted = sh.run(f"zfs mount | grep -c {RECOVER_MNT}").output
-    log.ok(f"System mounted at {RECOVER_MNT} ({mounted} datasets)")
+    _mount_restored_system(ubuntu_name, bpool_received, log)
 
     # Format EFI partition
     _ = sh.run(f"mkfs.vfat -F32 {sh.part(internal_disk, 1)}", log=log)

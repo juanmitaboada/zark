@@ -67,7 +67,9 @@ from commands.recover import (  # pylint: disable=wrong-import-position # noqa: 
     _check_sizes,
     _choose_point,
     _force_latest_signed_alternative,
+    _mount_restored_system,
     _plan,
+    _preflight,
     _target_candidates,
 )
 from commands.repair_divergent import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -5881,7 +5883,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         snaps = _stick_snaps()
         point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
         plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [], "k@k", 1, "617fca2c")
-        drive = type("D", (), {"name": "backup", "drive_id": _KINGSTON_ID})()
+        drive = type("D", (), {"name": "backup", "drive_id": _KINGSTON_ID, "guid": "1"})()
 
         def preflight(*_args: object) -> None:
             if preflight_fails:
@@ -6087,6 +6089,126 @@ class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
         assert "Passphrase for blue" in text and "secret" not in text
         assert "[OK] ══ BACKUP COMPLETED ══" in text
         assert "[FAIL] ══ BACKUP NOT VERIFIED ══" in text
+
+
+class TestReviewFindings:  # pylint: disable=missing-function-docstring
+    """Regression guards for the independent review of the M1 diff."""
+
+    def test_root_is_mounted_before_bpool_and_mount_all(self):
+        mock = MockShell()
+        mock.on("zfs mount rpool/ROOT/x").succeeds()
+        mock.on("zfs mount bpool/BOOT/x").succeeds()
+        mock.on("findmnt -n /mnt/recover/boot").succeeds("/mnt/recover/boot bpool/BOOT/x")
+        mock.on("zfs mount -a").succeeds()
+        with (
+            patch_sh(mock),
+            patch.object(recover_mod.Path, "exists", return_value=True),
+            patch.object(recover_mod.Path, "glob", return_value=[]),
+            redirect_stdout(StringIO()),
+        ):
+            _mount_restored_system("x", True, make_log())
+        mounts = [c for c in mock.calls if c.startswith("zfs mount") and "|" not in c]
+        assert mounts == ["zfs mount rpool/ROOT/x", "zfs mount bpool/BOOT/x", "zfs mount -a"]
+
+    def test_unmountable_root_is_fatal(self):
+        mock = MockShell()
+        mock.on("zfs mount rpool/ROOT/x").fails("cannot mount")
+        with (
+            patch_sh(mock),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                _mount_restored_system("x", True, make_log())
+            except SystemExit:
+                return
+        raise AssertionError("expected SystemExit")
+
+    def test_preflight_refuses_imported_system_pools(self):
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool list bpool").fails()
+        plan = _sized_plan(1, 1)
+        with (
+            patch_sh(mock),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                _preflight(plan, "/dev/sda", make_log())
+            except SystemExit:
+                assert mock.was_not_called("zpool destroy")
+                return
+        raise AssertionError("expected SystemExit")
+
+    def test_dataset_created_between_sanoid_runs_is_not_filed_earlier(self):
+        snaps = [
+            Snap("rpool/ROOT/x", "autosnap_a_hourly", "1", 1, 1000),
+            Snap("rpool/new", "autosnap_b_hourly", "2", 2, 1440),  # next run, new dataset
+            Snap("rpool/ROOT/x", "autosnap_b_hourly", "3", 3, 1441),
+        ]
+        points = restore_points(snaps, "rpool/ROOT/x")
+        assert len(points) == 2
+        assert resolve(points[0], snaps, ["rpool/new"])["rpool/new"] is None
+
+    def test_syncoid_run_with_long_gaps_stays_one_point(self):
+        snaps = [
+            Snap("rpool", "syncoid_h_1", "1", 1, 1000),
+            Snap("rpool/ROOT/x", "syncoid_h_2", "2", 2, 1002),
+            Snap("rpool/USERDATA/home", "syncoid_h_3", "3", 3, 1002 + 4200),  # 70 min transfer
+        ]
+        (point,) = restore_points(snaps, "rpool/ROOT/x")
+        assert set(point.members) == {"rpool", "rpool/ROOT/x", "rpool/USERDATA/home"}
+
+    def test_already_imported_pool_from_another_disk_is_refused(self):
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds("backup")
+        mock.on("zpool get -H -o value altroot backup").succeeds("/run/zark/altroot/backup")
+        mock.on("zpool get -H -o value readonly backup").succeeds("on")
+        mock.on("zpool get -H -o value guid backup").succeeds("999")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            zfs = ZFS(make_log())
+            assert not zfs.import_backup_pool("backup", "/dev/x", readonly=True, guid="111")
+            assert zfs.import_backup_pool("backup", "/dev/x", readonly=True, guid="999")
+            assert not zfs.import_backup_pool("backup", "/dev/x", readonly=False, guid="999")
+
+    def test_registry_match_uses_every_by_id_alias(self):
+        drives = {"blue": DriveInfo("blue", "1", "wwn-0x5000000000000001")}
+        ident = DiskIdentity(
+            disk="/dev/sdb",
+            by_id=_KINGSTON_ID,
+            aliases=(_KINGSTON_ID, "wwn-0x5000000000000001"),
+        )
+        assert match_registry(ident, drives) == ["blue"]
+
+    def test_second_home_dataset_is_not_stacked_on_home(self):
+        snaps = _stick_snaps()
+        extra = [
+            Snap(
+                "rpool/USERDATA/home_zzz",
+                "autosnap_2026-09-28_17:00:01_hourly",
+                "9",
+                999,
+                1790614801,
+            ),
+        ]
+        point = restore_points(snaps + extra, f"rpool/ROOT/{_BE}")[-1]
+        mock = _plan_mock()
+        types_extra = "backup/rpool/USERDATA/home_zzz\tfilesystem"
+        base = mock._find("zfs list -Hp -o name,type -r backup/rpool")  # pylint: disable=protected-access
+        assert base is not None
+        base.stdout = base.stdout + types_extra + "\n"
+        with (
+            patch_sh(mock),
+            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
+            patch.object(recover_mod, "_referenced", side_effect=lambda n: dict.fromkeys(n, 1)),
+            patch.object(recover_mod, "_empty_root", return_value=False),
+            redirect_stdout(StringIO()),
+        ):
+            plan = _plan("backup", "/dev/sdb1", _BE, point, snaps + extra, make_log())
+        rows = {r.rel: r for r in plan.rows}
+        assert rows["rpool/USERDATA/home_cgx8je"].options[0] == "-o canmount=on"
+        assert rows["rpool/USERDATA/home_zzz"].options[0] == "-o canmount=noauto"
 
 
 def main() -> int:

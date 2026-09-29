@@ -449,7 +449,7 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
 
     # ── 2. Import pool (no mount, no key load — we only inspect snapshots) ─
     log.step(2, 4, f"Importing pool {pool_name}...")
-    if not zfs.import_backup_pool(pool_name, drive_vdev(drive)):
+    if not zfs.import_backup_pool(pool_name, drive_vdev(drive), guid=drive.guid):
         log.fatal(
             f"Cannot import pool {pool_name}",
             solutions=["Check: zpool status; reconnect the drive and run again"],

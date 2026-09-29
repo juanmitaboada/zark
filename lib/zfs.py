@@ -206,13 +206,14 @@ class ZFS:
         self.log.error(f"Cannot import pool {name}: {last_err}")
         return False
 
-    def import_backup_pool(
+    def import_backup_pool(  # pylint: disable=too-many-locals
         self,
         name: str,
         device: str | None,
         *,
         altroot: str | None = None,
         readonly: bool = False,
+        guid: str | None = None,
     ) -> bool:
         """Import a backup pool under invariant I-G.
 
@@ -226,13 +227,24 @@ class ZFS:
         exact device the import is refused.
 
         A pool that is already imported is accepted only if it was imported
-        under an altroot; otherwise the caller is told to export it.
+        under an altroot, in the requested read-only/read-write mode, and
+        (when ``guid`` is given) is the expected pool; otherwise the caller
+        is told to export it.
         """
         if self.pool_exists(name):
             current = run(f"zpool get -H -o value altroot {name}").output
+            is_ro = run(f"zpool get -H -o value readonly {name}").output == "on"
+            actual = self.pool_guid(name)
+            problem = ""
             if current in ("", "-"):
+                problem = "without an altroot"
+            elif guid and actual != guid:
+                problem = f"with GUID {actual}, not {guid} (another disk)"
+            elif is_ro != readonly:
+                problem = "read-only" if is_ro else "read-write"
+            if problem:
                 self.log.error(
-                    f"Pool {name} is already imported without an altroot — "
+                    f"Pool {name} is already imported {problem} — "
                     + f"export it first: sudo zpool export {name}",
                 )
                 return False

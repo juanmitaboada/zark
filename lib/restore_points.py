@@ -26,9 +26,12 @@ Ordering rules (P0-8):
 A restore point is one snapshot run: snapshots of one name family
 (``autosnap_``, ``syncoid_<host>_``, ``prepare_``, ``zark_``, or a manual
 name) grouped by ``creation``. A run spans several seconds for sanoid and
-many minutes for a syncoid replication, so the grouping is not a time
-window: a new point starts only when a dataset reappears more than
-``REPEAT_GAP`` seconds after its first snapshot in the current point.
+many minutes for a syncoid replication. A new point starts when a
+dataset reappears more than ``REPEAT_GAP`` seconds after its first
+snapshot in the current point, or — except for syncoid, which snapshots
+one dataset at a time — when ``REPEAT_GAP`` seconds pass with no snapshot
+(so a dataset created between two sanoid runs is not filed into the
+earlier one).
 Only runs that include the boot environment root are offered.
 
 Resolution (hallazgo 3): for the chosen point every dataset uses its own
@@ -108,17 +111,27 @@ def cluster(snaps: list[Snap]) -> list[Point]:
     for s in snaps:
         by_family.setdefault(s.family, []).append(s)
     for family, members in sorted(by_family.items()):
+        # syncoid snapshots one dataset at a time, just before sending it, so
+        # its run can have long gaps between datasets; every other family
+        # (sanoid, zark's atomic points, manual -r snapshots) takes a whole
+        # run within seconds, so a long gap starts a new run there. A syncoid
+        # run starts with the pool's root dataset, which repeats from the
+        # previous run, so a dataset new in that run cannot slip into the
+        # previous point.
+        sequential = family.startswith("syncoid_")
         current: Point | None = None
         first_seen: dict[str, int] = {}
+        last = 0
         for s in sorted(members, key=lambda x: (x.creation, x.dataset, x.createtxg)):
-            if current is None or (
-                s.dataset in first_seen and s.creation - first_seen[s.dataset] > REPEAT_GAP
-            ):
+            repeated = s.dataset in first_seen and s.creation - first_seen[s.dataset] > REPEAT_GAP
+            gap = not sequential and s.creation - last > REPEAT_GAP
+            if current is None or repeated or gap:
                 current = Point(family=family)
                 points.append(current)
                 first_seen = {}
             first_seen.setdefault(s.dataset, s.creation)
             current.members.setdefault(s.dataset, []).append(s)
+            last = s.creation
     return points
 
 

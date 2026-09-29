@@ -380,7 +380,7 @@ def run(
     log.step(2, 10, f"Importing pool {pool_name}...")
 
     device = backup_device(drive)
-    if not zfs.import_backup_pool(pool_name, device):
+    if not zfs.import_backup_pool(pool_name, device, guid=pool_guid):
         log.fatal(
             f"Cannot import pool {pool_name}",
             causes=[

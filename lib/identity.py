@@ -72,6 +72,7 @@ class DiskIdentity:  # pylint: disable=too-many-instance-attributes
     size: str = ""
     transport: str = ""
     label: PoolLabel | None = None
+    aliases: tuple[str, ...] = ()  # every whole-disk by-id name of this disk
 
     @property
     def name(self) -> str:
@@ -186,7 +187,8 @@ def resolve_disk(device: str, *, allow_partition: bool = False) -> DiskIdentity:
     if info.get("TYPE") != "disk":
         raise IdentityError(f"{device}: type '{info.get('TYPE', '?')}' is not a disk")
 
-    by_id = preferred_by_id(by_id_names(node))
+    aliases = tuple(by_id_names(node))
+    by_id = preferred_by_id(list(aliases))
     ident = DiskIdentity(
         disk=node,
         by_id=by_id,
@@ -207,16 +209,19 @@ def resolve_disk(device: str, *, allow_partition: bool = False) -> DiskIdentity:
         size=ident.size,
         transport=ident.transport,
         label=label,
+        aliases=aliases,
     )
 
 
 def match_registry(ident: DiskIdentity, drives: dict[str, DriveInfo]) -> list[str]:
-    """Registry entries that describe ``ident``: by on-disk pool GUID, then drive_id."""
+    """Registry entries that describe ``ident``: by on-disk pool GUID, then by
+    drive_id against every by-id alias of the disk (a 1.0.12 entry may carry
+    a weak wwn- alias)."""
     names: list[str] = []
     if ident.label:
         names += [n for n, info in drives.items() if info.guid == ident.label.guid]
-    if ident.by_id:
-        names += [n for n, info in drives.items() if info.drive_id == ident.by_id]
+    ids = set(ident.aliases) | ({ident.by_id} if ident.by_id else set())
+    names += [n for n, info in drives.items() if info.drive_id in ids]
     return list(dict.fromkeys(names))
 
 
