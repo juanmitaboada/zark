@@ -52,6 +52,36 @@ def _esp_of_rpool_disk() -> str:
     return ""
 
 
+def _regenerate_grub_cfg(grub_cfg: Path, log: Log) -> str:
+    """Run update-grub in the chroot; "" on success, else why grub.cfg is not new.
+
+    The copy taken first is restored only when this run made it: a
+    grub.cfg.pre-repair left by an earlier run describes an older system.
+    """
+    backup = Path(f"{grub_cfg}.pre-repair")
+    backed_up = grub_cfg.exists() and sh.run(f"cp {grub_cfg} {backup}").ok
+    if backed_up:
+        log.dbg("Backed up grub.cfg → grub.cfg.pre-repair")
+
+    r = sh.run(f"chroot {REPAIR_MNT} update-grub", log=log)
+    content = grub_cfg.read_text(encoding="utf-8") if grub_cfg.exists() else ""
+    if r.ok and "vmlinuz" in content:
+        log.ok("grub.cfg regenerated with kernel entries ✓")
+        return ""
+
+    reason = (
+        "update-grub produced no kernel entries"
+        if r.ok
+        else f"update-grub failed: {r.stderr.strip()}"
+    )
+    log.warn(reason)
+    if backed_up and sh.run(f"cp {backup} {grub_cfg}").ok:
+        log.warn("Restored the grub.cfg found at the start of this run")
+    else:
+        log.warn("No grub.cfg from this run to restore — the generated one is left in place")
+    return reason
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
@@ -124,8 +154,10 @@ def run(
     else:
         log.fatal(f"No kernels found in {REPAIR_MNT}/boot — bpool may not be mounted")
 
-    # ── 5. Chroot setup + update-grub ─────────────────────────────────────
-    log.step(5, TOTAL_STEPS, "Regenerating grub.cfg...")
+    # ── 5. Chroot setup, grub guard, initrd ──────────────────────────────
+    # Before update-grub: 10_linux_zfs only lists kernels that have an
+    # initrd, and the guard is itself a grub.d script.
+    log.step(5, TOTAL_STEPS, "Installing grub guard and regenerating initrd...")
 
     # Bind mounts
     for d in ("proc", "sys", "dev", "dev/pts", "run"):
@@ -154,42 +186,21 @@ def run(
     cache_path = f"{REPAIR_MNT}/etc/zfs/zpool.cache"
     zfs.write_zpool_cache(cache_path, ["rpool", "bpool"])
 
-    # Backup current grub.cfg
-    grub_cfg = Path(f"{REPAIR_MNT}/boot/grub/grub.cfg")
-    if grub_cfg.exists():
-        _ = sh.run(f"cp {grub_cfg} {grub_cfg}.pre-repair")
-        log.dbg("Backed up grub.cfg → grub.cfg.pre-repair")
+    grub_guard.install(target_root=REPAIR_MNT, log=log)
 
-    # Run update-grub
-    r = sh.run(f"chroot {REPAIR_MNT} update-grub", log=log)
-    if r.ok:
-        # Verify it generated kernel entries
-        content = grub_cfg.read_text(encoding="utf-8") if grub_cfg.exists() else ""
-        if "vmlinuz" in content:
-            log.ok("grub.cfg regenerated with kernel entries ✓")
-        else:
-            log.warn("update-grub ran but no kernel entries found!")
-            log.info("Restoring previous grub.cfg...")
-            _ = sh.run(f"cp {grub_cfg}.pre-repair {grub_cfg}")
-            log.warn("Restored pre-repair grub.cfg")
-    else:
-        log.warn(f"update-grub failed: {r.stderr.strip()}")
-        if Path(f"{grub_cfg}.pre-repair").exists():
-            _ = sh.run(f"cp {grub_cfg}.pre-repair {grub_cfg}")
-            log.warn("Restored pre-repair grub.cfg")
+    initrd_failures = regenerate_initrd(REPAIR_MNT, log)
+
+    # ── 6. update-grub ────────────────────────────────────────────────────
+    log.step(6, TOTAL_STEPS, "Regenerating grub.cfg...")
+
+    grub_cfg = Path(f"{REPAIR_MNT}/boot/grub/grub.cfg")
+    grub_failure = _regenerate_grub_cfg(grub_cfg, log)
 
     # Fix bpool UUID in grub.cfg
     bpool_guid = zfs.pool_guid("bpool")
     if bpool_guid:
         bpool_hex = format(int(bpool_guid), "016x")
         _ = fix_grub_bpool_uuid(grub_cfg, bpool_hex, log)
-
-    # ── 6. Install grub guard + regenerate initrd ─────────────────────────
-    log.step(6, TOTAL_STEPS, "Installing grub guard and regenerating initrd...")
-
-    grub_guard.install(target_root=REPAIR_MNT, log=log)
-
-    initrd_failures = regenerate_initrd(REPAIR_MNT, log)
 
     # ── 7. Cleanup ────────────────────────────────────────────────────────
     log.step(7, TOTAL_STEPS, "Cleanup...")
@@ -199,7 +210,9 @@ def run(
     exported = cleanup.exported_pools()
     still = [p for p in ("rpool", "bpool") if p not in exported and zfs.pool_exists(p)]
     lines = [
-        "grub.cfg regenerated ✓",
+        "grub.cfg regenerated ✓"
+        if not grub_failure
+        else f"✗ grub.cfg not regenerated: {grub_failure}",
         "Grub guard installed ✓",
         *(["initrd regenerated ✓"] if not initrd_failures else []),
         *(f"✗ {f}" for f in initrd_failures),
@@ -208,7 +221,7 @@ def run(
         "",
         "Next: remove live USB and reboot.",
     ]
-    if still or initrd_failures:
+    if still or initrd_failures or grub_failure:
         log.banner_error("BOOT REPAIR INCOMPLETE", lines)
         raise SystemExit(1)
     log.banner_ok("BOOT REPAIR COMPLETE", lines)

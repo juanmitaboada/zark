@@ -5979,8 +5979,12 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
     """P0-6: every mount is tracked, /boot goes before rpool, banner is truthful."""
 
     @staticmethod
-    def _run(export_rpool_ok: bool) -> tuple[MockShell, str, bool]:
+    def _run(
+        export_rpool_ok: bool,
+        grub_failure: str = "",
+    ) -> tuple[MockShell, str, bool, list[str]]:
         mock = MockShell()
+        order: list[str] = []
         mock.on("zpool import").succeeds("")
         mock.on("zpool list rpool").succeeds("rpool")
         mock.on("zpool list bpool").succeeds("bpool")
@@ -6000,6 +6004,17 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         mock.on("mount /dev/sda1 /mnt/repair/boot/efi").succeeds()
         exported_after_rpool_state = {"rpool": export_rpool_ok}
 
+        def fake_initrd(*_a: object) -> list[str]:
+            order.append("initrd")
+            return []
+
+        def fake_guard(**_k: object) -> None:
+            order.append("guard")
+
+        def fake_grub(*_a: object) -> str:
+            order.append("grub")
+            return grub_failure
+
         def fake_mount(_alt, _pw, _log, _zfs, _ks, cleanup):
             cleanup.track_pool("rpool")
             cleanup.track_pool("bpool")
@@ -6014,8 +6029,9 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
             patch.object(repair_boot_mod.Cleanup, "register"),
             patch.object(repair_boot_mod.sh, "is_live_usb", return_value=True),
             patch.object(repair_boot_mod, "mount_system_pools", side_effect=fake_mount),
-            patch.object(repair_boot_mod, "regenerate_initrd", return_value=[]),
-            patch.object(repair_boot_mod.grub_guard, "install"),
+            patch.object(repair_boot_mod, "regenerate_initrd", side_effect=fake_initrd),
+            patch.object(repair_boot_mod.grub_guard, "install", side_effect=fake_guard),
+            patch.object(repair_boot_mod, "_regenerate_grub_cfg", side_effect=fake_grub),
             patch.object(repair_boot_mod, "fix_grub_bpool_uuid"),
             # write_zpool_cache mkdirs under /mnt/repair: unprivileged runs fail
             patch.object(ZFS, "write_zpool_cache"),
@@ -6036,10 +6052,10 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
                 repair_boot_mod.run([])
             except SystemExit:
                 exited = True
-        return mock, buf.getvalue(), exited
+        return mock, buf.getvalue(), exited, order
 
     def test_boot_unmounted_before_rpool_export_and_success_banner(self):
-        mock, out, exited = self._run(export_rpool_ok=True)
+        mock, out, exited, _ = self._run(export_rpool_ok=True)
         calls = mock.calls
         assert calls.index("umount /mnt/repair/boot") < calls.index("zpool export rpool")
         assert calls.index("umount /mnt/repair/boot/efi") < calls.index("umount /mnt/repair/boot")
@@ -6048,11 +6064,72 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         assert not any("zfs set mountpoint" in c for c in calls)
 
     def test_banner_does_not_lie_when_rpool_stays_imported(self):
-        _, out, exited = self._run(export_rpool_ok=False)
+        _, out, exited, _ = self._run(export_rpool_ok=False)
         assert exited
         assert "BOOT REPAIR INCOMPLETE" in out
         assert "Pools exported cleanly" not in out
         assert "rpool is still imported" in out
+
+    def test_initrd_and_guard_come_before_update_grub(self):
+        # 10_linux_zfs skips kernels without an initrd (E8 on eli).
+        _, _, _, order = self._run(export_rpool_ok=True)
+        assert order == ["guard", "initrd", "grub"]
+
+    def test_banner_does_not_lie_when_grub_cfg_is_not_regenerated(self):
+        _, out, exited, _ = self._run(export_rpool_ok=True, grub_failure="no entries")
+        assert exited
+        assert "BOOT REPAIR INCOMPLETE" in out
+        assert "grub.cfg regenerated ✓" not in out
+        assert "grub.cfg not regenerated: no entries" in out
+
+
+class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
+    """E8: a stale grub.cfg.pre-repair is never passed off as regenerated."""
+
+    @staticmethod
+    def _regenerate(root: Path, generated: str, update_grub_ok: bool = True) -> str:
+        grub_cfg = root / "grub.cfg"
+
+        def fake_run(cmd: str, **_kw: object) -> RunResult:
+            if "update-grub" in cmd:
+                grub_cfg.write_text(generated, encoding="utf-8")
+                rc, err = (0, "") if update_grub_ok else (1, "boom")
+                return RunResult(returncode=rc, stdout="", stderr=err, command=cmd)
+            if cmd.startswith("cp "):
+                _, src, dst = cmd.split()
+                Path(dst).write_bytes(Path(src).read_bytes())
+            return RunResult(returncode=0, stdout="", stderr="", command=cmd)
+
+        with patch.object(repair_boot_mod.sh, "run", side_effect=fake_run):
+            return repair_boot_mod._regenerate_grub_cfg(  # pylint: disable=protected-access
+                grub_cfg,
+                make_log(),
+            )
+
+    def test_entries_found_is_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "grub.cfg").write_text("old vmlinuz-1", encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                assert self._regenerate(root, "linux /vmlinuz-7") == ""
+
+    def test_stale_backup_from_an_earlier_run_is_not_restored(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "grub.cfg.pre-repair").write_text("STALE vmlinuz", encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                reason = self._regenerate(root, "no kernels here")
+            assert reason == "update-grub produced no kernel entries"
+            assert (root / "grub.cfg").read_text(encoding="utf-8") == "no kernels here"
+
+    def test_this_runs_copy_is_restored_but_reported_as_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "grub.cfg").write_text("CURRENT vmlinuz", encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                reason = self._regenerate(root, "", update_grub_ok=False)
+            assert reason == "update-grub failed: boom"
+            assert (root / "grub.cfg").read_text(encoding="utf-8") == "CURRENT vmlinuz"
 
 
 class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring

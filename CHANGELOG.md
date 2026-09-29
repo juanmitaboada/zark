@@ -117,6 +117,12 @@ consolidation that preceded it.
   small and destroyed the dataset. (hallazgo 5)
 - `ask_choice` looped forever when stdin was closed. (hallazgo 22)
 - repair-boot ran `zfs set mountpoint` with the keystore zvol imported.
+- repair-boot ran `update-grub` before regenerating the initrds, so with
+  missing initrds (found on eli by deleting them) `10_linux_zfs` listed no
+  kernel; it then restored a `grub.cfg.pre-repair` left by an earlier run
+  and still reported "grub.cfg regenerated ✓". The initrds and the grub
+  guard now come first; only this run's copy is ever restored; a grub.cfg
+  without kernel entries ends in BOOT REPAIR INCOMPLETE (exit 1).
 - recover ran `zpool destroy -f rpool bpool` before partitioning. With
   the new target filter those pools can only belong to another disk, so
   recover now refuses to start while they are imported instead.
