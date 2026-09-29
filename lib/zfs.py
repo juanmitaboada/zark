@@ -154,10 +154,8 @@ class ZFS:
           4. Auto-scan (no -d) — last resort, ZFS searches all devices.
           Each candidate is attempted without -f first, then with -f.
 
-        Callers that know the device should pass it (see commands/backup.py);
-        the directory/auto-scan fallbacks serve callers that import without a
-        known device (recover/mount/repair), where device is None and only
-        the fallbacks run.
+        Used for the system pools (rpool/bpool) from a live USB. Backup pools
+        go through :meth:`import_backup_pool`, which never scans.
         """
         del force  # currently unused, but could be added as a param to try force first if desired
         if self.pool_exists(name):
@@ -206,6 +204,58 @@ class ZFS:
                 last_err = r.stderr.strip()
 
         self.log.error(f"Cannot import pool {name}: {last_err}")
+        return False
+
+    def import_backup_pool(
+        self,
+        name: str,
+        device: str | None,
+        *,
+        altroot: str | None = None,
+        readonly: bool = False,
+    ) -> bool:
+        """Import a backup pool under invariant I-G.
+
+        ``zpool import -N -R <altroot> [-o readonly=on] -d <device> <name>``:
+        nothing mounts at import, every later mount lands under the altroot,
+        ``-R`` implies ``cachefile=none`` so the pool never enters
+        /etc/zfs/zpool.cache, and ``-d`` names the exact partition (never a
+        directory scan: the Micron bridges share one bogus WWN). A clean
+        import is tried first, then ``-f`` for a pool last used by another
+        host (e.g. the live USB). There is no by-name fallback: without an
+        exact device the import is refused.
+
+        A pool that is already imported is accepted only if it was imported
+        under an altroot; otherwise the caller is told to export it.
+        """
+        if self.pool_exists(name):
+            current = run(f"zpool get -H -o value altroot {name}").output
+            if current in ("", "-"):
+                self.log.error(
+                    f"Pool {name} is already imported without an altroot — "
+                    + f"export it first: sudo zpool export {name}",
+                )
+                return False
+            self.log.dbg(f"Pool {name} already imported (altroot={current})")
+            return True
+        if not device:
+            self.log.error(f"Cannot import {name}: no exact device path is known")
+            return False
+
+        root = altroot or backup_altroot(name)
+        run(f"mkdir -p {root}")
+        base = f"zpool import -N -R {root}"
+        if readonly:
+            base += " -o readonly=on"
+        last_err = ""
+        for force in ("", " -f"):
+            r = run(f"{base}{force} -d {device} {name}", log=self.log)
+            if r.ok:
+                mode = "read-only" if readonly else "read-write"
+                self.log.ok(f"Pool {name} imported ({mode}, altroot={root})")
+                return True
+            last_err = r.stderr.strip()
+        self.log.error(f"Cannot import pool {name} from {device}: {last_err}")
         return False
 
     def pool_export(self, name: str) -> bool:
@@ -275,8 +325,11 @@ class ZFS:
         # it just might read warm cache (weaker guarantee, never wrong-way).
         run("sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
 
-        # 2. Re-import read-only, no-mount, by exact device.
-        cmd = "zpool import -o readonly=on -N"
+        # 2. Re-import read-only, no-mount, by exact device, under an altroot
+        #    so the verification import never lands in zpool.cache (I-G).
+        root = backup_altroot(name)
+        run(f"mkdir -p {root}")
+        cmd = f"zpool import -o readonly=on -N -R {root}"
         if device:
             cmd += f" -d {device}"
         cmd += f" {name}"
@@ -509,6 +562,15 @@ class ZFS:
         if current:
             pools.append(current)
         return pools
+
+
+# Private altroot for backup-pool imports that mount nothing on purpose.
+BACKUP_ALTROOT_BASE = "/run/zark/altroot"
+
+
+def backup_altroot(pool: str) -> str:
+    """Altroot used for a backup pool when the command does not mount it."""
+    return f"{BACKUP_ALTROOT_BASE}/{pool}"
 
 
 # ── grub.cfg helpers ─────────────────────────────────────────────────────

@@ -118,11 +118,9 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
 
     # ── Import + unlock + mount the system ────────────────────────────────
     log.info("Importing and unlocking the system...")
-    passphrase = log.ask_password("Passphrase for rpool")
-
     result = mount_system_pools(
         CHROOT_MNT,
-        passphrase,
+        None,  # prompt inside, re-asking on a typo (I9)
         log,
         zfs,
         keystore,

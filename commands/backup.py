@@ -29,17 +29,18 @@ the user to run ``zark repair-divergent`` interactively.
 
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from lib import repair, sh
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config, now_utc_iso
 from lib.drives import (
+    backup_device,
     drive_staleness_days,
     drives_in_danger_zone,
     scan_connected_drives,
     select_drive,
 )
+from lib.identity import by_id_names, preferred_by_id, whole_disk
 from lib.keystore import Keystore
 from lib.log import Log
 from lib.sanoid_retention import worst_case_retention_days
@@ -280,6 +281,26 @@ def _take_snapshots(log: Log) -> None:
         log.warn("sanoid --take-snapshots had errors — proceeding with backup anyway")
 
 
+def _heal_drive_id(cfg: Config, pool_name: str, device: str | None, log: Log) -> None:
+    """Rewrite the registry's drive_id when the verified pool sits on another by-id.
+
+    Runs after the pool GUID matched the registry, so the disk is known to be
+    the registered one; a placeholder ("<unknown>") or stale drive_id left by
+    1.0.12 is replaced by the by-id this disk actually has.
+    """
+    info = cfg.known_drives.get(pool_name)
+    if info is None or not device:
+        return
+    disk = whole_disk(device)
+    by_id = preferred_by_id(by_id_names(disk)) if disk else ""
+    if not by_id or by_id == info.drive_id:
+        return
+    old = info.drive_id
+    info.drive_id = by_id
+    cfg.save_drives()
+    log.ok(f"Registry: {pool_name} drive_id {old} → {by_id}")
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
@@ -350,22 +371,17 @@ def run(
     # ── Import pool ──────────────────────────────────────────────────────
     log.step(2, 10, f"Importing pool {pool_name}...")
 
-    device = None
-    if drive.drive_id != "<unknown>":
-        by_id = Path(f"/dev/disk/by-id/{drive.drive_id}")
-        if by_id.exists():
-            device = str(by_id)
-        # ZFS may auto-partition: check for -part1
-        part1 = Path(f"/dev/disk/by-id/{drive.drive_id}-part1")
-        if part1.exists():
-            device = str(part1)
-
-    if not zfs.pool_import(pool_name, device=device):
+    device = backup_device(drive)
+    if not zfs.import_backup_pool(pool_name, device):
         log.fatal(
             f"Cannot import pool {pool_name}",
+            causes=[
+                f"Device: {device or 'not found'}",
+                "The pool may be imported elsewhere, or the drive not fully connected",
+            ],
             solutions=[
-                f"Try: zpool import -f {pool_name}",
-                "Check: zpool import  (list importable pools)",
+                "Check: zpool status; sudo zpool export <pool> if imported by hand",
+                "Reconnect the drive and run again",
             ],
         )
 
@@ -384,6 +400,7 @@ def run(
         )
 
     log.ok(f"Pool {pool_name} imported (GUID: {actual_guid} ✓)")
+    _heal_drive_id(cfg, pool_name, device, log)
 
     # ── Check health ─────────────────────────────────────────────────────
     log.step(3, 10, "Checking pool health...")
@@ -511,7 +528,7 @@ def run(
     excl = syncoid_exclude_flag()
     rpool_syncoid_cmd = (
         "syncoid --recursive --no-privilege-elevation --no-sync-snap "
-        + "--sendoptions=w "
+        + "--sendoptions=w --recvoptions=u "
         + f"{excl}=rpool/keystore "
         + f"{cfg.source_pool} {target_pool}"
     )
@@ -597,7 +614,7 @@ def run(
     if zfs.pool_exists("bpool"):
         bpool_syncoid_cmd = (
             "syncoid --recursive --no-privilege-elevation --no-sync-snap "
-            + "--preserve-properties "
+            + "--preserve-properties --recvoptions=u "
             + f"bpool {pool_name}/bpool"
         )
         r = sh.run(bpool_syncoid_cmd, log=log)

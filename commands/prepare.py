@@ -25,10 +25,10 @@ from pathlib import Path
 from lib import sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config, DriveInfo
-from lib.drives import get_drive_id, get_drive_info, validate_external_block_device
+from lib.drives import validate_external_block_device
 from lib.health import check_device, render_report
 from lib.log import Log
-from lib.zfs import ZFS, syncoid_exclude_flag
+from lib.zfs import ZFS, backup_altroot, syncoid_exclude_flag
 
 
 def run(
@@ -40,8 +40,9 @@ def run(
     cfg.check_registry(log, fatal=True)
     zfs = ZFS(log)
 
-    target_dev = args[0] if args else ""
-    validate_external_block_device(target_dev, log, command="prepare")
+    target_arg = args[0] if args else ""
+    ident = validate_external_block_device(target_arg, log, command="prepare")
+    target_dev = ident.disk
 
     log.banner("PREPARE NEW BACKUP DRIVE")
 
@@ -53,11 +54,21 @@ def run(
         )
 
     # ── Show drive info ──────────────────────────────────────────────────
-    model, size, transport = get_drive_info(target_dev)
     log.info(f"Device:    {target_dev}")
-    log.info(f"Model:     {model}")
-    log.info(f"Size:      {size}")
-    log.info(f"Transport: {transport}")
+    log.info(f"Drive ID:  {ident.by_id or '-'}")
+    log.info(f"Model:     {ident.model}")
+    log.info(f"Serial:    {ident.serial}")
+    log.info(f"Size:      {ident.size}")
+    log.info(f"Transport: {ident.transport}")
+    if not ident.by_id:
+        log.fatal(
+            f"{target_dev} has no stable /dev/disk/by-id name",
+            causes=["zark registers drives by their by-id name; it never registers <unknown>"],
+            solutions=[
+                "Use an enclosure/driver that exposes a by-id name",
+                "Check: ls -l /dev/disk/by-id/",
+            ],
+        )
 
     # ── Non-destructive risk check ───────────────────────────────────────
     # Flag bridges/transports correlated with the FUA cache-flush lie BEFORE
@@ -85,23 +96,41 @@ def run(
 
     log.ok("Drive appears empty ✓")
 
-    # ── Drive ID ─────────────────────────────────────────────────────────
-    # dev_name = Path(target_dev).name
-    base_drive_id = get_drive_id(target_dev)
-    log.dbg(f"Drive ID: {base_drive_id}")
+    base_drive_id = ident.by_id
+
+    # ── Stale registry entries for this same drive ───────────────────────
+    # The drive is blank, so any entry pointing at its drive_id describes a
+    # pool that no longer exists (e.g. purged by hand, or prepared again).
+    stale = [n for n, info in cfg.known_drives.items() if info.drive_id == base_drive_id]
+    replace: set[str] = set()
+    if stale:
+        log.warn(f"Registry entries for this same drive (stale): {', '.join(stale)}")
+        if log.ask(f"Remove {', '.join(stale)} from the registry when preparing?", default=True):
+            replace = set(stale)
 
     # ── Pool name ────────────────────────────────────────────────────────
     default_pool = "backup"
     counter = 1
-    while default_pool in cfg.known_drives or zfs.pool_exists(default_pool):
+    while (default_pool in cfg.known_drives and default_pool not in replace) or zfs.pool_exists(
+        default_pool
+    ):
         counter += 1
         default_pool = f"backup{counter}"
 
     new_pool = log.ask_input("Pool name for this backup drive", default_pool)
     if not new_pool.isidentifier():
         log.fatal(f"Invalid pool name '{new_pool}'")
-    if new_pool in cfg.known_drives:
-        log.fatal(f"Pool name '{new_pool}' already registered")
+    if new_pool in cfg.known_drives and new_pool not in replace:
+        other = cfg.known_drives[new_pool].drive_id
+        log.fatal(
+            f"Pool name '{new_pool}' is registered for another drive ({other})",
+            solutions=[
+                "Choose another pool name",
+                f"Or, if that drive is gone: sudo zark registry forget {new_pool}",
+            ],
+        )
+    if zfs.pool_exists(new_pool):
+        log.fatal(f"A pool named '{new_pool}' is already imported on this system")
 
     log.ok(f"Pool name: {new_pool}")
 
@@ -117,10 +146,15 @@ def run(
     # ── Create pool ──────────────────────────────────────────────────────
     log.step(1, 3, f"Creating ZFS pool '{new_pool}'...")
 
+    # -R: the new pool never enters zpool.cache and nothing it will hold can
+    # mount over the running system (I-G). The vdev is named by its by-id so
+    # later imports and `zpool status` never depend on /dev/sdX (I16).
+    altroot = backup_altroot(new_pool)
+    _ = sh.run(f"mkdir -p {altroot}")
     r = sh.run(
         "zpool create -f -o ashift=12 -O atime=off -O xattr=sa "
-        + "-O dnodesize=auto -O normalization=formD -m none "
-        + f"{new_pool} {target_dev}",
+        + f"-O dnodesize=auto -O normalization=formD -m none -R {altroot} "
+        + f"{new_pool} {ident.by_id_path}",
         log=log,
     )
     if not r.ok:
@@ -138,7 +172,7 @@ def run(
     # (22.04 - 25.10, sanoid 2.1.0 - 2.2.0-2) only know --exclude.
     excl = syncoid_exclude_flag()
     r = sh.run(
-        "syncoid --recursive --no-privilege-elevation --sendoptions=w "
+        "syncoid --recursive --no-privilege-elevation --sendoptions=w --recvoptions=u "
         + f"{excl}=rpool/keystore "
         + f"rpool {new_pool}/rpool",
         log=log,
@@ -154,7 +188,7 @@ def run(
     _ = sh.run(f"zfs snapshot rpool/keystore@prepare_{snap_ts}")
     r = sh.run_pipe(
         f"zfs send rpool/keystore@prepare_{snap_ts}",
-        f"zfs receive -F {new_pool}/keystore",
+        f"zfs receive -u -F {new_pool}/keystore",
     )
     if r.ok:
         log.ok(f"Keystore synced to {new_pool}/keystore ✓")
@@ -165,7 +199,7 @@ def run(
     if zfs.pool_exists("bpool"):
         log.info("Syncing bpool (kernels + grub)...")
         r = sh.run(
-            f"syncoid --recursive --no-privilege-elevation bpool {new_pool}/bpool",
+            f"syncoid --recursive --no-privilege-elevation --recvoptions=u bpool {new_pool}/bpool",
             log=log,
         )
         if r.ok:
@@ -212,9 +246,7 @@ def run(
     # ONLINE before we register it as a trusted backup target. If it fails,
     # do NOT register the drive — the prepared pool is not trustworthy even
     # though every step above reported success.
-    part1 = Path(f"/dev/disk/by-id/{base_drive_id}-part1")
-    verify_device = str(part1) if part1.exists() else None
-    if not zfs.verify_exported_pool_readback(new_pool, device=verify_device):
+    if not zfs.verify_exported_pool_readback(new_pool, device=ident.part1):
         log.banner_error(
             "DRIVE NOT VERIFIED",
             [
@@ -238,11 +270,13 @@ def run(
         "Enable auto-eject (timed eject prompt) for this drive?",
     )
 
-    # Auto-register in known_drives.json
+    # Auto-register in known_drives.json (replacing this drive's stale entries)
+    for name in replace:
+        del cfg.known_drives[name]
     cfg.known_drives[new_pool] = DriveInfo(
         name=new_pool,
         guid=new_guid,
-        drive_id=base_drive_id or "<unknown>",
+        drive_id=base_drive_id,
         autoeject=autoeject,
     )
     cfg.save_drives()
@@ -268,7 +302,7 @@ def run(
     # ejecting would force a pointless unplug/replug cycle. Operators
     # who really want to disconnect now can answer "y".
     prompt_eject_or_attach(
-        target_dev,
+        ident.by_id_path,
         new_pool,
         log,
         default_eject=False,

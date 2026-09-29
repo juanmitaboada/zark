@@ -154,9 +154,14 @@ def run(
     # Offer auto-registration for unknown drives
     unknowns = [d for d in drives if not d.known or d.guid_changed or d.renamed]
     if unknowns and log.ask("Auto-register these drives in known_drives.json?", default=False):
+        saved = 0
         for d in unknowns:
+            if d.drive_id == "<unknown>":
+                log.warn(f"{d.name}: no stable by-id name — not registered")
+                continue
             cfg.known_drives[d.name] = DriveInfo(name=d.name, guid=d.guid, drive_id=d.drive_id)
+            saved += 1
         cfg.save_drives()
-        log.ok(f"Saved {len(unknowns)} drive(s) to {cfg.drives_file_path}")
+        log.ok(f"Saved {saved} drive(s) to {cfg.drives_file_path}")
 
     log.blank()

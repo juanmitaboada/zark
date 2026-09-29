@@ -275,6 +275,27 @@ def _add_pool(  # pylint: disable=too-many-arguments,too-many-locals,too-many-po
     )
 
 
+def backup_device(drive: ConnectedDrive) -> str | None:
+    """Exact vdev partition of a connected backup drive, for device-exact imports.
+
+    Prefers ``/dev/disk/by-id/<drive_id>-part1``; falls back to the by-id of
+    the disk holding the partition blkid reported, then to that partition
+    itself. None when the drive cannot be located on a device (a registered
+    drive that is not connected).
+    """
+    if drive.drive_id and drive.drive_id != "<unknown>":
+        part1 = Path(f"/dev/disk/by-id/{drive.drive_id}-part1")
+        if part1.exists():
+            return str(part1)
+    if drive.dev_path:
+        disk = whole_disk(drive.dev_path)
+        by_id = preferred_by_id(by_id_names(disk)) if disk else ""
+        if by_id and Path(f"/dev/disk/by-id/{by_id}-part1").exists():
+            return f"/dev/disk/by-id/{by_id}-part1"
+        return drive.dev_path
+    return None
+
+
 def select_drive(
     drives: list[ConnectedDrive],
     log: Log,
@@ -342,6 +363,10 @@ def validate_external_block_device(
     except IdentityError as e:
         log.fatal(f"Cannot use {dev}", causes=[str(e)])
 
+    # The pool labelled on this very disk may be imported (purge of a mounted
+    # backup); its vdevs are on this disk by definition and do not protect it.
+    if own_pool is None and ident.label and ident.label.name not in SYSTEM_POOLS:
+        own_pool = ident.label.name
     reason = protected_disks(own_pool=own_pool).get(ident.disk)
     if reason:
         log.fatal(

@@ -47,6 +47,8 @@ from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa:
 
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -151,7 +153,10 @@ from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
     read_pool_label,
     resolve_disk,
 )
-from lib.keystore import Keystore  # pylint: disable=wrong-import-position # noqa: E402
+from lib.keystore import (  # pylint: disable=wrong-import-position # noqa: E402
+    Keystore,
+    open_keystore,
+)
 from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
 from lib.mount import (  # pylint: disable=wrong-import-position # noqa: E402
     find_system_root_dataset,
@@ -4623,12 +4628,13 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
     """
 
     DEV = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
+    IMPORT = f"zpool import -o readonly=on -N -R /run/zark/altroot/black -d {DEV} black"
 
     def test_passes_when_reimport_online(self):
         mock = MockShell()
         mock.on("sync").succeeds()
         mock.on("drop_caches").succeeds()
-        mock.on(f"zpool import -o readonly=on -N -d {self.DEV} black").succeeds()
+        mock.on(self.IMPORT).succeeds()
         mock.on("zpool list -H -o health black").succeeds("ONLINE")
         mock.on("zpool export black").succeeds()
         with patch_sh(mock):
@@ -4643,7 +4649,7 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on("sync").succeeds()
         mock.on("drop_caches").succeeds()
-        mock.on(f"zpool import -o readonly=on -N -d {self.DEV} black").fails(
+        mock.on(self.IMPORT).fails(
             "cannot import 'black': insufficient replicas",
         )
         with patch_sh(mock):
@@ -4654,7 +4660,7 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         mock.on("sync").succeeds()
         mock.on("drop_caches").succeeds()
-        mock.on(f"zpool import -o readonly=on -N -d {self.DEV} black").succeeds()
+        mock.on(self.IMPORT).succeeds()
         mock.on("zpool list -H -o health black").succeeds("DEGRADED")
         mock.on("zpool export black").succeeds()
         with patch_sh(mock):
@@ -4975,10 +4981,12 @@ class TestRepairBootImport:  # pylint: disable=missing-function-docstring,too-fe
 class _FakeKeystore:  # pylint: disable=missing-class-docstring,missing-function-docstring,too-few-public-methods # noqa: E501
     """Minimal stand-in for Keystore in system-mount tests (no real LUKS)."""
 
+    bad_passphrase = False
+
     def __init__(self, loaded: int = 2):
         self._loaded = loaded
 
-    def mount(self, pool, passphrase):  # pylint: disable=unused-argument
+    def mount(self, pool, passphrase, *, readonly=False):  # pylint: disable=unused-argument
         return True
 
     def load_pool_keys(self, pool_root):  # pylint: disable=unused-argument
@@ -5494,6 +5502,248 @@ class TestRegistry:  # pylint: disable=missing-function-docstring
         with redirect_stdout(buf):
             cfg.check_registry(make_log(), fatal=False)
         assert "boom" in buf.getvalue()
+
+
+class TestImportBackupPool:  # pylint: disable=missing-function-docstring
+    """I-G: every backup-pool import is -N -R <altroot> -d <exact device>."""
+
+    DEV = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
+
+    def test_readonly_exact_device_under_altroot(self):
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on("mkdir -p /run/zark/altroot/backup").succeeds()
+        cmd = f"zpool import -N -R /run/zark/altroot/backup -o readonly=on -d {self.DEV} backup"
+        mock.on(cmd).succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert ZFS(make_log()).import_backup_pool("backup", self.DEV, readonly=True)
+        imports = [c for c in mock.calls if c.startswith("zpool import")]
+        assert imports == [cmd]
+
+    def test_force_only_after_clean_attempt_and_never_scans(self):
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on("mkdir -p /mnt/zark/backup").succeeds()
+        mock.on(f"zpool import -N -R /mnt/zark/backup -d {self.DEV} backup").fails("in use")
+        mock.on(f"zpool import -N -R /mnt/zark/backup -f -d {self.DEV} backup").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert ZFS(make_log()).import_backup_pool(
+                "backup",
+                self.DEV,
+                altroot="/mnt/zark/backup",
+            )
+        imports = [c for c in mock.calls if c.startswith("zpool import")]
+        assert len(imports) == 2
+        assert all(f"-d {self.DEV} backup" in c and "-N -R" in c for c in imports)
+
+    def test_refuses_without_device(self):
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not ZFS(make_log()).import_backup_pool("backup", None)
+        assert mock.was_not_called("zpool import")
+
+    def test_refuses_pool_already_imported_without_altroot(self):
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds("backup")
+        mock.on("zpool get -H -o value altroot backup").succeeds("-")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not ZFS(make_log()).import_backup_pool("backup", self.DEV)
+
+    def test_accepts_pool_already_imported_under_altroot(self):
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds("backup")
+        mock.on("zpool get -H -o value altroot backup").succeeds("/mnt/zark/backup")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert ZFS(make_log()).import_backup_pool("backup", self.DEV)
+
+
+class TestKeystoreReadonlyAndRetry:  # pylint: disable=missing-function-docstring
+    """Read-only keystore open (readonly pools) and passphrase re-prompt (I9)."""
+
+    def test_readonly_mount_uses_readonly_luks_and_noload(self):
+        mock = MockShell()
+        mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0")
+        mock.on("zfs list -H -o objsetid backup/keystore").succeeds("12")
+        mock.on("zpool list rpool").fails()
+        mock.on("cryptsetup open --readonly /dev/zd0 zark_ks_backup").succeeds()
+        mock.on("mount -o ro,noload /dev/mapper/zark_ks_backup /run/keystore/rpool").succeeds()
+        ks = Keystore(make_log())
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch("lib.keystore.Path.mkdir"),
+            patch("lib.keystore.Path.exists", return_value=True),
+        ):
+            assert ks.mount("backup", "pw", readonly=True)
+        assert mock.was_called("cryptsetup open --readonly /dev/zd0")
+        assert mock.was_called("mount -o ro,noload /dev/mapper/zark_ks_backup")
+
+    def test_open_keystore_reprompts_on_wrong_passphrase(self):
+        class _Ks:  # pylint: disable=too-few-public-methods
+            bad_passphrase = False
+
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def mount(self, pool: str, passphrase: str, *, readonly: bool = False) -> bool:
+                del pool, readonly
+                self.calls.append(passphrase)
+                self.bad_passphrase = passphrase != "right"
+                return passphrase == "right"
+
+            def load_pool_keys(self, pool_root: str) -> int:
+                del pool_root
+                return 0
+
+            def umount(self) -> None:
+                return None
+
+        ks = _Ks()
+        with (
+            patch("lib.log.getpass.getpass", side_effect=["typo", "typo2", "right"]),
+            redirect_stdout(StringIO()),
+        ):
+            assert open_keystore(ks, "backup", make_log())
+        assert ks.calls == ["typo", "typo2", "right"]
+
+    def test_open_keystore_gives_up_after_three(self):
+        mock_ks = _FakeKeystore()
+        mock_ks.bad_passphrase = True
+        with (
+            patch.object(_FakeKeystore, "mount", return_value=False),
+            patch("lib.log.getpass.getpass", return_value="x") as gp,
+            redirect_stdout(StringIO()),
+        ):
+            assert not open_keystore(mock_ks, "backup", make_log())
+        assert gp.call_count == 3
+
+
+def _purge_ident(label: PoolLabel | None) -> DiskIdentity:
+    return DiskIdentity(
+        disk="/dev/sdb",
+        by_id=_KINGSTON_ID,
+        model="DT microDuo 3C",
+        size="115.5G",
+        transport="usb",
+        label=label,
+    )
+
+
+class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
+    """I21: purge recognises the registered drive and removes its entries."""
+
+    def _run(self, cfg_dir: Path, ident: DiskIdentity, mock: MockShell) -> None:
+        with (
+            patch_sh(mock),
+            patch.object(Config, "default_config_dir", return_value=cfg_dir),
+            patch.object(purge_mod, "validate_external_block_device", return_value=ident),
+            patch("builtins.input", side_effect=["yes", "sdb", "n"]),
+            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+            redirect_stdout(StringIO()),
+        ):
+            purge_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
+
+    def test_by_id_purge_destroys_pool_and_cleans_every_matching_entry(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json",
+            {
+                "backup": {"guid": "3446866051930726346", "drive_id": "<unknown>"},
+                "old": {"guid": "1", "drive_id": _KINGSTON_ID},
+                "black": {"guid": "2", "drive_id": "usb-Micron-0:0"},
+            },
+        )
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        vdev = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
+        mock.on(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup").succeeds()
+        mock.on("zpool destroy backup").succeeds()
+        ident = _purge_ident(PoolLabel("backup", "3446866051930726346"))
+        self._run(cfg_dir, ident, mock)
+        assert mock.was_called(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup")
+        assert mock.was_called("zpool destroy backup")
+        assert mock.was_called("sgdisk --zap-all /dev/sdb")
+        data = json.loads((cfg_dir / "known_drives.json").read_text())
+        assert list(data) == ["black"]
+
+    def test_foreign_rpool_label_is_never_imported(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        mock = MockShell()
+        ident = _purge_ident(PoolLabel("rpool", "99"))
+        with patch("lib.log.Log.ask", return_value=True):
+            self._run(cfg_dir, ident, mock)
+        assert mock.was_not_called("zpool import")
+        assert mock.was_not_called("zpool destroy")
+        assert mock.was_called("wipefs -a /dev/sdb")
+
+
+class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
+    """I16/I22/I23 + I-G in prepare."""
+
+    def test_prepare_by_id_replaces_stale_entry_and_uses_by_id_vdev(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json",
+            {
+                "blue": {"guid": "1", "drive_id": _KINGSTON_ID},
+                "black": {"guid": "2", "drive_id": "usb-Micron-0:0"},
+            },
+        )
+        ident = _purge_ident(None)
+        mock = MockShell()
+        mock.on("lsblk -no NAME /dev/sdb | tail -n +2").succeeds("")
+        mock.on("blkid /dev/sdb").fails()
+        mock.on("zpool list blue").fails()
+        mock.on_prefix("zpool create").succeeds()
+        mock.on_prefix("syncoid").succeeds()
+        mock.on("zpool list bpool").succeeds("bpool")
+        mock.on("zpool get -H -o value guid blue").succeeds("777")
+        report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
+        with (
+            patch_sh(mock),
+            patch.object(Config, "default_config_dir", return_value=cfg_dir),
+            patch.object(prepare_mod, "validate_external_block_device", return_value=ident),
+            patch.object(prepare_mod, "check_device", return_value=report),
+            patch.object(prepare_mod.Path, "exists", return_value=True),
+            patch.object(ZFS, "verify_exported_pool_readback", return_value=True),
+            patch.object(ZFS, "pool_export", return_value=True),
+            patch("lib.log.Log.ask", return_value=True),
+            patch("lib.log.Log.ask_input", return_value="blue"),
+            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+            patch.object(prepare_mod, "prompt_eject_or_attach"),
+            redirect_stdout(StringIO()),
+        ):
+            prepare_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
+        create = next(c for c in mock.calls if c.startswith("zpool create"))
+        assert "-R /run/zark/altroot/blue" in create
+        assert create.endswith(f"blue /dev/disk/by-id/{_KINGSTON_ID}")
+        syncoids = [c for c in mock.calls if c.startswith("syncoid --recursive")]
+        assert len(syncoids) == 2
+        assert all("--recvoptions=u" in c for c in syncoids)
+        assert mock.was_called("zfs receive -u -F blue/keystore")
+        data = json.loads((cfg_dir / "known_drives.json").read_text())
+        assert data["blue"] == {
+            "guid": "777",
+            "drive_id": _KINGSTON_ID,
+            "last_backup_at": None,
+            "autoeject": True,
+        }
+        assert data["black"]["guid"] == "2"
+
+    def test_prepare_refuses_disk_without_by_id(self):
+        ident = DiskIdentity(disk="/dev/sdb", by_id="")
+        with (
+            patch.object(prepare_mod, "validate_external_block_device", return_value=ident),
+            patch.object(prepare_mod.Path, "exists", return_value=True),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                prepare_mod.run(["/dev/sdb"])
+            except SystemExit:
+                return
+        raise AssertionError("prepare must refuse to register <unknown>")
 
 
 def main() -> int:

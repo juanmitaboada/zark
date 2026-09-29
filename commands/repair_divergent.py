@@ -46,7 +46,12 @@ from typing import Literal
 from lib import repair, sh
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
-from lib.drives import drive_staleness_days, scan_connected_drives, select_drive
+from lib.drives import (
+    backup_device as drive_vdev,
+    drive_staleness_days,
+    scan_connected_drives,
+    select_drive,
+)
 from lib.log import Log
 from lib.repair import SIZE_LIMIT_BYTES, DivergentDataset
 from lib.sanoid_retention import worst_case_retention_days
@@ -443,10 +448,10 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
 
     # ── 2. Import pool (no mount, no key load — we only inspect snapshots) ─
     log.step(2, 4, f"Importing pool {pool_name}...")
-    if not zfs.pool_import(pool_name, no_mount=True):
+    if not zfs.import_backup_pool(pool_name, drive_vdev(drive)):
         log.fatal(
             f"Cannot import pool {pool_name}",
-            solutions=[f"Try: zpool import -f {pool_name}"],
+            solutions=["Check: zpool status; reconnect the drive and run again"],
         )
 
     # Resolve the underlying device so cleanup can flush + eject the

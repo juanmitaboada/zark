@@ -18,13 +18,38 @@ Destroys ZFS pool, overwrites start/end with random data,
 wipes signatures, destroys partition table.
 """
 
-from pathlib import Path
-
 from lib import sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
-from lib.drives import get_drive_id, get_drive_info, validate_external_block_device
+from lib.drives import SYSTEM_POOLS, validate_external_block_device
+from lib.identity import match_registry
 from lib.log import Log
+from lib.zfs import ZFS
+
+
+def _destroy_labelled_pool(name: str, guid: str, vdev: str, zfs: ZFS, log: Log) -> None:
+    """Destroy the pool whose label is on the disk being purged.
+
+    The pool is imported device-exact under a private altroot (I-G) so
+    nothing it contains is mounted over the running system. A pool of the
+    same name that is imported with a different GUID lives on another disk
+    and is left alone; the wipe below erases this disk's labels anyway.
+    """
+    if name in SYSTEM_POOLS:
+        log.warn(f"Label says '{name}' — not importing a system pool name; wiping only")
+        return
+    if zfs.pool_exists(name):
+        if zfs.pool_guid(name) != guid:
+            log.warn(f"A different pool named '{name}' is imported — wiping only")
+            return
+    elif not zfs.import_backup_pool(name, vdev):
+        log.warn(f"Could not import '{name}' — continuing with wipe")
+        return
+    r = sh.run(f"zpool destroy {name}", log=log)
+    if r.ok:
+        log.ok(f"Pool {name} destroyed")
+    else:
+        log.warn(f"Could not destroy {name} — continuing with wipe")
 
 
 def run(
@@ -34,28 +59,23 @@ def run(
     log = Log()
     cfg = Config.load()
     cfg.check_registry(log, fatal=True)
-    target_dev = args[0] if args else ""
+    zfs = ZFS(log)
+    target_arg = args[0] if args else ""
 
-    validate_external_block_device(target_dev, log, command="purge")
+    ident = validate_external_block_device(target_arg, log, command="purge")
+    target_dev = ident.disk
 
     log.banner("PURGE BACKUP DRIVE", "⚠  IRREVERSIBLE OPERATION")
 
-    model, size, _ = get_drive_info(target_dev)
-    drive_id = get_drive_id(target_dev)
+    log.info(f"Device: {target_dev}  ({ident.by_id_path or 'no by-id name'})")
+    log.info(f"Model:  {ident.model}  Serial: {ident.serial}")
+    log.info(f"Size:   {ident.size}  Transport: {ident.transport}")
+    if ident.label:
+        log.info(f"Pool on disk: {ident.label.name} (GUID {ident.label.guid})")
 
-    log.info(f"Device: {target_dev}")
-    log.info(f"Model:  {model}")
-    log.info(f"Size:   {size}")
-
-    # Match against known drives
-    matched_pool = None
-    for name, info in cfg.known_drives.items():
-        if info.drive_id == drive_id:
-            matched_pool = name
-            break
-
-    if matched_pool:
-        log.ok(f"Drive recognized as: {matched_pool}")
+    matched = match_registry(ident, cfg.known_drives)
+    if matched:
+        log.ok(f"Drive recognized as: {', '.join(matched)}")
     else:
         log.warn("Drive is NOT registered in known_drives.json")
         if not log.ask("Purge unregistered drive? (DANGEROUS)"):
@@ -72,24 +92,20 @@ def run(
         log.info("Aborted")
         return
 
-    dev_base = Path(target_dev).name
-    log.info(f"Type device name to confirm ({dev_base}):")
+    log.info(f"Type the kernel device name to confirm ({ident.name}):")
     try:
         c2 = input("    > ").strip()
     except EOFError:
         c2 = ""
-    if c2 != dev_base:
+    if c2 != ident.name:
         log.fatal("Device name mismatch. Aborted.")
 
     # ── Destroy pool ─────────────────────────────────────────────────────
     log.step(1, 5, "Destroying ZFS pool...")
-    if matched_pool:
-        _ = sh.run(f"zpool import {matched_pool}")
-        r = sh.run(f"zpool destroy {matched_pool}", log=log)
-        if r.ok:
-            log.ok("Pool destroyed")
-        else:
-            log.warn("Could not destroy pool — continuing with wipe")
+    if ident.label:
+        _destroy_labelled_pool(ident.label.name, ident.label.guid, ident.part1, zfs, log)
+    else:
+        log.info("No ZFS label on this disk — nothing to destroy")
 
     # ── Overwrite start ──────────────────────────────────────────────────
     log.step(2, 5, "Overwriting first 10MB...")
@@ -117,11 +133,12 @@ def run(
     _ = sh.run(f"sgdisk --zap-all {target_dev}", log=log)
     log.ok("Partition table destroyed")
 
-    # Remove from known_drives.json
-    if matched_pool and matched_pool in cfg.known_drives:
-        del cfg.known_drives[matched_pool]
+    # Remove every registry entry that described this disk
+    if matched:
+        for name in matched:
+            del cfg.known_drives[name]
         cfg.save_drives()
-        log.ok(f"Removed '{matched_pool}' from known_drives.json")
+        log.ok(f"Removed {', '.join(matched)} from known_drives.json")
 
     # Flush kernel buffers before asking about the bridge power-down.
     # Even though purge does not leave a pool behind, the dd/wipefs/
@@ -130,11 +147,11 @@ def run(
     # confuse a later `prepare`.
     flush_device_cache(log)
 
-    label = matched_pool if matched_pool else target_dev
+    label = matched[0] if matched else target_dev
     log.banner_ok(
         "DRIVE PURGED",
         [
-            f"Device: {target_dev} ({model})",
+            f"Device: {target_dev} ({ident.model})",
             "Drive is blank and ready for reuse.",
         ],
     )
@@ -148,5 +165,5 @@ def run(
         label,
         log,
         default_eject=True,
-        autoeject=cfg.drive_autoeject(label),
+        autoeject=False,  # the registry entry is gone; ask the operator
     )

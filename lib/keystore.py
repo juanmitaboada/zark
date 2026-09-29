@@ -48,8 +48,10 @@ class KeystoreLike(Protocol):
     even though mount_system_pools never calls it itself.
     """
 
+    bad_passphrase: bool  # set by mount(): True when LUKS rejected the passphrase
+
     # pylint: disable=unnecessary-ellipsis
-    def mount(self, pool: str, passphrase: str) -> bool:
+    def mount(self, pool: str, passphrase: str, *, readonly: bool = False) -> bool:
         """Mount the keystore LUKS volume for a pool."""
         ...
 
@@ -69,6 +71,7 @@ class Keystore:
         self.log = log
         self._mapper_name: str | None = None
         self._mounted = False
+        self.bad_passphrase = False
 
     @staticmethod
     def mapper_name_for(pool: str) -> str:
@@ -159,10 +162,18 @@ class Keystore:
         # Try it anyway — worst case, wrong passphrase will fail cleanly
         return zd_devices[0]
 
-    def mount(self, pool: str, passphrase: str) -> bool:
+    def mount(self, pool: str, passphrase: str, *, readonly: bool = False) -> bool:
         """
         Mount the keystore LUKS volume for a pool.
         After this, system.key is accessible at SYSTEM_KEY_PATH.
+
+        ``readonly=True`` is required when the pool was imported with
+        ``readonly=on``: LUKS is opened ``--readonly`` and the ext4 inside is
+        mounted ``ro,noload``. ``noload`` skips the journal: a keystore
+        snapshot is taken while the filesystem is mounted, so its journal is
+        flagged for recovery and a plain ``ro`` mount of a read-only device
+        refuses to proceed. system.key is written once at install time, so
+        skipping the replay cannot hide it.
         """
         zd_dev = self.find_zvol_for_pool(pool)
         if not zd_dev:
@@ -174,18 +185,22 @@ class Keystore:
         mnt.mkdir(parents=True, exist_ok=True)
 
         # Open LUKS
+        ro_luks = " --readonly" if readonly else ""
         r = run(
-            f"cryptsetup open {zd_dev} {self._mapper_name}",
+            f"cryptsetup open{ro_luks} {zd_dev} {self._mapper_name}",
             input=passphrase + "\n",
             log=self.log,
         )
+        # cryptsetup exits 2 for "no permission (bad passphrase)".
+        self.bad_passphrase = r.returncode == 2
         if not r.ok:
             self.log.error(f"Cannot open keystore LUKS on {zd_dev} — wrong passphrase?")
             self.log.dbg(f"cryptsetup stderr: {r.stderr.strip()}")
             return False
 
         # Mount
-        r = run(f"mount /dev/mapper/{self._mapper_name} {mnt}", log=self.log)
+        ro_mount = " -o ro,noload" if readonly else ""
+        r = run(f"mount{ro_mount} /dev/mapper/{self._mapper_name} {mnt}", log=self.log)
         if not r.ok:
             run(f"cryptsetup close {self._mapper_name}")
             self.log.error("Cannot mount keystore filesystem")
@@ -244,3 +259,28 @@ class Keystore:
             else:
                 self.log.dbg(f"Key load failed: {ds}: {rk.stderr.strip()}")
         return count
+
+
+MAX_PASSPHRASE_ATTEMPTS = 3
+
+
+def open_keystore(
+    ks: KeystoreLike,
+    pool: str,
+    log: Log,
+    *,
+    readonly: bool = False,
+) -> bool:
+    """Ask for the passphrase and open ``pool``'s keystore, re-asking on a typo.
+
+    Up to :data:`MAX_PASSPHRASE_ATTEMPTS` prompts while LUKS reports a wrong
+    passphrase; any other failure (no zvol, mount error) returns at once.
+    """
+    for attempt in range(1, MAX_PASSPHRASE_ATTEMPTS + 1):
+        passphrase = log.ask_password(f"Passphrase for {pool}")
+        if ks.mount(pool, passphrase, readonly=readonly):
+            return True
+        if not ks.bad_passphrase:
+            return False
+        log.warn(f"Wrong passphrase ({attempt}/{MAX_PASSPHRASE_ATTEMPTS})")
+    return False

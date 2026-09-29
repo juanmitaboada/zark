@@ -14,20 +14,17 @@
 """
 zark mount — Mount a backup pool for inspection.
 
-Uses ZFS altroot: export → reimport with -R → zfs mount.
-For read-only mode: mount normally, then remount each VFS mountpoint
-as ro (doesn't modify ZFS properties).
+Imports the pool once under the altroot /mnt/zark/<pool> (``-N -R``, plus
+``readonly=on`` in read-only mode), unlocks its keystore, loads the keys and
+mounts each dataset with ``zfs mount``. Read-only mode never writes to the
+backup: the pool itself is imported read-only.
 """
-
-import os
-import shutil
-from pathlib import Path
 
 from lib import sh
 from lib.cleanup import Cleanup
 from lib.config import Config
-from lib.drives import scan_connected_drives, select_drive
-from lib.keystore import SYSTEM_KEY_PATH, Keystore
+from lib.drives import backup_device, scan_connected_drives, select_drive
+from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import mount_system_pools
 from lib.zfs import ZFS
@@ -63,11 +60,9 @@ def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
         ],
     )
     readonly = mode_idx == 0
-    passphrase = log.ask_password("Passphrase for rpool")
-
     result = mount_system_pools(
         SYSTEM_MNT,
-        passphrase,
+        None,  # prompt inside, re-asking on a typo (I9)
         log,
         zfs,
         Keystore(log),
@@ -147,71 +142,37 @@ def run(
     )
     readonly = mode_idx == 0
 
-    passphrase = log.ask_password(f"Passphrase for {pool_name}")
-
-    # ── Phase 1: Import -N to access keystore ────────────────────────────
-    log.info(f"Importing pool {pool_name} (phase 1: keystore)...")
-    if not zfs.pool_import(pool_name, no_mount=True):
+    # ── Import once, under the user-visible altroot (I-G) ────────────────
+    # Read-only mode imports the pool readonly=on: nothing on the backup is
+    # written, not even the keystore's ext4 journal replay.
+    log.info(f"Importing pool {pool_name} (altroot={mnt_point})...")
+    if not zfs.import_backup_pool(
+        pool_name,
+        backup_device(drive),
+        altroot=mnt_point,
+        readonly=readonly,
+    ):
         log.fatal(f"Cannot import pool {pool_name}")
+    cleanup.track_pool(pool_name)
 
     ks = Keystore(log)
-    if not ks.mount(pool_name, passphrase):
-        _ = zfs.pool_export(pool_name)
-        log.fatal("Cannot open keystore", causes=["Wrong passphrase"])
-
-    tmp_key = f"/tmp/zark_key_{os.getpid()}"
-    _ = shutil.copy2(SYSTEM_KEY_PATH, tmp_key)
-    os.chmod(tmp_key, 0o600)
-    log.dbg(f"Saved system.key to {tmp_key}")
+    if not open_keystore(ks, pool_name, log, readonly=readonly):
+        log.fatal("Cannot open keystore", causes=["Wrong passphrase (3 attempts)"])
+    loaded = ks.load_pool_keys(f"{pool_name}/rpool")
     ks.umount()
-
-    # ── Phase 2: Export → reimport with altroot ──────────────────────────
-    log.info(f"Reimporting with altroot={mnt_point}...")
-    _ = sh.run(f"zfs unload-key -r {pool_name}")
-    _ = sh.run(f"zpool export {pool_name}") or sh.run(f"zpool export -f {pool_name}")
-
-    Path(mnt_point).mkdir(parents=True, exist_ok=True)
-    r = sh.run(f"zpool import -R {mnt_point} -N {pool_name}", log=log)
-    if not r.ok:
-        r = sh.run(f"zpool import -f -R {mnt_point} -N {pool_name}", log=log)
-        if not r.ok:
-            os.remove(tmp_key)
-            log.fatal("Cannot reimport with altroot")
-
-    cleanup.track_pool(pool_name)
-    log.ok(f"Pool reimported with altroot={mnt_point}")
-
-    # ── Reload keys ──────────────────────────────────────────────────────
-    log.info("Loading encryption keys...")
-    r_keys = sh.run(f"zfs get -H keystatus -r {pool_name}/rpool")
-    loaded = 0
-    if r_keys.ok:
-        for line in r_keys.lines:
-            parts = line.split("\t")
-            if len(parts) >= 3 and "unavailable" in parts[2] and "@" not in parts[0]:
-                ds_name = parts[0].strip()
-                if sh.run(f"zfs load-key -L file://{tmp_key} {ds_name}").ok:
-                    loaded += 1
-                    log.dbg(f"Key loaded: {ds_name}")
     log.ok(f"Loaded {loaded} encryption key(s)")
-    os.remove(tmp_key)
 
-    # ── Mount datasets (read-write first, then remount ro) ───────────────
+    # ── Mount datasets ───────────────────────────────────────────────────
     log.info("Mounting datasets...")
     datasets = zfs.list_datasets(f"{pool_name}/rpool", recursive=True)
 
-    # Mount all datasets normally (ZFS needs rw to create mountpoint dirs)
     mounted = 0
-    mount_points: list[str] = []
     for ds in datasets:
         if ds.canmount == "off" or ds.mountpoint in ("none", "-", "legacy"):
             continue
         r = sh.run(f"zfs mount {ds.name}")
         if r.ok:
             mounted += 1
-            mp = zfs.get_property(ds.name, "mountpoint")
-            if mp:
-                mount_points.append(mp)
         else:
             log.dbg(f"Skip {ds.name}: {r.stderr.strip()}")
 
@@ -222,13 +183,6 @@ def run(
             "No datasets mounted",
             solutions=[f"Check: zfs get mountpoint,canmount -r {pool_name}/rpool"],
         )
-
-    # Apply read-only at VFS level (doesn't modify ZFS properties)
-    if readonly:
-        log.info("Applying read-only protection...")
-        for mp in mount_points:
-            _ = sh.run(f"mount -o remount,ro {mp}")
-        log.ok("All datasets remounted read-only")
 
     # ── Detect root dataset for chroot instructions ────────────────────
     root_ds = ""
