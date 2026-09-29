@@ -37,6 +37,7 @@ def run(
     del args  # unused
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=True)
     # zfs = ZFS(log)
 
     log.banner("EXPLORE ZFS POOLS", "Scanning all connected ZFS pools")

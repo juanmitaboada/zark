@@ -18,12 +18,20 @@ Finds connected drives, matches them against known_drives.json,
 and provides helpful output for unknown drives.
 """
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from lib.config import Config, DriveInfo, parse_utc_iso
+from lib.identity import (
+    DiskIdentity,
+    IdentityError,
+    by_id_names,
+    preferred_by_id,
+    protected_disks,
+    resolve_disk,
+    whole_disk,
+)
 from lib.log import Log
 from lib.sh import run
 
@@ -67,44 +75,24 @@ SYSTEM_POOLS = {"rpool", "bpool"}
 
 
 def get_drive_id(dev_path: str) -> str:
-    """Get /dev/disk/by-id/ name for a device (excluding wwn/scsi)."""
-    dev_name = Path(dev_path).name
-    # Remove partition suffix to get base disk
-    base = re.sub(r"p?\d+$", "", dev_name)
+    """Stable /dev/disk/by-id name of the disk holding ``dev_path`` ("" if none).
 
-    r = run("ls -la /dev/disk/by-id/")
-    if not r.ok:
-        return ""
-
-    for line in r.lines:
-        if f"../../{base}" not in line:
-            continue
-        if "wwn-" in line or "scsi-" in line:
-            continue
-        parts = line.split()
-        if len(parts) >= 9:
-            candidate = parts[8]
-            # Verify it points to the base disk, not a partition
-            if f"../../{base}" == parts[-1]:
-                return candidate
-
-    # Fallback: accept wwn/scsi
-    for line in r.lines:
-        if f"../../{base}" == line.split()[-1]:
-            parts = line.split()
-            if len(parts) >= 9:
-                return parts[8]
-    return ""
+    Accepts any spelling of the device (kernel name, partition, by-id,
+    by-path): it is resolved to the whole disk first, so the answer does not
+    depend on how the operator typed it.
+    """
+    disk = whole_disk(dev_path)
+    return preferred_by_id(by_id_names(disk)) if disk else ""
 
 
 def get_drive_info(dev_path: str) -> tuple[str, str, str]:
-    """Get model, size, transport for a device."""
-    base = Path(dev_path).name
-    base = re.sub(r"p?\d+$", "", base)
-
-    model = run(f"lsblk -dn -o MODEL /dev/{base}").output.strip()
-    size = run(f"lsblk -dn -o SIZE /dev/{base}").output.strip()
-    tran = run(f"lsblk -dn -o TRAN /dev/{base}").output.strip()
+    """Model, size and transport of the disk holding ``dev_path``."""
+    disk = whole_disk(dev_path)
+    if not disk:
+        return "", "", ""
+    model = run(f"lsblk -dn -o MODEL {disk}").output.strip()
+    size = run(f"lsblk -dn -o SIZE {disk}").output.strip()
+    tran = run(f"lsblk -dn -o TRAN {disk}").output.strip()
     return model, size, tran
 
 
@@ -318,40 +306,49 @@ def select_drive(
     return selected
 
 
-def validate_external_block_device(dev: str, log: Log, *, command: str) -> None:
+def validate_external_block_device(
+    dev: str,
+    log: Log,
+    *,
+    command: str,
+    own_pool: str | None = None,
+) -> DiskIdentity:
     """
-    Refuse to operate on something that is not a safe external block device.
+    Refuse to operate on something that is not a safe external whole disk.
 
-    Common safety check shared by `zark prepare` and `zark purge` (and any
-    future destructive command). Aborts via ``log.fatal`` if any of the
-    following holds:
+    Common safety check shared by the destructive commands (``prepare``,
+    ``purge``, destructive ``health``). Aborts via ``log.fatal`` when:
 
-    - ``dev`` is empty.
-    - ``dev`` does not exist or is not a block device.
-    - ``dev`` looks like an internal NVMe drive (refuses ``nvme`` paths).
-    - ``dev`` appears to be the parent of the running root filesystem.
+    - ``dev`` is empty, does not exist, or is not a block device;
+    - ``dev`` is a partition (the whole disk must be named explicitly);
+    - the disk holds a vdev of an imported pool (rpool/bpool on the running
+      system, or any other pool except ``own_pool``), a mounted filesystem
+      (the live USB, the ESP, a LUKS container) or active swap.
 
-    Args:
-        dev: device path the user supplied (e.g. ``/dev/sdb``).
-        log: logger; ``log.fatal`` aborts execution.
-        command: name of the calling command (``"prepare"``, ``"purge"``…)
-            used only to render the usage hint on the empty-device error.
+    Returns the resolved :class:`DiskIdentity`, so the caller uses the same
+    canonical disk the check was made against.
     """
     if not dev:
         log.fatal(
             "No device specified",
-            solutions=[f"Usage: sudo ./zark {command} /dev/sdX"],
+            solutions=[f"Usage: sudo zark {command} /dev/disk/by-id/<disk>"],
         )
     if not Path(dev).exists():
         log.fatal(f"{dev} does not exist")
     if not Path(dev).is_block_device():
         log.fatal(f"{dev} is not a block device")
-    if "nvme" in dev:
-        log.fatal(f"{dev} looks like an internal NVMe drive. Refusing.")
+    try:
+        ident = resolve_disk(dev)
+    except IdentityError as e:
+        log.fatal(f"Cannot use {dev}", causes=[str(e)])
 
-    root_dev = run("lsblk -no PKNAME $(findmnt -n -o SOURCE /) 2>/dev/null | head -1").output
-    if root_dev and root_dev in dev:
-        log.fatal(f"{dev} appears to be the system drive. Refusing.")
+    reason = protected_disks(own_pool=own_pool).get(ident.disk)
+    if reason:
+        log.fatal(
+            f"{dev} ({ident.disk}) is not an external backup disk. Refusing.",
+            causes=[f"{ident.disk} {reason}"],
+        )
+    return ident
 
 
 # ── last_backup_at staleness helpers ─────────────────────────────────────────

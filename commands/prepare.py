@@ -37,6 +37,7 @@ def run(
     """Main entry point for the prepare command."""
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=True)
     zfs = ZFS(log)
 
     target_dev = args[0] if args else ""

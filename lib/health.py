@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from lib.identity import whole_disk
 from lib.log import Log
 from lib.sh import run
 
@@ -101,9 +102,9 @@ class HealthReport:
 
 
 def _base_disk(dev: str) -> str:
-    """Strip a partition suffix to get the base disk name (sda1 -> sda)."""
-    name = Path(dev).name
-    return re.sub(r"p?\d+$", "", name)
+    """Kernel name of the whole disk holding ``dev`` (any spelling, by-id included)."""
+    disk = whole_disk(dev)
+    return Path(disk).name if disk else Path(dev).name
 
 
 def _usb_ids_for(base: str) -> tuple[str, str]:

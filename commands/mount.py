@@ -100,6 +100,7 @@ def run(
     """Mount a backup pool for inspection / chroot / recovery."""
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=False)
     zfs = ZFS(log)
     cleanup = Cleanup(log)
     cleanup.register()

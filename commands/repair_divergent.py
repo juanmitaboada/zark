@@ -412,6 +412,7 @@ def run(  # pylint: disable=too-many-statements,too-many-branches,too-many-local
     del args  # No CLI args yet; auto-detect a single connected drive.
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=False)
     zfs = ZFS(log)
     cleanup = Cleanup(log)
     cleanup.register()

@@ -104,6 +104,7 @@ def _select_device(args: list[str], log: Log) -> str:
         return target
 
     cfg = Config.load()
+    cfg.check_registry(log, fatal=False)
     devs: list[str] = []
     labels: list[str] = []
     seen: set[str] = set()

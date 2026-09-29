@@ -140,11 +140,28 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
     profile_target_bytes,
     run_destructive_test,
 )
+from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
+    DiskIdentity,
+    IdentityError,
+    PoolLabel,
+    by_id_names,
+    match_registry,
+    preferred_by_id,
+    protected_disks,
+    read_pool_label,
+    resolve_disk,
+)
 from lib.keystore import Keystore  # pylint: disable=wrong-import-position # noqa: E402
 from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
 from lib.mount import (  # pylint: disable=wrong-import-position # noqa: E402
     find_system_root_dataset,
     mount_system_pools,
+)
+from lib.registry import (  # pylint: disable=wrong-import-position # noqa: E402
+    RegistryError,
+    parse as registry_parse,
+    serialize as registry_serialize,
+    write_atomic as registry_write_atomic,
 )
 from lib.repair import (  # pylint: disable=wrong-import-position # noqa: E402
     SIZE_LIMIT_BYTES,
@@ -1615,6 +1632,54 @@ class TestBackupParseArgs:  # pylint: disable=missing-function-docstring
 
 class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docstring
     """Tests for the external-drive safety validator (used by prepare and purge)."""
+
+    @staticmethod
+    def _run(mock: MockShell, dev: str, realpath: str) -> DiskIdentity:
+        with (
+            patch_sh(mock),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.is_block_device", return_value=True),
+            patch("lib.identity.os.path.realpath", return_value=realpath),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(StringIO()),
+        ):
+            return validate_external_block_device(dev, make_log(), command="prepare")
+
+    def test_accepts_by_id_of_clean_usb_disk(self):
+        mock = _identity_mock()
+        mock.on("zpool list -H -o name").succeeds("")
+        mock.on("findmnt -rn -o SOURCE,TARGET").succeeds("")
+        mock.on("swapon --show=NAME --noheadings --raw").succeeds("")
+        ident = self._run(mock, f"/dev/disk/by-id/{_KINGSTON_ID}", "/dev/sdb")
+        assert ident.disk == "/dev/sdb"
+        assert ident.by_id == _KINGSTON_ID
+
+    def test_refuses_sata_system_disk(self):
+        """Hallazgo 7: eli's internal disk is /dev/sda, not nvme."""
+        mock = MockShell()
+        mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sda").succeeds(
+            'NAME="sda" TYPE="disk" PKNAME="" MODEL="KINGSTON" SERIAL="5002" '
+            'SIZE="476G" TRAN="sata"',
+        )
+        mock.on_prefix("find /dev/disk/by-id/").succeeds(_BY_ID_LISTING)
+        mock.on("zpool list -H -o name").succeeds("rpool")
+        mock.on("zpool list -vHP rpool").succeeds("rpool\t476G\n\t/dev/sda4\t476G")
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/sda4").succeeds("sda4 part\nsda disk")
+        mock.on("findmnt -rn -o SOURCE,TARGET").succeeds("")
+        mock.on("swapon --show=NAME --noheadings --raw").succeeds("")
+        try:
+            self._run(mock, "/dev/sda", "/dev/sda")
+        except SystemExit:
+            return
+        raise AssertionError("Should have called fatal")
+
+    def test_refuses_partition(self):
+        mock = _identity_mock()
+        try:
+            self._run(mock, f"/dev/disk/by-id/{_KINGSTON_ID}-part1", "/dev/sdb1")
+        except SystemExit:
+            return
+        raise AssertionError("Should have called fatal")
 
     def test_refuses_nvme(self):
         """Refuses internal NVMe drives."""
@@ -3653,10 +3718,9 @@ class TestConfigKnownDrivesTimestamp:  # pylint: disable=missing-function-docstr
         info = loaded.known_drives["blue"]
         assert info.last_backup_at == "2026-05-08T15:05:57Z"
 
-    def test_save_omits_field_when_none(self):
-        """A drive that has never been backed up successfully must not
-        carry an empty ``last_backup_at`` on disk — keeps the JSON
-        minimal and avoids implying a never-populated field is set."""
+    def test_save_writes_null_when_none(self):
+        """Every registry key is always written (I23): a drive that has
+        never been backed up carries an explicit ``null``."""
         cfg = make_config()
         cfg.known_drives["black"] = DriveInfo(
             name="black",
@@ -3666,7 +3730,8 @@ class TestConfigKnownDrivesTimestamp:  # pylint: disable=missing-function-docstr
         )
         cfg.save_drives()
         data = json.loads((cfg.config_dir / "known_drives.json").read_text())
-        assert "last_backup_at" not in data["black"]
+        assert data["black"]["last_backup_at"] is None
+        assert data["black"]["autoeject"] is False
         assert data["black"]["guid"] == "111"
 
     def test_save_preserves_field_when_set(self):
@@ -5181,6 +5246,254 @@ class TestAptGuard:  # pylint: disable=missing-function-docstring
                 check=False,
             )
             assert proc.returncode == 0
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  lib/identity.py and lib/registry.py (M1: I20–I25, hallazgo 7)
+# ═════════════════════════════════════════════════════════════════════════
+
+_KINGSTON_ID = "usb-Kingston_DT_microDuo_3C_408D5C15CFA5E961091D0CCA-0:0"
+_LSBLK_SDB = (
+    'NAME="sdb" TYPE="disk" PKNAME="" MODEL="DT microDuo 3C" '
+    'SERIAL="408D5C15CFA5E9610" SIZE="115.5G" TRAN="usb"'
+)
+_LSBLK_SDB1 = 'NAME="sdb1" TYPE="part" PKNAME="sdb" MODEL="" SERIAL="" SIZE="115.5G" TRAN=""'
+_BY_ID_LISTING = (
+    f"{_KINGSTON_ID}\t../../sdb\n"
+    f"{_KINGSTON_ID}-part1\t../../sdb1\n"
+    "wwn-0x5000000000000001\t../../sdb\n"
+    "ata-KINGSTON_SKC600MS512G_50026B7784FC3319\t../../sda\n"
+)
+_ZDB_LABEL = (
+    "------------------------------------\n"
+    "LABEL 0\n"
+    "------------------------------------\n"
+    "    version: 5000\n"
+    "    name: 'backup'\n"
+    "    state: 1\n"
+    "    pool_guid: 3446866051930726346\n"
+    "    hostid: 1635764780\n"
+    "    hostname: 'ubuntu'\n"
+    "    vdev_children: 1\n"
+)
+
+
+def _identity_mock() -> MockShell:
+    mock = MockShell()
+    mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sdb1").succeeds(
+        _LSBLK_SDB1,
+    )
+    mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sdb").succeeds(
+        _LSBLK_SDB,
+    )
+    mock.on_prefix("find /dev/disk/by-id/").succeeds(_BY_ID_LISTING)
+    mock.on(f"zdb -l /dev/disk/by-id/{_KINGSTON_ID}-part1").succeeds(_ZDB_LABEL)
+    return mock
+
+
+class TestIdentity:  # pylint: disable=missing-function-docstring
+    """Single device-identity path shared by every command (I20/I25)."""
+
+    def test_preferred_by_id_avoids_bogus_wwn(self):
+        names = ["wwn-0x5000000000000001", _KINGSTON_ID]
+        assert preferred_by_id(names) == _KINGSTON_ID
+
+    def test_preferred_by_id_falls_back_to_wwn_when_alone(self):
+        assert preferred_by_id(["wwn-0x5000000000000001"]) == "wwn-0x5000000000000001"
+
+    def test_by_id_names_skips_partitions_and_other_disks(self):
+        mock = _identity_mock()
+        with patch_sh(mock):
+            names = by_id_names("/dev/sdb")
+        assert names == [_KINGSTON_ID, "wwn-0x5000000000000001"]
+
+    def test_read_pool_label(self):
+        mock = MockShell()
+        mock.on("zdb -l /dev/sdb1").succeeds(_ZDB_LABEL)
+        with patch_sh(mock):
+            label = read_pool_label("/dev/sdb1")
+        assert label == PoolLabel("backup", "3446866051930726346", "1635764780", "ubuntu")
+
+    def test_read_pool_label_none_on_blank_disk(self):
+        mock = MockShell()
+        mock.on("zdb -l /dev/sdb1").fails("failed to unpack label 0")
+        with patch_sh(mock):
+            assert read_pool_label("/dev/sdb1") is None
+
+    def test_resolve_by_id_argument(self):
+        """The by-id spelling that broke 1.0.12 resolves to the real disk."""
+        mock = _identity_mock()
+        with (
+            patch_sh(mock),
+            patch("lib.identity.os.path.realpath", return_value="/dev/sdb"),
+            patch("lib.identity.Path.exists", return_value=True),
+        ):
+            ident = resolve_disk(f"/dev/disk/by-id/{_KINGSTON_ID}")
+        assert ident.disk == "/dev/sdb"
+        assert ident.by_id == _KINGSTON_ID
+        assert ident.model == "DT microDuo 3C"
+        assert ident.transport == "usb"
+        assert ident.part1 == f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
+        assert ident.label is not None
+        assert ident.label.guid == "3446866051930726346"
+
+    def test_resolve_refuses_partition(self):
+        mock = _identity_mock()
+        with (
+            patch_sh(mock),
+            patch("lib.identity.os.path.realpath", return_value="/dev/sdb1"),
+        ):
+            try:
+                resolve_disk(f"/dev/disk/by-id/{_KINGSTON_ID}-part1")
+            except IdentityError as e:
+                assert "/dev/sdb" in str(e)
+                return
+        raise AssertionError("expected IdentityError")
+
+    def test_resolve_partition_allowed(self):
+        mock = _identity_mock()
+        with (
+            patch_sh(mock),
+            patch("lib.identity.os.path.realpath", return_value="/dev/sdb1"),
+            patch("lib.identity.Path.exists", return_value=True),
+        ):
+            ident = resolve_disk("/dev/sdb1", allow_partition=True)
+        assert ident.disk == "/dev/sdb"
+
+    def test_match_registry_by_label_guid_and_drive_id(self):
+        drives = {
+            "backup": DriveInfo("backup", "3446866051930726346", "<unknown>"),
+            "stale": DriveInfo("stale", "111", _KINGSTON_ID),
+            "other": DriveInfo("other", "222", "usb-Other-0:0"),
+        }
+        ident = DiskIdentity(
+            disk="/dev/sdb",
+            by_id=_KINGSTON_ID,
+            label=PoolLabel("backup", "3446866051930726346"),
+        )
+        assert match_registry(ident, drives) == ["backup", "stale"]
+
+    def test_protected_disks(self):
+        mock = MockShell()
+        mock.on("zpool list -H -o name").succeeds("rpool\nbpool\nbackup")
+        mock.on("zpool list -vHP rpool").succeeds(
+            "rpool\t476G\t10G\n\t/dev/disk/by-id/ata-X-part4\t476G\t10G",
+        )
+        mock.on("zpool list -vHP bpool").succeeds(
+            "bpool\t2G\t1G\n\t/dev/disk/by-id/ata-X-part2\t2G\t1G",
+        )
+        mock.on("zpool list -vHP backup").succeeds(
+            "backup\t115G\t9G\n\t/dev/disk/by-id/usb-K-part1\t115G\t9G",
+        )
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/disk/by-id/ata-X-part4").succeeds(
+            "sda4 part\nsda disk",
+        )
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/disk/by-id/ata-X-part2").succeeds(
+            "sda2 part\nsda disk",
+        )
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/disk/by-id/usb-K-part1").succeeds(
+            "sdb1 part\nsdb disk",
+        )
+        mock.on("findmnt -rn -o SOURCE,TARGET").succeeds(
+            "rpool/ROOT/x /\n/dev/sdc1 /cdrom\n/dev/mapper/luks /media/j",
+        )
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/sdc1").succeeds("sdc1 part\nsdc disk")
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/mapper/luks").succeeds(
+            "luks crypt\nsdc4 part\nsdc disk",
+        )
+        mock.on("swapon --show=NAME --noheadings --raw").succeeds("")
+        with patch_sh(mock):
+            reasons = protected_disks(own_pool="backup")
+        assert "rpool" in reasons["/dev/sda"]
+        assert "/cdrom" in reasons["/dev/sdc"]
+        assert "/dev/sdb" not in reasons  # own_pool exempts the target itself
+        with patch_sh(mock):
+            assert "/dev/sdb" in protected_disks()
+
+
+class TestRegistry:  # pylint: disable=missing-function-docstring
+    """known_drives.json: strict parse, all keys, atomic write (I23/I24)."""
+
+    def test_invalid_json_reports_position(self):
+        try:
+            registry_parse('{"blue": {"guid": "1" "drive_id": "x"}}', Path("/k.json"))
+        except RegistryError as e:
+            assert "line 1" in str(e) and "column" in str(e)
+            return
+        raise AssertionError("expected RegistryError")
+
+    def test_schema_rejects_non_numeric_guid(self):
+        try:
+            registry_parse('{"blue": {"guid": "abc", "drive_id": "x"}}', Path("/k.json"))
+        except RegistryError as e:
+            assert "guid" in str(e)
+            return
+        raise AssertionError("expected RegistryError")
+
+    def test_schema_rejects_non_bool_autoeject(self):
+        text = '{"blue": {"guid": "1", "drive_id": "x", "autoeject": "false"}}'
+        try:
+            registry_parse(text, Path("/k.json"))
+        except RegistryError:
+            return
+        raise AssertionError("expected RegistryError")
+
+    def test_serialize_writes_every_key_and_keeps_unknown(self):
+        text = registry_serialize(
+            {"blue": {"guid": "7", "drive_id": "usb-X", "future": {"a": 1}}},
+            Path("/k.json"),
+        )
+        data = json.loads(text)
+        assert data["blue"] == {
+            "guid": "7",
+            "drive_id": "usb-X",
+            "last_backup_at": None,
+            "autoeject": False,
+            "future": {"a": 1},
+        }
+
+    def test_write_atomic_leaves_no_temp_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "known_drives.json"
+            registry_write_atomic(path, {"b": {"guid": "1", "drive_id": "d"}})
+            assert sorted(os.listdir(td)) == ["known_drives.json"]
+            assert json.loads(path.read_text())["b"]["guid"] == "1"
+
+    def test_malformed_registry_is_never_overwritten(self):
+        """Regression: 1.0.12 prepare rewrote a malformed file with only
+        the new drive, deleting every other registered disk."""
+        cfg = make_config()
+        path = cfg.config_dir / "known_drives.json"
+        broken = '{"black": {"guid": "1", "drive_id": "a"}\n "blue": {}}'
+        path.write_text(broken)
+        with patch.object(Config, "default_config_dir", return_value=cfg.config_dir):
+            loaded = Config.load()
+        assert loaded.load_error is not None
+        loaded.known_drives["new"] = DriveInfo("new", "9", "usb-New")
+        try:
+            loaded.save_drives()
+        except RegistryError:
+            assert path.read_text() == broken
+            return
+        raise AssertionError("save_drives must refuse")
+
+    def test_check_registry_fatal_for_writers(self):
+        cfg = make_config()
+        cfg._load_error = "boom"  # pylint: disable=protected-access
+        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            try:
+                cfg.check_registry(make_log(), fatal=True)
+            except SystemExit:
+                return
+        raise AssertionError("expected SystemExit")
+
+    def test_check_registry_warns_for_readers(self):
+        cfg = make_config()
+        cfg._load_error = "boom"  # pylint: disable=protected-access
+        buf = StringIO()
+        with redirect_stdout(buf):
+            cfg.check_registry(make_log(), fatal=False)
+        assert "boom" in buf.getvalue()
 
 
 def main() -> int:

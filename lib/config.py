@@ -23,11 +23,16 @@ If none found, all drives are treated as unknown and the user is
 guided to create the file.
 """
 
-import json
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from lib import registry
+
+if TYPE_CHECKING:
+    from lib.log import Log
 
 VERSION = "1.0.12"
 
@@ -81,6 +86,7 @@ class DriveInfo:
     autoeject: bool = False  # if True, the eject prompt times out and applies
     #                          the command's default after EJECT_TIMEOUT_SECONDS;
     #                          if False (default), the prompt waits for input.
+    extra: dict[str, Any] = field(default_factory=dict)  # keys this version does not know
 
 
 @dataclass
@@ -141,60 +147,77 @@ class Config:
 
     @classmethod
     def load(cls) -> "Config":
-        """Load configuration. Never fails — returns empty config if no file."""
+        """Load configuration. Never raises: a malformed registry is recorded
+        in :attr:`load_error`, leaves :attr:`known_drives` empty, and makes
+        :meth:`save_drives` refuse to write (so it can never be overwritten
+        with a partial view). Callers report it with :meth:`check_registry`.
+        """
         cfg = cls()
         cfg.config_dir = cls.default_config_dir()
-
-        drives_file = cfg.config_dir / "known_drives.json"
-        if drives_file.exists():
-            try:
-                data = json.loads(drives_file.read_text())
-                for name, info in data.items():
-                    cfg.known_drives[name] = DriveInfo(
-                        name=name,
-                        guid=str(info["guid"]),
-                        drive_id=str(info["drive_id"]),
-                        # Optional field; may be absent on older files
-                        # or freshly-prepared drives. Anything that is
-                        # not a string is normalized to None so
-                        # downstream code can treat it uniformly.
-                        last_backup_at=(
-                            str(info["last_backup_at"])
-                            if isinstance(info.get("last_backup_at"), str)
-                            else None
-                        ),
-                        # Optional opt-in: when true, the eject prompt for
-                        # this drive times out and applies the command's
-                        # default. Absent/!bool -> False (prompt waits).
-                        autoeject=bool(info.get("autoeject", False)),
-                    )
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                # Will be reported by the calling command
-                cfg._load_error = str(e)
-
+        try:
+            data = registry.load(cfg.drives_file_path)
+        except registry.RegistryError as e:
+            cfg._load_error = str(e)
+            return cfg
+        for name, info in data.items():
+            cfg.known_drives[name] = DriveInfo(
+                name=name,
+                guid=str(info["guid"]),
+                drive_id=str(info["drive_id"]),
+                last_backup_at=(
+                    str(info["last_backup_at"])
+                    if isinstance(info.get("last_backup_at"), str)
+                    else None
+                ),
+                autoeject=bool(info.get("autoeject", False)),
+                extra={k: v for k, v in info.items() if k not in registry.KNOWN_KEYS},
+            )
         return cfg
 
-    def save_drives(self) -> None:
-        """Write known_drives.json back to disk.
+    @property
+    def load_error(self) -> str | None:
+        """Why known_drives.json could not be used, or None when it is valid."""
+        return self._load_error
 
-        ``last_backup_at`` is emitted only when populated; absent fields
-        keep on-disk JSON minimal and avoid implying a never-populated
-        field is set.
+    def check_registry(self, log: "Log", *, fatal: bool) -> None:
+        """Report a malformed registry: FATAL for commands that write it,
+        a loud warning for commands that only read it."""
+        if self._load_error is None:
+            return
+        if fatal:
+            log.fatal(
+                "known_drives.json is malformed — refusing to continue",
+                causes=[self._load_error],
+                solutions=[
+                    f"Fix the file by hand, then check it: python3 -m json.tool "
+                    f"{self.drives_file_path}",
+                    "zark will not rewrite a registry it could not read",
+                ],
+            )
+        log.warn(f"known_drives.json ignored: {self._load_error}")
+        log.warn("All drives are treated as unregistered for this run.")
+
+    def save_drives(self) -> None:
+        """Validate and atomically write known_drives.json with every key.
+
+        Raises :class:`lib.registry.RegistryError` when the file on disk
+        could not be parsed at load time: writing then would replace the
+        other drives' entries with nothing.
         """
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        drives_file = self.config_dir / "known_drives.json"
-        data: dict[str, dict[str, str | bool]] = {}
+        if self._load_error is not None:
+            raise registry.RegistryError(
+                f"refusing to overwrite unreadable registry: {self._load_error}",
+            )
+        entries: dict[str, dict[str, Any]] = {}
         for name, info in self.known_drives.items():
-            entry: dict[str, str | bool] = {
+            entries[name] = {
+                **info.extra,
                 "guid": info.guid,
                 "drive_id": info.drive_id,
+                "last_backup_at": info.last_backup_at,
+                "autoeject": info.autoeject,
             }
-            if info.last_backup_at:
-                entry["last_backup_at"] = info.last_backup_at
-            if info.autoeject:
-                entry["autoeject"] = True
-            data[name] = entry
-        drives_file.write_text(json.dumps(data, indent=2) + "\n")
+        registry.write_atomic(self.drives_file_path, entries)
 
     @property
     def drives_file_path(self) -> Path:

@@ -759,6 +759,7 @@ def run(
     del args  # no CLI args supported (yet)
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=False)
     zfs = ZFS(log)
     cleanup = Cleanup(log)
     cleanup.register()

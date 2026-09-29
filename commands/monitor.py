@@ -38,6 +38,7 @@ def run(args: list[str]):  # pylint: disable=too-many-statements, too-many-local
     del args  # unused
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=False)
     zfs = ZFS(log)
 
     # Find imported known pool

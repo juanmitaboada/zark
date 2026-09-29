@@ -33,6 +33,7 @@ def run(
     """Main entry point for the purge command."""
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=True)
     target_dev = args[0] if args else ""
 
     validate_external_block_device(target_dev, log, command="purge")

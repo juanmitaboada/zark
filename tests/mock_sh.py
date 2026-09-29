@@ -210,6 +210,7 @@ def patch_sh(mock: MockShell):
         "lib.drives",  # from lib.sh import run
         "lib.mount",  # from lib.sh import run
         "lib.health",  # from lib.sh import run
+        "lib.identity",  # from lib.sh import run
     ]
 
     patches = []

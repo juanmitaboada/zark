@@ -287,6 +287,7 @@ def run(
     opts = _parse_args(args)
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=True)
     zfs = ZFS(log)
     cleanup = Cleanup(log)
     cleanup.register()

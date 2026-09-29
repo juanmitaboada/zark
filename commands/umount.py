@@ -87,6 +87,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     """
     log = Log()
     cfg = Config.load()
+    cfg.check_registry(log, fatal=False)
 
     # Local/system target: export the installed system's pools (the
     # counterpart to 'zark mount local'). Explicit keyword so the default
