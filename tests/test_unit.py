@@ -30,6 +30,7 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -5878,7 +5879,8 @@ class TestRecoverTargetDisks:  # pylint: disable=missing-function-docstring,too-
 class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
     """Hallazgo 15: nothing touches the internal disk before pre-flight + YES."""
 
-    def _run(self, answer: str, preflight_fails: bool = False) -> MockShell:
+    def _run(self, answer: str | None, preflight_fails: bool = False) -> MockShell:
+        """``answer`` None simulates a closed terminal (EOF) at the YES prompt."""
         mock = MockShell()
         snaps = _stick_snaps()
         point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
@@ -5908,7 +5910,9 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(recover_mod, "_plan", return_value=plan),
             patch.object(recover_mod, "_select_target", return_value="/dev/sda"),
             patch.object(recover_mod, "_preflight", side_effect=preflight),
-            patch("builtins.input", return_value=answer),
+            patch("builtins.input", side_effect=EOFError)
+            if answer is None
+            else patch("builtins.input", return_value=answer),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(StringIO()),
         ]
@@ -5930,6 +5934,11 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
     def test_no_wipe_when_preflight_fails(self):
         mock = self._run("YES", preflight_fails=True)
         assert mock.was_not_called("wipefs")
+
+    def test_no_wipe_when_terminal_closes_at_yes(self):
+        mock = self._run(None)
+        assert mock.was_not_called("wipefs")
+        assert mock.was_not_called("sgdisk")
 
 
 class TestInitrd:  # pylint: disable=missing-function-docstring
@@ -6091,6 +6100,31 @@ class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
         assert "Passphrase for blue" in text and "secret" not in text
         assert "[OK] ══ BACKUP COMPLETED ══" in text
         assert "[FAIL] ══ BACKUP NOT VERIFIED ══" in text
+
+    def test_typed_confirmations_reach_the_log_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.log")
+            log = Log(log_file=path)
+            with redirect_stdout(StringIO()):
+                with patch("builtins.input", return_value="YES"):
+                    got = log.ask_text(
+                        "    Type YES to proceed: ", label="Type YES to erase /dev/sda"
+                    )
+                with patch("builtins.input", side_effect=EOFError):
+                    eof = log.ask_text("  Type IUNDERSTAND to continue anyway: ")
+            text = Path(path).read_text(encoding="utf-8")
+        assert got == "YES" and eof == ""
+        assert "Type YES to erase /dev/sda → 'YES'" in text
+        assert "Type IUNDERSTAND to continue anyway: → '<empty>'" in text
+
+    def test_destructive_confirmations_never_bypass_the_log(self):
+        # A raw input() answer never reaches zark.log (I19).
+        raw_input = re.compile(r"(?<![\w.])input\(")
+        for name in ("recover", "purge", "repair_boot"):
+            src = (Path(__file__).parent.parent / "commands" / f"{name}.py").read_text(
+                encoding="utf-8",
+            )
+            assert not raw_input.search(src), f"commands/{name}.py reads input() directly"
 
 
 class TestReviewFindings:  # pylint: disable=missing-function-docstring

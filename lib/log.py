@@ -345,6 +345,20 @@ class Log:
         self._answer_to_file(question, answer or f"<default> {default}")
         return answer or default
 
+    def ask_text(self, prompt: str, *, label: str = "") -> str:
+        """Read one typed line (a confirmation word) and record it in the log.
+
+        ``label`` names the question in the log when ``prompt`` alone does not
+        (a bare ``>``). EOF reads as an empty answer, which no confirmation
+        accepts, so a closed terminal aborts instead of raising.
+        """
+        try:
+            answer = input(prompt).strip()
+        except EOFError:
+            answer = ""
+        self._answer_to_file(label or prompt.strip(), answer or "<empty>")
+        return answer
+
     def ask_password(self, question: str) -> str:
         """Password input (no echo)."""
 

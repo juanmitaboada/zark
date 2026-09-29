@@ -1124,10 +1124,7 @@ def run(
     # ── Verify live USB ──────────────────────────────────────────────────
     if not _is_live_usb():
         log.warn("NOT running from a live USB environment")
-        try:
-            confirm = input("  Type IUNDERSTAND to continue anyway: ").strip()
-        except EOFError:
-            confirm = ""
+        confirm = log.ask_text("  Type IUNDERSTAND to continue anyway: ")
         if confirm != "IUNDERSTAND":
             return
 
@@ -1210,10 +1207,7 @@ def run(
     inferred = [r.rel for r in plan.rows if r.props and r.props.source == "inferred"]
     if inferred:
         log.warn(f"Mount properties inferred for: {', '.join(inferred)}")
-    try:
-        confirm = input("    Type YES to proceed: ").strip()
-    except EOFError:
-        confirm = ""
+    confirm = log.ask_text("    Type YES to proceed: ", label=f"Type YES to erase {internal_disk}")
     if confirm != "YES":
         log.fatal("Aborted by user")
 

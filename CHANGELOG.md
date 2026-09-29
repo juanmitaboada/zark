@@ -98,7 +98,10 @@ consolidation that preceded it.
   (P0-7)
 - Passphrase prompts re-ask up to three times on a typo. (I9)
 - Verdict banners, prompts and answers are written to `zark.log`;
-  passphrases never are. (I19)
+  passphrases never are. (I19) This includes the typed confirmations that
+  read the terminal directly: recover's `YES` and `IUNDERSTAND`, purge's two
+  confirmations and repair-boot's "continue without external pools"; found
+  missing in the eli validation. A closed terminal at those prompts aborts.
 - `known_drives.json` now always carries `last_backup_at` (null until the
   first backup) and `autoeject`.
 - A malformed `known_drives.json` stops every command that writes it and

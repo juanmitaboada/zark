@@ -98,7 +98,7 @@ def run(
         log.warn(f"External pool(s) detected: {', '.join(external)}")
         log.info("These must NOT be imported during grub repair.")
         log.info("If a backup drive is connected, disconnect it now.")
-        answer = input("\n    Continue without external pools? [y/N]: ").strip().lower()
+        answer = log.ask_text("\n    Continue without external pools? [y/N]: ").lower()
         if answer != "y":
             log.fatal("Aborted — disconnect external drives and retry.")
 
