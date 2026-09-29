@@ -156,6 +156,37 @@ consolidation that preceded it.
 - *Registering `<unknown>` and fixing it later.* Every later command had
   to guess; a disk without a by-id name is refused up front.
 
+### Release tarball ships tracked files only
+
+#### Fixed
+
+- `make dist` copied the whole working tree (`cp -a .`) and removed only a
+  list of caches, so anything else untracked went into the upstream
+  tarball and the `.orig.tar.gz`: the dev `.venv/` (nearly all of a 29 MB
+  tarball; the tracked tree is 1.2 MB), `PROJECT-NOTES.md`, `.python-version` and the private
+  `etc/known_drives.json` with real drive GUIDs and by-id names. `dist-check`
+  could not notice, because `dpkg-source -b .` compared the tarball with
+  the same tree. `make dist` now archives `git ls-files` (tracked files, with
+  their working-tree edits), and fails outside a git checkout.
+- The expected untracked files of a developer tree are listed in
+  `debian/source/options`; any other untracked file now makes `dist-check`
+  and `deb-source` fail with "unexpected upstream changes" instead of
+  leaking.
+- `dist-check`'s "no debian/ in the tarball" guard looked for
+  `zark-<version>/debian/`, but the tarball's top directory is `zark/`, so
+  it could never fire.
+
+#### Rejected approaches
+
+- *`git archive HEAD`.* It drops uncommitted edits, so `fulltest` before a
+  commit would check a different tree than the one being committed, and
+  `deb-ppa` would upload a `.orig` that does not match the tree `dpkg-source`
+  diffs against.
+- *Running `dpkg-source`/`debuild -S` in a clean export.* Also closes the
+  leak, but moves `deb-ppa`'s per-series `dch` edits out of the working
+  tree; the ignore list plus fail-closed diff reaches the same guarantee
+  without changing the upload ritual.
+
 ### Development tooling (no behaviour change)
 
 #### Changed

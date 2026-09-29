@@ -316,9 +316,11 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 	@# they can see debian/ in the git repo. The tarball is the
 	@# upstream slice; debian/ is the packaging slice.
 	@#
-	@# The exclusion list (caches, pyc, etc.) MUST stay in sync with
-	@# debian/source/options. Both must agree or the next
-	@# `make deb-source` fails with "unexpected upstream changes".
+	@# Every untracked file that lives in the working tree (caches, the
+	@# dev venv, local config) MUST be listed in debian/source/options,
+	@# or `make deb-source` fails with "unexpected upstream changes".
+	@# That failure is the intended guard: an unknown untracked file
+	@# stops the build instead of leaking into the .orig.
 	@#
 	@# REPRODUCIBILITY: tar(1) defaults bake in volatile state — file
 	@# mtimes, the user's UID/GID, the order in which the filesystem
@@ -350,18 +352,21 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 	@#
 	@# Net effect: `make dist` is byte-for-byte reproducible across
 	@# runs of the same source revision.
-	@tmpdir=$$(mktemp -d) && \
-		cp -a . $$tmpdir/zark && \
+	@# CONTENT: only files git tracks, as they are in the working tree
+	@# (`git ls-files`), so uncommitted edits to tracked files still reach
+	@# the .orig (deb-ppa relies on that) but nothing untracked or ignored
+	@# ever does: a `cp -a .` shipped .venv/, PROJECT-NOTES.md and the
+	@# private etc/known_drives.json. A tracked file deleted but not yet
+	@# `git rm`-ed is skipped (--ignore-failed-read), as in the tree.
+	@git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { \
+		echo "  make dist needs a git checkout: it ships tracked files only"; \
+		exit 1; \
+	}
+	@tmpdir=$$(mktemp -d) && mkdir $$tmpdir/zark && \
+		git ls-files -z \
+			| tar --null --ignore-failed-read -T - -cf - 2>/dev/null \
+			| tar -xf - -C $$tmpdir/zark && \
 		rm -rf $$tmpdir/zark/debian; \
-		find $$tmpdir/zark -type d -name __pycache__   -exec rm -rf {} + 2>/dev/null; \
-		find $$tmpdir/zark -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null; \
-		find $$tmpdir/zark -type d -name .mypy_cache   -exec rm -rf {} + 2>/dev/null; \
-		find $$tmpdir/zark -type d -name .ruff_cache   -exec rm -rf {} + 2>/dev/null; \
-		find $$tmpdir/zark -type d -name .tox          -exec rm -rf {} + 2>/dev/null; \
-		find $$tmpdir/zark -type d -name .git          -exec rm -rf {} + 2>/dev/null; \
-		find $$tmpdir/zark -name '*.pyc'               -delete 2>/dev/null; \
-		find $$tmpdir/zark -name 'zark.log'            -delete 2>/dev/null; \
-		find $$tmpdir/zark -name '.DS_Store'           -delete 2>/dev/null; \
 		ts=$$(git log -1 --format=%ct 2>/dev/null \
 		      || date -u -d "$$(dpkg-parsechangelog -SDate)" +%s 2>/dev/null \
 		      || echo 0); \
@@ -391,7 +396,8 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 	}
 	@$(MAKE) --no-print-directory dist
 	@# Verify upstream-purity: zark-X.Y.Z/debian/ must NOT exist in the tarball
-	@if tar tzf zark_$(VERSION).tar.gz | grep -q '^zark-$(VERSION)/debian/'; then \
+	@# The tarball's top directory is zark/ (see dist), not zark-<version>/.
+	@if tar tzf zark_$(VERSION).tar.gz | grep -q '^zark/debian/'; then \
 		echo "  FAIL: zark_$(VERSION).tar.gz contains debian/ — this should not happen"; \
 		rm -f zark_$(VERSION).tar.gz; \
 		exit 1; \
