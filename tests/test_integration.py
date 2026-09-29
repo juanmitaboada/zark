@@ -436,6 +436,8 @@ def phase_3(workdir):
     print("    - No emergency shell")
     print("    - ZFS datasets mounted (df -h)")
     print("    - cat /home/testuser/test_data.txt")
+    print("    - cat /var/lib/docker/ZARK-MARKER   (rpool/var tree restored)")
+    print("    - findmnt /var   (must print nothing: rpool/var is canmount=off)")
     print("    - systemctl --failed")
     print()
     print(f"  {C_BOLD}  When done: poweroff{C_RESET}")
@@ -469,6 +471,7 @@ def phase_3(workdir):
         "passphrase": "Did the passphrase prompt appear and work?",
         "desktop": "Did you reach the desktop or login screen?",
         "data": "Was test data present? (cat /home/testuser/test_data.txt)",
+        "first_level": "Was /var/lib/docker/ZARK-MARKER present and findmnt /var empty?",
         "services": "Were there 0 failed systemd units?",
     }
 

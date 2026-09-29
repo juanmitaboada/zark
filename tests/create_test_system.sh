@@ -130,6 +130,12 @@ zfs create rpool/ROOT/$UBUNTU_NAME/var/spool
 zfs create -o canmount=off -o mountpoint=none rpool/USERDATA
 zfs create -o mountpoint=/home rpool/USERDATA/home_test01
 zfs create -o mountpoint=/root rpool/USERDATA/root_test01
+
+# First-level tree outside ROOT/USERDATA (carmen's docker layout): recover
+# must restore it with canmount=off on the containers (hallazgo 1, P0-11).
+zfs create -o canmount=off -o mountpoint=/var rpool/var
+zfs create -o canmount=off rpool/var/lib
+zfs create rpool/var/lib/docker
 ok "Datasets created"
 
 # ═══════════════════════════════════════════════════════════════════
@@ -297,6 +303,7 @@ chroot "$MNT" bash -c "
 
 # User data for phase 3 verification
 echo "Hello from zark integration test" >"$MNT/home/testuser/test_data.txt"
+echo "zark first-level marker" >"$MNT/var/lib/docker/ZARK-MARKER"
 echo "root test data" >"$MNT/root/.test_marker"
 
 ok "System configured (user: testuser/test123, root: root/root)"

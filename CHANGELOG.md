@@ -7,13 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Development tooling only. No change to zark's behaviour: the shipped
-program is byte-for-byte the one in 1.0.12 apart from the two cosmetic
-fixes listed under *Fixed*. `lib/config.py` and `debian/changelog` are
-deliberately untouched, so a `.deb` built from this tree is still
-`1.0.12-1`.
+zark 2 is being built as internal milestones on `main`, versioned
+`2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
+(`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
+The tree currently carries **M1 (2.0.0-rc1)** and the development-tooling
+consolidation that preceded it.
 
-### Changed
+### M1 — recover integrity, device identity and registry (2.0.0-rc1)
+
+#### Added
+
+- `lib/identity.py`: one device identity for every command. Any device
+  argument (kernel name, partition, by-id, by-path) is resolved once with
+  `realpath` + `lsblk` to the whole disk, its preferred by-id name (bogus
+  WWN aliases last), hardware facts and the ZFS label on the disk
+  (`zdb -l`). Registry entries are matched by the pool GUID on disk, then
+  by `drive_id`. (I20, I25)
+- `lib/registry.py`: strict parsing of `known_drives.json` (line/column of
+  JSON errors, schema validation), every key always written, unknown keys
+  preserved, atomic replacement. (I23, I24)
+- `zark registry list|forget|fix`. (I24)
+- `lib/restore_points.py`, `lib/mount_props.py`, `lib/initrd.py` (below).
+- `tests/fixtures/phase0-stick-manifest.txt`: the frozen Phase 0 stick,
+  used by the recover planner tests.
+
+#### Changed
+
+- **recover — restore points (P0-8, hallazgo 3).** Snapshots are grouped
+  into runs per name family (`autosnap_`, `syncoid_<host>_`, `prepare_`,
+  `zark_`, manual) by `creation`, which receive preserves. A run is split
+  only when a dataset reappears more than five minutes after its first
+  snapshot in it. Only runs that include the boot environment are offered,
+  newest by default. Each dataset resolves to its snapshot in the run, or
+  its newest snapshot not after the run; with none, it is listed as NOT
+  RESTORED and named in the final banner. The keystore resolves on its
+  own (newest). On the frozen stick this yields exactly four points
+  (15:52:42, 16:00:01, 16:12:50, 17:00:01 UTC) instead of 14 names.
+- **recover — whole first level (hallazgo 1, D6, P0-11).** Every
+  filesystem under `<pool>/rpool` is restored. canmount/mountpoint are set
+  at receive time (`zfs receive -u -o ...`, applied in the kernel with no
+  mount), from, in order: `org.zark:*` on the destination (written by M2),
+  origin's `/etc/zfs/zfs-list.cache` read from the boot environment's
+  snapshot, the Ubuntu layout, and structural inference (an empty snapshot
+  root with children was never mounted → `canmount=off`). Values stored on
+  a 1.0.12 destination are never copied. recover no longer runs `zfs set`
+  of mount properties, including the bpool one it used to run with the
+  restored keystore zvol present.
+- **recover — before the disk is touched (hallazgos 9, 10, 14, 15).** The
+  plan is shown as a table (snapshot, offset from the point, size, mount
+  properties and source). The backup pool is imported read-only,
+  device-exact, under an altroot; the keystore opens read-only
+  (`cryptsetup --readonly`, `mount -o ro,noload`). The hostid comes from
+  the point's boot-environment snapshot mounted in a private directory,
+  not from a mount over `/`. The size check sums `referenced` of the chosen
+  snapshots and the keystore against the real rpool partition (bpool
+  against 2G) and fails closed if any size is unknown. Target candidates
+  exclude the backup drive and any disk with a mounted filesystem, active
+  swap or imported vdev (the live USB), and show serial and transport.
+  The whole pre-flight runs before `YES`. Both exports of the backup pool
+  are verified; a failed second import is fatal.
+- **Invariant I-G (P0-10).** Every backup-pool import (backup, purge,
+  mount, recover, repair-divergent, read-back verification) is
+  `zpool import -N -R <altroot> [-o readonly=on] -d <exact partition>`, with
+  no directory or by-name scan; `prepare` creates the pool with `-R`. A
+  backup pool is never in `/etc/zfs/zpool.cache` and never mounts over the
+  running system. Every syncoid call left until M2 receives with
+  `--recvoptions=u`.
+- **purge** identifies the disk by its ZFS label and by-id, destroys the
+  labelled pool through a device-exact altroot import (never a system pool
+  name, never a same-named pool of another disk), and removes every
+  matching registry entry. The confirmation asks for the kernel name.
+  (I21)
+- **prepare** refuses a disk without a by-id name instead of registering
+  `<unknown>`, offers to replace registry entries of the same drive,
+  explains a name clash with another drive, and creates the pool on the
+  by-id vdev. (I16, I22, I23)
+- **backup** rewrites a placeholder or stale `drive_id` once the pool GUID
+  matched.
+- **mount** imports once, under `/mnt/zark/<pool>`, read-only in read-only
+  mode, instead of import / export / re-import.
+- **validate_external_block_device** refuses partitions and any disk
+  holding an imported pool's vdev, a mounted filesystem or active swap; the
+  "nvme" substring rule is gone. (hallazgo 7)
+- **repair-boot** mounts through `mount_system_pools`, so every mount is
+  tracked and `/boot` is unmounted before rpool is exported; the banner is
+  built from what Cleanup actually exported; the ESP is taken from the
+  disk holding rpool. (P0-6)
+- **initrd** (recover, repair-boot): one `dracut --force --kver=<v>` per
+  kernel that has both a vmlinuz and modules, exit status honoured.
+  (P0-7)
+- Passphrase prompts re-ask up to three times on a typo. (I9)
+- Verdict banners, prompts and answers are written to `zark.log`;
+  passphrases never are. (I19)
+- `known_drives.json` now always carries `last_backup_at` (null until the
+  first backup) and `autoeject`.
+- A malformed `known_drives.json` stops every command that writes it and
+  is reported loudly by the others; it is never overwritten.
+- The Makefile names Debian artefacts with the tilde version
+  (`2.0.0~rc1`) while the upstream tarball keeps `2.0.0-rc1`.
+
+#### Fixed
+
+- The four "out of space" remediations in backup pointed at `zark purge`,
+  which erases the whole drive. (hallazgo 8)
+- repair and repair-divergent treated an unreadable size (`used=-1`) as
+  small and destroyed the dataset. (hallazgo 5)
+- `ask_choice` looped forever when stdin was closed. (hallazgo 22)
+- repair-boot ran `zfs set mountpoint` with the keystore zvol imported.
+
+#### Removed
+
+- `lib/mount.MountedPool` (no callers; imported backup pools by name).
+- recover's name-sorted restore-point menu, `_raw_send`'s silent
+  fallback to another snapshot, and the hard-coded
+  `_apply_root_children_canmount` pass.
+
+#### Rejected approaches
+
+- *Copy canmount/mountpoint from the destination.* A 1.0.12 destination
+  holds `canmount=on` for containers that are `off` in origin
+  (`rpool/var`, `rpool/var/lib` on the frozen stick): restoring them would
+  mount an empty dataset over the boot environment's `/var`.
+- *`zfs set` after the backup pool is exported.* Works for rpool but not
+  for bpool, which is received after the keystore zvol exists; `receive
+  -o` avoids the constraint for every dataset.
+- *A fixed time window to group a run.* A syncoid replication spans
+  minutes (11 minutes for the stick's prepare) while distinct points are 7
+  minutes apart; grouping per family with a per-dataset repeat gap
+  separates both.
+- *`createtxg` across datasets.* On a destination it is receive order:
+  `bpool/BOOT@16:00:01` has txg 452 while a syncoid snapshot 12 minutes
+  newer has txg 59.
+- *Read the hostid by mounting the backup root at its mountpoint.* That
+  mount lands over `/` (or the altroot) and read the live USB's hostid; the
+  snapshot is mounted read-only in a private directory instead.
+- *`zpool import -d <part>` to read a disk's pool.* It cannot see a pool
+  that is already imported; `zdb -l` reads the label either way.
+- *Drop the export/re-import around step 9 now that no `zfs set` of mount
+  properties remains.* Kept: the keystore zvol must still be the last ZFS
+  operation, and the export is now verified.
+- *Registering `<unknown>` and fixing it later.* Every later command had
+  to guess; a disk without a by-id name is refused up front.
+
+### Development tooling (no behaviour change)
+
+#### Changed
 
 - Consolidated the linting stack on **ruff**: `black`, `blackdoc`, `isort`,
   `flake8` (plus `flake8-pyproject`), `pyupgrade` and `add-trailing-comma`
@@ -38,7 +176,7 @@ deliberately untouched, so a `.deb` built from this tree is still
   `make format-check` (read-only, used by `make lint` and `make fulltest`)
   and `make basedpyright`.
 
-### Added
+#### Added
 
 - **basedpyright**, configured under `[tool.pyright]` and run by
   `make lint`, `make fulltest`, `tox -e types` (in `envlist`) and CI. Its
@@ -52,7 +190,7 @@ deliberately untouched, so a `.deb` built from this tree is still
   `def test_x(self):`, so mypy had been skipping all 346 test bodies —
   which is why the two mismatched test doubles below were invisible to it.
 
-### Fixed
+#### Fixed
 
 - `SanoidRule` was declared `total=False` purely so that `_classify`'s
   skip case could `return {}`, which made the type lie about the seven

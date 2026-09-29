@@ -14,6 +14,9 @@ TOX    := tox
 # Resolve version from the single source of truth (lib/config.py).
 # Used by `make dist` to build a properly-named tarball.
 VERSION := $(shell $(PYTHON) -c "from lib.config import VERSION; print(VERSION)")
+# Debian spelling of the same version: a pre-release "2.0.0-rc1" sorts
+# before "2.0.0" only as "2.0.0~rc1". Used for every Debian artefact name.
+DEB_VERSION := $(subst -,~,$(VERSION))
 
 # Lintian tags suppressed during local builds. Kept centralised so the
 # rationale lives in one place and `make deb` / `make deb-source` stay
@@ -273,11 +276,11 @@ clean: ## Remove __pycache__ and temp files
 	# previous dput runs and would suppress legitimate re-uploads when
 	# the previous Launchpad-side outcome was a rejection that dput
 	# never observed locally).
-	rm -f ../zark_$(VERSION)*.deb ../zark_$(VERSION)*.dsc \
-	      ../zark_$(VERSION)*.changes ../zark_$(VERSION)*.buildinfo \
-	      ../zark_$(VERSION)*.build ../zark_$(VERSION)*.tar.* \
-	      ../zark_$(VERSION)*.orig.tar.* \
-	      ../zark_$(VERSION)*.upload \
+	rm -f ../zark_$(DEB_VERSION)*.deb ../zark_$(DEB_VERSION)*.dsc \
+	      ../zark_$(DEB_VERSION)*.changes ../zark_$(DEB_VERSION)*.buildinfo \
+	      ../zark_$(DEB_VERSION)*.build ../zark_$(DEB_VERSION)*.tar.* \
+	      ../zark_$(DEB_VERSION)*.orig.tar.* \
+	      ../zark_$(DEB_VERSION)*.upload \
 	      2>/dev/null || true
 	rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp \
 	       2>/dev/null || true
@@ -397,8 +400,8 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 	@# Set up .orig.tar.gz where dpkg-source expects it (parent dir) and
 	@# clean any prior debian artefacts of the same version that might
 	@# confuse dpkg-source.
-	@cp zark_$(VERSION).tar.gz ../zark_$(VERSION).orig.tar.gz
-	@rm -f ../zark_$(VERSION)-1.dsc ../zark_$(VERSION)-1.debian.tar.xz
+	@cp zark_$(VERSION).tar.gz ../zark_$(DEB_VERSION).orig.tar.gz
+	@rm -f ../zark_$(DEB_VERSION)-1.dsc ../zark_$(DEB_VERSION)-1.debian.tar.xz
 	@# A previous `make deb` (or fakeroot dpkg-buildpackage) leaves the
 	@# dh staging tree in debian/zark/ and the debhelper bookkeeping in
 	@# debian/.debhelper, debian/files, debian/debhelper-build-stamp.
@@ -417,9 +420,9 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 	@# the build/lintian/sign overhead. Capture rc to clean up before
 	@# propagating it.
 	@dpkg-source -b . ; rc=$$? ; \
-		rm -f ../zark_$(VERSION).orig.tar.gz \
-		      ../zark_$(VERSION)-1.dsc \
-		      ../zark_$(VERSION)-1.debian.tar.xz ; \
+		rm -f ../zark_$(DEB_VERSION).orig.tar.gz \
+		      ../zark_$(DEB_VERSION)-1.dsc \
+		      ../zark_$(DEB_VERSION)-1.debian.tar.xz ; \
 		if [ $$rc -ne 0 ]; then \
 			echo "  FAIL: dpkg-source -b . returned $$rc"; \
 			exit $$rc; \
@@ -481,11 +484,11 @@ fulltest-clean:
 	@# wipes deliberately omitted. Keep this in sync with `make clean`
 	@# whenever a new artefact path is added there.
 	@rm -f /tmp/zark_dist_*.tar.gz 2>/dev/null || true
-	@rm -f ../zark_$(VERSION)*.deb ../zark_$(VERSION)*.dsc \
-	       ../zark_$(VERSION)*.changes ../zark_$(VERSION)*.buildinfo \
-	       ../zark_$(VERSION)*.build ../zark_$(VERSION)*.tar.* \
-	       ../zark_$(VERSION)*.orig.tar.* \
-	       ../zark_$(VERSION)*.upload \
+	@rm -f ../zark_$(DEB_VERSION)*.deb ../zark_$(DEB_VERSION)*.dsc \
+	       ../zark_$(DEB_VERSION)*.changes ../zark_$(DEB_VERSION)*.buildinfo \
+	       ../zark_$(DEB_VERSION)*.build ../zark_$(DEB_VERSION)*.tar.* \
+	       ../zark_$(DEB_VERSION)*.orig.tar.* \
+	       ../zark_$(DEB_VERSION)*.upload \
 	       2>/dev/null || true
 	@rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp \
 	        2>/dev/null || true
@@ -533,7 +536,7 @@ PPA_DPUT_TGT := zark-ppa
 # (not copying) the file fixes that — the orig becomes the canonical
 # upstream source, and there's nothing left in the working tree that
 # diverges from it.
-ORIG_TARBALL := ../zark_$(VERSION).orig.tar.gz
+ORIG_TARBALL := ../zark_$(DEB_VERSION).orig.tar.gz
 
 $(ORIG_TARBALL): dist
 	@mv zark_$(VERSION).tar.gz $(ORIG_TARBALL)
@@ -552,8 +555,8 @@ deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally (-us -uc)
 	@# just expose a renamed link/copy for convenience.
 	@cp $(ORIG_TARBALL) zark_$(VERSION).tar.gz
 	@echo ""
-	@echo "  Built: $$(ls -1t ../zark_$(VERSION)-*_all.deb | head -1)"
-	@echo "  Inspect: lintian -i ../zark_$(VERSION)-*.changes"
+	@echo "  Built: $$(ls -1t ../zark_$(DEB_VERSION)-*_all.deb | head -1)"
+	@echo "  Inspect: lintian -i ../zark_$(DEB_VERSION)-*.changes"
 
 deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 	@command -v debuild >/dev/null || { \
@@ -590,20 +593,20 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 	@# has had inconsistent semantics across versions and silently
 	@# falls back to unsigned in some configurations.
 	debuild -S -sa -us -uc --lintian-opts --suppress-tags $(LINTIAN_SUPPRESS_TAGS)
-	debsign -k$(GPG_KEYID) ../zark_$(VERSION)-1_source.changes
+	debsign -k$(GPG_KEYID) ../zark_$(DEB_VERSION)-1_source.changes
 	@# Verify the .changes is actually signed before claiming success.
 	@# An unsigned upload would be rejected by Launchpad with "Bad
 	@# signature", so failing here saves a round-trip.
-	@head -1 ../zark_$(VERSION)-*_source.changes | grep -q "BEGIN PGP SIGNED MESSAGE" || { \
+	@head -1 ../zark_$(DEB_VERSION)-*_source.changes | grep -q "BEGIN PGP SIGNED MESSAGE" || { \
 		echo ""; \
 		echo "  ERROR: source.changes is NOT signed. Aborting."; \
 		echo "  Check gpg-agent / pinentry interaction or run debsign manually:"; \
-		echo "    debsign -k$(GPG_KEYID) ../zark_$(VERSION)-1_source.changes"; \
+		echo "    debsign -k$(GPG_KEYID) ../zark_$(DEB_VERSION)-1_source.changes"; \
 		exit 1; \
 	}
 	@echo ""
 	@echo "  Source package built and signed:"
-	@ls -1 ../zark_$(VERSION)-*_source.changes
+	@ls -1 ../zark_$(DEB_VERSION)-*_source.changes
 
 deb-ppa-test: ## Smoke-test the PPA pipeline by uploading only the first series
 	@# A safer way to validate the deb-ppa flow end-to-end without
@@ -691,15 +694,15 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 			*)         echo "  Unknown series: $$series"; exit 1 ;; \
 		esac; \
 		echo ""; \
-		echo "  ── Building for $$series ($(VERSION)-1$$suffix) ──"; \
+		echo "  ── Building for $$series ($(DEB_VERSION)-1$$suffix) ──"; \
 		cp "$$changelog_backup" debian/changelog; \
 		DEBEMAIL="juanmi@juanmitaboada.com" DEBFULLNAME="Juanmi Taboada" \
-		    dch --newversion "$(VERSION)-1$$suffix" --distribution "$$series" \
+		    dch --newversion "$(DEB_VERSION)-1$$suffix" --distribution "$$series" \
 		        --force-distribution --force-bad-version \
 		        "Build for Ubuntu $$series."; \
 		debuild -S -sa -us -uc; \
-		debsign -k$(GPG_KEYID) "../zark_$(VERSION)-1$${suffix}_source.changes"; \
-		head -1 "../zark_$(VERSION)-1$${suffix}_source.changes" | grep -q "BEGIN PGP SIGNED MESSAGE" \
+		debsign -k$(GPG_KEYID) "../zark_$(DEB_VERSION)-1$${suffix}_source.changes"; \
+		head -1 "../zark_$(DEB_VERSION)-1$${suffix}_source.changes" | grep -q "BEGIN PGP SIGNED MESSAGE" \
 		    || { echo "  ERROR: $$series .changes is NOT signed. Aborting."; exit 1; }; \
 		: "Remove dput's stale .upload marker before each push. dput" ; \
 		: "writes that file when the SFTP transfer completes and refuses" ; \
@@ -708,8 +711,8 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 		: "— rejections come as asynchronous emails). Our deb-ppa has its" ; \
 		: "own version-bumping safeguards, so dput's lock adds no value" ; \
 		: "for us and only causes false 'already uploaded' failures." ; \
-		rm -f "../zark_$(VERSION)-1$${suffix}_source.$(PPA_DPUT_TGT).upload"; \
-		dput -c dput.cf $(PPA_DPUT_TGT) ../zark_$(VERSION)-1$${suffix}_source.changes; \
+		rm -f "../zark_$(DEB_VERSION)-1$${suffix}_source.$(PPA_DPUT_TGT).upload"; \
+		dput -c dput.cf $(PPA_DPUT_TGT) ../zark_$(DEB_VERSION)-1$${suffix}_source.changes; \
 	done
 	@echo ""
 	@# Print the series that just finished uploading. PPA_SERIES is the

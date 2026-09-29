@@ -1,3 +1,38 @@
+zark (2.0.0~rc1-1) UNRELEASED; urgency=medium
+
+  * Milestone M1 of zark 2 (recover integrity, device identity, registry).
+    Not for release: nothing is published until the final 2.0.0.
+  * recover: restore points grouped per snapshot run and ordered by
+    creation time, never by name; per-dataset resolution never uses a
+    snapshot newer than the point, shown as a table before anything is
+    touched; every first-level dataset tree is restored, with
+    canmount/mountpoint set at receive time from origin's
+    zfs-list.cache, the Ubuntu layout or the snapshot structure; size
+    checked against the chosen point; full pre-flight before the disk is
+    wiped; the live USB and the backup drive are never candidates; the
+    backup pool is imported read-only and device-exact; hostid read from
+    the point's snapshot; exports verified; initrd regenerated only for
+    installed kernels, with dracut's exit status honoured.
+  * All commands identify disks through one module (realpath + by-id +
+    ZFS label): by-id arguments work in purge, prepare and health;
+    purge removes every registry entry of the purged drive; prepare
+    never registers "<unknown>" and replaces stale entries of the same
+    drive.
+  * known_drives.json: strict validation, every key written, atomic
+    replacement; a malformed file is never overwritten. New command
+    `zark registry list|forget|fix`.
+  * Backup pools are always imported with -N -R <altroot> -d <device>
+    (never in zpool.cache, nothing mounted over the live system) and
+    every receive uses -u.
+  * The external-disk guard refuses any disk holding an imported pool's
+    vdev, a mounted filesystem or swap (not only "nvme").
+  * repair-boot tracks every mount and exports rpool for real; its
+    banner reports what actually happened.
+  * Passphrase re-prompts on typos; verdicts, prompts and answers are
+    written to zark.log.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Tue, 29 Sep 2026 14:00:00 +0200
+
 zark (1.0.12-1) stable; urgency=medium
 
   * backup: import the backup pool by its exact device path

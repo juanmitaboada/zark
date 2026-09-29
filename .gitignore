@@ -234,3 +234,6 @@ debian/zark.1.raw
 # moving it to outputs. `make deb` also writes a sibling .orig.tar.gz
 # above the project root, which `make clean` removes.
 zark_*.tar.gz
+
+# Internal working notes (local only, never shipped)
+/PROJECT-NOTES.md

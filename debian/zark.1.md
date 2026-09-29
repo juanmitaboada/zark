@@ -135,7 +135,11 @@ for the canonical end-to-end sequences.
     here would just hide the failure of the inner one), performs the
     initial raw transfer of **rpool** and **bpool**, copies over the
     **rpool/keystore** zvol, and registers the new pool in
-    **known_drives.json**.
+    **known_drives.json** under the drive's */dev/disk/by-id* name. The
+    pool is created on that by-id name with an alternate root, so it is
+    never written to */etc/zfs/zpool.cache*. A drive without a by-id name
+    is refused rather than registered as *\<unknown\>*; registry entries
+    left for the same drive are offered for replacement.
 
     Before doing any work, **prepare** runs the same non-destructive risk
     check as **health** and, if a risk factor is present, warns and asks for
@@ -244,7 +248,19 @@ for the canonical end-to-end sequences.
     casual recovery, wipes filesystem signatures with **wipefs**(8) and
     zaps the partition table with **sgdisk**(8). The device may be
     specified as a positional argument, otherwise **zark** asks
-    interactively. The drive is also removed from **known_drives.json**.
+    interactively. The drive is identified by the pool GUID on its ZFS
+    label and by its by-id name, and every **known_drives.json** entry that
+    describes it is removed. Partitions and disks holding the running
+    system, a mounted filesystem or active swap are refused.
+
+**registry** \[**list** | **forget** *name* | **fix** \[*name*\]\]
+:   Inspect and repair **known_drives.json** without editing it by hand.
+    **list** (the default) shows every entry, whether its disk is connected
+    and whether the pool GUID on the disk matches. **forget** removes one
+    entry; the disk is not touched. **fix** rewrites *drive_id* from the
+    connected disk that carries the registered pool GUID and writes every
+    missing key. Every write is validated and atomic; a malformed file is
+    reported with its line and column and never overwritten.
 
 ## Recovery workflow
 
@@ -253,11 +269,17 @@ for the canonical end-to-end sequences.
     a backup drive. Must be run from an Ubuntu Live USB with the backup
     drive connected.
 
-    The procedure scans for backup drives, imports the chosen pool,
-    prompts for the rpool passphrase, partitions the internal disk as
-    EFI + bpool + rpool, recreates **rpool** *with* native encryption to
-    match the Ubuntu installer, raw-receives **ROOT** and **USERDATA**,
-    restores the LUKS keystore zvol last (which is mandatory — restoring
+    The procedure scans for backup drives, imports the chosen pool
+    read-only by its exact device, prompts for the rpool passphrase and
+    offers the restore points found on the drive, ordered by snapshot
+    creation time (the newest is the default). It then shows a table with
+    the snapshot every dataset will be restored from — never one newer
+    than the point — and the mount properties it will get. Only after a
+    full pre-flight (sizes of that point, keystore, bpool) and a typed
+    **YES** does it partition the internal disk as EFI + bpool + rpool,
+    recreate **rpool** *with* native encryption to match the Ubuntu
+    installer, raw-receive every first-level dataset tree (not only
+    **ROOT** and **USERDATA**), restore the LUKS keystore zvol last (which is mandatory — restoring
     it earlier triggers a kernel udev crash documented in the Debian
     **zfs-linux** issue tracker), reinstates **encryptionroot** with
     **zfs change-key -i**, repopulates **bpool**, chroots into the
@@ -373,10 +395,10 @@ for the canonical end-to-end sequences.
 
 **mount** \[*target*\]
 :   Mount a backup pool for inspection, **chroot**(1) entry or manual
-    recovery work. Imports the chosen pool with an alternate root of
-    */mnt/zark/<poolname>/* and mounts every dataset there. Asks
-    interactively whether to mount read-only (recommended, and the
-    default) or read-write.
+    recovery work. Imports the chosen pool by its exact device with an
+    alternate root of */mnt/zark/<poolname>/* and mounts every dataset
+    there. Asks interactively whether to mount read-only (recommended, and
+    the default; the pool itself is imported read-only) or read-write.
 
     With no argument, scans for connected backup drives. With the
     *target* **local** (aliases **system**, **rpool**) it instead mounts

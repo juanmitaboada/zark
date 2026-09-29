@@ -34,7 +34,7 @@ from lib import registry
 if TYPE_CHECKING:
     from lib.log import Log
 
-VERSION = "1.0.12"
+VERSION = "2.0.0-rc1"
 
 
 def now_utc_iso() -> str:
