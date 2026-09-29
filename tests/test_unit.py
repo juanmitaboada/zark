@@ -33,7 +33,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from contextlib import redirect_stdout
+from contextlib import AbstractContextManager, ExitStack, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -49,6 +49,7 @@ import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # 
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -59,14 +60,14 @@ from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E
 )
 from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
 from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
-    _UBUNTU_ROOT_CHILDREN_ALL,
+    RestorePlan,
+    RestoreRow,
     _abort_missing_keystore,
-    _apply_root_children_canmount,
-    _check_target_disk_size,
-    _detect_root_children,
-    _disk_size_bytes,
-    _emit_dataset_layout_warnings,
+    _check_sizes,
+    _choose_point,
     _force_latest_signed_alternative,
+    _plan,
+    _target_candidates,
 )
 from commands.repair_divergent import (  # pylint: disable=wrong-import-position # noqa: E402
     DOUBLE_CONFIRM_BYTES,
@@ -154,6 +155,10 @@ from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
     read_pool_label,
     resolve_disk,
 )
+from lib.initrd import (  # pylint: disable=wrong-import-position # noqa: E402
+    installed_kernels,
+    regenerate_initrd,
+)
 from lib.keystore import (  # pylint: disable=wrong-import-position # noqa: E402
     Keystore,
     open_keystore,
@@ -162,6 +167,12 @@ from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
 from lib.mount import (  # pylint: disable=wrong-import-position # noqa: E402
     find_system_root_dataset,
     mount_system_pools,
+)
+from lib.mount_props import (  # pylint: disable=wrong-import-position # noqa: E402
+    MountProps,
+    choose as choose_props,
+    parse_list_cache,
+    receive_options,
 )
 from lib.registry import (  # pylint: disable=wrong-import-position # noqa: E402
     RegistryError,
@@ -174,6 +185,12 @@ from lib.repair import (  # pylint: disable=wrong-import-position # noqa: E402
     DivergentDataset,
     find_divergent,
     is_divergence_error,
+)
+from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa: E402
+    Snap,
+    parse_snapshots,
+    resolve,
+    restore_points,
 )
 from lib.sanoid_retention import (  # pylint: disable=wrong-import-position # noqa: E402
     _retention_days_of_template,
@@ -2427,274 +2444,6 @@ syncoid [options]... SOURCE TARGET
         mock.on("syncoid --help").fails(self.HELP_2_3)  # rc!=0, output via stderr
         with patch_sh(mock):
             assert syncoid_exclude_flag() == "--exclude-datasets"
-
-
-# ═════════════════════════════════════════════════════════════════════════
-#  commands/recover.py — dataset layout detection
-# ═════════════════════════════════════════════════════════════════════════
-
-
-class TestRecoverDatasetLayout:
-    """
-    Tests for _apply_root_children_canmount and the missing/extra detection.
-
-    Covers three real scenarios:
-      - Full layout: every expected dataset exists (real Ubuntu installer).
-      - Reduced layout: only a subset exists (the QEMU integration test).
-      - Extended layout: source has datasets unknown to zark.
-    """
-
-    UBUNTU = "ubuntu_test01"
-
-    def _zfs_list_output(self, relative_children: list[str]) -> str:
-        """
-        Build the multi-line response zfs list returns. Includes the parent
-        itself (which _detect_root_children must filter out) plus each child
-        with the full prefix.
-        """
-        lines = [f"rpool/ROOT/{self.UBUNTU}"]
-        for ds in relative_children:
-            lines.append(f"rpool/ROOT/{self.UBUNTU}/{ds}")
-        return "\n".join(lines)
-
-    def _make_mock(self, children: list[str]) -> MockShell:
-        mock = MockShell()
-        # _detect_root_children's listing
-        mock.on(f"zfs list -H -o name -r rpool/ROOT/{self.UBUNTU}").succeeds(
-            self._zfs_list_output(children),
-        )
-        # Catch every `zfs set ... rpool/ROOT/<ubuntu>/<ds>` succeeding
-        mock.on_prefix("zfs set").succeeds()
-        return mock
-
-    def test_full_ubuntu_layout_no_drift(self):
-        """Real Ubuntu hardware: all 15 expected children present, no drift."""
-        all_children = sorted(_UBUNTU_ROOT_CHILDREN_ALL)
-        mock = self._make_mock(all_children)
-        with patch_sh(mock):
-            log = make_log()
-            zfs = ZFS(log)
-            missing, extra = _apply_root_children_canmount(self.UBUNTU, zfs, log)
-        assert missing == set()
-        assert extra == set()
-
-    def test_reduced_layout_reports_missing(self):
-        """QEMU test fixture: only a subset of the expected children exist."""
-        present = [
-            "usr",
-            "usr/local",
-            "var",
-            "var/lib",
-            "var/lib/dpkg",
-            "var/log",
-            "var/spool",
-            "srv",
-        ]
-        mock = self._make_mock(present)
-        with patch_sh(mock):
-            log = make_log()
-            zfs = ZFS(log)
-            missing, extra = _apply_root_children_canmount(self.UBUNTU, zfs, log)
-        # Things zark expected but the test fixture doesn't create:
-        assert "var/mail" in missing
-        assert "var/snap" in missing
-        assert "var/www" in missing
-        assert "var/games" in missing
-        assert "var/lib/apt" in missing
-        assert "var/lib/AccountsService" in missing
-        assert "var/lib/NetworkManager" in missing
-        # Things that ARE present must not be flagged missing:
-        for ds in present:
-            assert ds not in missing
-        assert extra == set()
-
-    def test_extended_layout_reports_extra(self):
-        """Custom system: source has datasets zark doesn't know about."""
-        actual = sorted(_UBUNTU_ROOT_CHILDREN_ALL) + ["opt", "srv/data"]
-        mock = self._make_mock(actual)
-        with patch_sh(mock):
-            log = make_log()
-            zfs = ZFS(log)
-            missing, extra = _apply_root_children_canmount(self.UBUNTU, zfs, log)
-        assert missing == set()
-        assert extra == {"opt", "srv/data"}
-
-    def test_only_intersection_receives_set(self):
-        """
-        zark must NOT issue `zfs set` against datasets it doesn't recognize,
-        even if they're present. Extras are reported but not modified.
-        """
-        actual = ["usr", "var", "var/lib", "opt", "srv/data"]
-        mock = self._make_mock(actual)
-        with patch_sh(mock):
-            log = make_log()
-            zfs = ZFS(log)
-            _apply_root_children_canmount(self.UBUNTU, zfs, log)
-        # The known intersection got `zfs set`:
-        assert mock.was_called(f"zfs set canmount=off rpool/ROOT/{self.UBUNTU}/usr")
-        assert mock.was_called(f"zfs set canmount=off rpool/ROOT/{self.UBUNTU}/var")
-        assert mock.was_called(f"zfs set canmount=on rpool/ROOT/{self.UBUNTU}/var/lib")
-        # The unknown extras did NOT:
-        assert mock.was_not_called(f"rpool/ROOT/{self.UBUNTU}/opt")
-        assert mock.was_not_called(f"rpool/ROOT/{self.UBUNTU}/srv/data")
-
-    def test_missing_datasets_not_set(self):
-        """A dataset zark expects but isn't present must not trigger `zfs set`."""
-        # Present: only usr and usr/local. Everything else missing.
-        actual = ["usr", "usr/local"]
-        mock = self._make_mock(actual)
-        with patch_sh(mock):
-            log = make_log()
-            zfs = ZFS(log)
-            _apply_root_children_canmount(self.UBUNTU, zfs, log)
-        # Should set on the two that exist:
-        assert mock.was_called(f"canmount=off rpool/ROOT/{self.UBUNTU}/usr")
-        assert mock.was_called(f"canmount=on rpool/ROOT/{self.UBUNTU}/usr/local")
-        # Should NOT have tried any of the absent ones:
-        for absent in ("var", "var/lib", "var/log", "srv"):
-            assert mock.was_not_called(f"rpool/ROOT/{self.UBUNTU}/{absent}")
-
-    def test_emit_warnings_skipped_when_no_drift(self):
-        """Empty missing + empty extra → no warnings emitted (capture stdout)."""
-        buf = StringIO()
-        with redirect_stdout(buf):
-            log = Log()  # writes to stdout via print
-            _emit_dataset_layout_warnings(self.UBUNTU, set(), set(), log)
-        assert "Missing" not in buf.getvalue()
-        assert "Extra" not in buf.getvalue()
-
-    def test_emit_warnings_lists_both(self):
-        """When both sets are non-empty, both sections are printed."""
-        buf = StringIO()
-        with redirect_stdout(buf):
-            log = Log()
-            _emit_dataset_layout_warnings(
-                self.UBUNTU,
-                {"var/mail", "var/snap"},
-                {"opt"},
-                log,
-            )
-        out = buf.getvalue()
-        assert "Missing" in out
-        assert "var/mail" in out
-        assert "var/snap" in out
-        assert "Extra" in out
-        assert "opt" in out
-
-    def test_detect_root_children_strips_prefix(self):
-        """_detect_root_children returns relative names, not full paths."""
-        mock = self._make_mock(["usr", "var/lib", "var/log"])
-        with patch_sh(mock):
-            children = _detect_root_children(self.UBUNTU)
-        # Relative names only
-        assert children == {"usr", "var/lib", "var/log"}
-        # Parent itself is excluded
-        assert f"rpool/ROOT/{self.UBUNTU}" not in children
-
-
-# ═════════════════════════════════════════════════════════════════════════
-#  commands/recover.py — preventive disk-size guard
-# ═════════════════════════════════════════════════════════════════════════
-
-
-class TestRecoverDiskSize:  # pylint: disable=missing-function-docstring
-    """Tests for _disk_size_bytes() and _check_target_disk_size()."""
-
-    def test_disk_size_bytes_ok(self):
-        mock = MockShell()
-        # 2 TB NVMe in raw bytes
-        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds("2000398934016")
-        with patch_sh(mock):
-            assert _disk_size_bytes("/dev/nvme0n1") == 2000398934016
-
-    def test_disk_size_bytes_failure(self):
-        mock = MockShell()
-        mock.on("lsblk -bdn -o SIZE /dev/missing").fails()
-        with patch_sh(mock):
-            assert _disk_size_bytes("/dev/missing") == 0
-
-    def test_disk_size_bytes_unparseable(self):
-        mock = MockShell()
-        mock.on("lsblk -bdn -o SIZE /dev/weird").succeeds("not-a-number")
-        with patch_sh(mock):
-            assert _disk_size_bytes("/dev/weird") == 0
-
-    def test_check_target_disk_size_passes_when_large_enough(self):
-        # Source uses 100 GiB; 5% overhead → threshold 105 GiB.
-        # Target is 200 GiB → fits.
-        mock, zfs = make_mock_zfs()
-        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(200 * 1024**3))
-        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(100 * 1024**3))
-        log = make_log()
-        with patch_sh(mock):
-            # No raise expected
-            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
-
-    def test_check_target_disk_size_fatal_when_too_small(self):
-        # Source uses 200 GiB; 5% overhead → threshold 210 GiB.
-        # Target is 100 GiB → fatal.
-        mock, zfs = make_mock_zfs()
-        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(100 * 1024**3))
-        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(200 * 1024**3))
-        log = make_log()
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch("builtins.input", return_value=""),
-        ):
-            try:
-                _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
-            except SystemExit:
-                return
-        raise AssertionError("Expected SystemExit from log.fatal()")
-
-    def test_check_target_disk_size_silent_when_lsblk_fails(self):
-        # Cannot measure target → defer silently to reactive handler
-        mock, zfs = make_mock_zfs()
-        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").fails()
-        log = make_log()
-        with patch_sh(mock):
-            # No raise even though the rpool used would dominate
-            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
-
-    def test_check_target_disk_size_silent_when_used_unknown(self):
-        # Cannot measure backup/rpool → defer silently
-        mock, zfs = make_mock_zfs()
-        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(100 * 1024**3))
-        mock.on("zfs list -H -p -o used backup/rpool").fails()
-        log = make_log()
-        with patch_sh(mock):
-            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
-
-    def test_check_target_disk_size_boundary_just_above(self):
-        # Exactly 5% above source.used → just passes
-        used = 100 * 1024**3
-        threshold = used * 105 // 100  # 105 GiB
-        mock, zfs = make_mock_zfs()
-        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(threshold))
-        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(used))
-        log = make_log()
-        with patch_sh(mock):
-            _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
-
-    def test_check_target_disk_size_boundary_just_below(self):
-        # One byte below threshold → fatal
-        used = 100 * 1024**3
-        threshold = used * 105 // 100
-        mock, zfs = make_mock_zfs()
-        mock.on("lsblk -bdn -o SIZE /dev/nvme0n1").succeeds(str(threshold - 1))
-        mock.on("zfs list -H -p -o used backup/rpool").succeeds(str(used))
-        log = make_log()
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch("builtins.input", return_value=""),
-        ):
-            try:
-                _check_target_disk_size("/dev/nvme0n1", "backup", log, zfs)
-            except SystemExit:
-                return
-        raise AssertionError("Expected SystemExit from log.fatal()")
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -5807,6 +5556,411 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
                 assert (d / "known_drives.json").read_text() == "{bad"
                 return
         raise AssertionError("expected SystemExit")
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  M1 recover: restore points, resolution, mount properties, sizes (fixture)
+# ═════════════════════════════════════════════════════════════════════════
+
+_MANIFEST = Path(__file__).parent / "fixtures" / "phase0-stick-manifest.txt"
+_BE = "ubuntu_g8v4da"
+
+
+def _manifest_snapshot_lines() -> list[str]:
+    """Snapshot lines in `zfs list -Hp -o name,guid,createtxg,creation` form."""
+    return [ln for ln in _MANIFEST.read_text().splitlines() if "@" in ln.split("\t")[0]]
+
+
+def _manifest_dataset_lines() -> list[tuple[str, str, str, str, str]]:
+    """(name, used, referenced, mountpoint, canmount) of the frozen stick."""
+    out = []
+    for ln in _MANIFEST.read_text().splitlines():
+        f = ln.split("\t")
+        if "@" not in f[0] and len(f) == 5:
+            out.append((f[0], f[1], f[2], f[3], f[4]))
+    return out
+
+
+def _stick_snaps() -> list[Snap]:
+    return [
+        s for s in parse_snapshots(_manifest_snapshot_lines(), "backup") if s.dataset != "keystore"
+    ]
+
+
+def _utc(p) -> str:
+    return datetime.fromtimestamp(p.label, UTC).strftime("%H:%M:%S")
+
+
+# Origin (eli) mount properties, as its zfs-list.cache would record them.
+_ELI_CACHE_RPOOL = "\n".join(
+    [
+        "rpool\tnone\toff",
+        "rpool/ROOT\tnone\toff",
+        f"rpool/ROOT/{_BE}\t/\ton",
+        f"rpool/ROOT/{_BE}/usr\t/usr\toff",
+        f"rpool/ROOT/{_BE}/var\t/var\toff",
+        f"rpool/ROOT/{_BE}/var/lib\t/var/lib\ton",
+        "rpool/USERDATA\tnone\toff",
+        "rpool/USERDATA/home_cgx8je\t/home\ton",
+        "rpool/USERDATA/root_cgx8je\t/root\ton",
+        "rpool/var\t/var\toff",
+        "rpool/var/lib\t/var/lib\toff",
+        "rpool/var/lib/docker\t/var/lib/docker\ton",
+    ],
+)
+_ELI_CACHE_BPOOL = f"bpool\tnone\toff\nbpool/BOOT\tnone\toff\nbpool/BOOT/{_BE}\t/boot\ton"
+
+
+class TestRestorePoints:  # pylint: disable=missing-function-docstring
+    """P0-8: points by creation, grouped per run, from the frozen stick."""
+
+    def test_four_points_ordered_by_creation(self):
+        points = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")
+        assert [_utc(p) for p in points] == ["15:52:42", "16:00:01", "16:12:50", "17:00:01"]
+        assert [p.family for p in points] == ["autosnap_", "autosnap_", "syncoid_eli_", "autosnap_"]
+
+    def test_default_is_the_newest(self):
+        points = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")
+        with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
+            assert _choose_point(points, make_log()) is points[-1]
+
+    def test_invalid_selection_asks_again(self):
+        points = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")
+        with (
+            patch("builtins.input", side_effect=["x", "9", "2"]),
+            redirect_stdout(StringIO()),
+        ):
+            assert _choose_point(points, make_log()) is points[1]
+
+    def test_resolution_of_the_1700_point(self):
+        snaps = _stick_snaps()
+        points = restore_points(snaps, f"rpool/ROOT/{_BE}")
+        datasets = sorted({s.dataset for s in snaps})
+        got = {ds: s.name if s else None for ds, s in resolve(points[-1], snaps, datasets).items()}
+        minimal = {
+            "rpool": "syncoid_eli_2026-09-28:18:12:48-GMT02:00",
+            "rpool/ROOT": "syncoid_eli_2026-09-28:18:12:49-GMT02:00",
+            "rpool/var": "syncoid_eli_2026-09-28:18:23:31-GMT02:00",
+            "rpool/var/lib": "syncoid_eli_2026-09-28:18:23:33-GMT02:00",
+            "rpool/var/lib/docker": "syncoid_eli_2026-09-28:18:23:34-GMT02:00",
+            "bpool": "syncoid_eli_2026-09-28:18:23:42-GMT02:00",
+        }
+        for ds, name in got.items():
+            assert name == minimal.get(ds, "autosnap_2026-09-28_17:00:01_hourly"), (ds, name)
+
+    def test_never_resolves_forward(self):
+        snaps = _stick_snaps()
+        points = restore_points(snaps, f"rpool/ROOT/{_BE}")
+        p1600 = points[1]
+        for ds, snap in resolve(p1600, snaps, sorted({s.dataset for s in snaps})).items():
+            assert snap is not None and snap.creation <= p1600.end, ds
+        got = resolve(p1600, snaps, ["rpool/var", "rpool/ROOT/" + _BE])
+        var, root = got["rpool/var"], got["rpool/ROOT/" + _BE]
+        assert var is not None and var.name.startswith("autosnap")
+        assert root is not None and root.name == "autosnap_2026-09-28_16:00:01_hourly"
+
+    def test_createtxg_across_datasets_is_not_time(self):
+        """On a destination createtxg is receive order: bpool/BOOT@16:00:01
+        has txg 452 but the syncoid run (txg 59) is 12 minutes newer."""
+        snaps = {(s.dataset, s.name): s for s in _stick_snaps()}
+        a = snaps[("bpool/BOOT", "autosnap_2026-09-28_16:00:01_hourly")]
+        b = snaps[(f"rpool/ROOT/{_BE}", "syncoid_eli_2026-09-28:18:12:50-GMT02:00")]
+        assert a.createtxg > b.createtxg and a.creation < b.creation
+
+    def test_dataset_without_earlier_snapshot_is_none(self):
+        snaps = [
+            Snap("rpool/ROOT/x", "autosnap_a", "1", 1, 100),
+            Snap("rpool/new", "autosnap_b", "2", 2, 900),
+        ]
+        (point,) = restore_points(snaps[:1], "rpool/ROOT/x")
+        assert resolve(point, snaps, ["rpool/new"])["rpool/new"] is None
+
+
+class TestMountProps:  # pylint: disable=missing-function-docstring
+    """D6/P0-11: where canmount/mountpoint come from, applied at receive."""
+
+    def test_cache_wins_over_layout(self):
+        cache = parse_list_cache(_ELI_CACHE_RPOOL)
+        props = choose_props("rpool/var", _BE, zark={}, cache=cache, empty_with_children=False)
+        assert props == MountProps("off", "/var", "cache")
+
+    def test_zark_props_win_over_cache(self):
+        cache = parse_list_cache(_ELI_CACHE_RPOOL)
+        zark = {"rpool/var": ("noauto", "/srv/var")}
+        props = choose_props("rpool/var", _BE, zark=zark, cache=cache, empty_with_children=False)
+        assert props.source == "zark" and props.canmount == "noauto"
+
+    def test_layout_for_boot_environment_children(self):
+        props = choose_props(
+            f"rpool/ROOT/{_BE}/usr", _BE, zark={}, cache={}, empty_with_children=True
+        )
+        assert props == MountProps("off", "/usr", "ubuntu")
+
+    def test_inference_for_unknown_trees(self):
+        top = choose_props("rpool/var", _BE, zark={}, cache={}, empty_with_children=True)
+        mid = choose_props("rpool/var/lib", _BE, zark={}, cache={}, empty_with_children=True)
+        leaf = choose_props(
+            "rpool/var/lib/docker", _BE, zark={}, cache={}, empty_with_children=False
+        )
+        assert (top.canmount, top.mountpoint, top.source) == ("off", "/var", "inferred")
+        assert (mid.canmount, mid.mountpoint) == ("off", "")
+        assert (leaf.canmount, leaf.mountpoint) == ("on", "")
+
+    def test_receive_options_keep_inheritance(self):
+        assert receive_options(MountProps("off", "/var", "cache"), "none", "var") == [
+            "-o canmount=off",
+            "-o mountpoint=/var",
+        ]
+        assert receive_options(MountProps("off", "/var/lib", "cache"), "/var", "lib") == [
+            "-o canmount=off",
+        ]
+        assert receive_options(MountProps("on", "/", "cache"), "none", _BE) == [
+            "-o canmount=on",
+            "-o mountpoint=/",
+        ]
+
+
+def _plan_mock(referenced: int = 1000) -> MockShell:
+    mock = MockShell()
+    types = [(d[0], "volume" if d[4] == "-" else "filesystem") for d in _manifest_dataset_lines()]
+    mock.on("zfs list -Hp -o name,type -r backup/rpool").succeeds(
+        "\n".join(f"{n}\t{t}" for n, t in types if n.startswith("backup/rpool")),
+    )
+    mock.on("zfs list -Hp -o name,type -r backup/bpool").succeeds(
+        "\n".join(f"{n}\t{t}" for n, t in types if n.startswith("backup/bpool")),
+    )
+    mock.on_prefix("zfs get -Hp -s local -o name,property,value org.zark").succeeds("")
+
+    def _refs(cmd: str) -> str:
+        return "\n".join(f"{n}\t{referenced}" for n in cmd.split()[6:])
+
+    mock.on("zfs list -Hp -t snapshot -o name,createtxg -s createtxg backup/keystore").succeeds(
+        "backup/keystore@prepare_20260928_182338\t430",
+    )
+    mock._refs = _refs  # type: ignore[attr-defined] # pylint: disable=protected-access
+    return mock
+
+
+def _run_plan(cache: bool, empty: dict[str, bool] | None = None) -> RestorePlan:
+    snaps = _stick_snaps()
+    point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
+    mock = _plan_mock()
+    probe = (_ELI_CACHE_RPOOL, _ELI_CACHE_BPOOL, "617fca2c") if cache else ("", "", "617fca2c")
+
+    def fake_referenced(names: list[str]) -> dict[str, int]:
+        return dict.fromkeys(names, 1000)
+
+    with (
+        patch_sh(mock),
+        patch.object(recover_mod, "_probe_be", return_value=probe),
+        patch.object(recover_mod, "_referenced", side_effect=fake_referenced),
+        patch.object(
+            recover_mod,
+            "_empty_root",
+            side_effect=lambda full: (empty or {}).get(full.split("@")[0], False),
+        ),
+    ):
+        return _plan("backup", "/dev/sdb1", _BE, point, snaps, make_log())
+
+
+class TestRecoverPlan:  # pylint: disable=missing-function-docstring
+    """Hallazgos 1/3 + P0-11 on the frozen stick, 17:00:01 point."""
+
+    def test_first_level_tree_is_restored_with_origin_properties(self):
+        plan = _run_plan(cache=True)
+        rows = {r.rel: r for r in plan.rows}
+        assert rows["rpool/var"].options == ["-o canmount=off", "-o mountpoint=/var"]
+        assert rows["rpool/var/lib"].options == ["-o canmount=off"]
+        assert rows["rpool/var/lib/docker"].options == ["-o canmount=on"]
+        assert rows["rpool/var/lib/docker"].effective == "/var/lib/docker"
+        assert rows[f"rpool/ROOT/{_BE}"].options == ["-o canmount=on", "-o mountpoint=/"]
+        assert rows[f"rpool/ROOT/{_BE}/var/lib"].effective == "/var/lib"
+        assert rows["rpool/USERDATA/home_cgx8je"].effective == "/home"
+        assert rows[f"bpool/BOOT/{_BE}"].options == ["-o canmount=on", "-o mountpoint=/boot"]
+        assert plan.keystore_snap == "backup/keystore@prepare_20260928_182338"
+        assert plan.hostid == "617fca2c"
+        assert not plan.skipped
+
+    def test_first_level_tree_without_cache_is_inferred(self):
+        plan = _run_plan(
+            cache=False,
+            empty={"backup/rpool/var": True, "backup/rpool/var/lib": True},
+        )
+        rows = {r.rel: r for r in plan.rows}
+        assert rows["rpool/var"].props is not None
+        assert rows["rpool/var"].props.source == "inferred"
+        assert rows["rpool/var"].options == ["-o canmount=off", "-o mountpoint=/var"]
+        assert rows["rpool/var/lib"].options == ["-o canmount=off"]
+        assert rows["rpool/var/lib/docker"].options == ["-o canmount=on"]
+        assert rows[f"rpool/ROOT/{_BE}/var"].options == ["-o canmount=off"]
+
+    def test_snapshots_and_keystore_resolution(self):
+        plan = _run_plan(cache=True)
+        rows = {r.rel: r for r in plan.rows}
+        assert rows["rpool/var/lib/docker"].snap is not None
+        assert rows["rpool/var/lib/docker"].snap.name.startswith("syncoid_eli_")
+        home = rows["rpool/USERDATA/home_cgx8je"].snap
+        assert home is not None
+        assert home.name == "autosnap_2026-09-28_17:00:01_hourly"
+        assert not any("keystore" in r for r in rows)  # keystore resolves on its own
+
+
+def _sized_plan(rpool: int, bpool: int, keystore: int = 16 * 1024**2) -> RestorePlan:
+    snap = Snap("rpool/ROOT/x", "a", "1", 1, 1)
+    rows = [
+        RestoreRow("rpool/ROOT/x", snap, referenced=rpool),
+        RestoreRow("bpool/BOOT/x", snap, referenced=bpool),
+    ]
+    point = restore_points([snap], "rpool/ROOT/x")[0]
+    return RestorePlan("backup", "/dev/sdb1", "x", point, rows, "backup/keystore@k", keystore)
+
+
+class TestRecoverSizeCheck:  # pylint: disable=missing-function-docstring
+    """Hallazgo 14: size of the chosen point, fail-closed (hallazgo 5 spirit)."""
+
+    @staticmethod
+    def _check(plan: RestorePlan, disk_bytes: str | None) -> bool:
+        mock = MockShell()
+        if disk_bytes is None:
+            mock.on("lsblk -bdn -o SIZE /dev/sda").fails()
+        else:
+            mock.on("lsblk -bdn -o SIZE /dev/sda").succeeds(disk_bytes)
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch("builtins.input", return_value=""),
+        ):
+            try:
+                _check_sizes(plan, "/dev/sda", make_log())
+            except SystemExit:
+                return False
+        return True
+
+    def test_point_that_fits(self):
+        assert self._check(_sized_plan(8 * 1024**3, 130 * 1024**2), str(476 * 1024**3))
+
+    def test_point_too_big(self):
+        assert not self._check(_sized_plan(470 * 1024**3, 130 * 1024**2), str(476 * 1024**3))
+
+    def test_bpool_too_big(self):
+        assert not self._check(_sized_plan(1024**3, 3 * 1024**3), str(476 * 1024**3))
+
+    def test_fail_closed_when_unmeasurable(self):
+        assert not self._check(_sized_plan(-1, 1), str(476 * 1024**3))
+        assert not self._check(_sized_plan(1, 1), None)
+
+
+class TestRecoverTargetDisks:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """Hallazgo 15: the live stick and the backup drive are never candidates."""
+
+    def test_candidates(self):
+        mock = MockShell()
+        mock.on("lsblk -dn -P -o NAME,TYPE,SIZE,MODEL,SERIAL,TRAN").succeeds(
+            'NAME="sda" TYPE="disk" SIZE="476.9G" MODEL="KINGSTON SKC600MS512G" '
+            'SERIAL="50026B7784FC3319" TRAN="sata"\n'
+            'NAME="sdb" TYPE="disk" SIZE="115.5G" MODEL="DT microDuo 3C" SERIAL="408D" TRAN="usb"\n'
+            'NAME="sdc" TYPE="disk" SIZE="231G" MODEL="DT microDuo 3C" SERIAL="1C1B" TRAN="usb"\n'
+            'NAME="zd0" TYPE="disk" SIZE="16M" MODEL="" SERIAL="" TRAN=""\n'
+            'NAME="loop0" TYPE="loop" SIZE="2G" MODEL="" SERIAL="" TRAN=""',
+        )
+        with (
+            patch_sh(mock),
+            patch.object(recover_mod, "protected_disks", return_value={"/dev/sdc": "/cdrom"}),
+        ):
+            cands = _target_candidates("/dev/sdb")
+        assert [c[0] for c in cands] == ["/dev/sda"]
+        assert "50026B7784FC3319" in cands[0][1]
+
+
+class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
+    """Hallazgo 15: nothing touches the internal disk before pre-flight + YES."""
+
+    def _run(self, answer: str, preflight_fails: bool = False) -> MockShell:
+        mock = MockShell()
+        snaps = _stick_snaps()
+        point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
+        plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [], "k@k", 1, "617fca2c")
+        drive = type("D", (), {"name": "backup", "drive_id": _KINGSTON_ID})()
+
+        def preflight(*_args: object) -> None:
+            if preflight_fails:
+                make_log().fatal("preflight")
+
+        patches: list[AbstractContextManager[object]] = [
+            patch_sh(mock),
+            patch.object(recover_mod.Cleanup, "register"),
+            patch.object(recover_mod, "_is_live_usb", return_value=True),
+            patch.object(recover_mod, "scan_connected_drives", return_value=[drive]),
+            patch.object(recover_mod, "select_drive", return_value=drive),
+            patch.object(recover_mod, "backup_device", return_value="/dev/sdb1"),
+            patch.object(ZFS, "import_backup_pool", return_value=True),
+            patch.object(recover_mod, "open_keystore", return_value=True),
+            patch.object(Keystore, "load_pool_keys", return_value=1),
+            patch.object(recover_mod.shutil, "copy2"),
+            patch.object(recover_mod.os, "chmod"),
+            patch.object(recover_mod, "whole_disk", return_value="/dev/sdb"),
+            patch.object(recover_mod, "_find_be", return_value=_BE),
+            patch.object(recover_mod, "_list_snapshots", return_value=snaps),
+            patch.object(recover_mod, "_choose_point", return_value=point),
+            patch.object(recover_mod, "_plan", return_value=plan),
+            patch.object(recover_mod, "_select_target", return_value="/dev/sda"),
+            patch.object(recover_mod, "_preflight", side_effect=preflight),
+            patch("builtins.input", return_value=answer),
+            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+            redirect_stdout(StringIO()),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            try:
+                recover_mod.run([])
+            except SystemExit:
+                pass
+        return mock
+
+    def test_no_wipe_when_not_confirmed(self):
+        mock = self._run("NO")
+        assert mock.was_not_called("wipefs")
+        assert mock.was_not_called("sgdisk")
+        assert mock.was_not_called("zpool destroy")
+
+    def test_no_wipe_when_preflight_fails(self):
+        mock = self._run("YES", preflight_fails=True)
+        assert mock.was_not_called("wipefs")
+
+
+class TestInitrd:  # pylint: disable=missing-function-docstring
+    """P0-7: only installed kernels; dracut failures are reported."""
+
+    @staticmethod
+    def _root() -> str:
+        root = Path(tempfile.mkdtemp())
+        (root / "boot").mkdir()
+        for v in ("7.0.0-31-generic", "7.0.0-34-generic"):
+            (root / f"boot/vmlinuz-{v}").write_text("")
+            (root / f"lib/modules/{v}").mkdir(parents=True)
+            (root / f"lib/modules/{v}/modules.dep").write_text("")
+        # Installer residue: live-ISO kernel modules dir without a vmlinuz.
+        (root / "lib/modules/7.0.0-14-generic").mkdir(parents=True)
+        (root / "lib/modules/7.0.0-14-generic/modules.dep").write_text("")
+        (root / "usr/bin").mkdir(parents=True)
+        (root / "usr/bin/dracut").write_text("")
+        return str(root)
+
+    def test_installed_kernels_skip_residue(self):
+        assert installed_kernels(self._root()) == ["7.0.0-31-generic", "7.0.0-34-generic"]
+
+    def test_dracut_per_kernel_and_failure_reported(self):
+        root = self._root()
+        mock = MockShell()
+        mock.on(f"cat {root}/etc/machine-id").fails()
+        mock.on(f"chroot {root} dracut --force --kver=7.0.0-31-generic").succeeds()
+        mock.on(f"chroot {root} dracut --force --kver=7.0.0-34-generic").fails(rc=1)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            failures = regenerate_initrd(root, make_log())
+        assert failures == ["dracut failed for 7.0.0-34-generic (rc=1)"]
+        assert mock.was_not_called("--regenerate-all")
+        assert mock.was_not_called("7.0.0-14")
 
 
 def main() -> int:

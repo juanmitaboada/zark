@@ -17,22 +17,32 @@ zark recover — Full bare-metal system recovery from backup drive.
 Must run from Ubuntu live USB with backup drive connected.
 
 CRITICAL RULES:
-  - ZERO 'zfs set mountpoint/canmount' while ANY pool with zvols is imported.
+  - ZERO 'zfs set mountpoint/canmount' while ANY pool with zvols is imported:
+    every restored dataset gets its canmount/mountpoint at receive time
+    (``zfs receive -u -o ...``), which sets them in the kernel with no
+    mount or unmount (lib/mount_props.py says where the values come from).
   - ZERO rapid pool export/import cycles (corrupts live USB overlay).
   - Keystore zvol (rpool/keystore) is restored LAST to avoid the kernel
     udev/systemd crash (chase.c:648).
+  - The backup pool is only ever imported read-only, device-exact, under
+    a private altroot (I-G).
+  - Nothing on the internal disk is touched before the full pre-flight
+    has passed and the operator typed YES.
 
 Recovery order:
-  1-5.   Find drive, import, unlock, sync hostid, select snapshot
+  1-2.   Find drive; import read-only by exact device; unlock keystore
+  3-4.   Choose restore point; resolve every dataset (never forward);
+         mount properties; hostid of the point; restore table
+  5.     Choose internal disk; pre-flight (sizes, keystore, bpool); YES
   6-7.   Partition disk, create bpool + rpool
-  8.     Raw send ROOT + USERDATA (no keystore = no zvols)
-  9.     Export backup pool (removes its zvols)
-  10.    Load keys from saved system.key
-  11.    Set mountpoints + canmount (safe: no zvols anywhere)
-  12.    Reimport backup pool:
+  8.     Raw send every rpool dataset of the point (no keystore = no zvols)
+  9.     Export backup pool, verified (removes its zvols)
+  10.    Load keys from saved system.key; restore encryptionroot
+  11.    bootfs
+  12.    Reimport backup pool (read-only):
            12a. Restore bpool content  (NO zvols on rpool yet — safe)
            12b. Restore keystore zvol  (adds zvol — LAST zfs operation)
-         Export backup pool.
+         Export backup pool, verified.
   13.    Mount system, write EFI/crypttab/fstab
   14.    Restore hostid to target
   15.    Chroot: cachefile, grub.cfg UUID fix, grub-install, initrd
@@ -43,15 +53,28 @@ import os
 import re
 import shutil
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
 from lib import apt_guard, grub_guard, sh
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config
-from lib.drives import scan_connected_drives, select_drive
-from lib.keystore import SYSTEM_KEY_PATH, Keystore
+from lib.drives import backup_device, scan_connected_drives, select_drive
+from lib.identity import protected_disks, whole_disk
+from lib.initrd import regenerate_initrd
+from lib.keystore import SYSTEM_KEY_PATH, Keystore, open_keystore
 from lib.log import Log
+from lib.mount_props import (
+    BPOOL_CONTAINERS,
+    CREATED_CONTAINERS,
+    MountProps,
+    choose,
+    effective_mountpoint,
+    parse_list_cache,
+    receive_options,
+)
+from lib.restore_points import Point, Snap, parse_snapshots, resolve, restore_points
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 # bpool features safe for GRUB 2.12 (Ubuntu 24.04 / initramfs-tools)
@@ -83,40 +106,16 @@ BPOOL_FEATURES_EXTENDED = "userobj_accounting project_quota spacemap_v2 log_spac
 
 
 RECOVER_MNT = "/mnt/recover"
+PROBE_MNT = "/run/zark/probe"
 TOTAL_STEPS = 16
 
-# Expected layout under rpool/ROOT/<ubuntu_name>/ in a stock Ubuntu ZFS install
-# (24.04 / 25.xx). Names are stored relative to the root dataset so they can be
-# compared against `zfs list` output without prefix juggling.
-#
-# The Ubuntu installer marks `usr` and `var` as canmount=off (they are pure
-# containers — their data lives in their children). All other expected children
-# are leaf datasets that get canmount=on so they auto-mount on boot.
-#
-# These two sets are also used to detect layout drift during recovery: missing
-# datasets (in the list but absent from the source) and extra datasets (present
-# in the source but unknown to zark) are reported as warnings at the end of the
-# run. zark only applies properties to datasets it recognises — extras keep
-# whatever properties the send/receive stream brought in.
-_UBUNTU_ROOT_CHILDREN_OFF = frozenset({"usr", "var"})
-_UBUNTU_ROOT_CHILDREN_ON = frozenset(
-    {
-        "usr/local",
-        "var/lib",
-        "var/log",
-        "var/mail",
-        "var/snap",
-        "var/spool",
-        "var/www",
-        "var/games",
-        "var/lib/apt",
-        "var/lib/dpkg",
-        "var/lib/AccountsService",
-        "var/lib/NetworkManager",
-        "srv",
-    },
-)
-_UBUNTU_ROOT_CHILDREN_ALL = _UBUNTU_ROOT_CHILDREN_OFF | _UBUNTU_ROOT_CHILDREN_ON
+# Partition layout written in step 6, in MiB before the rpool partition:
+# 1 MiB alignment + 1 GiB ESP + 2 GiB bpool + 8 GiB swap.
+_LAYOUT_BEFORE_RPOOL_MIB = 1 + 1024 + 2048 + 8192
+_BPOOL_PART_BYTES = 2 * 1024**3
+
+# Headroom on top of the restored data: ZFS metadata and slop space.
+_RECOVER_TARGET_OVERHEAD_PCT = 5
 
 
 def _force_latest_signed_alternative(
@@ -171,127 +170,6 @@ def _is_live_usb() -> bool:
     return sh.is_live_usb()
 
 
-# Free-space margin for the preventive disk-size check. The target NVMe
-# is wiped and freshly partitioned, but ~5% is consumed by the EFI System
-# Partition (1 GiB), bpool (2 GiB), swap (8 GiB) and ZFS pool metadata.
-# Using a flat 5% multiplier on src.used_bytes is a coarse but sufficient
-# approximation: the reactive ENOSPC handler in _raw_send catches anything
-# the preventive guard misses.
-_RECOVER_TARGET_OVERHEAD_PCT = 5  # added to src.used_bytes for the threshold
-
-
-def _disk_size_bytes(disk: str) -> int:
-    """Return the size of a block device in bytes, or 0 on failure.
-
-    Uses `lsblk -bdn -o SIZE` (bytes, no header, no children). Returns 0
-    if the device is missing, lsblk is unavailable, or the output cannot
-    be parsed — in which case the preventive check defers silently to
-    the reactive ENOSPC handler.
-    """
-    r = sh.run(f"lsblk -bdn -o SIZE {disk}")
-    if not r.ok:
-        return 0
-    try:
-        return int(r.output.strip())
-    except (ValueError, AttributeError):
-        return 0
-
-
-def _check_target_disk_size(
-    target_disk: str,
-    pool_name: str,
-    log: Log,
-    zfs: ZFS,
-) -> None:
-    """Refuse recovery if the target disk is too small for the backup data.
-
-    Compares the target NVMe's physical size against the backup's
-    rpool used_bytes plus a 5% overhead margin (EFI/bpool/swap/metadata).
-    If the target cannot fit even the bare data, fatal — recovery is
-    guaranteed to ENOSPC mid-stream and waste the operator's time.
-
-    Silently skipped if either size measurement returns 0 (transient
-    failure of lsblk or zfs list); the reactive _raw_send ENOSPC
-    handler will still catch in-flight exhaustion.
-    """
-    target_size = _disk_size_bytes(target_disk)
-    if target_size <= 0:
-        log.dbg(f"Could not measure {target_disk} size — skipping preventive check")
-        return
-
-    # The data we are going to copy is everything under {pool_name}/rpool.
-    # That's a dataset, not a pool, so we use `zfs list -p -o used`, not
-    # `zpool list`. used here includes all child datasets and snapshots
-    # (the recursive accounting that `zfs list` reports).
-    src_used = zfs.dataset_used_bytes(f"{pool_name}/rpool")
-    if src_used <= 0:
-        log.dbg(
-            f"Could not measure {pool_name}/rpool used_bytes — skipping preventive check",
-        )
-        return
-
-    threshold = src_used * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
-    if target_size < threshold:
-        log.fatal(
-            f"Target disk {target_disk} too small to fit backup",
-            causes=[
-                f"Backup {pool_name}/rpool: used={sh.humanize_bytes(src_used)}",
-                f"Target {target_disk}: {sh.humanize_bytes(target_size)}",
-                f"Required: ≥ {sh.humanize_bytes(threshold)} "
-                f"(used + {_RECOVER_TARGET_OVERHEAD_PCT}% overhead)",
-            ],
-            solutions=[
-                "Recover to a larger disk",
-                "Or shrink the backup by purging snapshots before recovery",
-            ],
-        )
-
-
-def _raw_send(src: str, dst: str, snap: str, log: Log) -> bool:
-    """Raw send a single dataset@snap to dst."""
-    r = sh.run(f"zfs list -H -o name -t snapshot {src}")
-    if not r.ok or not r.lines:
-        log.warn(f"No snapshots for {src}")
-        return False
-
-    best = None
-    for line in r.lines:
-        if f"@{snap}" in line:
-            best = line.strip()
-            break
-    if not best:
-        best = r.lines[-1].strip()
-
-    short_dst = dst.split("/", 1)[-1] if "/" in dst else dst
-    snap_name = best.split("@")[1] if "@" in best else best
-    log.info(f"  {short_dst} @ {snap_name}")
-
-    r = sh.run_pipe(f"zfs send -w {best}", f"zfs receive -F {dst}")
-    if r.ok:
-        log.dbg(f"  raw send OK: {dst}")
-        return True
-    # Reactive ENOSPC: ENOSPC during recover is always fatal — there is
-    # no point in continuing to subsequent datasets when the target is
-    # full; they will all fail the same way. The non-ENOSPC `return False`
-    # path below is preserved for genuinely optional dataset failures
-    # (callers at the rpool/ROOT/USERDATA loops use `_ = _raw_send(...)`
-    # to keep going on individual misses).
-    if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
-        log.fatal(
-            f"Recovery ran out of space while restoring {dst}",
-            causes=[
-                "Target disk filled up during raw send",
-                "Backup data exceeds target disk capacity (preventive check missed it)",
-            ],
-            solutions=[
-                "Recover to a larger disk",
-                "Or shrink the backup by purging snapshots before retry",
-            ],
-        )
-    log.warn(f"  raw send failed: {dst}: {r.stderr.strip()}")
-    return False
-
-
 def _load_keys_from_file(keyfile: str, pool_root: str, log: Log) -> int:
     """Load encryption keys for all datasets using a key file."""
     zfs = ZFS(log)
@@ -301,96 +179,6 @@ def _load_keys_from_file(keyfile: str, pool_root: str, log: Log) -> int:
             count += 1
             log.dbg(f"Key loaded: {ds}")
     return count
-
-
-def _bpool_send_recv(pool_name: str, ubuntu_name: str, log: Log, zfs: ZFS) -> bool:
-    """
-    Restore bpool/BOOT/{ubuntu_name} via send/receive — no mounting required.
-
-    This sidesteps all mountpoint issues (mountpoint=none, mountpoint=/boot, legacy)
-    by never trying to mount the backup bpool dataset at all.
-
-    SAFE WITH ZVOLS: 'zfs send | zfs receive' does NOT trigger udev device events
-    and does NOT require 'zfs set mountpoint'. It is safe to call while the backup
-    pool (with its keystore zvol) is imported.
-
-    The received dataset will have mountpoint=none (inherited from backup).
-    Caller MUST call _bpool_fix_mountpoint() AFTER exporting black (no zvols).
-
-    Both src and dst bpool use the same limited GRUB-compatible feature set,
-    so the receive stream is always compatible.
-    """
-    bpool_src = f"{pool_name}/bpool/BOOT/{ubuntu_name}"
-
-    if not zfs.dataset_exists(f"{pool_name}/bpool"):
-        log.warn("No bpool in backup — kernels will need reinstallation")
-        return False
-    if not zfs.dataset_exists(bpool_src):
-        log.warn(f"No {bpool_src} in backup — kernels will need reinstallation")
-        return False
-
-    # Find latest snapshot
-    bpool_snap = sh.run(f"zfs list -H -o name -t snapshot {bpool_src} | tail -1").output.strip()
-    if not bpool_snap:
-        log.warn(f"No snapshots in {bpool_src} — kernels will need reinstallation")
-        return False
-
-    log.dbg(f"bpool snapshot: {bpool_snap}")
-
-    # Create bpool/BOOT container — no zfs set, safe with zvols present
-    _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
-
-    # Send/receive — properties flow in the stream; mountpoint=none is expected
-    r = sh.run_pipe(
-        f"zfs send {bpool_snap}",
-        f"zfs receive -F bpool/BOOT/{ubuntu_name}",
-    )
-    if r.ok:
-        log.ok("bpool received via send/receive ✓")
-        return True
-    if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
-        # bpool ENOSPC during recover: fatal. Unlike backup, recover has
-        # no "stale data is better than nothing" tradeoff — the target
-        # bpool is freshly created and any partial data is unbootable.
-        log.fatal(
-            "Recovery ran out of space while restoring bpool",
-            causes=[
-                "Target disk filled up during bpool send/receive",
-                "Backup data exceeds target disk capacity (preventive check missed it)",
-            ],
-            solutions=[
-                "Recover to a larger disk",
-                "Or shrink the backup by purging snapshots before retry",
-            ],
-        )
-    log.warn(f"bpool send/receive failed: {r.stderr.strip()}")
-    return False
-
-
-def _bpool_fix_mountpoint(ubuntu_name: str, log: Log, zfs: ZFS) -> bool:
-    """
-    Set bpool/BOOT/{ubuntu_name} mountpoint to /boot and mount it.
-
-    PRECONDITION: No zvols active anywhere (safe to call zfs set).
-    Must be called AFTER the backup pool (black) has been exported.
-    """
-    ds = f"bpool/BOOT/{ubuntu_name}"
-    if not zfs.dataset_exists(ds):
-        log.warn(f"{ds} not found — bpool send/receive may have failed")
-        return False
-
-    _ = zfs.set_property(ds, "canmount", "on")
-    _ = zfs.set_property(ds, "mountpoint", "/boot")
-
-    # Mount — altroot (-R /mnt/recover) makes this land at /mnt/recover/boot
-    _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot")
-    if not sh.run(f"zfs mount {ds}").ok:
-        # Fallback: explicit path
-        _ = sh.run(f"mount -t zfs {ds} {RECOVER_MNT}/boot")
-
-    kernel_count = len(list(Path(f"{RECOVER_MNT}/boot").glob("vmlinuz*")))
-    log.ok(f"bpool mounted at {RECOVER_MNT}/boot ✓  ({kernel_count} kernel(s))")
-    return True
 
 
 def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
@@ -669,605 +457,416 @@ fi
     log.ok("initramfs-tools keystore module installed (hook + local-premount)")
 
 
-def _detect_root_children(ubuntu_name: str) -> set[str]:
-    """
-    List actual child datasets under rpool/ROOT/<ubuntu_name>/ as relative
-    names (e.g. "usr/local", "var/lib/apt"). Returns an empty set if the
-    parent dataset can't be listed.
-    """
-    prefix = f"rpool/ROOT/{ubuntu_name}/"
-    r = sh.run(f"zfs list -H -o name -r rpool/ROOT/{ubuntu_name}")
-    if not r.ok:
-        return set()
-    children: set[str] = set()
-    for line in r.output.splitlines():
-        name = line.strip()
-        if name and name.startswith(prefix):
-            children.add(name[len(prefix) :])
-    return children
+# ── Restore plan ─────────────────────────────────────────────────────────
 
 
-def _apply_root_children_canmount(
+@dataclass
+class RestoreRow:  # pylint: disable=too-many-instance-attributes
+    """One dataset of the restore table."""
+
+    rel: str  # dataset relative to the backup pool (rpool/var, bpool/BOOT/x)
+    snap: Snap | None  # resolved snapshot; None = not restored
+    referenced: int = 0
+    props: MountProps | None = None
+    options: list[str] = field(default_factory=list)
+    effective: str = ""  # effective mountpoint after receive
+    note: str = ""  # why the dataset is not restored
+
+    @property
+    def restored(self) -> bool:
+        """True when this dataset will be received."""
+        return self.snap is not None and not self.note
+
+
+@dataclass
+class RestorePlan:  # pylint: disable=too-many-instance-attributes
+    """Everything decided before the internal disk is touched."""
+
+    pool: str
+    device: str
+    be: str
+    point: Point
+    rows: list[RestoreRow]
+    keystore_snap: str
+    keystore_bytes: int
+    hostid: str = ""  # 8 hex digits, big-endian as zgenhostid expects
+
+    def row(self, rel: str) -> RestoreRow | None:
+        """Row of ``rel``, if any."""
+        return next((r for r in self.rows if r.rel == rel), None)
+
+    @property
+    def rpool_rows(self) -> list[RestoreRow]:
+        """Restored rows under rpool, parents first."""
+        return [r for r in self.rows if r.rel.startswith("rpool/") and r.restored]
+
+    @property
+    def skipped(self) -> list[RestoreRow]:
+        """Rows that will not be restored."""
+        return [r for r in self.rows if not r.restored]
+
+    @property
+    def rpool_bytes(self) -> int:
+        """Bytes received into rpool (datasets + keystore)."""
+        return sum(r.referenced for r in self.rpool_rows) + self.keystore_bytes
+
+    @property
+    def bpool_bytes(self) -> int:
+        """Bytes received into bpool."""
+        return sum(r.referenced for r in self.rows if r.rel.startswith("bpool/") and r.restored)
+
+
+def _find_be(pool: str) -> str:
+    """Boot environment name: the first child of <pool>/rpool/ROOT."""
+    for line in sh.run(f"zfs list -H -o name -r {pool}/rpool/ROOT").lines:
+        ds = line.strip()
+        if ds.count("/") == 3 and "@" not in ds:
+            return ds.split("/")[-1]
+    return ""
+
+
+def _list_snapshots(pool: str) -> list[Snap]:
+    snaps: list[Snap] = []
+    for root in (f"{pool}/rpool", f"{pool}/bpool"):
+        r = sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}")
+        if r.ok:
+            snaps += parse_snapshots(r.lines, pool)
+    return snaps
+
+
+def _list_datasets(pool: str) -> dict[str, str]:
+    """{relative name: type} under <pool>/rpool and <pool>/bpool."""
+    out: dict[str, str] = {}
+    for root in (f"{pool}/rpool", f"{pool}/bpool"):
+        r = sh.run(f"zfs list -Hp -o name,type -r {root}")
+        for line in r.lines if r.ok else []:
+            fields = line.split("\t")
+            if len(fields) == 2 and fields[0].startswith(f"{pool}/"):
+                out[fields[0][len(pool) + 1 :]] = fields[1]
+    return out
+
+
+def _zark_props(pool: str) -> dict[str, tuple[str, str]]:
+    """org.zark:canmount / org.zark:mountpoint recorded on the destination (M2+)."""
+    r = sh.run(
+        "zfs get -Hp -s local -o name,property,value "
+        + f"org.zark:canmount,org.zark:mountpoint -r {pool}/rpool {pool}/bpool",
+    )
+    found: dict[str, dict[str, str]] = {}
+    for line in r.lines if r.ok else []:
+        fields = line.split("\t")
+        if len(fields) == 3 and fields[0].startswith(f"{pool}/"):
+            found.setdefault(fields[0][len(pool) + 1 :], {})[fields[1]] = fields[2]
+    return {
+        ds: (p["org.zark:canmount"], p["org.zark:mountpoint"])
+        for ds, p in found.items()
+        if "org.zark:canmount" in p and "org.zark:mountpoint" in p
+    }
+
+
+def _referenced(snapshots: list[str]) -> dict[str, int]:
+    """``referenced`` in bytes of each full snapshot name."""
+    if not snapshots:
+        return {}
+    r = sh.run("zfs get -Hp -o name,value referenced " + " ".join(snapshots))
+    out: dict[str, int] = {}
+    for line in r.lines if r.ok else []:
+        fields = line.split("\t")
+        if len(fields) == 2 and fields[1].isdigit():
+            out[fields[0]] = int(fields[1])
+    return out
+
+
+def _mount_snapshot(full_snap: str) -> bool:
+    """Mount a snapshot read-only at PROBE_MNT (snapshots mount as legacy)."""
+    _ = sh.run(f"mkdir -p {PROBE_MNT}")
+    return sh.run(f"mount -t zfs -o ro {full_snap} {PROBE_MNT}").ok
+
+
+def _umount_probe() -> None:
+    _ = sh.run(f"umount {PROBE_MNT}")
+
+
+def _probe_be(full_snap: str, log: Log) -> tuple[str, str, str]:
+    """Read origin's zfs-list.cache files and hostid from the BE snapshot.
+
+    Returns ``(rpool cache text, bpool cache text, hostid hex)``, each
+    empty when absent. The snapshot is mounted read-only in a private
+    directory, never over ``/`` (hallazgo 9).
+    """
+    if not _mount_snapshot(full_snap):
+        log.warn(f"Could not mount {full_snap} to read origin metadata")
+        return "", "", ""
+    try:
+        root = Path(PROBE_MNT)
+        caches: list[str] = []
+        for pool in ("rpool", "bpool"):
+            f = root / "etc/zfs/zfs-list.cache" / pool
+            caches.append(f.read_text(encoding="utf-8") if f.is_file() else "")
+        hostid = ""
+        hf = root / "etc/hostid"
+        if hf.is_file():
+            raw = hf.read_bytes()
+            if len(raw) >= 4:
+                hostid = f"{int.from_bytes(raw[:4], 'little'):08x}"
+        return caches[0], caches[1], hostid
+    finally:
+        _umount_probe()
+
+
+def _empty_root(full_snap: str) -> bool | None:
+    """True when the snapshot's root directory has no entries; None if unreadable."""
+    if not _mount_snapshot(full_snap):
+        return None
+    try:
+        r = sh.run(f"find {PROBE_MNT} -mindepth 1 -maxdepth 1 -print -quit")
+        return r.ok and not r.output
+    finally:
+        _umount_probe()
+
+
+def _choose_point(points: list[Point], log: Log) -> Point:
+    options = []
+    for p in points:
+        kinds = sorted({s.name.split("_")[-1] for m in p.members.values() for s in m})
+        detail = "/".join(kinds) if p.family == "autosnap_" else f"{len(p.members)} datasets"
+        options.append(f"{p.label_utc()}  {p.family.rstrip('_')}  ({detail})")
+    idx = log.ask_choice("Restore point (newest is the default):", options, len(points) - 1)
+    return points[idx]
+
+
+def _plan(  # pylint: disable=too-many-locals,too-many-branches
+    pool: str,
+    device: str,
+    be: str,
+    point: Point,
+    snaps: list[Snap],
+    log: Log,
+) -> RestorePlan:
+    """Resolve every dataset for ``point`` and decide its mount properties."""
+    types = _list_datasets(pool)
+    wanted = [
+        ds
+        for ds in sorted(types)
+        if (ds.startswith("rpool/") and ds not in CREATED_CONTAINERS) or ds == f"bpool/BOOT/{be}"
+    ]
+    resolved = resolve(point, [s for s in snaps if s.dataset in wanted], wanted)
+
+    be_row_snap = resolved.get(f"rpool/ROOT/{be}")
+    cache_r, cache_b, hostid = ("", "", "")
+    if be_row_snap:
+        cache_r, cache_b, hostid = _probe_be(f"{pool}/rpool/ROOT/{be}@{be_row_snap.name}", log)
+    cache = {**parse_list_cache(cache_r), **parse_list_cache(cache_b)}
+    zark = _zark_props(pool)
+    children = {ds for ds in types for other in types if other.startswith(f"{ds}/")}
+
+    effective: dict[str, str] = {**CREATED_CONTAINERS, **BPOOL_CONTAINERS}
+    rows: list[RestoreRow] = []
+    for ds in wanted:
+        snap = resolved[ds]
+        row = RestoreRow(rel=ds, snap=snap)
+        parent = ds.rsplit("/", 1)[0]
+        leaf = ds.rsplit("/", 1)[-1]
+        if types[ds] == "volume":
+            row.note = "zvol (only the keystore zvol is restored)"
+        elif snap is None:
+            row.note = "no snapshot at or before this point"
+        elif parent not in effective:
+            row.note = f"parent {parent} is not restored"
+        if row.note:
+            rows.append(row)
+            continue
+        assert snap is not None
+        full = f"{pool}/{ds}@{snap.name}"
+        needs_probe = ds not in zark and ds not in cache and ds in children
+        empty = bool(needs_probe and _empty_root(full))
+        row.props = choose(ds, be, zark=zark, cache=cache, empty_with_children=empty)
+        row.options = receive_options(row.props, effective[parent], leaf)
+        row.effective = effective_mountpoint(row.props, effective[parent], leaf)
+        effective[ds] = row.effective
+        rows.append(row)
+
+    refs = _referenced([f"{pool}/{r.rel}@{r.snap.name}" for r in rows if r.restored and r.snap])
+    for r in rows:
+        if r.restored and r.snap:
+            r.referenced = refs.get(f"{pool}/{r.rel}@{r.snap.name}", -1)
+
+    ks = sh.run(f"zfs list -Hp -t snapshot -o name,createtxg -s createtxg {pool}/keystore")
+    ks_snap = ks.lines[-1].split("\t")[0] if ks.ok and ks.lines else ""
+    ks_bytes = _referenced([ks_snap]).get(ks_snap, -1) if ks_snap else -1
+    return RestorePlan(pool, device, be, point, rows, ks_snap, ks_bytes, hostid)
+
+
+def _fmt_delta(seconds: int) -> str:
+    """Signed offset from the point, e.g. ``-36m30s`` or ``0``."""
+    if seconds == 0:
+        return "0"
+    sign = "-" if seconds < 0 else "+"
+    m, sec = divmod(abs(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{sign}{h}h{m:02d}m" if h else f"{sign}{m}m{sec:02d}s"
+
+
+def _show_plan(plan: RestorePlan, log: Log) -> None:
+    """The restore table (hallazgo 3): what each dataset will be restored from."""
+    log.info(f"Restore point: {plan.point.label_utc()} ({plan.point.family.rstrip('_')})")
+    log.raw(f"  {'DATASET':44} {'SNAPSHOT':44} {'Δ POINT':>9} {'SIZE':>7}  MOUNT")
+    for r in plan.rows:
+        if not r.restored:
+            log.raw(f"  {log.Y}{r.rel:44} NOT RESTORED — {r.note}{log.N}")
+            continue
+        assert r.snap is not None and r.props is not None
+        delta = _fmt_delta(r.snap.creation - plan.point.label)
+        size = sh.humanize_bytes(r.referenced) if r.referenced >= 0 else "?"
+        mark = log.Y if r.props.source == "inferred" else ""
+        log.raw(
+            f"  {r.rel:44} {r.snap.name:44} {delta:>9} {size:>7}  "
+            + f"{mark}{r.props.canmount} {r.effective} [{r.props.source}]{log.N if mark else ''}",
+        )
+    log.raw(f"  {'keystore':44} {plan.keystore_snap.split('@')[-1]:44} (newest, independent)")
+
+
+def _disk_size_bytes(disk: str) -> int:
+    """Size of a block device in bytes, or 0 on failure."""
+    r = sh.run(f"lsblk -bdn -o SIZE {disk}")
+    try:
+        return int(r.output.strip()) if r.ok else 0
+    except ValueError:
+        return 0
+
+
+def _check_sizes(plan: RestorePlan, target_disk: str, log: Log) -> None:
+    """Hallazgo 14: size against the chosen point, fail-closed on any unknown."""
+    unknown = [r.rel for r in plan.rows if r.restored and r.referenced < 0]
+    if plan.keystore_bytes < 0:
+        unknown.append("keystore")
+    disk_bytes = _disk_size_bytes(target_disk)
+    if unknown or disk_bytes <= 0:
+        log.fatal(
+            "Cannot measure the restore size — refusing to erase the disk",
+            causes=[
+                *(f"referenced unknown for {u}" for u in unknown),
+                *([f"size of {target_disk} unknown"] if disk_bytes <= 0 else []),
+            ],
+        )
+    rpool_part = disk_bytes - _LAYOUT_BEFORE_RPOOL_MIB * 1024**2
+    need_r = plan.rpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
+    need_b = plan.bpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
+    log.info(
+        f"Restore size: rpool {sh.humanize_bytes(plan.rpool_bytes)} "
+        + f"(partition {sh.humanize_bytes(max(rpool_part, 0))}), "
+        + f"bpool {sh.humanize_bytes(plan.bpool_bytes)} (partition 2G)",
+    )
+    if need_r > rpool_part or need_b > _BPOOL_PART_BYTES:
+        log.fatal(
+            f"Target disk {target_disk} too small for this restore point",
+            causes=[
+                f"rpool data at this point: {sh.humanize_bytes(plan.rpool_bytes)} "
+                + f"(+{_RECOVER_TARGET_OVERHEAD_PCT}%)",
+                f"rpool partition: {sh.humanize_bytes(max(rpool_part, 0))}",
+                f"bpool data: {sh.humanize_bytes(plan.bpool_bytes)} vs 2G partition",
+            ],
+            solutions=["Recover to a larger disk"],
+        )
+
+
+def _target_candidates(backup_disk: str) -> list[tuple[str, str]]:
+    """(disk, label) of every disk recover may erase (hallazgo 15).
+
+    Excluded: the backup drive, any disk with a mounted filesystem, active
+    swap or an imported pool's vdev (the live USB mounts /cdrom), and
+    virtual devices.
+    """
+    protected = protected_disks()
+    r = sh.run("lsblk -dn -P -o NAME,TYPE,SIZE,MODEL,SERIAL,TRAN")
+    out: list[tuple[str, str]] = []
+    for line in r.lines if r.ok else []:
+        f = dict(re.findall(r'(\w+)="([^"]*)"', line))
+        name = f.get("NAME", "")
+        dev = f"/dev/{name}"
+        if f.get("TYPE") != "disk" or name.startswith(("zd", "loop", "sr", "zram", "ram")):
+            continue
+        if dev in (backup_disk, *protected):
+            continue
+        tran = f.get("TRAN", "")
+        warn = "  ⚠ USB" if tran == "usb" else ""
+        label = (
+            f"{dev}  {f.get('SIZE', '?')}  {f.get('MODEL', '').strip()}  "
+            + f"serial {f.get('SERIAL', '?')}  {tran}{warn}"
+        )
+        out.append((dev, label))
+    return out
+
+
+def _select_target(backup_disk: str, log: Log) -> str:
+    candidates = _target_candidates(backup_disk)
+    if not candidates:
+        log.fatal(
+            "No internal disk available to restore to",
+            causes=["Every disk is the backup drive, the live USB, or in use"],
+        )
+    idx = log.ask_choice("Internal disk to ERASE and restore to:", [c[1] for c in candidates])
+    return candidates[idx][0]
+
+
+def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
+    """Everything that can fail without the disk being erased (hallazgo 15)."""
+    tools = ("sgdisk", "mkfs.vfat", "cryptsetup", "zgenhostid", "partprobe")
+    missing = [t for t in tools if not sh.run(f"which {t}").ok]
+    if missing:
+        log.fatal(f"Missing tools in the live session: {' '.join(missing)}")
+    be_row = plan.row(f"rpool/ROOT/{plan.be}")
+    if be_row is None or not be_row.restored:
+        log.fatal("The boot environment has no snapshot at this point")
+    if not plan.keystore_snap:
+        _abort_missing_keystore("no_snapshot", plan.pool, log)
+    bpool_row = plan.row(f"bpool/BOOT/{plan.be}")
+    if bpool_row is None or not bpool_row.restored:
+        log.warn("No bpool snapshot at this point — kernels will need reinstallation")
+    _check_sizes(plan, target_disk, log)
+
+
+def _receive(src: str, dst: str, options: list[str], raw: bool, log: Log) -> bool:
+    """``zfs send [-w] src | zfs receive -u <options> dst``; ENOSPC is fatal."""
+    send = f"zfs send -w {src}" if raw else f"zfs send {src}"
+    recv = f"zfs receive -u {' '.join(options)} {dst}".replace("  ", " ")
+    log.info(f"  {dst} ← @{src.split('@', 1)[1]}")
+    r = sh.run_pipe(send, recv)
+    if r.ok:
+        return True
+    if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+        log.fatal(
+            f"Recovery ran out of space while restoring {dst}",
+            causes=["Target disk filled up during the receive"],
+            solutions=["Recover to a larger disk"],
+        )
+    log.error(f"  receive failed: {dst}: {r.stderr.strip()}")
+    return False
+
+
+def _export_verified(pool: str, log: Log) -> None:
+    """Export the backup pool and prove its zvols are gone (hallazgo 9)."""
+    _ = sh.run(f"zfs unload-key -r {pool}")
+    if not sh.run(f"zpool export {pool}", log=log).ok:
+        _ = sh.run(f"zpool export -f {pool}", log=log)
+    still = sh.run(f"zpool list {pool}").ok or sh.run(f"test -e /dev/zvol/{pool}").ok
+    if still:
+        log.fatal(
+            f"{pool} could not be exported — refusing to continue",
+            causes=["Its keystore zvol would stay present during the next steps"],
+            solutions=[f"Check: zpool status {pool}; fuser -vm /dev/zvol/{pool}/keystore"],
+        )
+    log.ok(f"{pool} exported — its zvols are gone")
+
+
+def _install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
+    internal_disk: str,
     ubuntu_name: str,
     zfs: ZFS,
-    log: Log,
-) -> tuple[set[str], set[str]]:
-    """
-    Apply canmount properties to root children that exist in the source system,
-    matching what the Ubuntu installer would set:
-
-      - usr, var               → canmount=off (containers)
-      - everything else known  → canmount=on  (leaf datasets)
-
-    Datasets present in zark's expected list but missing from the source are
-    silently skipped here (returned as `missing` for end-of-run reporting).
-    Datasets present in the source but unknown to zark are NOT touched — they
-    keep whatever properties the send/receive stream carried (returned as
-    `extra` for reporting).
-
-    Returns (missing, extra) — both are sets of relative dataset names.
-    """
-    del log  # log is only used for debugging inside this function, not for user-facing messages
-    actual = _detect_root_children(ubuntu_name)
-
-    missing = set(_UBUNTU_ROOT_CHILDREN_ALL - actual)
-    extra = actual - _UBUNTU_ROOT_CHILDREN_ALL
-
-    # Only operate on the intersection so we never log "dataset does not exist".
-    for ds in sorted(_UBUNTU_ROOT_CHILDREN_OFF & actual):
-        _ = zfs.set_property(f"rpool/ROOT/{ubuntu_name}/{ds}", "canmount", "off")
-    for ds in sorted(_UBUNTU_ROOT_CHILDREN_ON & actual):
-        _ = zfs.set_property(f"rpool/ROOT/{ubuntu_name}/{ds}", "canmount", "on")
-
-    return missing, extra
-
-
-def _emit_dataset_layout_warnings(
-    ubuntu_name: str,
-    missing: set[str],
-    extra: set[str],
+    cleanup: Cleanup,
     log: Log,
 ) -> None:
-    """
-    Emit a single end-of-run warning block describing layout drift between
-    the source system and zark's expected Ubuntu layout. No-op if both sets
-    are empty.
-    """
-    if not missing and not extra:
-        return
-
-    log.warn("Dataset layout differs from expected Ubuntu installer layout:")
-    if missing:
-        log.warn("  Missing (zark expected, not present in source):")
-        for ds in sorted(missing):
-            log.warn(f"    - rpool/ROOT/{ubuntu_name}/{ds}")
-    if extra:
-        log.warn("  Extra (present in source, unknown to zark):")
-        for ds in sorted(extra):
-            log.warn(f"    - rpool/ROOT/{ubuntu_name}/{ds}")
-        log.warn(
-            "  Extra datasets were restored via send/receive but their "
-            + "canmount/mountpoint properties were NOT modified by zark.",
-        )
-        log.warn("  Verify with: zfs list -o name,canmount,mountpoint rpool")
-
-
-def run(
-    args: list[str],
-):  # pylint: disable= too-many-statements, too-many-branches, too-many-locals
-    """Main entry point for 'zark recover'. See module docstring for details."""
-    del args  # no CLI args supported (yet)
-    log = Log()
-    cfg = Config.load()
-    cfg.check_registry(log, fatal=False)
-    zfs = ZFS(log)
-    cleanup = Cleanup(log)
-    cleanup.register()
-
-    recover_start = time.time()
-
-    log.banner(
-        f"FULL SYSTEM RECOVERY v{VERSION}",
-        "Run from Ubuntu live USB with backup drive connected",
-    )
-
-    uptime = sh.run("uptime -p").output or sh.run("cat /proc/uptime").output
-    log.info(f"System uptime: {uptime}")
-
-    # ── Verify live USB ──────────────────────────────────────────────────
-    if not _is_live_usb():
-        log.warn("NOT running from a live USB environment")
-        try:
-            confirm = input("  Type IUNDERSTAND to continue anyway: ").strip()
-        except EOFError:
-            confirm = ""
-        if confirm != "IUNDERSTAND":
-            return
-
-    if not sh.run("which syncoid").ok:
-        log.info("Installing required packages...")
-        _ = sh.run(
-            "apt-get install -y sanoid zfsutils-linux gdisk bc pv mbuffer lzop",
-            log=log,
-        )
-
-    # ── 1. Find backup drive ─────────────────────────────────────────────
-    log.step(1, TOTAL_STEPS, "Scanning for backup drives...")
-    drives = scan_connected_drives(cfg, log)
-    if not drives:
-        log.fatal("No backup drives detected")
-
-    drive = select_drive(drives, log, known_only=False)
-    if not drive:
-        return
-    pool_name = drive.name
-
-    # ── 2. Import and unlock backup pool ─────────────────────────────────
-    log.step(2, TOTAL_STEPS, f"Importing pool {pool_name}...")
-
-    if not zfs.pool_import(pool_name, no_mount=True):
-        log.fatal(f"Cannot import pool {pool_name}")
-
-    # Resolve the underlying device so the end-of-run prompt can offer
-    # an explicit eject of the USB backup drive. Purely a flush-window
-    # concern for the removable drive — never affects the internal disk
-    # we are restoring TO.
-    backup_device: str | None = None
-    if drive.drive_id and drive.drive_id != "<unknown>":
-        by_id = Path(f"/dev/disk/by-id/{drive.drive_id}")
-        if by_id.exists():
-            backup_device = str(by_id)
-
-    cleanup.track_pool(pool_name)
-
-    passphrase = log.ask_password(f"Passphrase for {pool_name}")
-    ks = Keystore(log)
-    if not ks.mount(pool_name, passphrase):
-        log.fatal("Cannot open keystore")
-    cleanup.track_keystore(ks)
-    _ = ks.load_pool_keys(f"{pool_name}/rpool")
-    log.ok("Encryption key loaded ✓")
-
-    # Save system.key to temp — survives pool exports, used throughout recovery
-    tmp_key = f"/tmp/zark_syskey_{os.getpid()}"
-    _ = shutil.copy2(SYSTEM_KEY_PATH, tmp_key)
-    os.chmod(tmp_key, 0o600)
-    log.dbg(f"Saved system.key to {tmp_key}")
-
-    # ── 3. Sync hostid from backup ───────────────────────────────────────
-    log.step(3, TOTAL_STEPS, "Syncing hostid from backup...")
-
-    root_ds = None
-    r = sh.run(f"zfs list -H -o name -r {pool_name}/rpool/ROOT")
-    for line in r.lines:
-        ds = line.strip()
-        if ds != f"{pool_name}/rpool/ROOT" and "@" not in ds and ds.count("/") == 3:
-            root_ds = ds
-            break
-    if not root_ds:
-        log.fatal("Cannot find root dataset in backup")
-
-    ubuntu_name = root_ds.split("/")[-1]
-    log.ok(f"Root dataset: {ubuntu_name}")
-
-    stored_mp = zfs.get_property(root_ds, "mountpoint")
-    log.dbg(f"Stored mountpoint: {stored_mp}")
-    if stored_mp and stored_mp not in ("none", "-"):
-        _ = sh.run(f"mkdir -p {stored_mp}")
-        r = sh.run(f"zfs mount {root_ds}")
-        if r.ok:
-            hostid_file = Path(stored_mp) / "etc/hostid"
-            if hostid_file.exists():
-                hostid_hex = sh.run(
-                    f"od -A n -t x1 {hostid_file} | tr -d ' \\n' | head -c 8",
-                ).output
-                if len(hostid_hex) == 8:
-                    hostid_be = (
-                        hostid_hex[6:8] + hostid_hex[4:6] + hostid_hex[2:4] + hostid_hex[0:2]
-                    )
-                    _ = sh.run(f"zgenhostid -f 0x{hostid_be}", log=log)
-                    log.ok(f"Hostid set to: {sh.run('hostid').output}")
-                else:
-                    log.warn("Hostid file unreadable — generating new")
-                    _ = sh.run("zgenhostid -f")
-            else:
-                log.warn("No /etc/hostid in backup — generating new one")
-                _ = sh.run("zgenhostid -f")
-            _ = sh.run(f"zfs umount {root_ds}")
-        else:
-            log.warn(f"Could not mount {root_ds} — generating new hostid")
-            _ = sh.run("zgenhostid -f")
-    else:
-        log.warn("Stored mountpoint is none — generating new hostid")
-        _ = sh.run("zgenhostid -f")
-
-    # ── 4. Select restore point ──────────────────────────────────────────
-    log.step(4, TOTAL_STEPS, "Available restore points...")
-    snap_names = zfs.unique_snap_names(f"{pool_name}/rpool")
-    if not snap_names:
-        log.fatal("No autosnap snapshots found on backup")
-
-    for i, name in enumerate(snap_names):
-        log.raw(f"  {log.W}{i + 1}{log.N}) {name}")
-    log.blank()
-    try:
-        sel = input(
-            f"    Select restore point (default: {len(snap_names)} = most recent): ",
-        ).strip()
-    except EOFError:
-        sel = ""
-    snap_idx = int(sel) if sel.isdigit() else len(snap_names)
-    chosen_snap = snap_names[snap_idx - 1]
-    log.ok(f"Restore point: {chosen_snap}")
-
-    # ── 5. Select internal disk ──────────────────────────────────────────
-    log.step(5, TOTAL_STEPS, "Selecting internal disk...")
-
-    backup_disk = ""
-    if drive.drive_id != "<unknown>":
-        bp = Path(f"/dev/disk/by-id/{drive.drive_id}")
-        if bp.exists():
-            backup_disk = str(bp.resolve()).rstrip("0123456789").rstrip("p")
-
-    candidates: list[str] = []
-    r = sh.run("lsblk -dn -o NAME,TYPE,SIZE,MODEL")
-    for line in r.lines:
-        parts = line.split(None, 3)
-        if len(parts) >= 2 and parts[1] == "disk":
-            dev = f"/dev/{parts[0]}"
-            if dev == backup_disk or parts[0].startswith("zd"):
-                continue
-            candidates.append(line.strip())
-
-    if not candidates:
-        log.fatal("No internal disks found")
-
-    log.info("Available internal disks:")
-    for i, c in enumerate(candidates):
-        log.raw(f"    {log.W}{i + 1}{log.N}) {c}")
-
-    if len(candidates) == 1:
-        internal_disk = f"/dev/{candidates[0].split()[0]}"
-        log.ok(f"Auto-selected: {internal_disk}")
-    else:
-        try:
-            sel = input(f"    Select disk [1-{len(candidates)}]: ").strip()
-        except EOFError:
-            sel = "1"
-        idx = int(sel) - 1 if sel.isdigit() else 0
-        internal_disk = f"/dev/{candidates[idx].split()[0]}"
-
-    # Preventive disk-size check: refuse if the selected disk is too
-    # small for the backup data. Runs BEFORE the YES confirmation so
-    # the operator does not commit to wiping a disk we know is too
-    # small. Silently defers to the reactive ENOSPC handler if either
-    # size measurement is unavailable.
-    _check_target_disk_size(internal_disk, pool_name, log, zfs)
-
-    log.blank()
-    log.warn(f"This will COMPLETELY ERASE {internal_disk}")
-    log.info(f"Restore point: {chosen_snap}")
-    log.info(f"Source pool:   {pool_name}")
-    try:
-        confirm = input("    Type YES to proceed: ").strip()
-    except EOFError:
-        confirm = ""
-    if confirm != "YES":
-        log.fatal("Aborted by user")
-
-    restore_start = time.time()
-
-    # ── 6. Cleanup + partition ───────────────────────────────────────────
-    log.step(6, TOTAL_STEPS, "Cleaning up and partitioning...")
-    for pool in ("rpool", "bpool"):
-        _ = sh.run(f"zpool export -f {pool}")
-        _ = sh.run(f"zpool destroy -f {pool}")
-    _ = sh.run(f"rm -rf {RECOVER_MNT}")
-    _ = sh.run(f"mkdir -p {RECOVER_MNT}")
-
-    _ = sh.run(f"wipefs -a {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk --zap-all {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n1:1M:+1G   -t1:EF00 {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n2:0:+2G    -t2:BE00 {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n3:0:+8G    -t3:8200 {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n4:0:0      -t4:BF00 {internal_disk}", log=log)
-    _ = sh.run(f"partprobe {internal_disk}")
-    _ = sh.run("sleep 3")
-
-    for i in range(1, 5):
-        if not Path(sh.part(internal_disk, i)).exists():
-            log.fatal(f"Partition {sh.part(internal_disk, i)} not created")
-        _ = sh.run(f"zpool labelclear -f {sh.part(internal_disk, i)}")
-    log.ok("Partitions created")
-
-    # ── 7. Create pools ──────────────────────────────────────────────────
-    log.step(7, TOTAL_STEPS, "Creating bpool + rpool...")
-
-    # Use only GRUB-safe features for bpool (compatible with GRUB 2.12+)
-    features = " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
-    r = sh.run(
-        f"zpool create -f -o ashift=12 -o autotrim=on -d {features} "
-        + "-O devices=off -O mountpoint=none -O canmount=off "
-        + "-O acltype=posixacl -O xattr=sa -O compression=lz4 -O normalization=formD "
-        + f"-R {RECOVER_MNT} bpool {sh.part(internal_disk, 2)}",
-        log=log,
-    )
-    if not r.ok:
-        log.fatal("Failed to create bpool")
-    cleanup.track_pool("bpool")
-    log.ok("bpool created")
-
-    r = sh.run(
-        "zpool create -f -o ashift=12 -o autotrim=on "
-        + "-O acltype=posixacl -O xattr=sa -O dnodesize=auto "
-        + "-O normalization=formD -O relatime=on "
-        + "-O canmount=off -O mountpoint=none -m none "
-        + "-O encryption=aes-256-gcm -O keyformat=raw "
-        + f"-O keylocation=file://{tmp_key} "
-        + f"-R {RECOVER_MNT} "
-        + f"rpool {sh.part(internal_disk, 4)}",
-        log=log,
-    )
-    if not r.ok:
-        log.fatal("Failed to create rpool container")
-    cleanup.track_pool("rpool")
-    # Set keylocation to standard Ubuntu path (used by dracut keystore module)
-    _ = sh.run("zfs set keylocation=file:///run/keystore/rpool/system.key rpool")
-    log.ok("rpool container created (encrypted, matching Ubuntu installer)")
-
-    # ── 8. Raw send ROOT + USERDATA (NO keystore = no zvols = safe) ──────
-    log.step(8, TOTAL_STEPS, "Restoring datasets via raw send (keystore deferred)...")
-
-    _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/ROOT", log=log)
-
-    if not _raw_send(
-        f"{pool_name}/rpool/ROOT/{ubuntu_name}",
-        f"rpool/ROOT/{ubuntu_name}",
-        chosen_snap,
-        log,
-    ):
-        log.fatal("Failed to raw send root dataset")
-
-    r = sh.run(f"zfs list -H -o name -r {pool_name}/rpool/ROOT/{ubuntu_name}")
-    for line in r.lines:
-        ds = line.strip()
-        if ds == f"{pool_name}/rpool/ROOT/{ubuntu_name}" or "@" in ds:
-            continue
-        rel = ds.replace(f"{pool_name}/rpool/ROOT/{ubuntu_name}/", "")
-        _ = _raw_send(ds, f"rpool/ROOT/{ubuntu_name}/{rel}", chosen_snap, log)
-    log.ok("ROOT datasets restored ✓")
-
-    if zfs.dataset_exists(f"{pool_name}/rpool/USERDATA"):
-        _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/USERDATA", log=log)
-        r = sh.run(f"zfs list -H -o name -r {pool_name}/rpool/USERDATA")
-        for line in r.lines:
-            ds = line.strip()
-            if ds == f"{pool_name}/rpool/USERDATA" or "@" in ds:
-                continue
-            rel = ds.replace(f"{pool_name}/rpool/USERDATA/", "")
-            _ = _raw_send(ds, f"rpool/USERDATA/{rel}", chosen_snap, log)
-        log.ok("USERDATA restored ✓")
-
-    # ── 9. Export backup pool (removes its zvols) ────────────────────────
-    log.step(9, TOTAL_STEPS, "Exporting backup pool (prevents kernel crash)...")
-    ks.umount()
-    _ = sh.run(f"zfs unload-key -r {pool_name}")
-    _ = sh.run(f"zpool export {pool_name}")
-    cleanup.untrack_pool(pool_name)
-    log.ok(f"{pool_name} exported — no zvols active")
-    log.dbg(f"zvol devices: {sh.run('ls /dev/zd* 2>/dev/null').output or 'none'}")
-
-    # ── 10. Load keys using saved system.key ─────────────────────────────
-    log.step(10, TOTAL_STEPS, "Loading encryption keys...")
-    loaded = _load_keys_from_file(tmp_key, "rpool", log)
-    log.ok(f"Loaded {loaded} key(s)")
-
-    # ── 10b. Restore encryption hierarchy (encryptionroot=rpool) ─────────
-    # Raw send/receive always breaks encryptionroot inheritance: each
-    # received dataset becomes its own encryptionroot.  The Ubuntu
-    # installer creates all datasets inheriting from rpool, so we must
-    # restore that relationship with `zfs change-key -i`.
-    log.info("Restoring encryption hierarchy (encryptionroot → rpool)...")
-    ds_list = sh.run("zfs list -H -o name,encryptionroot -r rpool").output
-    changed = 0
-    for line in ds_list.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 2:
-            continue
-        ds, eroot = parts
-        # Skip rpool itself, containers, and datasets already correct
-        if ds == "rpool" or eroot == "rpool" or eroot == "-":
-            continue
-        r = sh.run(f"zfs change-key -i {ds}")
-        if r.ok:
-            changed += 1
-            log.dbg(f"  change-key -i: {ds}")
-        else:
-            log.warn(f"  change-key -i failed: {ds}: {r.stderr.strip()}")
-    if changed:
-        log.ok(f"Encryption hierarchy restored ({changed} dataset(s) → encryptionroot=rpool) ✓")
-    else:
-        log.ok("Encryption hierarchy already correct ✓")
-
-    # ── 11. Set mountpoints + properties (safe: no zvols anywhere!) ──────
-    log.step(11, TOTAL_STEPS, "Setting mountpoints and properties...")
-
-    _ = zfs.set_property(f"rpool/ROOT/{ubuntu_name}", "mountpoint", "/")
-
-    # Apply canmount only to datasets that actually exist. Drift between
-    # zark's expected layout and the source system is collected here and
-    # reported as a single warning block at the end of the run.
-    layout_missing, layout_extra = _apply_root_children_canmount(
-        ubuntu_name,
-        zfs,
-        log,
-    )
-
-    home_ds = sh.run("zfs list -H -o name -r rpool/USERDATA | grep 'home_' | head -1").output
-    root_ds_u = sh.run("zfs list -H -o name -r rpool/USERDATA | grep 'root_' | head -1").output
-    if home_ds:
-        _ = zfs.set_property(home_ds, "mountpoint", "/home")
-    if root_ds_u:
-        _ = zfs.set_property(root_ds_u, "mountpoint", "/root")
-
-    _ = sh.run(f"zpool set bootfs=rpool/ROOT/{ubuntu_name} rpool")
-    log.ok("Mountpoints set ✓")
-
-    # ── 12. Reimport backup pool → bpool → keystore → export ─────────────
-    log.step(12, TOTAL_STEPS, "Reimporting backup pool for bpool + keystore restore...")
-
-    bpool_received = False
-
-    if not zfs.pool_import(pool_name, no_mount=True):
-        log.warn(f"Cannot reimport {pool_name}")
-        log.warn("bpool and keystore restore skipped — kernels need reinstallation")
-    else:
-        cleanup.track_pool(pool_name)
-
-        # Reload backup pool keys
-        bk_ks = Keystore(log)
-        if bk_ks.mount(pool_name, passphrase):
-            _ = bk_ks.load_pool_keys(f"{pool_name}/rpool")
-            bk_ks.umount()
-
-        # ── 12a. Send/receive bpool (safe with zvols — no zfs set, no mounting)
-        # The received dataset inherits mountpoint=none from the stream.
-        # Mountpoint is fixed in 12c, AFTER black is exported (no zvols).
-        log.info("Restoring bpool via send/receive (pre-keystore)...")
-        bpool_received = _bpool_send_recv(pool_name, ubuntu_name, log, zfs)
-
-        # ── 12b. Restore keystore zvol (LAST zfs op — adds zvol to rpool)
-        #
-        # If anything goes wrong here the recovered system would boot without
-        # a way to load its encryption key. Continuing silently in that state
-        # is unsafe, so we abort with a detailed explanation and let the user
-        # fix the backup before retrying. See _abort_missing_keystore() for
-        # the full rationale and the rejected fallback options.
-        if not zfs.dataset_exists(f"{pool_name}/keystore"):
-            _abort_missing_keystore("no_dataset", pool_name, log)
-
-        log.info("Restoring keystore zvol...")
-        ks_snap = sh.run(
-            f"zfs list -H -o name -t snapshot {pool_name}/keystore | tail -1",
-        ).output
-        if not ks_snap:
-            _abort_missing_keystore("no_snapshot", pool_name, log)
-
-        r = sh.run_pipe(
-            f"zfs send {ks_snap}",
-            "zfs receive -o encryption=off rpool/keystore",
-        )
-        if not r.ok:
-            log.error(f"Keystore restore failed: {r.stderr.strip()}")
-            if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
-                # Keystore is the very last dataset to receive (~12b). If
-                # ENOSPC fires here, the target disk is full despite the
-                # preventive check passing — bail with an ENOSPC-specific
-                # message rather than the generic "send_failed" causes.
-                log.fatal(
-                    "Recovery ran out of space while restoring keystore",
-                    causes=[
-                        "Target disk filled up during the final keystore send",
-                        "rpool data + keystore zvol exceed target disk capacity",
-                    ],
-                    solutions=[
-                        "Recover to a larger disk",
-                        "Or shrink the backup by purging snapshots before retry",
-                    ],
-                )
-            _abort_missing_keystore("send_failed", pool_name, log)
-        log.ok("rpool/keystore restored ✓")
-
-        log.info(f"Exporting backup pool {pool_name} (final)...")
-        _ = sh.run(f"zfs unload-key -r {pool_name}")
-        _ = sh.run(f"zpool export -f {pool_name}")
-        cleanup.untrack_pool(pool_name)
-        log.ok(f"{pool_name} exported — zvols removed")
-
-    log.dbg(
-        "zvol devices after step 12: " + f"{sh.run('ls /dev/zd* 2>/dev/null').output or 'none'}",
-    )
-
-    # ── 12c. Fix bpool mountpoint (safe: black is now exported, no zvols) ──
-    # MUST happen after black export. 'zfs set mountpoint' while any pool with
-    # zvols is imported causes the kernel udev crash (chase.c:648).
-    if bpool_received:
-        log.info("Fixing bpool mountpoint (post-export, no zvols active)...")
-        _ = _bpool_fix_mountpoint(ubuntu_name, log, zfs)
-
-    # ── 13. Mount system ─────────────────────────────────────────────────
-    log.step(13, TOTAL_STEPS, "Mounting system...")
-    _ = sh.run("zfs mount -a")
-
-    if not Path(f"{RECOVER_MNT}/usr/bin/bash").exists():
-        log.warn("Cannot see /usr/bin/bash — rpool mount may be incomplete")
-
-    mounted = sh.run(f"zfs mount | grep -c {RECOVER_MNT}").output
-    log.ok(f"System mounted at {RECOVER_MNT} ({mounted} datasets)")
-
-    # Format EFI partition
-    _ = sh.run(f"mkfs.vfat -F32 {sh.part(internal_disk, 1)}", log=log)
-    _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot/efi")
-    _ = sh.run(f"mount {sh.part(internal_disk, 1)} {RECOVER_MNT}/boot/efi")
-    cleanup.track_mount(f"{RECOVER_MNT}/boot/efi")
-
-    # crypttab — preserve existing lines, update swap only.
-    # NOTE: keystore-rpool is NOT in crypttab — it's handled by the dracut
-    # 89keystore module which opens it AFTER ZFS import (correct ordering).
-    # A crypttab entry would fail because the zvol doesn't exist yet when
-    # systemd-cryptsetup runs (before ZFS import).
-    crypttab_path = Path(f"{RECOVER_MNT}/etc/crypttab")
-    swap_uuid = sh.run(f"blkid -s PARTUUID -o value {sh.part(internal_disk, 3)}").output
-    if swap_uuid:
-        swap_line = (
-            f"dm_crypt-0 PARTUUID={swap_uuid} /dev/urandom "
-            "plain,swap,cipher=aes-xts-plain64,size=512,initramfs"
-        )
-        existing_lines: list[str] = []
-        if crypttab_path.exists():
-            for line in crypttab_path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#") and stripped.startswith("dm_crypt-0"):
-                    continue
-                # Remove any keystore-rpool entry (dracut module handles it)
-                if (
-                    stripped
-                    and not stripped.startswith("#")
-                    and stripped.startswith("keystore-rpool")
-                ):
-                    continue
-                existing_lines.append(line)
-        existing_lines.append(swap_line)
-        _ = crypttab_path.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
-        ks_handler = (
-            "dracut module"
-            if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists()
-            else "initramfs-tools hook"
-        )
-        log.ok(f"crypttab written (swap only — keystore handled by {ks_handler})")
-
-    # fstab EFI UUID
-    efi_uuid = sh.run(f"blkid -s UUID -o value {sh.part(internal_disk, 1)}").output
-    fstab = Path(f"{RECOVER_MNT}/etc/fstab")
-    if fstab.exists() and efi_uuid:
-        content = fstab.read_text(encoding="utf-8")
-        content = re.sub(
-            r"/dev/disk/by-uuid/[A-Fa-f0-9-]+\s+/boot/efi",
-            f"/dev/disk/by-uuid/{efi_uuid} /boot/efi",
-            content,
-            flags=re.IGNORECASE,
-        )
-        _ = fstab.write_text(content, encoding="utf-8")
-        log.ok(f"fstab EFI UUID updated: {efi_uuid}")
-
-    # ── 14. Restore hostid to target ─────────────────────────────────────
-    log.step(14, TOTAL_STEPS, "Restoring hostid to target...")
-    _ = sh.run(f"cp /etc/hostid {RECOVER_MNT}/etc/hostid")
-    log.ok(f"hostid: {sh.run('hostid').output}")
-
-    # ── 15. Chroot: cachefile, grub.cfg UUID fix, grub-install, initrd ───
-    log.step(15, TOTAL_STEPS, "Installing bootloader and regenerating initrd...")
-
+    """Chroot binds, zpool.cache, grub.cfg fix, signed GRUB/shim, keystore hook, guards."""
     # Bind mounts for chroot
     for d in ("proc", "sys", "dev", "dev/pts", "run"):
         _ = sh.run(f"mkdir -p {RECOVER_MNT}/{d}")
@@ -1444,21 +1043,387 @@ def run(
     # recovered system from half-applying while a backup drive is connected.
     apt_guard.install(target_root=RECOVER_MNT, log=log)
 
-    # Regenerate initrd
-    if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists():
-        log.info("Regenerating initrd (dracut)...")
-        machine_id = sh.run(f"cat {RECOVER_MNT}/etc/machine-id").output.strip()
-        if machine_id:
-            for kver in sh.run(f"ls {RECOVER_MNT}/lib/modules/").lines:
-                _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot/efi/{machine_id}/{kver.strip()}")
-        _ = sh.run(f"chroot {RECOVER_MNT} dracut --force --regenerate-all", log=log)
-        log.ok("initrd regenerated (dracut) ✓")
-    elif Path(f"{RECOVER_MNT}/usr/sbin/update-initramfs").exists():
-        log.info("Regenerating initrd (update-initramfs)...")
-        _ = sh.run(f"chroot {RECOVER_MNT} update-initramfs -u -k all", log=log)
-        log.ok("initrd regenerated ✓")
+
+def run(
+    args: list[str],
+):  # pylint: disable= too-many-statements, too-many-branches, too-many-locals
+    """Main entry point for 'zark recover'. See module docstring for details."""
+    del args  # no CLI args supported (yet)
+    log = Log()
+    cfg = Config.load()
+    cfg.check_registry(log, fatal=False)
+    zfs = ZFS(log)
+    cleanup = Cleanup(log)
+    cleanup.register()
+
+    recover_start = time.time()
+
+    log.banner(
+        f"FULL SYSTEM RECOVERY v{VERSION}",
+        "Run from Ubuntu live USB with backup drive connected",
+    )
+
+    uptime = sh.run("uptime -p").output or sh.run("cat /proc/uptime").output
+    log.info(f"System uptime: {uptime}")
+
+    # ── Verify live USB ──────────────────────────────────────────────────
+    if not _is_live_usb():
+        log.warn("NOT running from a live USB environment")
+        try:
+            confirm = input("  Type IUNDERSTAND to continue anyway: ").strip()
+        except EOFError:
+            confirm = ""
+        if confirm != "IUNDERSTAND":
+            return
+
+    if not sh.run("which syncoid").ok:
+        log.info("Installing required packages...")
+        _ = sh.run(
+            "apt-get install -y sanoid zfsutils-linux gdisk bc pv mbuffer lzop",
+            log=log,
+        )
+
+    # ── 1. Find backup drive ─────────────────────────────────────────────
+    log.step(1, TOTAL_STEPS, "Scanning for backup drives...")
+    drives = scan_connected_drives(cfg, log)
+    if not drives:
+        log.fatal("No backup drives detected")
+
+    drive = select_drive(drives, log, known_only=False)
+    if not drive:
+        return
+    pool_name = drive.name
+    device = backup_device(drive)
+    if not device:
+        log.fatal(f"Cannot locate the device of {pool_name} for a device-exact import")
+
+    # ── 2. Import (read-only) and unlock backup pool ─────────────────────
+    log.step(2, TOTAL_STEPS, f"Importing pool {pool_name} read-only...")
+    if not zfs.import_backup_pool(pool_name, device, readonly=True):
+        log.fatal(f"Cannot import pool {pool_name}")
+    cleanup.track_pool(pool_name)
+    backup_disk = whole_disk(device)
+
+    ks = Keystore(log)
+    if not open_keystore(ks, pool_name, log, readonly=True):
+        log.fatal("Cannot open keystore", causes=["Wrong passphrase (3 attempts)"])
+    cleanup.track_keystore(ks)
+    _ = ks.load_pool_keys(f"{pool_name}/rpool")
+    log.ok("Encryption key loaded ✓")
+
+    # Save system.key to temp — survives pool exports, used throughout recovery
+    tmp_key = f"/tmp/zark_syskey_{os.getpid()}"
+    _ = shutil.copy2(SYSTEM_KEY_PATH, tmp_key)
+    os.chmod(tmp_key, 0o600)
+    log.dbg(f"Saved system.key to {tmp_key}")
+
+    # ── 3. Select restore point ──────────────────────────────────────────
+    log.step(3, TOTAL_STEPS, "Available restore points...")
+    ubuntu_name = _find_be(pool_name)
+    if not ubuntu_name:
+        log.fatal("Cannot find root dataset in backup")
+    log.ok(f"Root dataset: {ubuntu_name}")
+    snaps = [s for s in _list_snapshots(pool_name) if s.dataset != "keystore"]
+    points = restore_points(snaps, f"rpool/ROOT/{ubuntu_name}")
+    if not points:
+        log.fatal("No restore point found on backup (no snapshot of the boot environment)")
+    point = _choose_point(points, log)
+
+    # ── 4. Restore plan: datasets, mount properties, hostid ──────────────
+    log.step(4, TOTAL_STEPS, "Resolving every dataset for this point...")
+    plan = _plan(pool_name, device, ubuntu_name, point, snaps, log)
+    _show_plan(plan, log)
+    if plan.hostid:
+        _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
+        log.ok(f"Hostid set to: {sh.run('hostid').output}")
     else:
-        log.warn("No initrd generator found — boot may fail")
+        log.warn("No /etc/hostid in the backup — generating a new one")
+        _ = sh.run("zgenhostid -f")
+
+    # ── 5. Select internal disk + pre-flight ─────────────────────────────
+    log.step(5, TOTAL_STEPS, "Selecting internal disk...")
+    internal_disk = _select_target(backup_disk, log)
+    _preflight(plan, internal_disk, log)
+
+    log.blank()
+    log.warn(f"This will COMPLETELY ERASE {internal_disk}")
+    log.info(f"Restore point: {point.label_utc()}")
+    log.info(f"Source pool:   {pool_name}")
+    if plan.skipped:
+        log.warn(f"{len(plan.skipped)} dataset(s) will NOT be restored (see table above)")
+    inferred = [r.rel for r in plan.rows if r.props and r.props.source == "inferred"]
+    if inferred:
+        log.warn(f"Mount properties inferred for: {', '.join(inferred)}")
+    try:
+        confirm = input("    Type YES to proceed: ").strip()
+    except EOFError:
+        confirm = ""
+    if confirm != "YES":
+        log.fatal("Aborted by user")
+
+    restore_start = time.time()
+    errors: list[str] = []
+
+    # ── 6. Cleanup + partition ───────────────────────────────────────────
+    log.step(6, TOTAL_STEPS, "Cleaning up and partitioning...")
+    for pool in ("rpool", "bpool"):
+        _ = sh.run(f"zpool export -f {pool}")
+        _ = sh.run(f"zpool destroy -f {pool}")
+    _ = sh.run(f"rm -rf {RECOVER_MNT}")
+    _ = sh.run(f"mkdir -p {RECOVER_MNT}")
+
+    _ = sh.run(f"wipefs -a {internal_disk}", log=log)
+    _ = sh.run(f"sgdisk --zap-all {internal_disk}", log=log)
+    _ = sh.run(f"sgdisk -n1:1M:+1G   -t1:EF00 {internal_disk}", log=log)
+    _ = sh.run(f"sgdisk -n2:0:+2G    -t2:BE00 {internal_disk}", log=log)
+    _ = sh.run(f"sgdisk -n3:0:+8G    -t3:8200 {internal_disk}", log=log)
+    _ = sh.run(f"sgdisk -n4:0:0      -t4:BF00 {internal_disk}", log=log)
+    _ = sh.run(f"partprobe {internal_disk}")
+    _ = sh.run("sleep 3")
+
+    for i in range(1, 5):
+        if not Path(sh.part(internal_disk, i)).exists():
+            log.fatal(f"Partition {sh.part(internal_disk, i)} not created")
+        _ = sh.run(f"zpool labelclear -f {sh.part(internal_disk, i)}")
+    log.ok("Partitions created")
+
+    # ── 7. Create pools ──────────────────────────────────────────────────
+    log.step(7, TOTAL_STEPS, "Creating bpool + rpool...")
+
+    # Use only GRUB-safe features for bpool (compatible with GRUB 2.12+)
+    features = " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
+    r = sh.run(
+        f"zpool create -f -o ashift=12 -o autotrim=on -d {features} "
+        + "-O devices=off -O mountpoint=none -O canmount=off "
+        + "-O acltype=posixacl -O xattr=sa -O compression=lz4 -O normalization=formD "
+        + f"-R {RECOVER_MNT} bpool {sh.part(internal_disk, 2)}",
+        log=log,
+    )
+    if not r.ok:
+        log.fatal("Failed to create bpool")
+    cleanup.track_pool("bpool")
+    log.ok("bpool created")
+
+    r = sh.run(
+        "zpool create -f -o ashift=12 -o autotrim=on "
+        + "-O acltype=posixacl -O xattr=sa -O dnodesize=auto "
+        + "-O normalization=formD -O relatime=on "
+        + "-O canmount=off -O mountpoint=none -m none "
+        + "-O encryption=aes-256-gcm -O keyformat=raw "
+        + f"-O keylocation=file://{tmp_key} "
+        + f"-R {RECOVER_MNT} "
+        + f"rpool {sh.part(internal_disk, 4)}",
+        log=log,
+    )
+    if not r.ok:
+        log.fatal("Failed to create rpool container")
+    cleanup.track_pool("rpool")
+    # Set keylocation to standard Ubuntu path (used by dracut keystore module)
+    _ = sh.run("zfs set keylocation=file:///run/keystore/rpool/system.key rpool")
+    log.ok("rpool container created (encrypted, matching Ubuntu installer)")
+
+    # ── 8. Raw send every rpool dataset (NO keystore = no zvols = safe) ──
+    log.step(8, TOTAL_STEPS, "Restoring datasets via raw send (keystore deferred)...")
+    _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/ROOT", log=log)
+    if any(r.rel.startswith("rpool/USERDATA/") for r in plan.rpool_rows):
+        _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/USERDATA", log=log)
+
+    be_ds = f"rpool/ROOT/{ubuntu_name}"
+    for row in plan.rpool_rows:
+        assert row.snap is not None
+        ok = _receive(
+            f"{pool_name}/{row.rel}@{row.snap.name}",
+            row.rel,
+            row.options,
+            raw=True,
+            log=log,
+        )
+        if not ok:
+            if row.rel == be_ds:
+                log.fatal("Failed to raw send root dataset")
+            errors.append(f"{row.rel}: receive failed")
+    log.ok(f"{len(plan.rpool_rows)} rpool dataset(s) restored ✓")
+
+    # ── 9. Export backup pool (removes its zvols) ────────────────────────
+    log.step(9, TOTAL_STEPS, "Exporting backup pool (prevents kernel crash)...")
+    ks.umount()
+    _export_verified(pool_name, log)
+    cleanup.untrack_pool(pool_name)
+
+    # ── 10. Load keys using saved system.key ─────────────────────────────
+    log.step(10, TOTAL_STEPS, "Loading encryption keys...")
+    loaded = _load_keys_from_file(tmp_key, "rpool", log)
+    log.ok(f"Loaded {loaded} key(s)")
+
+    # ── 10b. Restore encryption hierarchy (encryptionroot=rpool) ─────────
+    # Raw send/receive always breaks encryptionroot inheritance: each
+    # received dataset becomes its own encryptionroot.  The Ubuntu
+    # installer creates all datasets inheriting from rpool, so we must
+    # restore that relationship with `zfs change-key -i`.
+    log.info("Restoring encryption hierarchy (encryptionroot → rpool)...")
+    ds_list = sh.run("zfs list -H -o name,encryptionroot -r rpool").output
+    changed = 0
+    for line in ds_list.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        ds, eroot = parts
+        # Skip rpool itself, containers, and datasets already correct
+        if ds == "rpool" or eroot == "rpool" or eroot == "-":
+            continue
+        r = sh.run(f"zfs change-key -i {ds}")
+        if r.ok:
+            changed += 1
+            log.dbg(f"  change-key -i: {ds}")
+        else:
+            log.warn(f"  change-key -i failed: {ds}: {r.stderr.strip()}")
+    if changed:
+        log.ok(f"Encryption hierarchy restored ({changed} dataset(s) → encryptionroot=rpool) ✓")
+    else:
+        log.ok("Encryption hierarchy already correct ✓")
+
+    # ── 11. Boot filesystem (mount properties were set at receive) ───────
+    log.step(11, TOTAL_STEPS, "Setting bootfs...")
+    _ = sh.run(f"zpool set bootfs=rpool/ROOT/{ubuntu_name} rpool")
+    log.ok("bootfs set ✓")
+
+    # ── 12. Reimport backup pool → bpool → keystore → export ─────────────
+    # Neither bpool nor the keystore dataset is encrypted: no key is loaded.
+    log.step(12, TOTAL_STEPS, "Reimporting backup pool for bpool + keystore restore...")
+    if not zfs.import_backup_pool(pool_name, device, readonly=True):
+        log.fatal(
+            f"Cannot reimport {pool_name} to restore bpool and the keystore",
+            causes=["Without the keystore the recovered system cannot unlock rpool"],
+            solutions=["Reconnect the backup drive and run recover again"],
+        )
+    cleanup.track_pool(pool_name)
+
+    # ── 12a. bpool (no zvol on rpool yet; properties set at receive)
+    bpool_received = False
+    bpool_row = plan.row(f"bpool/BOOT/{ubuntu_name}")
+    if bpool_row is not None and bpool_row.restored and bpool_row.snap is not None:
+        _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
+        bpool_received = _receive(
+            f"{pool_name}/{bpool_row.rel}@{bpool_row.snap.name}",
+            bpool_row.rel,
+            bpool_row.options,
+            raw=False,
+            log=log,
+        )
+        if not bpool_received:
+            errors.append("bpool: receive failed — kernels need reinstallation")
+    else:
+        errors.append("bpool: not in backup at this point — kernels need reinstallation")
+
+    # ── 12b. Keystore zvol (LAST zfs op — adds zvol to rpool)
+    #
+    # If anything goes wrong here the recovered system would boot without
+    # a way to load its encryption key. Continuing silently in that state
+    # is unsafe, so we abort with a detailed explanation and let the user
+    # fix the backup before retrying. See _abort_missing_keystore() for
+    # the full rationale and the rejected fallback options.
+    log.info("Restoring keystore zvol...")
+    r = sh.run_pipe(
+        f"zfs send {plan.keystore_snap}",
+        "zfs receive -u -o encryption=off rpool/keystore",
+    )
+    if not r.ok:
+        log.error(f"Keystore restore failed: {r.stderr.strip()}")
+        if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
+            log.fatal(
+                "Recovery ran out of space while restoring keystore",
+                causes=["rpool data + keystore zvol exceed target disk capacity"],
+                solutions=["Recover to a larger disk"],
+            )
+        _abort_missing_keystore("send_failed", pool_name, log)
+    log.ok("rpool/keystore restored ✓")
+
+    log.info(f"Exporting backup pool {pool_name} (final)...")
+    _export_verified(pool_name, log)
+    cleanup.untrack_pool(pool_name)
+
+    # ── 12c. Mount bpool (its mountpoint came with the receive)
+    if bpool_received:
+        _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot")
+        if not sh.run(f"zfs mount bpool/BOOT/{ubuntu_name}", log=log).ok:
+            errors.append("bpool: could not be mounted at /boot")
+        kernel_count = len(list(Path(f"{RECOVER_MNT}/boot").glob("vmlinuz*")))
+        log.ok(f"bpool mounted at {RECOVER_MNT}/boot ✓  ({kernel_count} kernel(s))")
+
+    # ── 13. Mount system ─────────────────────────────────────────────────
+    log.step(13, TOTAL_STEPS, "Mounting system...")
+    _ = sh.run("zfs mount -a")
+
+    if not Path(f"{RECOVER_MNT}/usr/bin/bash").exists():
+        log.warn("Cannot see /usr/bin/bash — rpool mount may be incomplete")
+
+    mounted = sh.run(f"zfs mount | grep -c {RECOVER_MNT}").output
+    log.ok(f"System mounted at {RECOVER_MNT} ({mounted} datasets)")
+
+    # Format EFI partition
+    _ = sh.run(f"mkfs.vfat -F32 {sh.part(internal_disk, 1)}", log=log)
+    _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot/efi")
+    _ = sh.run(f"mount {sh.part(internal_disk, 1)} {RECOVER_MNT}/boot/efi")
+    cleanup.track_mount(f"{RECOVER_MNT}/boot/efi")
+
+    # crypttab — preserve existing lines, update swap only.
+    # NOTE: keystore-rpool is NOT in crypttab — it's handled by the dracut
+    # 89keystore module which opens it AFTER ZFS import (correct ordering).
+    # A crypttab entry would fail because the zvol doesn't exist yet when
+    # systemd-cryptsetup runs (before ZFS import).
+    crypttab_path = Path(f"{RECOVER_MNT}/etc/crypttab")
+    swap_uuid = sh.run(f"blkid -s PARTUUID -o value {sh.part(internal_disk, 3)}").output
+    if swap_uuid:
+        swap_line = (
+            f"dm_crypt-0 PARTUUID={swap_uuid} /dev/urandom "
+            "plain,swap,cipher=aes-xts-plain64,size=512,initramfs"
+        )
+        existing_lines: list[str] = []
+        if crypttab_path.exists():
+            for line in crypttab_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and stripped.startswith("dm_crypt-0"):
+                    continue
+                # Remove any keystore-rpool entry (dracut module handles it)
+                if (
+                    stripped
+                    and not stripped.startswith("#")
+                    and stripped.startswith("keystore-rpool")
+                ):
+                    continue
+                existing_lines.append(line)
+        existing_lines.append(swap_line)
+        _ = crypttab_path.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+        ks_handler = (
+            "dracut module"
+            if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists()
+            else "initramfs-tools hook"
+        )
+        log.ok(f"crypttab written (swap only — keystore handled by {ks_handler})")
+
+    # fstab EFI UUID
+    efi_uuid = sh.run(f"blkid -s UUID -o value {sh.part(internal_disk, 1)}").output
+    fstab = Path(f"{RECOVER_MNT}/etc/fstab")
+    if fstab.exists() and efi_uuid:
+        content = fstab.read_text(encoding="utf-8")
+        content = re.sub(
+            r"/dev/disk/by-uuid/[A-Fa-f0-9-]+\s+/boot/efi",
+            f"/dev/disk/by-uuid/{efi_uuid} /boot/efi",
+            content,
+            flags=re.IGNORECASE,
+        )
+        _ = fstab.write_text(content, encoding="utf-8")
+        log.ok(f"fstab EFI UUID updated: {efi_uuid}")
+
+    # ── 14. Restore hostid to target ─────────────────────────────────────
+    log.step(14, TOTAL_STEPS, "Restoring hostid to target...")
+    _ = sh.run(f"cp /etc/hostid {RECOVER_MNT}/etc/hostid")
+    log.ok(f"hostid: {sh.run('hostid').output}")
+
+    # ── 15. Chroot: cachefile, grub.cfg UUID fix, grub-install, initrd ───
+    log.step(15, TOTAL_STEPS, "Installing bootloader and regenerating initrd...")
+    _install_boot_chain(internal_disk, ubuntu_name, zfs, cleanup, log)
+    errors += regenerate_initrd(RECOVER_MNT, log)
 
     # ── 16. Cleanup and summary ──────────────────────────────────────────
     log.step(16, TOTAL_STEPS, "Cleanup...")
@@ -1472,33 +1437,38 @@ def run(
     restore_mins, restore_secs = divmod(int(restore_end - restore_start), 60)
     total_mins, total_secs = divmod(int(restore_end - recover_start), 60)
 
-    # Surface any dataset-layout drift from step 11 in a single block, right
-    # before the success banner so it isn't lost in the middle of the run.
-    _emit_dataset_layout_warnings(ubuntu_name, layout_missing, layout_extra, log)
-
-    log.banner_ok(
-        "RECOVERY COMPLETE",
-        [
-            f"Script version:  {log.W}zark v{VERSION}{log.N}",
-            f"Restored from:   {log.W}{pool_name}{log.N}",
-            f"Restore point:   {log.W}{chosen_snap}{log.N}",
-            f"Internal disk:   {log.W}{internal_disk}{log.N}",
-            f"Dataset restore: {log.W}{restore_mins}m {restore_secs}s{log.N}",
-            f"Total time:      {log.W}{total_mins}m {total_secs}s{log.N}",
-            "",
-            f"{log.W}Next steps:{log.N}",
-            "  1. Remove the live USB",
-            f"  2. {log.Y}Disconnect the backup drive{log.N}",
-            "  3. Reboot — enter your rpool passphrase at the prompt",
-            f"  {log.Y}⚠  If it drops to emergency shell on first boot:{log.N}",
-            f"     {log.W}zpool import rpool && exit{log.N}",
-            f"  4. Run: {log.W}sudo update-grub{log.N}  (regenerates grub.cfg)",
-            f"  5. Run: {log.W}sudo ./zark finish{log.N}",
-            "",
-            f"  {log.Y}If boot fails:{log.N} boot from live USB and run:",
-            f"     {log.W}sudo ./zark repair-boot{log.N}",
-        ],
-    )
+    summary = [
+        f"Script version:  {log.W}zark v{VERSION}{log.N}",
+        f"Restored from:   {log.W}{pool_name}{log.N}",
+        f"Restore point:   {log.W}{point.label_utc()}{log.N}",
+        f"Internal disk:   {log.W}{internal_disk}{log.N}",
+        f"Dataset restore: {log.W}{restore_mins}m {restore_secs}s{log.N}",
+        f"Total time:      {log.W}{total_mins}m {total_secs}s{log.N}",
+    ]
+    if plan.skipped:
+        summary += ["", f"{log.Y}Not restored:{log.N}"]
+        summary += [f"  • {r.rel} — {r.note}" for r in plan.skipped]
+    if errors:
+        summary += ["", f"{log.R}Errors:{log.N}"]
+        summary += [f"  • {e}" for e in errors]
+    summary += [
+        "",
+        f"{log.W}Next steps:{log.N}",
+        "  1. Remove the live USB",
+        f"  2. {log.Y}Disconnect the backup drive{log.N}",
+        "  3. Reboot — enter your rpool passphrase at the prompt",
+        f"  {log.Y}⚠  If it drops to emergency shell on first boot:{log.N}",
+        f"     {log.W}zpool import rpool && exit{log.N}",
+        f"  4. Run: {log.W}sudo update-grub{log.N}  (regenerates grub.cfg)",
+        f"  5. Run: {log.W}sudo ./zark finish{log.N}",
+        "",
+        f"  {log.Y}If boot fails:{log.N} boot from live USB and run:",
+        f"     {log.W}sudo ./zark repair-boot{log.N}",
+    ]
+    if errors:
+        log.banner_error("RECOVERY COMPLETED WITH ERRORS", summary)
+    else:
+        log.banner_ok("RECOVERY COMPLETE", summary)
 
     # By this point the backup pool has been exported (steps 9 and 12)
     # and any cleanup.run() exports have issued the kernel-side flush.
@@ -1506,7 +1476,7 @@ def run(
     # the next step in the printed instructions above is "remove live
     # USB and reboot", so the typical operator path is to disconnect.
     prompt_eject_or_attach(
-        backup_device,
+        device,
         pool_name,
         log,
         default_eject=True,
