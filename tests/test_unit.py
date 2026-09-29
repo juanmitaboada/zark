@@ -6008,6 +6008,8 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
             patch.object(repair_boot_mod, "regenerate_initrd", return_value=[]),
             patch.object(repair_boot_mod.grub_guard, "install"),
             patch.object(repair_boot_mod, "fix_grub_bpool_uuid"),
+            # write_zpool_cache mkdirs under /mnt/repair: unprivileged runs fail
+            patch.object(ZFS, "write_zpool_cache"),
             patch.object(repair_boot_mod.Path, "glob", return_value=[Path("vmlinuz-7")]),
             patch("lib.cleanup.Path.is_mount", return_value=True),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
