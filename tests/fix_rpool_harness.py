@@ -95,7 +95,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         note("export")
         return True
 
-    def fix(_zfs: ZFS, _log: Log) -> bool:
+    def fix(_zfs: ZFS, _log: Log, _turned_off: list[str]) -> bool:
         if kind == "sig":
             os.kill(os.getpid(), sigs[0])
         elif kind == "pending":

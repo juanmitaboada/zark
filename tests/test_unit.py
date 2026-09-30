@@ -6709,10 +6709,10 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
 
             real_fix = fix_rpool_mod._fix  # pylint: disable=protected-access
 
-            def fix(zfs: ZFS, log: Log) -> bool:
+            def fix(zfs: ZFS, log: Log, turned_off: list[str]) -> bool:
                 if during_fix:
                     during_fix()
-                return real_fix(zfs, log)
+                return real_fix(zfs, log, turned_off)
 
             rpool_props = iter(
                 [
@@ -6867,8 +6867,29 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
             "rpool/var/lib/docker\tcanmount\ton\tdefault",
         )
         with patch_sh(mock):
-            got = fix_rpool_mod._inheriting_from_rpool()  # pylint: disable=protected-access
+            got = fix_rpool_mod._inheriting_from_rpool(make_log())  # pylint: disable=protected-access
         assert got == [("rpool/var", "off"), ("rpool/var/lib/docker", "on")]
+
+    def test_the_inheritor_list_fails_closed(self):
+        # V-4: an empty list here used to read as "No other dataset inherits".
+        mock = MockShell()
+        mock.on_prefix("zfs get -H -r -t filesystem").fails("cannot open 'rpool'")
+        with patch_sh(mock), redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            try:
+                fix_rpool_mod._inheriting_from_rpool(make_log())  # pylint: disable=protected-access
+            except SystemExit:
+                return
+        raise AssertionError("a failed zfs get must be fatal")
+
+    def test_an_unknown_canmount_is_asked_about_as_on(self):
+        r = self._run(inheritors=(("rpool/x", "?"),), choices=("",), answer="unused")
+        assert "rpool/x has canmount=?" in r.out
+        assert r.code == 1 and r.mock.was_not_called("zfs set")
+
+    def test_the_verdict_lists_canmount_changes_when_the_mountpoint_fails(self):
+        r = self._run(inheritors=(("rpool/var", "on"),), choices=("2",), after=("none", "local"))
+        assert r.mock.was_called("zfs set canmount=off rpool/var")
+        assert "RPOOL MOUNTPOINT NOT FIXED" in r.out and "canmount=off: rpool/var" in r.out
 
     def test_inheritors_are_listed_with_their_canmount(self):
         r = self._run(inheritors=self._ELI_TREE, choices=("1", "rpool/var/lib/docker"))

@@ -89,12 +89,17 @@ def _props(dataset: str) -> dict[str, tuple[str, str]]:
     return props
 
 
-def _inheriting_from_rpool() -> list[tuple[str, str]]:
-    """(dataset, canmount) of the filesystems whose mountpoint is inherited from rpool."""
+def _inheriting_from_rpool(log: Log) -> list[tuple[str, str]]:
+    """(dataset, canmount) of the filesystems whose mountpoint is inherited from rpool.
+
+    Fails closed: without the list the operator cannot see what starts mounting.
+    """
     r = sh.run(
         "zfs get -H -r -t filesystem -o name,property,value,source mountpoint,canmount rpool"
     )
-    rows = [f for f in (line.split("\t") for line in (r.lines if r.ok else [])) if len(f) == 4]
+    if not r.ok:
+        log.fatal(f"Cannot list rpool's datasets: {r.stderr.strip()}")
+    rows = [f for f in (line.split("\t") for line in r.lines) if len(f) == 4]
     canmount = {f[0]: f[2] for f in rows if f[1] == "canmount"}
     return [
         (f[0], canmount.get(f[0], "?"))
@@ -103,14 +108,14 @@ def _inheriting_from_rpool() -> list[tuple[str, str]]:
     ]
 
 
-def _decide_canmount_on(log: Log, dataset: str, target: str) -> bool | None:
+def _decide_canmount_on(log: Log, dataset: str, canmount: str, target: str) -> bool | None:
     """Keep (True) or turn off (False) a dataset that will start mounting; None aborts."""
-    log.warn(f"{dataset} has canmount=on: from the next boot it mounts at {target},")
+    log.warn(f"{dataset} has canmount={canmount}: from the next boot it mounts at {target},")
     log.warn(f"  over whatever the boot environment keeps in {target}.")
     choice = log.ask_choice(
         f"What should happen to {dataset}?",
         [
-            f"Keep canmount=on — it mounts at {target}",
+            f"Keep canmount={canmount} — it mounts at {target}",
             "Set canmount=off — it never mounts",
             "Abort — change nothing",
         ],
@@ -130,7 +135,7 @@ def _decide_canmount_on(log: Log, dataset: str, target: str) -> bool | None:
 
 def _review_inheritors(log: Log) -> list[str] | None:
     """List what inherits from rpool; the canmount=on ones to turn off, None to abort."""
-    affected = _inheriting_from_rpool()
+    affected = _inheriting_from_rpool(log)
     targets = {ds: inherited(UBUNTU_RPOOL_MOUNTPOINT, ds[len("rpool/") :]) for ds, _ in affected}
     if affected:
         log.warn("These datasets inherit their mountpoint from rpool and will change:")
@@ -141,9 +146,10 @@ def _review_inheritors(log: Log) -> list[str] | None:
 
     turn_off: list[str] = []
     for ds, canmount in affected:
-        if canmount != "on":
+        # Anything but off/noauto (a missing row included) is asked about as on.
+        if canmount in ("off", "noauto"):
             continue
-        keep = _decide_canmount_on(log, ds, targets[ds])
+        keep = _decide_canmount_on(log, ds, canmount, targets[ds])
         if keep is None:
             return None
         if not keep:
@@ -151,8 +157,12 @@ def _review_inheritors(log: Log) -> list[str] | None:
     return turn_off
 
 
-def _fix(zfs: ZFS, log: Log) -> bool:
-    """Import, check, confirm and set. True when rpool ends with mountpoint=/."""
+def _fix(zfs: ZFS, log: Log, turned_off: list[str]) -> bool:
+    """Import, check, confirm and set. True when rpool ends with mountpoint=/.
+
+    Datasets set to canmount=off are appended to ``turned_off`` as they are
+    set, so the verdict lists them even when the mountpoint then fails.
+    """
     if not zfs.pool_import("rpool", altroot=ALTROOT, no_mount=True):
         log.fatal("Cannot import rpool — see messages above")
     zvols = sorted(glob.glob("/dev/zd*"))
@@ -195,6 +205,7 @@ def _fix(zfs: ZFS, log: Log) -> bool:
         if _props(ds).get("canmount", ("", ""))[0] != "off":
             log.error(f"{ds} is not canmount=off — rpool's mountpoint left unchanged")
             return False
+        turned_off.append(ds)
         log.ok(f"{ds} canmount=off ✓")
 
     r = sh.run(f"zfs set mountpoint={UBUNTU_RPOOL_MOUNTPOINT} rpool", log=log)
@@ -223,7 +234,13 @@ def run(args: list[str]) -> None:
             causes=["On the running system rpool's keystore zvol exists (chase.c:648)"],
         )
     if zfs.pool_exists("rpool"):
-        log.fatal("rpool is already imported — export it first (sudo zpool export rpool)")
+        log.fatal(
+            "rpool is already imported — refusing to start",
+            solutions=[
+                "Mounted with 'zark mount local': sudo ./zark umount local",
+                "Otherwise: sudo zpool export rpool",
+            ],
+        )
     _ = sh.run("modprobe zfs")
     if not ZVOL_INHIBIT.exists():
         log.fatal(f"{ZVOL_INHIBIT} not found — is the zfs module loaded?")
@@ -234,13 +251,15 @@ def run(args: list[str]) -> None:
             "zvol devices exist before rpool is imported — refusing to start",
             causes=[f"{', '.join(zvols)} of imported pool(s): {', '.join(pools) or 'unknown'}"],
             solutions=[
-                f"Export them first: sudo zpool export {' '.join(pools)}"
+                "A backup mounted with 'zark mount': sudo ./zark umount",
+                f"Otherwise: sudo zpool export {' '.join(pools)}"
                 if pools
-                else "Reboot the live USB and run this command before anything else",
+                else "Otherwise reboot the live USB and run this command first",
             ],
         )
 
     previous = ZVOL_INHIBIT.read_text(encoding="utf-8").strip()
+    turned_off: list[str] = []
     fixed = False
     exported = False
     handlers = {sig: signal.getsignal(sig) for sig in TEARDOWN_SIGNALS}
@@ -250,7 +269,7 @@ def run(args: list[str]) -> None:
     try:
         ZVOL_INHIBIT.write_text("1", encoding="utf-8")
         log.ok("zvol device creation inhibited (zvol_inhibit_dev=1)")
-        fixed = _fix(zfs, log)
+        fixed = _fix(zfs, log, turned_off)
     finally:
         # Nothing may cut the teardown short: a second Ctrl-C, a kill, a closed
         # terminal or a dead pipe. Ignored signals stay ignored in the zpool child too.
@@ -275,6 +294,7 @@ def run(args: list[str]) -> None:
     )
     lines = [
         mp_line,
+        *([f"canmount=off: {', '.join(turned_off)}"] if turned_off else []),
         export_line,
         "",
         "Next: remove the live USB and boot.",
