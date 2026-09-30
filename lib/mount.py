@@ -24,6 +24,7 @@ Used by:
 """
 
 from lib.cleanup import Cleanup
+from lib.identity import BY_ID_DIR
 from lib.keystore import KeystoreLike, open_keystore
 from lib.log import Log
 from lib.sh import run
@@ -92,7 +93,9 @@ def mount_system_pools(
     # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
     # ── Import rpool (no-mount) under altroot ─────────────────────────────
     if not zfs.pool_exists("rpool"):
-        if not zfs.pool_import("rpool", device=device, altroot=altroot, no_mount=True):
+        # Scanning by-id first makes the pool (and the zpool.cache written
+        # from it) record stable names instead of /dev/sdX.
+        if not zfs.pool_import("rpool", device=device or BY_ID_DIR, altroot=altroot, no_mount=True):
             log.error("Cannot import rpool (tried clean import and -f)")
             return None
         cleanup.track_pool("rpool")
@@ -144,7 +147,7 @@ def mount_system_pools(
 
     # ── Import + mount bpool (/boot) ──────────────────────────────────────
     if not zfs.pool_exists("bpool"):
-        if zfs.pool_import("bpool", altroot=altroot, no_mount=True):
+        if zfs.pool_import("bpool", device=BY_ID_DIR, altroot=altroot, no_mount=True):
             cleanup.track_pool("bpool")
         else:
             log.warn("Could not import bpool — /boot will be unavailable in the chroot")
@@ -190,3 +193,29 @@ def warn_rpool_mountpoint_lost(log: Log) -> None:
     log.info("  New datasets directly under rpool will not mount, and backup drives")
     log.info("  prepared from this system cannot be browsed with 'zark mount'.")
     log.info("  Fix it from a live USB: sudo ./zark fix-rpool-mountpoint")
+
+
+_STABLE_VDEV_PREFIXES = ("/dev/disk/", "/dev/mapper/")
+
+
+def kernel_named_vdevs(pools: tuple[str, ...] = ("rpool", "bpool")) -> list[str]:
+    """Vdev paths of the system pools that are kernel names (/dev/sdb4)."""
+    found: list[str] = []
+    for pool in pools:
+        r = run(f"zpool list -vHP {pool}")
+        for line in r.lines[1:] if r.ok else []:
+            path = line.strip().split("\t")[0]
+            if path.startswith("/dev/") and not path.startswith(_STABLE_VDEV_PREFIXES):
+                found.append(path)
+    return found
+
+
+def warn_kernel_named_vdevs(log: Log) -> None:
+    """Explain the boot risk of kernel-named vdevs and how to fix it, when it applies."""
+    paths = kernel_named_vdevs()
+    if not paths:
+        return
+    log.warn(f"rpool/bpool use kernel device names ({', '.join(paths)})")
+    log.info("  A USB disk plugged in at boot can take that name and stop the")
+    log.info("  pool import (emergency shell). Fix it from a live USB:")
+    log.info("  sudo ./zark repair-boot  (re-imports by /dev/disk/by-id, rewrites zpool.cache)")

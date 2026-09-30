@@ -304,6 +304,12 @@ for the canonical end-to-end sequences.
     drive paths or UUIDs that no longer match the current firmware
     layout.
 
+    The pools are imported by */dev/disk/by-id*, so the *zpool.cache* it
+    writes records stable device names. A system whose pools still record
+    kernel names (*/dev/sdb4*) can fail to boot when a USB disk plugged in
+    at power-on takes that name; **backup** and **finish** warn about it,
+    and one **repair-boot** fixes it.
+
 **chroot** \[*device*\]
 :   Open an interactive **chroot**(1) into the installed ZFS system from a
     live USB. Imports **rpool** and **bpool** under an alternate root,

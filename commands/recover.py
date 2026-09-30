@@ -67,7 +67,7 @@ from lib.backup_layout import (
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config
 from lib.drives import backup_device, scan_connected_drives, select_drive
-from lib.identity import protected_disks, whole_disk
+from lib.identity import BY_ID_DIR, by_id_names, preferred_by_id, protected_disks, whole_disk
 from lib.initrd import regenerate_initrd
 from lib.keystore import SYSTEM_KEY_PATH, Keystore, open_keystore
 from lib.log import Log
@@ -696,6 +696,23 @@ def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str) -> str:
     )
 
 
+def _stable_vdev(disk: str, n: int, log: Log) -> str:
+    """Partition ``n`` of ``disk`` by its /dev/disk/by-id name, for the pool vdev.
+
+    The vdev path is what zpool.cache and the labels record. A kernel name
+    (/dev/sda2) is taken by whatever enumerates first: a USB stick plugged
+    in at boot then gets it, and libzfs aborts the import on that device
+    (eli, 2026-09-30). Falls back to the kernel name, with a warning, when
+    the disk has no by-id name (e.g. a virtio disk without a serial).
+    """
+    by_id = preferred_by_id(by_id_names(disk))
+    path = f"{BY_ID_DIR}/{by_id}-part{n}" if by_id else ""
+    if path and Path(path).exists():
+        return path
+    log.warn(f"No /dev/disk/by-id name for {sh.part(disk, n)} — the pool will record a kernel name")
+    return sh.part(disk, n)
+
+
 def _fmt_delta(seconds: int) -> str:
     """Signed offset from the point, e.g. ``-36m30s`` or ``0``."""
     if seconds == 0:
@@ -1219,6 +1236,7 @@ def run(
     _ = sh.run(f"sgdisk -n4:0:0      -t4:BF00 {internal_disk}", log=log)
     _ = sh.run(f"partprobe {internal_disk}")
     _ = sh.run("sleep 3")
+    _ = sh.run("udevadm settle --timeout=10")  # by-id -partN links come from udev
 
     for i in range(1, 5):
         if not Path(sh.part(internal_disk, i)).exists():
@@ -1229,13 +1247,17 @@ def run(
     # ── 7. Create pools ──────────────────────────────────────────────────
     log.step(7, TOTAL_STEPS, "Creating bpool + rpool...")
 
+    bpool_vdev = _stable_vdev(internal_disk, 2, log)
+    rpool_vdev = _stable_vdev(internal_disk, 4, log)
+    log.info(f"Pool devices: bpool {bpool_vdev}, rpool {rpool_vdev}")
+
     # Use only GRUB-safe features for bpool (compatible with GRUB 2.12+)
     features = " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
     r = sh.run(
         f"zpool create -f -o ashift=12 -o autotrim=on -d {features} "
         + "-O devices=off -O mountpoint=none -O canmount=off "
         + "-O acltype=posixacl -O xattr=sa -O compression=lz4 -O normalization=formD "
-        + f"-R {RECOVER_MNT} bpool {sh.part(internal_disk, 2)}",
+        + f"-R {RECOVER_MNT} bpool {bpool_vdev}",
         log=log,
     )
     if not r.ok:
@@ -1249,9 +1271,7 @@ def run(
     root_dir = Path(f"{RECOVER_MNT}{plan.rpool_mountpoint}")
     if root_dir.is_dir() and any(root_dir.iterdir()):
         log.fatal(f"{root_dir} is not empty — zpool create would refuse rpool's mountpoint")
-    r = sh.run(
-        _rpool_create_cmd(plan.rpool_mountpoint, tmp_key, sh.part(internal_disk, 4)), log=log
-    )
+    r = sh.run(_rpool_create_cmd(plan.rpool_mountpoint, tmp_key, rpool_vdev), log=log)
     if not r.ok:
         log.fatal("Failed to create rpool container")
     cleanup.track_pool("rpool")

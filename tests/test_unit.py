@@ -173,6 +173,7 @@ from lib.keystore import (  # pylint: disable=wrong-import-position # noqa: E402
 from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
 from lib.mount import (  # pylint: disable=wrong-import-position # noqa: E402
     find_system_root_dataset,
+    kernel_named_vdevs,
     mount_system_pools,
     rpool_mountpoint_lost,
 )
@@ -4773,9 +4774,10 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
         # Neither pool imported yet.
         mock.on("zpool list rpool").fails()
         mock.on("zpool list bpool").fails()
-        # Imports succeed (clean, no -f needed).
-        mock.on("zpool import -N -R /mnt/zark/chroot rpool").succeeds()
-        mock.on("zpool import -N -R /mnt/zark/chroot bpool").succeeds()
+        # Imports succeed (clean, no -f needed), scanning by-id first so the
+        # pools record stable device names (eli 2026-09-30).
+        mock.on("zpool import -N -R /mnt/zark/chroot -d /dev/disk/by-id rpool").succeeds()
+        mock.on("zpool import -N -R /mnt/zark/chroot -d /dev/disk/by-id bpool").succeeds()
         # Root dataset discovery + mounts.
         mock.on("zfs list -H -o name -r rpool/ROOT").succeeds(
             "rpool/ROOT\nrpool/ROOT/ubuntu_x\n",
@@ -4811,8 +4813,11 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
             )
         assert res == ("/mnt/zark/chroot", "ubuntu_x")
         # Both pools were imported (and thus tracked for clean export).
-        assert mock.was_called("zpool import -N -R /mnt/zark/chroot rpool")
-        assert mock.was_called("zpool import -N -R /mnt/zark/chroot bpool")
+        imports = [c for c in mock.calls if c.startswith("zpool import")]
+        assert imports == [
+            "zpool import -N -R /mnt/zark/chroot -d /dev/disk/by-id rpool",
+            "zpool import -N -R /mnt/zark/chroot -d /dev/disk/by-id bpool",
+        ]
         # Keystore zvol must never be mounted as a filesystem.
         assert not mock.was_called("zfs mount rpool/keystore")
         # The helper must never touch mountpoint properties (project rule #1).
@@ -6566,6 +6571,44 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         # `zfs unmount -a` would also hit the running system's datasets.
         src = Path(umount_mod.__file__).read_text(encoding="utf-8")
         assert 'sh.run("zfs unmount -a")' not in src.split("def run(")[1]
+
+
+class TestStableVdevs:  # pylint: disable=missing-function-docstring
+    """eli 2026-09-30: kernel-named vdevs broke the boot with a USB stick plugged in."""
+
+    @staticmethod
+    def _vdev(links: str, exists: bool) -> tuple[str, str]:
+        mock = MockShell()
+        mock.on_prefix("find /dev/disk/by-id/").succeeds(links)
+        buf = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(recover_mod.Path, "exists", return_value=exists),
+            redirect_stdout(buf),
+        ):
+            path = recover_mod._stable_vdev("/dev/sda", 4, make_log())  # pylint: disable=protected-access
+        return path, buf.getvalue()
+
+    def test_pools_are_created_on_the_by_id_partition(self):
+        links = (
+            "ata-KINGSTON_SKC600MS512G_50026B7784FC3319\t../../sda\n"
+            "wwn-0x50026b7784fc3319\t../../sda\n"
+            "ata-KINGSTON_SKC600MS512G_50026B7784FC3319-part4\t../../sda4\n"
+        )
+        path, _ = self._vdev(links, exists=True)
+        assert path == "/dev/disk/by-id/ata-KINGSTON_SKC600MS512G_50026B7784FC3319-part4"
+
+    def test_falls_back_to_the_kernel_name_with_a_warning(self):
+        path, out = self._vdev("", exists=False)
+        assert path == "/dev/sda4"
+        assert "kernel name" in out
+
+    def test_kernel_named_vdevs_are_detected(self):
+        mock = MockShell()
+        mock.on("zpool list -vHP rpool").succeeds("rpool\t464G\n\t/dev/sdb4\t464G")
+        mock.on("zpool list -vHP bpool").succeeds("bpool\t2G\n\t/dev/disk/by-id/ata-X-part2\t2G")
+        with patch_sh(mock):
+            assert kernel_named_vdevs() == ["/dev/sdb4"]
 
 
 def main() -> int:

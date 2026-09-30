@@ -25,7 +25,7 @@ from lib import apt_guard, grub_guard, sh
 
 # from lib.config import Config
 from lib.log import Log
-from lib.mount import warn_rpool_mountpoint_lost
+from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 
@@ -43,6 +43,7 @@ def run(
 
     log.banner("POST-RECOVERY FINISH", "Run from inside the recovered system")
     warn_rpool_mountpoint_lost(log)
+    warn_kernel_named_vdevs(log)
 
     # ── Verify not live USB ──────────────────────────────────────────────
     if not zfs.pool_exists("rpool"):

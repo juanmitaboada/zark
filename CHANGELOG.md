@@ -147,6 +147,18 @@ consolidation that preceded it.
   `mount -t zfs -o ro,zfsutil`, parents first; containers, `canmount=off`,
   other boot environments and datasets whose directory does not exist
   are listed as not mounted. Nothing is written to the drive.
+- recover created bpool and rpool on kernel names (`/dev/sda2`,
+  `/dev/sda4`), and every later import recorded whatever names the disk
+  had then. On eli a USB stick plugged in at power-on took `sda`; the
+  initramfs import read the stick's 5 MB `sda2` as bpool's vdev, libzfs
+  aborted with "internal error: Value too large for defined data type"
+  instead of rescanning, and the boot stopped in the emergency shell.
+  recover now creates the pools on the internal disk's
+  `/dev/disk/by-id/…-partN` (kernel name only when the disk has no by-id
+  name, with a warning); `chroot`, `mount local` and `repair-boot` import
+  the system pools scanning `/dev/disk/by-id` first, so the zpool.cache
+  repair-boot writes records stable names; `backup` and `finish` warn when
+  rpool/bpool still record kernel names.
 - `zark umount` ran `zfs unmount -a`, which also tries every dataset of
   the running system; it now unmounts only `/mnt/zark/<pool>` (and
   `zpool export` unmounts whatever of the pool is left).
