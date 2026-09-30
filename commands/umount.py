@@ -28,6 +28,18 @@ from lib.log import Log
 
 MNT_BASE = "/mnt/zark"
 SYSTEM_TARGETS = ("local", "system", "rpool")
+# Why an export can fail with nothing mounted here (eli, K6): a copy of a
+# dataset stays mounted in another mount namespace, which zark cannot reach.
+BUSY_HINT = [
+    "A dataset may still be mounted in another mount",
+    "namespace (a service or a snap); zark cannot release it.",
+    "On a live USB, reboot the live session to release it.",
+]
+# The live's reboot leaves rpool/bpool marked as its own (seen on eli).
+SYSTEM_REBOOT_HINT = [
+    "The installed system may then stop at an emergency",
+    "shell; there run: zpool import -N -f rpool; exit",
+]
 
 
 def _unmount_tree(root: str) -> None:
@@ -94,6 +106,7 @@ def _umount_local_system(log: Log) -> None:
         ks.attach_to_pool("rpool")
         ks.umount()
 
+    left: list[str] = []
     for pool in ("bpool", "rpool"):  # bpool first (it sits under /boot)
         if not sh.run(f"zpool list {pool}").ok:
             continue
@@ -104,7 +117,14 @@ def _umount_local_system(log: Log) -> None:
             log.ok(f"Pool {pool} exported (forced) ✓")
         else:
             log.warn(f"Could not export {pool} — run: zpool export {pool}")
+            left.append(pool)
     flush_device_cache(log)
+    if left:
+        log.banner_error(
+            "SYSTEM NOT UNMOUNTED",
+            [f"✗ still imported: {', '.join(left)}", "", *BUSY_HINT, *SYSTEM_REBOOT_HINT],
+        )
+        raise SystemExit(1)
     log.banner_ok("SYSTEM UNMOUNTED", ["rpool/bpool exported cleanly ✓"])
 
 
@@ -241,4 +261,8 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
             autoeject=cfg.drive_autoeject(selected),
         )
     else:
-        log.blank()
+        log.banner_error(
+            "BACKUP NOT UNMOUNTED",
+            [f"✗ {selected} is still imported", "", *BUSY_HINT],
+        )
+        raise SystemExit(1)

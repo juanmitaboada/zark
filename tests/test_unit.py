@@ -4932,6 +4932,30 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         ]
         assert mock.was_not_called("zfs unmount")
 
+    def test_a_failed_export_is_not_reported_as_unmounted(self):
+        # K6-1 (eli): "SYSTEM UNMOUNTED — exported cleanly" printed under two
+        # "Could not export" warnings.
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
+        mock.on("zpool list bpool").succeeds("bpool")
+        mock.on_prefix("zpool export").fails("pool is busy")
+        buf = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(umount_mod, "flush_device_cache"),
+            redirect_stdout(buf),
+        ):
+            try:
+                _umount_local_system(make_log())
+            except SystemExit as e:
+                assert e.code == 1
+            else:
+                raise AssertionError("a pool left imported must end with exit status 1")
+        out = buf.getvalue()
+        assert "SYSTEM NOT UNMOUNTED" in out and "still imported: bpool, rpool" in out
+        assert "exported cleanly" not in out
+
     def test_refuses_an_altroot_that_climbs_out_of_mnt_zark(self):
         # V-7: a prefix match on the stored string let "/mnt/zark/../.." through.
         mock = MockShell()
@@ -7191,8 +7215,10 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
             ):
                 try:
                     umount_mod.run([])
-                except SystemExit:
-                    pass
+                except SystemExit as e:
+                    assert not export_ok and e.code == 1, e.code
+                else:
+                    assert export_ok, "a failed export must end with exit status 1"
         return mock
 
     def test_umount_cleans_directories_only_after_the_export(self):
