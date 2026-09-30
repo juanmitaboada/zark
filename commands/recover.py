@@ -845,13 +845,19 @@ def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
     """Everything that can fail without the disk being erased (hallazgo 15)."""
     _refuse_imported_system_pools(log)
     # Checked here, not after the wipe: zpool create refuses a non-empty
-    # <altroot><mountpoint>, and only a mount can survive step 6's rm.
-    held = sh.run(f"findmnt -R -n -o TARGET {RECOVER_MNT}")
-    if held.ok and held.output.strip():
+    # <altroot><mountpoint>, and step 6's rm stays off mounted subtrees.
+    # The whole table, filtered: `findmnt -R <dir>` lists nothing when <dir>
+    # itself is not a mountpoint, however much is mounted below it.
+    table = sh.run("findmnt -rn -o TARGET")
+    if not table.ok:
+        log.fatal(f"Cannot list the mounts to check {RECOVER_MNT}: {table.stderr.strip()}")
+    held = [t for t in table.lines if t == RECOVER_MNT or t.startswith(f"{RECOVER_MNT}/")]
+    if held:
+        tops = [t for t in held if not any(t.startswith(f"{o}/") for o in held)]
         log.fatal(
             f"Something is still mounted under {RECOVER_MNT}",
-            causes=held.lines,
-            solutions=[f"sudo umount -R {RECOVER_MNT}", "Or reboot the live USB"],
+            causes=held,
+            solutions=[*(f"sudo umount -R {t}" for t in tops), "Or reboot the live USB"],
         )
     tools = ("sgdisk", "mkfs.vfat", "cryptsetup", "zgenhostid", "partprobe")
     missing = [t for t in tools if not sh.run(f"which {t}").ok]

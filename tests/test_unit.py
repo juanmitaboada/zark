@@ -6051,20 +6051,39 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
 class TestRecoverAltrootChecks:  # pylint: disable=missing-function-docstring
     """R2-13 and review §8: /mnt/recover is checked before the wipe, and rm stays on it."""
 
-    def test_preflight_refuses_a_mount_under_the_altroot(self):
+    @staticmethod
+    def _preflight_with_mounts(table: str) -> tuple[MockShell, str]:
+        """Run _preflight with ``table`` as findmnt's output; it always ends in a fatal
+        (the tool checks are not mocked), so the output says which check stopped it."""
         mock = MockShell()
-        mock.on("findmnt -R -n -o TARGET /mnt/recover").succeeds(
-            "/mnt/recover\n/mnt/recover/dev",
-        )
+        mock.on("findmnt -rn -o TARGET").succeeds(table)
         point = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")[-1]
         plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [], "k@k", 1, "")
-        with patch_sh(mock), redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+        buf = StringIO()
+        with patch_sh(mock), redirect_stdout(buf), patch("builtins.input", return_value=""):
             try:
                 recover_mod._preflight(plan, "/dev/sda", make_log())  # pylint: disable=protected-access
             except SystemExit:
-                assert mock.was_not_called("which")  # stopped at the first check
-                return
-        raise AssertionError("Expected a fatal with /mnt/recover still mounted")
+                pass
+        return mock, buf.getvalue()
+
+    def test_preflight_refuses_a_mount_under_the_altroot(self):
+        mock, out = self._preflight_with_mounts("/\n/mnt/recover\n/mnt/recover/dev")
+        assert "still mounted under /mnt/recover" in out
+        assert mock.was_not_called("which")  # stopped before the tool checks
+        assert "sudo umount -R /mnt/recover" in out
+
+    def test_preflight_refuses_a_mount_below_a_plain_altroot_directory(self):
+        # V-2: /mnt/recover is a plain directory; `findmnt -R` on it lists nothing.
+        mock, out = self._preflight_with_mounts("/\n/mnt/recover/dev\n/mnt/recovery\n/run")
+        assert "still mounted under /mnt/recover" in out
+        assert mock.was_not_called("which")
+        assert "sudo umount -R /mnt/recover/dev" in out and "/mnt/recovery" not in out
+
+    def test_preflight_ignores_mounts_elsewhere(self):
+        mock, out = self._preflight_with_mounts("/\n/mnt/recovery\n/run")
+        assert "still mounted" not in out
+        assert mock.was_called("which sgdisk")  # went on to the next check
 
     def test_step_6_never_leaves_the_altroot_filesystem(self):
         src = Path(recover_mod.__file__).read_text(encoding="utf-8")
