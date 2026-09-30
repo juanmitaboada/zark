@@ -5949,7 +5949,23 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
     """Hallazgo 15: nothing touches the internal disk before pre-flight + YES."""
 
     def _run(self, answer: str | None, preflight_fails: bool = False) -> MockShell:
-        """``answer`` None simulates a closed terminal (EOF) at the YES prompt."""
+        with tempfile.TemporaryDirectory() as td:
+            return self._run_in(td, answer, preflight_fails)
+
+    def _run_in(  # pylint: disable=too-many-locals
+        self,
+        work: str,
+        answer: str | None,
+        preflight_fails: bool = False,
+    ) -> MockShell:
+        """``answer`` None simulates a closed terminal (EOF) at the YES prompt.
+
+        The system.key copy goes below ``work``; Cleanup's atexit run is
+        simulated after the command returns.
+        """
+        source_key = os.path.join(work, "source.key")
+        Path(source_key).write_bytes(b"k" * 32)
+        cleanups: list[Cleanup] = []
         mock = MockShell()
         snaps = _stick_snaps()
         point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
@@ -5962,7 +5978,18 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
 
         patches: list[AbstractContextManager[object]] = [
             patch_sh(mock),
-            patch.object(recover_mod.Cleanup, "register"),
+            patch.object(
+                recover_mod.Cleanup,
+                "register",
+                autospec=True,
+                side_effect=cleanups.append,
+            ),
+            patch.object(recover_mod, "SYSTEM_KEY_PATH", source_key),
+            patch.object(
+                recover_mod.tempfile,
+                "mkdtemp",
+                side_effect=lambda real=tempfile.mkdtemp, **_k: real(dir=work),
+            ),
             patch.object(recover_mod, "_is_live_usb", return_value=True),
             patch.object(recover_mod, "scan_connected_drives", return_value=[drive]),
             patch.object(recover_mod, "select_drive", return_value=drive),
@@ -5970,8 +5997,6 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(ZFS, "import_backup_pool", return_value=True),
             patch.object(recover_mod, "open_keystore", return_value=True),
             patch.object(Keystore, "load_pool_keys", return_value=1),
-            patch.object(recover_mod.shutil, "copy2"),
-            patch.object(recover_mod.os, "chmod"),
             patch.object(recover_mod, "whole_disk", return_value="/dev/sdb"),
             patch.object(recover_mod, "_find_be", return_value=_BE),
             patch.object(recover_mod, "_list_snapshots", return_value=snaps),
@@ -5992,7 +6017,20 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
                 recover_mod.run([])
             except SystemExit:
                 pass
+            for c in cleanups:  # what atexit would do
+                c.run()
         return mock
+
+    def test_system_key_copy_is_private_and_removed_on_a_fatal(self):
+        # Review §8: the /tmp copy used to survive every failure path.
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_in(td, "YES", preflight_fails=True)
+            key_dirs = [d for d in os.listdir(td) if d != "source.key"]
+            assert len(key_dirs) == 1
+            copy = Path(td, key_dirs[0], "system.key")
+            assert copy.read_bytes() == b"k" * 32
+            assert copy.stat().st_mode & 0o777 == 0o600
+            assert mock.was_called(f"rm -rf {copy.parent}")
 
     def test_no_wipe_when_not_confirmed(self):
         mock = self._run("NO")
@@ -6008,6 +6046,30 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         mock = self._run(None)
         assert mock.was_not_called("wipefs")
         assert mock.was_not_called("sgdisk")
+
+
+class TestRecoverAltrootChecks:  # pylint: disable=missing-function-docstring
+    """R2-13 and review §8: /mnt/recover is checked before the wipe, and rm stays on it."""
+
+    def test_preflight_refuses_a_mount_under_the_altroot(self):
+        mock = MockShell()
+        mock.on("findmnt -R -n -o TARGET /mnt/recover").succeeds(
+            "/mnt/recover\n/mnt/recover/dev",
+        )
+        point = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")[-1]
+        plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [], "k@k", 1, "")
+        with patch_sh(mock), redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            try:
+                recover_mod._preflight(plan, "/dev/sda", make_log())  # pylint: disable=protected-access
+            except SystemExit:
+                assert mock.was_not_called("which")  # stopped at the first check
+                return
+        raise AssertionError("Expected a fatal with /mnt/recover still mounted")
+
+    def test_step_6_never_leaves_the_altroot_filesystem(self):
+        src = Path(recover_mod.__file__).read_text(encoding="utf-8")
+        assert "rm -rf {RECOVER_MNT}" not in src
+        assert "rm -rf --one-file-system {RECOVER_MNT}" in src
 
 
 class TestInitrd:  # pylint: disable=missing-function-docstring

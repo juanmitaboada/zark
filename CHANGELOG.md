@@ -80,8 +80,14 @@ consolidation that preceded it.
   against 2G) and fails closed if any size is unknown. Target candidates
   exclude the backup drive and any disk with a mounted filesystem, active
   swap or imported vdev (the live USB), and show serial and transport.
-  The whole pre-flight runs before `YES`. Both exports of the backup pool
-  are verified; a failed second import is fatal.
+  The whole pre-flight runs before `YES`, including the check that nothing
+  is mounted under `/mnt/recover` (it used to run after the wipe, as a
+  refusal of `zpool create`). Step 6 removes `/mnt/recover` with
+  `--one-file-system`, so bind mounts left by a killed run are never
+  descended into. The copy of `system.key` is created 0600 in a private
+  directory that Cleanup removes on every exit it handles (it used to stay
+  in `/tmp` on every failure path). Both exports of the backup pool are
+  verified; a failed second import is fatal.
 - **Invariant I-G (P0-10).** Every backup-pool import (backup, purge,
   mount, recover, repair-divergent, read-back verification) is
   `zpool import -N -R <altroot> [-o readonly=on] -d <exact partition>`, with

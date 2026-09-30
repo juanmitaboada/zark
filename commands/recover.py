@@ -51,7 +51,7 @@ Recovery order:
 
 import os
 import re
-import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -844,6 +844,15 @@ def _refuse_imported_system_pools(log: Log) -> None:
 def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
     """Everything that can fail without the disk being erased (hallazgo 15)."""
     _refuse_imported_system_pools(log)
+    # Checked here, not after the wipe: zpool create refuses a non-empty
+    # <altroot><mountpoint>, and only a mount can survive step 6's rm.
+    held = sh.run(f"findmnt -R -n -o TARGET {RECOVER_MNT}")
+    if held.ok and held.output.strip():
+        log.fatal(
+            f"Something is still mounted under {RECOVER_MNT}",
+            causes=held.lines,
+            solutions=[f"sudo umount -R {RECOVER_MNT}", "Or reboot the live USB"],
+        )
     tools = ("sgdisk", "mkfs.vfat", "cryptsetup", "zgenhostid", "partprobe")
     missing = [t for t in tools if not sh.run(f"which {t}").ok]
     if missing:
@@ -1172,10 +1181,14 @@ def run(
     _ = ks.load_pool_keys(f"{pool_name}/rpool")
     log.ok("Encryption key loaded ✓")
 
-    # Save system.key to temp — survives pool exports, used throughout recovery
-    tmp_key = f"/tmp/zark_syskey_{os.getpid()}"
-    _ = shutil.copy2(SYSTEM_KEY_PATH, tmp_key)
-    os.chmod(tmp_key, 0o600)
+    # Save system.key to temp — survives pool exports, used throughout recovery.
+    # Private from creation, in a directory Cleanup removes on every exit it handles.
+    key_dir = tempfile.mkdtemp(prefix="zark_syskey_")
+    cleanup.track_dir(key_dir)
+    tmp_key = os.path.join(key_dir, "system.key")
+    fd = os.open(tmp_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        _ = f.write(Path(SYSTEM_KEY_PATH).read_bytes())
     log.dbg(f"Saved system.key to {tmp_key}")
 
     # ── 3. Select restore point ──────────────────────────────────────────
@@ -1229,7 +1242,7 @@ def run(
 
     # ── 6. Cleanup + partition ───────────────────────────────────────────
     log.step(6, TOTAL_STEPS, "Cleaning up and partitioning...")
-    _ = sh.run(f"rm -rf {RECOVER_MNT}")
+    _ = sh.run(f"rm -rf --one-file-system {RECOVER_MNT}")
     _ = sh.run(f"mkdir -p {RECOVER_MNT}")
 
     _ = sh.run(f"wipefs -a {internal_disk}", log=log)
@@ -1271,10 +1284,6 @@ def run(
 
     # Set at create time: the backup pool (with its keystore zvol) is still
     # imported, so a later `zfs set mountpoint` is forbidden (chase.c:648).
-    # zpool create refuses a non-empty <altroot><mountpoint>, even with -f.
-    root_dir = Path(f"{RECOVER_MNT}{plan.rpool_mountpoint}")
-    if root_dir.is_dir() and any(root_dir.iterdir()):
-        log.fatal(f"{root_dir} is not empty — zpool create would refuse rpool's mountpoint")
     r = sh.run(_rpool_create_cmd(plan.rpool_mountpoint, tmp_key, rpool_vdev), log=log)
     if not r.ok:
         log.fatal("Failed to create rpool container")
@@ -1475,10 +1484,7 @@ def run(
     # ── 16. Cleanup and summary ──────────────────────────────────────────
     log.step(16, TOTAL_STEPS, "Cleanup...")
 
-    if Path(tmp_key).exists():
-        os.remove(tmp_key)
-
-    cleanup.run()
+    cleanup.run()  # also removes the system.key copy
 
     restore_end = time.time()
     restore_mins, restore_secs = divmod(int(restore_end - restore_start), 60)
