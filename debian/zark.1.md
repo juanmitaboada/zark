@@ -322,7 +322,10 @@ for the canonical end-to-end sequences.
     real boot imports them without **-f**.
 
     The optional *device* is an import hint (for example */dev/nvme0n1* or
-    a */dev/disk/by-id/* path); when omitted, ZFS auto-scans for the pools.
+    a */dev/disk/by-id/* path), tried before anything else, so **rpool**
+    then records the names it was found under. When omitted, **rpool** is
+    looked for in */dev/disk/by-id* first and by a full scan only when that
+    fails.
     **chroot** refuses to run when **rpool** is already imported — if that
     is the running system you are already inside it, and if it is a
     leftover from a previous run, **clean** releases it first.

@@ -179,7 +179,10 @@ consolidation that preceded it.
   name, with a warning); `chroot`, `mount local` and `repair-boot` import
   the system pools scanning `/dev/disk/by-id` first, so the zpool.cache
   repair-boot writes records stable names; `backup` and `finish` warn when
-  rpool/bpool still record kernel names.
+  rpool/bpool still record kernel names. Two exceptions remain: a device
+  hint (`zark chroot <device>`) is tried before `/dev/disk/by-id` for
+  rpool, and when the by-id scan finds nothing the import falls back to a
+  plain scan without saying so.
 - `zark umount` ran `zfs unmount -a`, which also tries every dataset of
   the running system; it now unmounts only `/mnt/zark/<pool>` (and
   `zpool export` unmounts whatever of the pool is left). `umount local`
