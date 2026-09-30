@@ -35,7 +35,11 @@ consolidation that preceded it.
   importing rpool (`-N`, altroot, no key loaded), so no zvol device exists
   while the mountpoint changes (chase.c:648); it lists the datasets that
   inherit from rpool, asks for YES, judges success by the stored property,
-  and exports rpool and restores the parameter on every exit path.
+  and exports rpool and restores the parameter on every exit path: SIGTERM
+  and SIGHUP (a closed terminal) end the run through the same teardown, and
+  during it SIGINT, SIGTERM and SIGHUP are ignored, by the `zpool export`
+  child as well. It refuses to start while any `/dev/zd*` exists and names
+  the pools to export first.
   `backup`, `prepare` and `finish` warn when rpool has the local
   `mountpoint=none` of the Ubuntu layout.
 

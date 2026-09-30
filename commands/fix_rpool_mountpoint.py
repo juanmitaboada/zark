@@ -27,7 +27,10 @@ altroot and no key is loaded, so nothing is mounted.
 """
 
 import glob
+import signal
 from pathlib import Path
+from types import FrameType
+from typing import NoReturn
 
 from lib import sh
 from lib.log import Log
@@ -36,6 +39,19 @@ from lib.zfs import ZFS
 
 ZVOL_INHIBIT = Path("/sys/module/zfs/parameters/zvol_inhibit_dev")
 ALTROOT = "/run/zark/altroot/rpool"
+EXIT_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+TEARDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def _exit_on_signal(signum: int, _frame: FrameType | None) -> NoReturn:
+    """Turn a kill or a closed terminal into SystemExit, so run()'s teardown runs."""
+    raise SystemExit(128 + signum)
+
+
+def _pools_with_zvols() -> list[str]:
+    """Imported pools that hold at least one zvol."""
+    r = sh.run("zfs list -H -t volume -o name")
+    return sorted({line.split("/", 1)[0] for line in (r.lines if r.ok else []) if line})
 
 
 def _without_altroot(value: str) -> str:
@@ -143,18 +159,42 @@ def run(args: list[str]) -> None:
     _ = sh.run("modprobe zfs")
     if not ZVOL_INHIBIT.exists():
         log.fatal(f"{ZVOL_INHIBIT} not found — is the zfs module loaded?")
+    zvols = sorted(glob.glob("/dev/zd*"))
+    if zvols:
+        pools = _pools_with_zvols()
+        log.fatal(
+            "zvol devices exist before rpool is imported — refusing to start",
+            causes=[f"{', '.join(zvols)} of imported pool(s): {', '.join(pools) or 'unknown'}"],
+            solutions=[
+                f"Export them first: sudo zpool export {' '.join(pools)}"
+                if pools
+                else "Reboot the live USB and run this command before anything else",
+            ],
+        )
 
     previous = ZVOL_INHIBIT.read_text(encoding="utf-8").strip()
     fixed = False
     exported = False
+    handlers = {sig: signal.getsignal(sig) for sig in TEARDOWN_SIGNALS}
+    for sig in EXIT_SIGNALS:
+        _ = signal.signal(sig, _exit_on_signal)
     try:
         ZVOL_INHIBIT.write_text("1", encoding="utf-8")
         log.ok("zvol device creation inhibited (zvol_inhibit_dev=1)")
         fixed = _fix(zfs, log)
     finally:
-        exported = zfs.pool_export("rpool")
-        ZVOL_INHIBIT.write_text(previous, encoding="utf-8")
-        log.info(f"zvol_inhibit_dev restored to {previous}")
+        # Nothing may cut the teardown short: a second Ctrl-C, a kill or a
+        # closed terminal. Ignored signals stay ignored in the zpool child too.
+        for sig in TEARDOWN_SIGNALS:
+            _ = signal.signal(sig, signal.SIG_IGN)
+        try:
+            exported = zfs.pool_export("rpool")
+        finally:
+            ZVOL_INHIBIT.write_text(previous, encoding="utf-8")
+            log.info(f"zvol_inhibit_dev restored to {previous}")
+            for sig, handler in handlers.items():
+                if handler is not None:
+                    _ = signal.signal(sig, handler)
 
     mp_line = (
         f"rpool mountpoint={UBUNTU_RPOOL_MOUNTPOINT} ✓" if fixed else "✗ rpool mountpoint unchanged"

@@ -33,10 +33,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from contextlib import AbstractContextManager, ExitStack, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -6381,6 +6384,14 @@ class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
         assert "Type YES: → 'yes'" in text
         assert "Confirm → 'DESTROY'" in text
 
+    def test_a_closed_terminal_does_not_stop_the_log(self):
+        # R2-1: after SIGHUP a print raises EIO; teardown messages still reach the file.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.log")
+            with patch("builtins.print", side_effect=OSError(5, "Input/output error")):
+                Log(log_file=path).ok("Pool rpool exported")
+            assert "Pool rpool exported" in Path(path).read_text(encoding="utf-8")
+
     def test_log_file_is_private(self):
         # R2-2: created 0600 whatever the umask; an existing 0644 file is tightened.
         with tempfile.TemporaryDirectory() as td:
@@ -6568,6 +6579,17 @@ class TestRpoolRootMountpoint:  # pylint: disable=missing-function-docstring
         assert not self._lost(lost, has_root=False)
 
 
+@dataclass
+class _FixRun:
+    """What one fix-rpool-mountpoint run did."""
+
+    mock: MockShell
+    out: str
+    code: int | str | None  # SystemExit code, or the exception's name; None = returned
+    events: list[str]
+    final: str  # zvol_inhibit_dev after the run
+
+
 class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
     """fix-rpool-mountpoint: live only, no zvol devices, YES, always restores."""
 
@@ -6575,38 +6597,60 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
     def _run(  # pylint: disable=too-many-arguments,too-many-locals
         *,
         answer: str = "YES",
+        live: bool = True,
         imported: bool = False,
-        zvols: list[str] | None = None,
+        import_ok: bool = True,
+        export_ok: bool = True,
+        zvols_before: list[str] | None = None,
+        zvols_after: list[str] | None = None,
         before: tuple[str, str] = ("none", "local"),
         after: tuple[str, str] = ("/", "local"),
-    ) -> tuple[MockShell, str, bool, list[str], str]:
+        during_fix: Callable[[], None] | None = None,
+        during_export: Callable[[], None] | None = None,
+    ) -> _FixRun:
         mock = MockShell()
         mock.on("zfs set mountpoint=/ rpool").succeeds()
         mock.on("modprobe zfs").succeeds()
+        mock.on("zfs list -H -t volume -o name").succeeds("backup/keystore")
         events: list[str] = []
+        handlers = {sig: signal.getsignal(sig) for sig in fix_rpool_mod.TEARDOWN_SIGNALS}
         with tempfile.TemporaryDirectory() as td:
             param = Path(td) / "zvol_inhibit_dev"
             param.write_text("0\n", encoding="utf-8")
 
             def fake_import(*_a: object, **_k: object) -> bool:
                 events.append(f"import(inhibit={param.read_text(encoding='utf-8')})")
-                return True
+                return import_ok
 
             def fake_export(*_a: object, **_k: object) -> bool:
+                if during_export:
+                    during_export()
                 events.append(f"export(inhibit={param.read_text(encoding='utf-8')})")
-                return True
+                return export_ok
+
+            real_fix = fix_rpool_mod._fix  # pylint: disable=protected-access
+
+            def fix(zfs: ZFS, log: Log) -> bool:
+                if during_fix:
+                    during_fix()
+                return real_fix(zfs, log)
 
             props = [
                 {"mountpoint": before, "canmount": ("off", "local")},
                 {"mountpoint": after, "canmount": ("off", "local")},
             ]
             buf = StringIO()
-            exited = False
+            code: int | str | None = None
             patches: list[AbstractContextManager[object]] = [
                 patch_sh(mock),
                 patch.object(fix_rpool_mod, "ZVOL_INHIBIT", param),
-                patch.object(fix_rpool_mod.sh, "is_live_usb", return_value=True),
-                patch.object(fix_rpool_mod.glob, "glob", return_value=zvols or []),
+                patch.object(fix_rpool_mod, "_fix", side_effect=fix),
+                patch.object(fix_rpool_mod.sh, "is_live_usb", return_value=live),
+                patch.object(
+                    fix_rpool_mod.glob,
+                    "glob",
+                    side_effect=[zvols_before or [], zvols_after or []],
+                ),
                 patch.object(fix_rpool_mod, "_props", side_effect=props),
                 patch.object(fix_rpool_mod, "_inheriting_from_rpool", return_value=[]),
                 patch.object(ZFS, "pool_exists", return_value=imported),
@@ -6621,35 +6665,93 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
                     stack.enter_context(p)
                 try:
                     fix_rpool_mod.run([])
-                except SystemExit:
-                    exited = True
+                except SystemExit as e:
+                    code = e.code if e.code is not None else 0
+                except KeyboardInterrupt:
+                    code = "KeyboardInterrupt"
+                except RuntimeError:
+                    code = "RuntimeError"
             final = param.read_text(encoding="utf-8")
-        return mock, buf.getvalue(), exited, events, final
+        # The runner's own signal handlers are back after the command.
+        assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
+        return _FixRun(mock, buf.getvalue(), code, events, final)
 
     def test_sets_mountpoint_with_zvols_inhibited_and_restores_the_parameter(self):
-        mock, out, exited, events, final = self._run()
-        assert events == ["import(inhibit=1)", "export(inhibit=1)"]
-        assert mock.was_called("zfs set mountpoint=/ rpool")
-        assert final == "0" and not exited
-        assert "RPOOL MOUNTPOINT FIXED" in out
+        r = self._run()
+        assert r.events == ["import(inhibit=1)", "export(inhibit=1)"]
+        assert r.mock.was_called("zfs set mountpoint=/ rpool")
+        assert r.final == "0" and r.code is None
+        assert "RPOOL MOUNTPOINT FIXED" in r.out
 
     def test_refuses_when_rpool_is_imported(self):
-        mock, _, exited, events, final = self._run(imported=True)
-        assert exited and not events
-        assert mock.was_not_called("zfs set")
-        assert final == "0\n"  # never touched
+        r = self._run(imported=True)
+        assert r.code == 1 and not r.events
+        assert r.mock.was_not_called("zfs set")
+        assert r.final == "0\n"  # never touched
+
+    def test_refuses_outside_a_live_usb(self):
+        r = self._run(live=False)
+        assert r.code == 1 and not r.events and r.final == "0\n"
+        assert "Run this from a live USB" in r.out
 
     def test_no_answer_changes_nothing_but_still_exports_and_restores(self):
-        mock, out, exited, events, final = self._run(answer="NO")
-        assert mock.was_not_called("zfs set")
-        assert events[-1] == "export(inhibit=1)" and final == "0"
-        assert exited and "RPOOL MOUNTPOINT NOT FIXED" in out
+        r = self._run(answer="NO")
+        assert r.mock.was_not_called("zfs set")
+        assert r.events[-1] == "export(inhibit=1)" and r.final == "0"
+        assert r.code == 1 and "RPOOL MOUNTPOINT NOT FIXED" in r.out
 
-    def test_aborts_if_a_zvol_device_appears(self):
-        mock, _, exited, events, final = self._run(zvols=["/dev/zd0"])
-        assert exited
-        assert mock.was_not_called("zfs set")
-        assert events[-1] == "export(inhibit=1)" and final == "0"
+    def test_refuses_before_touching_anything_when_zvol_devices_exist(self):
+        # R2-10: another pool's zvols; the parameter and rpool are never touched.
+        r = self._run(zvols_before=["/dev/zd0"])
+        assert r.code == 1 and not r.events and r.final == "0\n"
+        assert "sudo zpool export backup" in r.out
+
+    def test_aborts_if_a_zvol_device_appears_after_the_import(self):
+        r = self._run(zvols_after=["/dev/zd0"])
+        assert r.code == 1
+        assert r.mock.was_not_called("zfs set")
+        assert r.events[-1] == "export(inhibit=1)" and r.final == "0"
+
+    def test_import_failure_still_restores_the_parameter(self):
+        r = self._run(import_ok=False)
+        assert r.code == 1 and r.final == "0"
+        assert r.mock.was_not_called("zfs set")
+
+    def test_failed_export_is_in_the_verdict(self):
+        r = self._run(export_ok=False)
+        assert r.code == 1 and r.final == "0"
+        assert "rpool is still imported" in r.out and "NOT FIXED" in r.out
+
+    def test_sigterm_and_sighup_export_and_restore(self):
+        # R2-1: both used to kill the process with rpool imported and the parameter at 1.
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+
+            def send(s: signal.Signals = sig) -> None:
+                os.kill(os.getpid(), s)
+
+            r = self._run(during_fix=send)
+            assert r.code == 128 + sig, (sig, r.code)
+            assert r.events == ["export(inhibit=1)"] and r.final == "0", sig
+            assert r.mock.was_not_called("zfs set")
+
+    def test_a_second_ctrl_c_cannot_interrupt_the_export(self):
+        def interrupt() -> None:
+            raise KeyboardInterrupt
+
+        r = self._run(
+            during_fix=interrupt,
+            during_export=lambda: os.kill(os.getpid(), signal.SIGINT),
+        )
+        assert r.code == "KeyboardInterrupt"
+        assert r.events == ["export(inhibit=1)"] and r.final == "0"
+
+    def test_an_exception_in_the_fix_still_exports_and_restores(self):
+        def boom() -> None:
+            raise RuntimeError("boom")
+
+        r = self._run(during_fix=boom)
+        assert r.code == "RuntimeError"
+        assert r.events == ["export(inhibit=1)"] and r.final == "0"
 
     def test_mountpoint_is_read_without_the_import_altroot(self):
         # eli 2026-09-30: under -R, zfs get shows "/" as the altroot itself.
@@ -6667,8 +6769,8 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
         assert child["mountpoint"] == ("/srv", "local")
 
     def test_success_is_judged_by_the_property_not_the_exit_code(self):
-        _, out, exited, _, _ = self._run(after=("none", "local"))
-        assert exited and "RPOOL MOUNTPOINT NOT FIXED" in out
+        r = self._run(after=("none", "local"))
+        assert r.code == 1 and "RPOOL MOUNTPOINT NOT FIXED" in r.out
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring

@@ -99,7 +99,10 @@ class Log:
                 pass
 
     def _emit(self, msg: str):
-        print(msg, flush=True)
+        try:
+            print(msg, flush=True)
+        except OSError:
+            pass  # terminal closed (EIO): the log file still records it, the work goes on
         self._to_file(msg)
 
     # ── Public API ───────────────────────────────────────────────────────

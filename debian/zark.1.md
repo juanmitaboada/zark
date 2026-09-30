@@ -413,7 +413,8 @@ for the canonical end-to-end sequences.
     Runs from a live USB only. It sets the **zvol_inhibit_dev** module
     parameter before importing **rpool** (**-N**, under an altroot, no
     key loaded), so no zvol device exists while the mountpoint is
-    changed; lists the datasets that inherit their mountpoint from
+    changed, and refuses to start while another pool's zvol devices
+    exist; lists the datasets that inherit their mountpoint from
     **rpool**; asks for *YES*; exports **rpool** and restores the
     parameter on every exit path.
 
