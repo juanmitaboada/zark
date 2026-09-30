@@ -418,11 +418,13 @@ for the canonical end-to-end sequences.
     key loaded), so no zvol device exists while the mountpoint is
     changed, and refuses to start while another pool's zvol devices
     exist; lists the datasets that inherit their mountpoint from
-    **rpool** with their *canmount*, and for each one with
-    *canmount=on*, which starts mounting at the next boot, asks
+    **rpool** with their *canmount*, and for each one that is not
+    *off* or *noauto*, which starts mounting at the next boot, asks
     whether to keep it (typing its name), set *canmount=off* or
-    abort; asks for *YES*; exports **rpool** and restores the
-    parameter on every exit path.
+    abort; asks for *YES*. It exports **rpool** and restores the
+    parameter on a normal end, an error, Ctrl-C, SIGTERM or SIGHUP
+    (also several at once), and when its output goes to a closed
+    terminal or a dead pipe; not on SIGKILL.
 
 ## Maintenance
 

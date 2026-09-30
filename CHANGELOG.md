@@ -34,16 +34,22 @@ consolidation that preceded it.
   `mountpoint=/`. It sets the `zvol_inhibit_dev` module parameter before
   importing rpool (`-N`, altroot, no key loaded), so no zvol device exists
   while the mountpoint changes (chase.c:648); it lists the datasets that
-  inherit from rpool with their `canmount`, and for each one with
-  `canmount=on` (it starts mounting at the next boot, over whatever the
-  boot environment has there) asks whether to keep it (typing its name),
-  set `canmount=off` in the same inhibited import (before the mountpoint)
-  or abort; then it asks for YES, judges success by the stored property,
-  and exports rpool and restores the parameter on every exit path: SIGTERM
-  and SIGHUP (a closed terminal) end the run through the same teardown, and
-  during it SIGINT, SIGTERM and SIGHUP are ignored, by the `zpool export`
-  child as well. It refuses to start while any `/dev/zd*` exists and names
-  the pools to export first.
+  inherit from rpool with their `canmount` (a failure to list them is
+  fatal), and for each one that is not `off` or `noauto` (it starts
+  mounting at the next boot, over whatever the boot environment has there)
+  asks whether to keep it (typing its name), set `canmount=off` in the same
+  inhibited import (before the mountpoint) or abort; then it asks for YES,
+  judges success by the stored property, and lists in its verdict the
+  datasets it set to `canmount=off`. It exports rpool and restores the
+  parameter on a normal end, an error, Ctrl-C, SIGTERM and SIGHUP (a
+  closed terminal), several of them arriving together (logind sends
+  SIGTERM and SIGHUP at once when it ends a session), and with stdout on
+  a closed terminal or a dead pipe (`| tee` killed by the same Ctrl-C);
+  not on SIGKILL. The first of those signals ignores all three before
+  leaving for the teardown; during the teardown SIGINT, SIGTERM, SIGHUP
+  and SIGPIPE are ignored, by the `zpool export` child as well. It refuses
+  to start while any `/dev/zd*` exists and names the pools to unmount or
+  export first.
   `backup`, `prepare` and `finish` warn when rpool has the local
   `mountpoint=none` of the Ubuntu layout.
 
@@ -81,8 +87,9 @@ consolidation that preceded it.
   exclude the backup drive and any disk with a mounted filesystem, active
   swap or imported vdev (the live USB), and show serial and transport.
   The whole pre-flight runs before `YES`, including the check that nothing
-  is mounted under `/mnt/recover` (it used to run after the wipe, as a
-  refusal of `zpool create`). Step 6 removes `/mnt/recover` with
+  is mounted on or anywhere below `/mnt/recover`, read from the whole mount
+  table (it used to run after the wipe, as a refusal of `zpool create`).
+  Step 6 removes `/mnt/recover` with
   `--one-file-system`, so bind mounts left by a killed run are never
   descended into. The copy of `system.key` is created 0600 in a private
   directory that Cleanup removes on every exit it handles (it used to stay
@@ -187,8 +194,12 @@ consolidation that preceded it.
   the running system; it now unmounts only `/mnt/zark/<pool>` (and
   `zpool export` unmounts whatever of the pool is left). `umount local`
   does the same with the system's altroot, so a backup mounted alongside
-  it stays mounted, and it requires that altroot to be below
-  `/mnt/zark/`, not merely to start with that string. After a failed
+  it stays mounted, and it requires that altroot, resolved with
+  `realpath`, to be below `/mnt/zark/`. Both branches make the tree
+  private (`mount --make-rprivate`) before `umount -R`: under systemd's
+  shared propagation, a host directory bound under the tree (a chroot's
+  `/run`, `/dev`…) otherwise carries the unmount to whatever was mounted
+  there on the host since. After a failed
   export, umount no longer deletes empty directories under
   `/mnt/zark/<pool>`: with the pool still mounted there, `find -delete`
   removed empty directories of the backup itself.
@@ -213,6 +224,28 @@ consolidation that preceded it.
   `canmount=noauto` boot environment is skipped by `zfs mount -a`, and a
   bpool mounted first is shadowed by the root) and stops if either
   mount fails.
+
+- Log lines (`ok`, `info`, `warn`, `error`, `dbg`, `raw`) ignore an
+  `OSError` from the terminal (EIO once it is closed, `BrokenPipeError` on
+  a dead pipe when SIGPIPE is ignored): the line still reaches `zark.log`
+  and the command carries on. This applies to every command. Banners,
+  `fatal` and the prompts still raise, and with zark's SIGPIPE at SIG_DFL a
+  dead pipe still kills a command outright, except inside
+  fix-rpool-mountpoint's teardown.
+
+#### Known limitations (to M4)
+
+- finish runs `update-grub` before `update-initramfs`, so a missing
+  initrd ends in "no kernel entries" with advice that cannot fix it
+  (`repair-boot` does); the results of the two EFI `dpkg-reconfigure`
+  calls are not part of its verdict. (review 2, R2-7)
+- repair-boot and finish decide "regenerated" by a `vmlinuz` substring
+  in grub.cfg, and a grub.cfg with invalid UTF-8 ends in a generic fatal
+  instead of their verdict. (R2-8)
+- Cleanup's SIGTERM handler runs the cleanup and lets the command go on,
+  SIGHUP is not handled, and with SIGPIPE at SIG_DFL a Ctrl-C on a
+  command piped to `tee` kills it before `atexit` runs, leaving the
+  pools of recover, repair-boot or chroot imported. (hallazgo 12)
 
 #### Removed
 

@@ -12,7 +12,8 @@ For bugs include:
 - Your Ubuntu version (`lsb_release -d`) and ZFS version (`zfs version`)
 - A clear description of what you expected vs. what happened
 - The relevant slice of `/var/log/zark.log` (or `<zark_root>/zark.log`
-  when running from a portable copy)
+  when running from a portable copy); the file is readable by root only,
+  so use `sudo`, and check it holds nothing you would not publish
 - For recovery issues: the QEMU command line if you reproduced inside
   the simulator, or the `dmesg` output around the failure
 
