@@ -38,14 +38,27 @@ ZVOL_INHIBIT = Path("/sys/module/zfs/parameters/zvol_inhibit_dev")
 ALTROOT = "/run/zark/altroot/rpool"
 
 
+def _without_altroot(value: str) -> str:
+    """Stored mountpoint from the value zfs shows under ALTROOT (/ shows as ALTROOT)."""
+    if value == ALTROOT:
+        return "/"
+    if value.startswith(f"{ALTROOT}/"):
+        return value[len(ALTROOT) :]
+    return value
+
+
 def _props(dataset: str) -> dict[str, tuple[str, str]]:
-    """mountpoint/canmount of ``dataset`` as {property: (value, source)}."""
+    """mountpoint/canmount of ``dataset`` as {property: (stored value, source)}."""
     r = sh.run(f"zfs get -H -o property,value,source mountpoint,canmount {dataset}")
-    return {
+    props = {
         f[0]: (f[1], f[2])
         for f in (line.split("\t") for line in (r.lines if r.ok else []))
         if len(f) == 3
     }
+    if "mountpoint" in props:
+        value, source = props["mountpoint"]
+        props["mountpoint"] = (_without_altroot(value), source)
+    return props
 
 
 def _inheriting_from_rpool() -> list[str]:

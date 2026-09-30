@@ -6454,6 +6454,21 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("zfs set")
         assert events[-1] == "export(inhibit=1)" and final == "0"
 
+    def test_mountpoint_is_read_without_the_import_altroot(self):
+        # eli 2026-09-30: under -R, zfs get shows "/" as the altroot itself.
+        mock = MockShell()
+        mock.on("zfs get -H -o property,value,source mountpoint,canmount rpool").succeeds(
+            f"mountpoint\t{fix_rpool_mod.ALTROOT}\tlocal\ncanmount\toff\tlocal",
+        )
+        mock.on("zfs get -H -o property,value,source mountpoint,canmount rpool/x").succeeds(
+            f"mountpoint\t{fix_rpool_mod.ALTROOT}/srv\tlocal\ncanmount\ton\tdefault",
+        )
+        with patch_sh(mock):
+            root = fix_rpool_mod._props("rpool")  # pylint: disable=protected-access
+            child = fix_rpool_mod._props("rpool/x")  # pylint: disable=protected-access
+        assert root["mountpoint"] == ("/", "local")
+        assert child["mountpoint"] == ("/srv", "local")
+
     def test_success_is_judged_by_the_property_not_the_exit_code(self):
         _, out, exited, _, _ = self._run(after=("none", "local"))
         assert exited and "RPOOL MOUNTPOINT NOT FIXED" in out
