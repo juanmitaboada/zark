@@ -84,13 +84,17 @@ def run(
 
     # Double confirmation
     log.info("Type 'yes' to confirm:")
-    c1 = log.ask_text("    > ", label=f"Type 'yes' to purge {ident.disk}")
+    c1 = log.ask_text("    > ", accept=("yes",), label=f"Type 'yes' to purge {ident.disk}")
     if c1 != "yes":
         log.info("Aborted")
         return
 
     log.info(f"Type the kernel device name to confirm ({ident.name}):")
-    c2 = log.ask_text("    > ", label=f"Type the kernel device name ({ident.name})")
+    c2 = log.ask_text(
+        "    > ",
+        accept=(ident.name,),
+        label=f"Type the kernel device name ({ident.name})",
+    )
     if c2 != ident.name:
         log.fatal("Device name mismatch. Aborted.")
 

@@ -121,7 +121,8 @@ def run(
 
     new_pool = log.ask_input("Pool name for this backup drive", default_pool)
     if not new_pool.isidentifier():
-        log.fatal(f"Invalid pool name '{new_pool}'")
+        # Not echoed: a mistyped answer here may be a passphrase.
+        log.fatal("Invalid pool name — letters, digits and _ only, not starting with a digit")
     if new_pool in cfg.known_drives and new_pool not in replace:
         other = cfg.known_drives[new_pool].drive_id
         log.fatal(

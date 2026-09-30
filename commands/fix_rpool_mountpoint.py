@@ -106,6 +106,7 @@ def _fix(zfs: ZFS, log: Log) -> bool:
 
     answer = log.ask_text(
         f"    Type YES to set mountpoint={UBUNTU_RPOOL_MOUNTPOINT} on rpool: ",
+        accept=("YES",),
         label=f"Type YES to set rpool mountpoint={UBUNTU_RPOOL_MOUNTPOINT}",
     )
     if answer != "YES":

@@ -110,6 +110,10 @@ consolidation that preceded it.
   read the terminal directly: recover's `YES` and `IUNDERSTAND`, purge's two
   confirmations and repair-boot's "continue without external pools"; found
   missing in the eli validation. A closed terminal at those prompts aborts.
+  An answer is written verbatim only when it is one of the words that
+  prompt accepts (or its default); anything else, such as a passphrase
+  typed at the wrong prompt, is logged as its length. `zark.log` is
+  created with mode 0600, and an existing one is tightened to it.
 - `known_drives.json` now always carries `last_backup_at` (null until the
   first backup) and `autoeject`.
 - A malformed `known_drives.json` stops every command that writes it and

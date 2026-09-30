@@ -192,6 +192,7 @@ def _prompt_double_confirm(log: Log, dataset: str, used: str) -> bool:
     answer = log.ask_input(
         f"This will destroy {dataset} ({used}). "
         "Type DESTROY (uppercase) to confirm, anything else cancels",
+        accept=("DESTROY",),
     )
     return answer.strip() == "DESTROY"
 

@@ -23,8 +23,12 @@ import getpass
 import os
 import re
 import select
+import stat
 import sys
+from collections.abc import Collection
 from typing import NoReturn
+
+_YES_NO = ("y", "yes", "n", "no")
 
 
 class Log:
@@ -44,6 +48,7 @@ class Log:
 
     def __init__(self, log_file: str | None = None):
         self.log_file = log_file if log_file is not None else self.default_file()
+        self._mode_checked = False
 
     @classmethod
     def default_file(cls) -> str:
@@ -73,10 +78,25 @@ class Log:
 
     def _to_file(self, msg: str):
         try:
-            with open(self.log_file, "a", encoding="utf-8") as f:
+            # Answers can hold a mistyped passphrase: the log is readable by root only.
+            fd = os.open(self.log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
+                if not self._mode_checked:
+                    self._mode_checked = True
+                    self._make_private(fd)
                 f.write(f"[{self._ts()}] {self._strip(msg)}\n")
         except OSError:
             pass
+
+    @staticmethod
+    def _make_private(fd: int) -> None:
+        """Drop group/other access from a log file created before 0600 (never /dev/null)."""
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode) and st.st_mode & 0o077:
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
 
     def _emit(self, msg: str):
         print(msg, flush=True)
@@ -258,6 +278,16 @@ class Log:
         """Record an interactive prompt and the operator's answer (I19)."""
         self._to_file(f"[PROMPT]  {self._strip(question)} → {answer!r}")
 
+    @staticmethod
+    def _loggable(answer: str, accepted: Collection[str]) -> str:
+        """``answer`` when it is one of the accepted words, else only its length.
+
+        Anything else may be a passphrase typed at the wrong prompt.
+        """
+        if answer.casefold() in {a.casefold() for a in accepted}:
+            return answer
+        return f"<other answer, {len(answer)} chars>"
+
     # ── Interactive ──────────────────────────────────────────────────────
 
     def ask(self, question: str, default: bool = False) -> bool:
@@ -272,7 +302,8 @@ class Log:
         except EOFError:
             answer = ""
         result = default if not answer else answer.startswith("y")
-        self._answer_to_file(question, f"{answer or '<default>'} ({'yes' if result else 'no'})")
+        shown = self._loggable(answer, _YES_NO) if answer else "<default>"
+        self._answer_to_file(question, f"{shown} ({'yes' if result else 'no'})")
         return result
 
     def ask_timeout(self, question: str, default: bool, timeout: int) -> bool:
@@ -312,9 +343,8 @@ class Log:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
                 result = default if not answer else answer.startswith("y")
-                self._answer_to_file(
-                    question, f"{answer or '<default>'} ({'yes' if result else 'no'})"
-                )
+                shown = self._loggable(answer, _YES_NO) if answer else "<default>"
+                self._answer_to_file(question, f"{shown} ({'yes' if result else 'no'})")
                 return result
         # Timed out: clear the countdown line and apply the default.
         sys.stdout.write("\r" + " " * 70 + "\r")
@@ -323,8 +353,17 @@ class Log:
         self._answer_to_file(question, f"<timeout> ({default_word})")
         return default
 
-    def ask_input(self, question: str, default: str = "") -> str:
-        """Free-text input question."""
+    def ask_input(
+        self,
+        question: str,
+        default: str = "",
+        *,
+        accept: Collection[str] = (),
+    ) -> str:
+        """Free-text input question.
+
+        The log gets the answer only when it is the default or in ``accept``.
+        """
         print(file=sys.stderr)
         print(
             f"{self.M}  ┌─────────────────────────────────────────────────────┐{self.N}",
@@ -344,21 +383,25 @@ class Log:
             answer = input("    > ").strip()
         except EOFError:
             answer = ""
-        self._answer_to_file(question, answer or f"<default> {default}")
+        shown = self._loggable(answer, (*accept, default)) if answer else f"<default> {default}"
+        self._answer_to_file(question, shown)
         return answer or default
 
-    def ask_text(self, prompt: str, *, label: str = "") -> str:
+    def ask_text(self, prompt: str, *, accept: Collection[str], label: str = "") -> str:
         """Read one typed line (a confirmation word) and record it in the log.
 
-        ``label`` names the question in the log when ``prompt`` alone does not
-        (a bare ``>``). EOF reads as an empty answer, which no confirmation
-        accepts, so a closed terminal aborts instead of raising.
+        ``accept`` lists the words this prompt acts on; any other answer is
+        logged by length only. ``label`` names the question in the log when
+        ``prompt`` alone does not (a bare ``>``). EOF reads as an empty answer,
+        which no confirmation accepts, so a closed terminal aborts instead of
+        raising.
         """
         try:
             answer = input(prompt).strip()
         except EOFError:
             answer = ""
-        self._answer_to_file(label or prompt.strip(), answer or "<empty>")
+        shown = self._loggable(answer, accept) if answer else "<empty>"
+        self._answer_to_file(label or prompt.strip(), shown)
         return answer
 
     def ask_password(self, question: str) -> str:

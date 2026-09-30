@@ -36,7 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from contextlib import AbstractContextManager, ExitStack, redirect_stdout
+from contextlib import AbstractContextManager, ExitStack, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -6345,19 +6345,63 @@ class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
             with redirect_stdout(StringIO()):
                 with patch("builtins.input", return_value="YES"):
                     got = log.ask_text(
-                        "    Type YES to proceed: ", label="Type YES to erase /dev/sda"
+                        "    Type YES to proceed: ",
+                        accept=("YES",),
+                        label="Type YES to erase /dev/sda",
                     )
                 with patch("builtins.input", side_effect=EOFError):
-                    eof = log.ask_text("  Type IUNDERSTAND to continue anyway: ")
+                    eof = log.ask_text(
+                        "  Type IUNDERSTAND to continue anyway: ", accept=("IUNDERSTAND",)
+                    )
             text = Path(path).read_text(encoding="utf-8")
         assert got == "YES" and eof == ""
         assert "Type YES to erase /dev/sda → 'YES'" in text
         assert "Type IUNDERSTAND to continue anyway: → '<empty>'" in text
 
+    def test_other_answers_are_logged_by_length_only(self):
+        # R2-2: a passphrase typed at the wrong prompt never reaches the log.
+        secret = "correct horse battery staple"
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.log")
+            log = Log(log_file=path)
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                with patch("builtins.input", return_value=secret):
+                    assert not log.ask("Continue anyway?")
+                    assert log.ask_text("  Type YES: ", accept=("YES",)) == secret
+                    assert log.ask_input("Pool name", "backup1") == secret
+                    assert log.ask_input("Confirm", accept=("DESTROY",)) == secret
+                with patch("builtins.input", return_value="yes"):
+                    assert log.ask_text("  Type YES: ", accept=("YES",)) == "yes"
+                with patch("builtins.input", return_value="DESTROY"):
+                    assert log.ask_input("Confirm", accept=("DESTROY",)) == "DESTROY"
+            text = Path(path).read_text(encoding="utf-8")
+        assert secret not in text
+        assert f"<other answer, {len(secret)} chars>" in text
+        assert "Continue anyway? → '<other answer, 28 chars> (no)'" in text
+        assert "Type YES: → 'yes'" in text
+        assert "Confirm → 'DESTROY'" in text
+
+    def test_log_file_is_private(self):
+        # R2-2: created 0600 whatever the umask; an existing 0644 file is tightened.
+        with tempfile.TemporaryDirectory() as td:
+            new = os.path.join(td, "new.log")
+            old = os.path.join(td, "old.log")
+            Path(old).write_text("x\n", encoding="utf-8")
+            os.chmod(old, 0o644)
+            umask = os.umask(0o022)
+            try:
+                with redirect_stdout(StringIO()):
+                    Log(log_file=new).info("hello")
+                    Log(log_file=old).info("hello")
+            finally:
+                os.umask(umask)
+            assert os.stat(new).st_mode & 0o777 == 0o600
+            assert os.stat(old).st_mode & 0o777 == 0o600
+
     def test_destructive_confirmations_never_bypass_the_log(self):
         # A raw input() answer never reaches zark.log (I19).
         raw_input = re.compile(r"(?<![\w.])input\(")
-        for name in ("recover", "purge", "repair_boot"):
+        for name in ("recover", "purge", "repair_boot", "fix_rpool_mountpoint"):
             src = (Path(__file__).parent.parent / "commands" / f"{name}.py").read_text(
                 encoding="utf-8",
             )
