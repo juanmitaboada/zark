@@ -4908,8 +4908,23 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         assert mock.was_called("zpool export rpool")
         assert mock.was_called("zpool export bpool")
         # R2-5: only the system's tree; a backup mounted alongside stays.
-        assert mock.was_called("umount -R /mnt/zark/system")
+        # V-3: made private first, so shared binds cannot carry the unmount to the host.
+        tree = [c for c in mock.calls if c.endswith(" /mnt/zark/system")]
+        assert tree == ["mount --make-rprivate /mnt/zark/system", "umount -R /mnt/zark/system"]
         assert mock.was_not_called("zfs unmount")
+
+    def test_refuses_an_altroot_that_climbs_out_of_mnt_zark(self):
+        # V-7: a prefix match on the stored string let "/mnt/zark/../.." through.
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/../..")
+        with patch_sh(mock), redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            try:
+                _umount_local_system(make_log())
+            except SystemExit:
+                assert mock.was_not_called("umount") and mock.was_not_called("mount --make")
+                return
+        raise AssertionError("Expected SystemExit for an altroot resolving to /")
 
     def test_refuses_an_altroot_that_only_starts_like_mnt_zark(self):
         mock = MockShell()
@@ -7159,6 +7174,13 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         assert self._umount_backup(export_ok=False).was_not_called("find")
         ok = self._umount_backup(export_ok=True)
         assert any(c.startswith("find ") and " -xdev " in c for c in ok.calls)
+
+    def test_umount_makes_the_backup_tree_private_first(self):
+        # V-3: same as umount local, for the backup-pool branch.
+        calls = self._umount_backup(export_ok=True).calls
+        tree = [c for c in calls if c.startswith(("mount --make-rprivate ", "umount -R "))]
+        assert [c.split()[0:2] for c in tree] == [["mount", "--make-rprivate"], ["umount", "-R"]]
+        assert tree[0].endswith("/backup") and tree[1].endswith("/backup")
 
 
 class TestStableVdevs:  # pylint: disable=missing-function-docstring

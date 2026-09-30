@@ -17,6 +17,7 @@ zark umount — Unmount a previously mounted backup pool.
 Safely unmounts all datasets, closes keystore, exports pool.
 """
 
+import os
 from pathlib import Path
 
 from lib import sh
@@ -27,6 +28,17 @@ from lib.log import Log
 
 MNT_BASE = "/mnt/zark"
 SYSTEM_TARGETS = ("local", "system", "rpool")
+
+
+def _unmount_tree(root: str) -> None:
+    """``umount -R root`` without reaching the live system through shared binds.
+
+    Under systemd mounts are shared: a bind of a host directory left under
+    ``root`` (a chroot's /run, /dev…) propagates the unmount of anything
+    mounted there on the host since. Private first, then unmount.
+    """
+    _ = sh.run(f"mount --make-rprivate {root}")
+    _ = sh.run(f"umount -R {root}")
 
 
 def _umount_local_system(log: Log) -> None:
@@ -42,11 +54,13 @@ def _umount_local_system(log: Log) -> None:
         log.warn("rpool is not imported — nothing to unmount.")
         return
 
-    altroot = sh.run("zpool get -H -o value altroot rpool").output.strip()
+    stored = sh.run("zpool get -H -o value altroot rpool").output.strip()
+    # Resolved: the value goes to umount -R, and "/mnt/zark/../.." is a prefix match.
+    altroot = os.path.realpath(stored) if stored.startswith("/") else ""
     if not altroot.startswith(f"{MNT_BASE}/"):
         log.fatal(
             "rpool was not imported by zark under an altroot "
-            f"(altroot={altroot or '-'}).\n"
+            f"(altroot={stored or '-'}).\n"
             "  Refusing to export — this looks like the running system, not a\n"
             "  live-USB inspection mount.",
         )
@@ -54,7 +68,7 @@ def _umount_local_system(log: Log) -> None:
     # Only the system's tree: `zfs unmount -a` would also unmount a backup
     # mounted with `zark mount` in the same session. zpool export unmounts the rest.
     log.info("Unmounting system datasets...")
-    _ = sh.run(f"umount -R {altroot}")
+    _unmount_tree(altroot)
 
     # Close the rpool keystore (LUKS over the keystore zvol) BEFORE exporting.
     # Unmounting and `unload-key` do not close the cryptsetup mapping, so
@@ -140,7 +154,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     # Only this pool's tree: `zfs unmount -a` would also try every dataset
     # of the running system. zpool export unmounts anything left.
     log.info("Unmounting datasets...")
-    _ = sh.run(f"umount -R {MNT_BASE}/{selected}")
+    _unmount_tree(f"{MNT_BASE}/{selected}")
 
     # Close keystore
     log.info("Closing keystore...")
