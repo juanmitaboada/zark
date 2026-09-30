@@ -6814,28 +6814,13 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
         assert r.code == 1 and r.final == "0"
         assert "rpool is still imported" in r.out and "NOT FIXED" in r.out
 
-    def test_sigterm_and_sighup_export_and_restore(self):
-        # R2-1: both used to kill the process with rpool imported and the parameter at 1.
-        for sig in (signal.SIGTERM, signal.SIGHUP):
+    def test_a_raising_export_still_restores_the_parameter(self):
+        # V-7: the restore sits in its own finally, after the export.
+        def boom() -> None:
+            raise RuntimeError("export blew up")
 
-            def send(s: signal.Signals = sig) -> None:
-                os.kill(os.getpid(), s)
-
-            r = self._run(during_fix=send)
-            assert r.code == 128 + sig, (sig, r.code)
-            assert r.events == ["export(inhibit=1)"] and r.final == "0", sig
-            assert r.mock.was_not_called("zfs set")
-
-    def test_a_second_ctrl_c_cannot_interrupt_the_export(self):
-        def interrupt() -> None:
-            raise KeyboardInterrupt
-
-        r = self._run(
-            during_fix=interrupt,
-            during_export=lambda: os.kill(os.getpid(), signal.SIGINT),
-        )
-        assert r.code == "KeyboardInterrupt"
-        assert r.events == ["export(inhibit=1)"] and r.final == "0"
+        r = self._run(during_export=boom)
+        assert r.code == "RuntimeError" and r.final == "0"
 
     def test_an_exception_in_the_fix_still_exports_and_restores(self):
         def boom() -> None:
@@ -6920,6 +6905,64 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
     def test_success_is_judged_by_the_property_not_the_exit_code(self):
         r = self._run(after=("none", "local"))
         assert r.code == 1 and "RPOOL MOUNTPOINT NOT FIXED" in r.out
+
+
+class TestFixRpoolSignals:  # pylint: disable=missing-function-docstring
+    """R2-1, V-1, V-6: the teardown survives any mix of signals and a dead stdout.
+
+    Each case runs tests/fix_rpool_harness.py in its own process: a regression
+    kills that process, not the test runner.
+    """
+
+    @staticmethod
+    def _run(scenario: str) -> tuple[int, str, list[str]]:
+        harness = Path(__file__).parent / "fix_rpool_harness.py"
+        with tempfile.TemporaryDirectory() as td:
+            r = subprocess.run(
+                [sys.executable, str(harness), td, scenario],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+            final = Path(td, "zvol_inhibit_dev").read_text(encoding="utf-8").strip()
+            events_file = Path(td, "events")
+            events = events_file.read_text(encoding="utf-8").split() if events_file.exists() else []
+        return r.returncode, final, events
+
+    def _assert_torn_down(self, scenario: str, code: int) -> None:
+        rc, final, events = self._run(scenario)
+        assert (rc, final, events) == (code, "0", ["export(inhibit=1)"]), (
+            scenario,
+            rc,
+            final,
+            events,
+        )
+
+    def test_one_signal(self):
+        self._assert_torn_down("sig:TERM", 128 + signal.SIGTERM)
+        self._assert_torn_down("sig:HUP", 128 + signal.SIGHUP)
+
+    def test_two_signals_pending_together_in_either_order(self):
+        # V-1: logind sends SIGTERM and SIGHUP together when a session is ended.
+        # CPython runs pending handlers lowest number first, whatever the send order.
+        for pair, first in (
+            ("INT,TERM", signal.SIGINT),
+            ("TERM,INT", signal.SIGINT),
+            ("HUP,INT", signal.SIGHUP),
+            ("TERM,HUP", signal.SIGHUP),
+            ("HUP,TERM", signal.SIGHUP),
+        ):
+            self._assert_torn_down(f"pending:{pair}", 128 + first)
+
+    def test_signals_during_the_export_are_ignored(self):
+        self._assert_torn_down("export:INT", 128 + signal.SIGINT)
+        self._assert_torn_down("export:TERM,HUP", 128 + signal.SIGINT)
+
+    def test_a_dead_stdout_does_not_kill_the_teardown(self):
+        # V-6: `| tee` killed by the same Ctrl-C; zark runs with SIGPIPE at SIG_DFL.
+        self._assert_torn_down("deadpipe:INT", 128 + signal.SIGINT)
+        self._assert_torn_down("deadpipe:HUP", 128 + signal.SIGHUP)
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
@@ -7148,10 +7191,9 @@ def main() -> int:
                 print(f"    \033[0;31m✗\033[0m {name}: {e}")
                 failed += 1
 
-    if _real_log_state() != real_logs:
-        print(
-            f"\n    \033[0;31m✗\033[0m the run wrote a real log file: {', '.join(_REAL_LOG_FILES)}"
-        )
+    changed = [p for p, st in _real_log_state().items() if st != real_logs[p]]
+    if changed:
+        print(f"\n    \033[0;31m✗\033[0m the run wrote a real log file: {', '.join(changed)}")
         failed += 1
 
     print(f"\n  {passed} passed, {failed} failed")

@@ -39,12 +39,24 @@ from lib.zfs import ZFS
 
 ZVOL_INHIBIT = Path("/sys/module/zfs/parameters/zvol_inhibit_dev")
 ALTROOT = "/run/zark/altroot/rpool"
-EXIT_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
-TEARDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+EXIT_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+# SIGPIPE too: with stdout on a dead pipe (`| tee` killed by the same Ctrl-C)
+# the default action kills the teardown at its first line; ignored, the write
+# raises BrokenPipeError, which Log._emit absorbs.
+TEARDOWN_SIGNALS = (*EXIT_SIGNALS, signal.SIGPIPE)
 
 
 def _exit_on_signal(signum: int, _frame: FrameType | None) -> NoReturn:
-    """Turn a kill or a closed terminal into SystemExit, so run()'s teardown runs."""
+    """Leave run()'s try for its teardown on Ctrl-C, a kill or a closed terminal.
+
+    The exit signals are ignored first: a second one already pending (logind
+    sends SIGTERM and SIGHUP together) is then dropped instead of raising
+    inside the teardown.
+    """
+    for sig in EXIT_SIGNALS:
+        _ = signal.signal(sig, signal.SIG_IGN)
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
     raise SystemExit(128 + signum)
 
 
@@ -234,13 +246,14 @@ def run(args: list[str]) -> None:
     handlers = {sig: signal.getsignal(sig) for sig in TEARDOWN_SIGNALS}
     for sig in EXIT_SIGNALS:
         _ = signal.signal(sig, _exit_on_signal)
+    _ = signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     try:
         ZVOL_INHIBIT.write_text("1", encoding="utf-8")
         log.ok("zvol device creation inhibited (zvol_inhibit_dev=1)")
         fixed = _fix(zfs, log)
     finally:
-        # Nothing may cut the teardown short: a second Ctrl-C, a kill or a
-        # closed terminal. Ignored signals stay ignored in the zpool child too.
+        # Nothing may cut the teardown short: a second Ctrl-C, a kill, a closed
+        # terminal or a dead pipe. Ignored signals stay ignored in the zpool child too.
         for sig in TEARDOWN_SIGNALS:
             _ = signal.signal(sig, signal.SIG_IGN)
         try:
