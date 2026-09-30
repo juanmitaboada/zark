@@ -358,7 +358,12 @@ for the canonical end-to-end sequences.
     recovered system* on its first boot. Resets the hostid, refreshes the
     ZFS cachefile, ensures the ZFS systemd services are enabled and runs
     a final **update-grub**(8) and initramfs regeneration without the
-    backup drive present, so the resulting **grub.cfg** is clean.
+    backup drive present, so the resulting **grub.cfg** is clean. If
+    **update-grub** fails (the grub guard refuses while an external pool
+    is visible) or produces no kernel entries, the previous **grub.cfg**
+    is kept, the banner reads FINISH INCOMPLETE and the exit status is 1;
+    the same applies to a failed initramfs update or a pool not ONLINE.
+    Disconnect the backup drive and run **finish** again.
 
 **simulate** \[*device*\] \[**--rw**\] \[**--display** *WxH*\]
 :   Boot a recovered (or live) disk in **qemu-system-x86_64**(1) under

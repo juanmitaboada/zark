@@ -48,6 +48,7 @@ from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa:
 
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.finish as finish_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.mount as mount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -56,6 +57,7 @@ import commands.recover as recover_mod  # pylint: disable=wrong-import-position 
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -6045,7 +6047,7 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
             patch.object(repair_boot_mod, "mount_system_pools", side_effect=fake_mount),
             patch.object(repair_boot_mod, "regenerate_initrd", side_effect=fake_initrd),
             patch.object(repair_boot_mod.grub_guard, "install", side_effect=fake_guard),
-            patch.object(repair_boot_mod, "_regenerate_grub_cfg", side_effect=fake_grub),
+            patch.object(repair_boot_mod, "regenerate_grub_cfg", side_effect=fake_grub),
             patch.object(repair_boot_mod, "fix_grub_bpool_uuid"),
             # write_zpool_cache mkdirs under /mnt/repair: unprivileged runs fail
             patch.object(ZFS, "write_zpool_cache"),
@@ -6101,22 +6103,29 @@ class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
     """E8: a stale grub.cfg.pre-repair is never passed off as regenerated."""
 
     @staticmethod
-    def _regenerate(root: Path, generated: str, update_grub_ok: bool = True) -> str:
+    def _regenerate(
+        root: Path,
+        generated: str,
+        update_grub_ok: bool = True,
+        stderr: str = "boom",
+    ) -> str:
         grub_cfg = root / "grub.cfg"
 
         def fake_run(cmd: str, **_kw: object) -> RunResult:
             if "update-grub" in cmd:
                 grub_cfg.write_text(generated, encoding="utf-8")
-                rc, err = (0, "") if update_grub_ok else (1, "boom")
+                rc, err = (0, "") if update_grub_ok else (1, stderr)
                 return RunResult(returncode=rc, stdout="", stderr=err, command=cmd)
             if cmd.startswith("cp "):
                 _, src, dst = cmd.split()
                 Path(dst).write_bytes(Path(src).read_bytes())
             return RunResult(returncode=0, stdout="", stderr="", command=cmd)
 
-        with patch.object(repair_boot_mod.sh, "run", side_effect=fake_run):
-            return repair_boot_mod._regenerate_grub_cfg(  # pylint: disable=protected-access
+        with patch.object(grub_cfg_mod.sh, "run", side_effect=fake_run):
+            return grub_cfg_mod.regenerate_grub_cfg(
                 grub_cfg,
+                "chroot /mnt/repair update-grub",
+                root / "grub.cfg.pre-repair",
                 make_log(),
             )
 
@@ -6144,6 +6153,108 @@ class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
                 reason = self._regenerate(root, "", update_grub_ok=False)
             assert reason == "update-grub failed: boom"
             assert (root / "grub.cfg").read_text(encoding="utf-8") == "CURRENT vmlinuz"
+
+    def test_guard_refusal_is_reported_by_its_error_line(self):
+        # J on eli: the guard's ERROR line, not grub-mkconfig's chatter.
+        stderr = (
+            "Sourcing file `/etc/default/grub'\n"
+            "Generating grub configuration file ...\n"
+            "ERROR: External ZFS pool(s) detected: backup\n\n"
+            "  Fix: disconnect the external drive(s) and run update-grub again.\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "grub.cfg").write_text("CURRENT vmlinuz", encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                reason = self._regenerate(root, "partial", update_grub_ok=False, stderr=stderr)
+            assert reason == "update-grub failed: ERROR: External ZFS pool(s) detected: backup"
+            assert (root / "grub.cfg").read_text(encoding="utf-8") == "CURRENT vmlinuz"
+
+
+class _FinishPath:  # pylint: disable=too-few-public-methods
+    """Stand-in for Path in finish: only /etc/os-release exists (no host writes)."""
+
+    def __init__(self, p: object) -> None:
+        self.p = str(p)
+
+    def __str__(self) -> str:
+        return self.p
+
+    def exists(self) -> bool:
+        """Only the os-release check passes; nothing on the host is read or written."""
+        return self.p == "/etc/os-release"
+
+
+class TestFinishBanner:  # pylint: disable=missing-function-docstring
+    """J: finish reports update-grub, update-initramfs and pool failures."""
+
+    @staticmethod
+    def _run(
+        grub_failure: str = "",
+        initramfs_ok: bool = True,
+        health: str = "ONLINE",
+    ) -> tuple[str, bool, list[tuple[object, ...]]]:
+        grub_calls: list[tuple[object, ...]] = []
+
+        def fake_run(cmd: str, **_kw: object) -> RunResult:
+            rc = 1 if cmd.startswith("update-initramfs") and not initramfs_ok else 0
+            return RunResult(returncode=rc, stdout="", stderr="", command=cmd)
+
+        def fake_grub(*a: object) -> str:
+            grub_calls.append(a)
+            return grub_failure
+
+        buf = StringIO()
+        exited = False
+        patches: list[AbstractContextManager[object]] = [
+            patch("lib.sh.run", side_effect=fake_run),
+            patch("lib.zfs.run", side_effect=fake_run),
+            patch.object(finish_mod, "Path", _FinishPath),
+            patch.object(finish_mod, "warn_rpool_mountpoint_lost"),
+            patch.object(finish_mod, "warn_kernel_named_vdevs"),
+            patch.object(finish_mod.grub_guard, "install"),
+            patch.object(finish_mod.apt_guard, "install"),
+            patch.object(finish_mod, "regenerate_grub_cfg", side_effect=fake_grub),
+            patch.object(finish_mod, "fix_grub_bpool_uuid"),
+            patch.object(ZFS, "pool_exists", return_value=True),
+            patch.object(ZFS, "pool_guid", return_value=""),
+            patch.object(ZFS, "pool_health", return_value=health),
+            redirect_stdout(buf),
+        ]
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            try:
+                finish_mod.run([])
+            except SystemExit:
+                exited = True
+        return buf.getvalue(), exited, grub_calls
+
+    def test_all_good_is_complete(self):
+        out, exited, calls = self._run()
+        assert not exited
+        assert "FINISH COMPLETE" in out and "GRUB config updated ✓" in out
+        assert [(str(a[0]), a[1], str(a[2])) for a in calls] == [
+            ("/boot/grub/grub.cfg", "update-grub", "/boot/grub/grub.cfg.pre-finish"),
+        ]
+
+    def test_guard_refusal_is_incomplete(self):
+        reason = "update-grub failed: ERROR: External ZFS pool(s) detected: backup"
+        out, exited, _ = self._run(grub_failure=reason)
+        assert exited
+        assert "FINISH INCOMPLETE" in out
+        assert "GRUB config updated ✓" not in out
+        assert f"grub.cfg not regenerated: {reason}" in out
+
+    def test_initramfs_failure_is_incomplete(self):
+        out, exited, _ = self._run(initramfs_ok=False)
+        assert exited
+        assert "FINISH INCOMPLETE" in out and "initramfs updated ✓" not in out
+
+    def test_degraded_pool_is_incomplete(self):
+        out, exited, _ = self._run(health="DEGRADED")
+        assert exited
+        assert "✗ pool rpool: DEGRADED" in out
 
 
 class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring

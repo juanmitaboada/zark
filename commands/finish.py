@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 
 from lib import apt_guard, grub_guard, sh
+from lib.grub_cfg import regenerate_grub_cfg
 
 # from lib.config import Config
 from lib.log import Log
@@ -107,14 +108,19 @@ def run(
             _ = f.write("GRUB_RECORDFAIL_TIMEOUT=0\n")
         log.ok("GRUB_RECORDFAIL_TIMEOUT=0 set")
 
-    _ = sh.run("update-grub", log=log)
-    log.ok("update-grub completed")
+    grub_cfg = Path("/boot/grub/grub.cfg")
+    grub_failure = regenerate_grub_cfg(
+        grub_cfg,
+        "update-grub",
+        Path(f"{grub_cfg}.pre-finish"),
+        log,
+    )
 
     # Fix bpool UUID in grub.cfg
     bpool_guid_dec = zfs.pool_guid("bpool")
     if bpool_guid_dec:
         bpool_uuid_hex = format(int(bpool_guid_dec), "016x")
-        _ = fix_grub_bpool_uuid(Path("/boot/grub/grub.cfg"), bpool_uuid_hex, log)
+        _ = fix_grub_bpool_uuid(grub_cfg, bpool_uuid_hex, log)
 
     # Verify EFI binary
     if (
@@ -146,27 +152,45 @@ def run(
     # ── 4. initramfs ─────────────────────────────────────────────────────
     log.step(4, 5, "Updating initramfs...")
     r = sh.run("update-initramfs -u -k all", log=log)
-    if r.ok:
+    initramfs_ok = r.ok
+    if initramfs_ok:
         log.ok("initramfs updated")
     else:
         log.warn("update-initramfs had errors")
 
     # ── 5. Verify ────────────────────────────────────────────────────────
     log.step(5, 5, "Verifying system state...")
+    unhealthy: list[str] = []
     for pool in ("rpool", "bpool"):
         health = zfs.pool_health(pool)
         if health == "ONLINE":
             log.ok(f"  {pool}: ONLINE ✓")
         else:
             log.warn(f"  {pool}: {health}")
+            unhealthy.append(f"{pool}: {health}")
 
-    log.banner_ok(
-        "FINISH COMPLETE",
-        [
-            "ZFS services enabled ✓",
-            "GRUB config updated ✓",
-            "initramfs updated ✓",
-            "",
-            f"Run setup: {log.W}sudo ./zark setup{log.N}",
-        ],
-    )
+    # The banner reports what happened: "updated" over a failed update-grub
+    # sent the operator to a reboot with a stale grub.cfg (J, 2026-09-30).
+    failed = bool(grub_failure) or not initramfs_ok or bool(unhealthy)
+    lines = [
+        "ZFS services enabled ✓",
+        (
+            "GRUB config updated ✓"
+            if not grub_failure
+            else f"✗ grub.cfg not regenerated: {grub_failure}"
+        ),
+        "initramfs updated ✓" if initramfs_ok else "✗ update-initramfs had errors",
+        *(f"✗ pool {u}" for u in unhealthy),
+        "",
+    ]
+    if failed:
+        log.banner_error(
+            "FINISH INCOMPLETE",
+            [
+                *lines,
+                "Disconnect the external drive(s) if any,",
+                f"then run again: {log.W}sudo ./zark finish{log.N}",
+            ],
+        )
+        raise SystemExit(1)
+    log.banner_ok("FINISH COMPLETE", [*lines, f"Run setup: {log.W}sudo ./zark setup{log.N}"])

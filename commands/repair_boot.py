@@ -22,6 +22,7 @@ from pathlib import Path
 
 from lib import grub_guard, sh
 from lib.cleanup import Cleanup
+from lib.grub_cfg import regenerate_grub_cfg
 from lib.identity import disks_under
 from lib.initrd import regenerate_initrd
 from lib.keystore import Keystore
@@ -50,36 +51,6 @@ def _esp_of_rpool_disk() -> str:
                 if len(fields) == 2 and fields[1].lower() == _ESP_PARTTYPE:
                     return f"/dev/{fields[0]}"
     return ""
-
-
-def _regenerate_grub_cfg(grub_cfg: Path, log: Log) -> str:
-    """Run update-grub in the chroot; "" on success, else why grub.cfg is not new.
-
-    The copy taken first is restored only when this run made it: a
-    grub.cfg.pre-repair left by an earlier run describes an older system.
-    """
-    backup = Path(f"{grub_cfg}.pre-repair")
-    backed_up = grub_cfg.exists() and sh.run(f"cp {grub_cfg} {backup}").ok
-    if backed_up:
-        log.dbg("Backed up grub.cfg → grub.cfg.pre-repair")
-
-    r = sh.run(f"chroot {REPAIR_MNT} update-grub", log=log)
-    content = grub_cfg.read_text(encoding="utf-8") if grub_cfg.exists() else ""
-    if r.ok and "vmlinuz" in content:
-        log.ok("grub.cfg regenerated with kernel entries ✓")
-        return ""
-
-    reason = (
-        "update-grub produced no kernel entries"
-        if r.ok
-        else f"update-grub failed: {r.stderr.strip()}"
-    )
-    log.warn(reason)
-    if backed_up and sh.run(f"cp {backup} {grub_cfg}").ok:
-        log.warn("Restored the grub.cfg found at the start of this run")
-    else:
-        log.warn("No grub.cfg from this run to restore — the generated one is left in place")
-    return reason
 
 
 def run(
@@ -194,7 +165,12 @@ def run(
     log.step(6, TOTAL_STEPS, "Regenerating grub.cfg...")
 
     grub_cfg = Path(f"{REPAIR_MNT}/boot/grub/grub.cfg")
-    grub_failure = _regenerate_grub_cfg(grub_cfg, log)
+    grub_failure = regenerate_grub_cfg(
+        grub_cfg,
+        f"chroot {REPAIR_MNT} update-grub",
+        Path(f"{grub_cfg}.pre-repair"),
+        log,
+    )
 
     # Fix bpool UUID in grub.cfg
     bpool_guid = zfs.pool_guid("bpool")

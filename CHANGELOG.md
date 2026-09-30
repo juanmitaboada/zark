@@ -168,6 +168,14 @@ consolidation that preceded it.
   and still reported "grub.cfg regenerated ✓". The initrds and the grub
   guard now come first; only this run's copy is ever restored; a grub.cfg
   without kernel entries ends in BOOT REPAIR INCOMPLETE (exit 1).
+- finish ignored the exit status of `update-grub`: with the backup drive
+  still plugged in, the grub guard refused ("External ZFS pool(s)
+  detected") and finish still printed "update-grub completed" and
+  "GRUB config updated ✓". finish now shares repair-boot's grub.cfg check
+  (`lib/grub_cfg.py`: non-zero exit or no kernel entries is a failure,
+  reported by the guard's ERROR line, and only this run's
+  `grub.cfg.pre-finish` is restored); a failed update-grub,
+  update-initramfs or a pool not ONLINE ends in FINISH INCOMPLETE (exit 1).
 - recover ran `zpool destroy -f rpool bpool` before partitioning. With
   the new target filter those pools can only belong to another disk, so
   recover now refuses to start while they are imported instead.
