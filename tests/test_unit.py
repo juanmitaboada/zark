@@ -4897,7 +4897,18 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         mock.on("zpool list rpool").succeeds("rpool")
         mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
         mock.on("zpool list bpool").succeeds("bpool")
-        mock.on("umount -R /mnt/zark/system").succeeds()
+        mock.on("findmnt -rn -o TARGET,FSTYPE").succeeds(
+            "/ overlay\n"
+            "/mnt/zark/system zfs\n"
+            "/mnt/zark/system/boot zfs\n"
+            "/mnt/zark/system/proc proc\n"
+            "/mnt/zark/system/run tmpfs\n"
+            "/mnt/zark/system/run/user/1000 tmpfs\n"
+            "/mnt/zark/system/home zfs\n"
+            "/mnt/zark/systemx tmpfs\n"
+            "/mnt/zark/backup zfs\n"
+            "/mnt/zark/backup/proc proc",
+        )
         mock.on("zfs unload-key -r bpool").succeeds()
         mock.on("zfs unload-key -r rpool").succeeds()
         mock.on("zpool export bpool").succeeds()
@@ -4908,9 +4919,17 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         assert mock.was_called("zpool export rpool")
         assert mock.was_called("zpool export bpool")
         # R2-5: only the system's tree; a backup mounted alongside stays.
-        # V-3: made private first, so shared binds cannot carry the unmount to the host.
-        tree = [c for c in mock.calls if c.endswith(" /mnt/zark/system")]
-        assert tree == ["mount --make-rprivate /mnt/zark/system", "umount -R /mnt/zark/system"]
+        # V-3: the non-ZFS mounts (binds) are made private and unmounted first,
+        # each once at its top; the ZFS tree is unmounted without that, so the
+        # unmount reaches its copies in other mount namespaces (eli, K6).
+        tree = [c for c in mock.calls if c.startswith(("mount --make-rprivate", "umount -R"))]
+        assert tree == [
+            "mount --make-rprivate /mnt/zark/system/proc",
+            "umount -R /mnt/zark/system/proc",
+            "mount --make-rprivate /mnt/zark/system/run",
+            "umount -R /mnt/zark/system/run",
+            "umount -R /mnt/zark/system",
+        ]
         assert mock.was_not_called("zfs unmount")
 
     def test_refuses_an_altroot_that_climbs_out_of_mnt_zark(self):
@@ -7170,21 +7189,24 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
                 patch("builtins.input", return_value="y"),
                 redirect_stdout(StringIO()),
             ):
-                umount_mod.run([])
+                try:
+                    umount_mod.run([])
+                except SystemExit:
+                    pass
         return mock
 
     def test_umount_cleans_directories_only_after_the_export(self):
         # Review §8: with the pool still imported, find would delete inside the backup.
-        assert self._umount_backup(export_ok=False).was_not_called("find")
+        assert self._umount_backup(export_ok=False).was_not_called("find /")
         ok = self._umount_backup(export_ok=True)
         assert any(c.startswith("find ") and " -xdev " in c for c in ok.calls)
 
-    def test_umount_makes_the_backup_tree_private_first(self):
-        # V-3: same as umount local, for the backup-pool branch.
+    def test_umount_lets_the_zfs_unmount_propagate(self):
+        # eli K6: a private backup tree left its copies mounted in the service
+        # and snap namespaces, and the export failed "busy".
         calls = self._umount_backup(export_ok=True).calls
-        tree = [c for c in calls if c.startswith(("mount --make-rprivate ", "umount -R "))]
-        assert [c.split()[0:2] for c in tree] == [["mount", "--make-rprivate"], ["umount", "-R"]]
-        assert tree[0].endswith("/backup") and tree[1].endswith("/backup")
+        assert not any(c.startswith("mount --make-rprivate") for c in calls)
+        assert [c for c in calls if c.startswith("umount -R ")][-1].endswith("/backup")
 
 
 class TestStableVdevs:  # pylint: disable=missing-function-docstring

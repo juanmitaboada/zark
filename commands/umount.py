@@ -31,13 +31,26 @@ SYSTEM_TARGETS = ("local", "system", "rpool")
 
 
 def _unmount_tree(root: str) -> None:
-    """``umount -R root`` without reaching the live system through shared binds.
+    """``umount -R root``: the ZFS unmounts propagate, the other mounts do not.
 
-    Under systemd mounts are shared: a bind of a host directory left under
-    ``root`` (a chroot's /run, /dev…) propagates the unmount of anything
-    mounted there on the host since. Private first, then unmount.
+    Under systemd mounts are shared. Every dataset mounted here has copies in
+    other mount namespaces (systemd services, snaps, the namespaces snapd pins
+    in /run/snapd/ns) that only a propagated unmount releases; made private,
+    they stay and keep the pool busy (eli, K6). A bind of a host directory
+    under ``root`` (a chroot's /run, /dev…) would instead carry the unmount to
+    whatever the host mounted there since, so each non-ZFS mount is made
+    private and unmounted first.
     """
-    _ = sh.run(f"mount --make-rprivate {root}")
+    table = sh.run("findmnt -rn -o TARGET,FSTYPE")
+    below = [
+        (target, fstype)
+        for target, _, fstype in (line.rpartition(" ") for line in table.lines if table.ok)
+        if target == root or target.startswith(f"{root}/")
+    ]
+    others = [t for t, fstype in below if fstype != "zfs" and t != root]
+    for top in (t for t in others if not any(t.startswith(f"{o}/") for o in others)):
+        _ = sh.run(f"mount --make-rprivate {top}")
+        _ = sh.run(f"umount -R {top}")
     _ = sh.run(f"umount -R {root}")
 
 
