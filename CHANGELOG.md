@@ -34,7 +34,11 @@ consolidation that preceded it.
   `mountpoint=/`. It sets the `zvol_inhibit_dev` module parameter before
   importing rpool (`-N`, altroot, no key loaded), so no zvol device exists
   while the mountpoint changes (chase.c:648); it lists the datasets that
-  inherit from rpool, asks for YES, judges success by the stored property,
+  inherit from rpool with their `canmount`, and for each one with
+  `canmount=on` (it starts mounting at the next boot, over whatever the
+  boot environment has there) asks whether to keep it (typing its name),
+  set `canmount=off` in the same inhibited import (before the mountpoint)
+  or abort; then it asks for YES, judges success by the stored property,
   and exports rpool and restores the parameter on every exit path: SIGTERM
   and SIGHUP (a closed terminal) end the run through the same teardown, and
   during it SIGINT, SIGTERM and SIGHUP are ignored, by the `zpool export`

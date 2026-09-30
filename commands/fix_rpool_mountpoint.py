@@ -77,14 +77,66 @@ def _props(dataset: str) -> dict[str, tuple[str, str]]:
     return props
 
 
-def _inheriting_from_rpool() -> list[str]:
-    """Filesystems whose mountpoint is inherited from rpool itself."""
-    r = sh.run("zfs get -H -r -t filesystem -o name,source mountpoint rpool")
+def _inheriting_from_rpool() -> list[tuple[str, str]]:
+    """(dataset, canmount) of the filesystems whose mountpoint is inherited from rpool."""
+    r = sh.run(
+        "zfs get -H -r -t filesystem -o name,property,value,source mountpoint,canmount rpool"
+    )
+    rows = [f for f in (line.split("\t") for line in (r.lines if r.ok else [])) if len(f) == 4]
+    canmount = {f[0]: f[2] for f in rows if f[1] == "canmount"}
     return [
-        f[0]
-        for f in (line.split("\t") for line in (r.lines if r.ok else []))
-        if len(f) == 2 and f[1] == "inherited from rpool"
+        (f[0], canmount.get(f[0], "?"))
+        for f in rows
+        if f[1] == "mountpoint" and f[3] == "inherited from rpool"
     ]
+
+
+def _decide_canmount_on(log: Log, dataset: str, target: str) -> bool | None:
+    """Keep (True) or turn off (False) a dataset that will start mounting; None aborts."""
+    log.warn(f"{dataset} has canmount=on: from the next boot it mounts at {target},")
+    log.warn(f"  over whatever the boot environment keeps in {target}.")
+    choice = log.ask_choice(
+        f"What should happen to {dataset}?",
+        [
+            f"Keep canmount=on — it mounts at {target}",
+            "Set canmount=off — it never mounts",
+            "Abort — change nothing",
+        ],
+        default=2,
+    )
+    if choice == 1:
+        return False
+    if choice == 2:
+        return None
+    typed = log.ask_text(
+        f"    Type {dataset} to confirm it mounts at {target}: ",
+        accept=(dataset,),
+        label=f"Type {dataset} to keep it mounting at {target}",
+    )
+    return True if typed == dataset else None
+
+
+def _review_inheritors(log: Log) -> list[str] | None:
+    """List what inherits from rpool; the canmount=on ones to turn off, None to abort."""
+    affected = _inheriting_from_rpool()
+    targets = {ds: inherited(UBUNTU_RPOOL_MOUNTPOINT, ds[len("rpool/") :]) for ds, _ in affected}
+    if affected:
+        log.warn("These datasets inherit their mountpoint from rpool and will change:")
+        for ds, canmount in affected:
+            log.raw(f"    {ds:44} none → {targets[ds]:24} canmount={canmount}")
+    else:
+        log.info("No other dataset inherits its mountpoint from rpool")
+
+    turn_off: list[str] = []
+    for ds, canmount in affected:
+        if canmount != "on":
+            continue
+        keep = _decide_canmount_on(log, ds, targets[ds])
+        if keep is None:
+            return None
+        if not keep:
+            turn_off.append(ds)
+    return turn_off
 
 
 def _fix(zfs: ZFS, log: Log) -> bool:
@@ -110,15 +162,11 @@ def _fix(zfs: ZFS, log: Log) -> bool:
             "rpool does not have the Ubuntu layout (canmount=off, rpool/ROOT) — not touching it",
         )
 
-    affected = _inheriting_from_rpool()
     log.info(f"rpool: mountpoint none → {UBUNTU_RPOOL_MOUNTPOINT} (canmount stays off)")
-    if affected:
-        log.warn("These datasets inherit their mountpoint from rpool and will change:")
-        for ds in affected:
-            leaf = ds[len("rpool/") :]
-            log.raw(f"    {ds:44} none → {inherited(UBUNTU_RPOOL_MOUNTPOINT, leaf)}")
-    else:
-        log.info("No other dataset inherits its mountpoint from rpool")
+    turn_off = _review_inheritors(log)
+    if turn_off is None:
+        log.info("Aborted — nothing changed")
+        return False
 
     answer = log.ask_text(
         f"    Type YES to set mountpoint={UBUNTU_RPOOL_MOUNTPOINT} on rpool: ",
@@ -128,6 +176,14 @@ def _fix(zfs: ZFS, log: Log) -> bool:
     if answer != "YES":
         log.info("Aborted — nothing changed")
         return False
+
+    # Before the mountpoint: once it is set, libzfs tries to mount canmount=on inheritors.
+    for ds in turn_off:
+        _ = sh.run(f"zfs set canmount=off {ds}", log=log)
+        if _props(ds).get("canmount", ("", ""))[0] != "off":
+            log.error(f"{ds} is not canmount=off — rpool's mountpoint left unchanged")
+            return False
+        log.ok(f"{ds} canmount=off ✓")
 
     r = sh.run(f"zfs set mountpoint={UBUNTU_RPOOL_MOUNTPOINT} rpool", log=log)
     # Judge by the property, not the exit code: with no key loaded the

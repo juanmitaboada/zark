@@ -6597,6 +6597,8 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
     def _run(  # pylint: disable=too-many-arguments,too-many-locals
         *,
         answer: str = "YES",
+        choices: tuple[str, ...] = (),
+        inheritors: tuple[tuple[str, str], ...] = (),
         live: bool = True,
         imported: bool = False,
         import_ok: bool = True,
@@ -6635,10 +6637,19 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
                     during_fix()
                 return real_fix(zfs, log)
 
-            props = [
-                {"mountpoint": before, "canmount": ("off", "local")},
-                {"mountpoint": after, "canmount": ("off", "local")},
-            ]
+            rpool_props = iter(
+                [
+                    {"mountpoint": before, "canmount": ("off", "local")},
+                    {"mountpoint": after, "canmount": ("off", "local")},
+                ],
+            )
+
+            def props(ds: str) -> dict[str, tuple[str, str]]:
+                if ds == "rpool":
+                    return next(rpool_props)
+                off = mock.was_called(f"zfs set canmount=off {ds}")
+                return {"canmount": ("off", "local") if off else ("on", "default")}
+
             buf = StringIO()
             code: int | str | None = None
             patches: list[AbstractContextManager[object]] = [
@@ -6652,12 +6663,16 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
                     side_effect=[zvols_before or [], zvols_after or []],
                 ),
                 patch.object(fix_rpool_mod, "_props", side_effect=props),
-                patch.object(fix_rpool_mod, "_inheriting_from_rpool", return_value=[]),
+                patch.object(
+                    fix_rpool_mod,
+                    "_inheriting_from_rpool",
+                    return_value=list(inheritors),
+                ),
                 patch.object(ZFS, "pool_exists", return_value=imported),
                 patch.object(ZFS, "pool_import", side_effect=fake_import),
                 patch.object(ZFS, "pool_export", side_effect=fake_export),
                 patch.object(ZFS, "dataset_exists", return_value=True),
-                patch("builtins.input", return_value=answer),
+                patch("builtins.input", side_effect=[*choices, answer]),
                 redirect_stdout(buf),
             ]
             with ExitStack() as stack:
@@ -6767,6 +6782,63 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
             child = fix_rpool_mod._props("rpool/x")  # pylint: disable=protected-access
         assert root["mountpoint"] == ("/", "local")
         assert child["mountpoint"] == ("/srv", "local")
+
+    # eli after H5: the rpool/var tree inherits from rpool; only docker mounts.
+    _ELI_TREE = (
+        ("rpool/var", "off"),
+        ("rpool/var/lib", "off"),
+        ("rpool/var/lib/docker", "on"),
+    )
+
+    def test_inheritors_are_read_with_their_canmount(self):
+        mock = MockShell()
+        mock.on(
+            "zfs get -H -r -t filesystem -o name,property,value,source mountpoint,canmount rpool",
+        ).succeeds(
+            "rpool\tmountpoint\t/run/zark/altroot/rpool\tlocal\n"
+            "rpool\tcanmount\toff\tlocal\n"
+            "rpool/ROOT\tmountpoint\tnone\tlocal\n"
+            "rpool/ROOT\tcanmount\toff\tlocal\n"
+            "rpool/var\tmountpoint\t/run/zark/altroot/rpool/var\tinherited from rpool\n"
+            "rpool/var\tcanmount\toff\tlocal\n"
+            "rpool/var/lib/docker\tmountpoint\t/x\tinherited from rpool\n"
+            "rpool/var/lib/docker\tcanmount\ton\tdefault",
+        )
+        with patch_sh(mock):
+            got = fix_rpool_mod._inheriting_from_rpool()  # pylint: disable=protected-access
+        assert got == [("rpool/var", "off"), ("rpool/var/lib/docker", "on")]
+
+    def test_inheritors_are_listed_with_their_canmount(self):
+        r = self._run(inheritors=self._ELI_TREE, choices=("1", "rpool/var/lib/docker"))
+        for ds, cm, target in (
+            ("rpool/var", "off", "/var"),
+            ("rpool/var/lib/docker", "on", "/var/lib/docker"),
+        ):
+            assert re.search(
+                rf"{re.escape(ds)}\s+none → {re.escape(target)}\s+canmount={cm}", r.out
+            )
+        assert "rpool/var has canmount=on" not in r.out  # off datasets ask nothing
+
+    def test_keeping_a_canmount_on_dataset_needs_its_name(self):
+        r = self._run(inheritors=self._ELI_TREE, choices=("1", "rpool/var/lib/docker"))
+        assert r.code is None and r.mock.was_called("zfs set mountpoint=/ rpool")
+        assert r.mock.was_not_called("zfs set canmount")
+
+    def test_a_wrong_name_changes_nothing(self):
+        r = self._run(inheritors=self._ELI_TREE, choices=("1", "YES"), answer="unused")
+        assert r.code == 1 and r.mock.was_not_called("zfs set")
+        assert r.events[-1] == "export(inhibit=1)" and r.final == "0"
+
+    def test_the_default_aborts(self):
+        r = self._run(inheritors=self._ELI_TREE, choices=("",), answer="unused")
+        assert r.code == 1 and r.mock.was_not_called("zfs set")
+
+    def test_canmount_off_is_set_before_the_mountpoint(self):
+        # R2-4: an empty rpool/var created later must not cover the BE's /var.
+        r = self._run(inheritors=(("rpool/var", "on"),), choices=("2",))
+        sets = [c for c in r.mock.calls if c.startswith("zfs set")]
+        assert sets == ["zfs set canmount=off rpool/var", "zfs set mountpoint=/ rpool"]
+        assert r.code is None and "RPOOL MOUNTPOINT FIXED" in r.out
 
     def test_success_is_judged_by_the_property_not_the_exit_code(self):
         r = self._run(after=("none", "local"))
