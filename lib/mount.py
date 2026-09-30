@@ -168,7 +168,7 @@ def mount_system_pools(
 
 
 def rpool_mountpoint_lost() -> bool:
-    """True when rpool carries the mountpoint=none left by zark recover ≤ 2.0.0-rc1.
+    """True when rpool carries the mountpoint=none left by zark recover ≤ 1.0.12.
 
     The Ubuntu installer creates rpool with canmount=off, mountpoint=/.
     Only that layout (rpool/ROOT present, canmount=off, a *local* none) is
@@ -189,7 +189,7 @@ def warn_rpool_mountpoint_lost(log: Log) -> None:
     """Explain rpool's lost mountpoint and how to fix it, when it applies."""
     if not rpool_mountpoint_lost():
         return
-    log.warn("rpool has mountpoint=none; the Ubuntu installer sets / (zark recover ≤ 2.0.0-rc1)")
+    log.warn("rpool has mountpoint=none; the Ubuntu installer sets / (zark recover ≤ 1.0.12)")
     log.info("  New datasets directly under rpool will not mount, and backup drives")
     log.info("  prepared from this system cannot be browsed with 'zark mount'.")
     log.info("  Fix it from a live USB: sudo ./zark fix-rpool-mountpoint")

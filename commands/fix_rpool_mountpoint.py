@@ -14,7 +14,7 @@
 """
 zark fix-rpool-mountpoint — give a restored rpool back the installer's mountpoint=/.
 
-zark recover up to 2.0.0-rc1 created rpool with mountpoint=none, where the
+zark recover up to 1.0.12 created rpool with mountpoint=none, where the
 Ubuntu installer uses / (with canmount=off). Datasets created later directly
 under rpool then inherit none and never mount, and ``prepare`` copies none
 to new backup drives, so ``zark mount`` finds nothing to mount.

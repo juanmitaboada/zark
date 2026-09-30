@@ -404,7 +404,7 @@ for the canonical end-to-end sequences.
 
 **fix-rpool-mountpoint**
 :   Give a restored **rpool** back the Ubuntu installer's
-    *mountpoint=/* (with *canmount=off*). **recover** up to 2.0.0-rc1
+    *mountpoint=/* (with *canmount=off*). **recover** up to 1.0.12
     created **rpool** with *mountpoint=none*: datasets created later
     directly under **rpool** then never mount, and drives prepared
     from that system cannot be browsed with **mount**. **backup**,

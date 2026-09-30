@@ -6621,7 +6621,7 @@ class TestRpoolRootMountpoint:  # pylint: disable=missing-function-docstring
 
     def test_root_mountpoint_from_cache_or_ubuntu_layout(self):
         assert rpool_root_mountpoint({"rpool": ("off", "/")}) == ("/", "cache")
-        # none in origin's cache is what a pre-rc2 recover left behind
+        # none in origin's cache is what a 1.0.12 recover left behind
         assert rpool_root_mountpoint({"rpool": ("off", "none")}) == ("/", "ubuntu")
         assert rpool_root_mountpoint({}) == ("/", "ubuntu")
         assert rpool_root_mountpoint({"rpool": ("off", "/srv/x")}) == ("/srv/x", "cache")

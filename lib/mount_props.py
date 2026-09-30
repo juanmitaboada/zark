@@ -90,7 +90,7 @@ def rpool_root_mountpoint(cache: dict[str, tuple[str, str]]) -> tuple[str, str]:
     """(mountpoint, source) for the pool root recover creates.
 
     ``none`` in origin's cache is not trusted: zark recover up to
-    2.0.0-rc1 created rpool with mountpoint=none, so a system restored by it
+    1.0.12 created rpool with mountpoint=none, so a system restored by it
     carries that value into its own cache and every later backup.
     """
     mountpoint = cache.get("rpool", ("", ""))[1]
