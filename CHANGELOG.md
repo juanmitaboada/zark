@@ -195,11 +195,19 @@ consolidation that preceded it.
   `zpool export` unmounts whatever of the pool is left). `umount local`
   does the same with the system's altroot, so a backup mounted alongside
   it stays mounted, and it requires that altroot, resolved with
-  `realpath`, to be below `/mnt/zark/`. Both branches make the tree
-  private (`mount --make-rprivate`) before `umount -R`: under systemd's
-  shared propagation, a host directory bound under the tree (a chroot's
-  `/run`, `/dev`…) otherwise carries the unmount to whatever was mounted
-  there on the host since. After a failed
+  `realpath`, to be below `/mnt/zark/`. Before `umount -R`, both branches
+  make each non-ZFS mount under the tree (a chroot's or an operator's
+  binds of `/proc`, `/sys`, `/dev`, `/run`, the ESP) private and unmount
+  it: under systemd's shared propagation such a bind would otherwise
+  carry the unmount to whatever the host mounted there since. The ZFS
+  datasets are unmounted without changing their propagation, because
+  their copies in other mount namespaces (systemd services, snaps, the
+  namespaces snapd pins in `/run/snapd/ns`) are released only by a
+  propagated unmount; making the whole tree private (an intermediate
+  version) left all three pools busy on eli's live session. When an
+  export still fails, `umount local` ends in SYSTEM NOT UNMOUNTED and the
+  backup branch in BACKUP NOT UNMOUNTED, both with exit 1 (`umount local`
+  used to print "exported cleanly" regardless). After a failed
   export, umount no longer deletes empty directories under
   `/mnt/zark/<pool>`: with the pool still mounted there, `find -delete`
   removed empty directories of the backup itself.
@@ -246,6 +254,11 @@ consolidation that preceded it.
   SIGHUP is not handled, and with SIGPIPE at SIG_DFL a Ctrl-C on a
   command piped to `tee` kills it before `atexit` runs, leaving the
   pools of recover, repair-boot or chroot imported. (hallazgo 12)
+- `umount` does not release dataset copies that another mount namespace
+  keeps (a snap namespace pinned in `/run/snapd/ns` whose copies were
+  stacked while the tree was private, seen on eli with an intermediate
+  version of this milestone): it reports the pool as still imported and
+  exits 1; rebooting the live session releases it.
 
 #### Removed
 

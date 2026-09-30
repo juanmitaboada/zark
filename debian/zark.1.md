@@ -455,7 +455,9 @@ for the canonical end-to-end sequences.
 **umount** \[*target*\]
 :   Unmount a previously **mount**-ed backup pool. Unmounts only the tree
     under */mnt/zark/<poolname>/*, closes the LUKS keystore and exports the
-    pool cleanly.
+    pool. If the export fails (a copy of a dataset can stay mounted in
+    another mount namespace, such as a service's or a snap's), it says so
+    and exits 1; on a live USB, rebooting the live session releases it.
 
     With the *target* **local** (aliases **system**, **rpool**) it exports
     the installed system's pools mounted by **mount local**, unmounting
