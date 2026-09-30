@@ -49,11 +49,13 @@ from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa:
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.mount as mount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -6472,6 +6474,98 @@ class TestFixRpoolMountpoint:  # pylint: disable=missing-function-docstring
     def test_success_is_judged_by_the_property_not_the_exit_code(self):
         _, out, exited, _, _ = self._run(after=("none", "local"))
         assert exited and "RPOOL MOUNTPOINT NOT FIXED" in out
+
+
+class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
+    """G4: read-only `zark mount` rebuilds origin's tree without writing."""
+
+    @staticmethod
+    def _plan(cache: bool = True) -> dict[str, "mount_mod.LayoutMount"]:
+        c = (
+            {
+                **parse_list_cache(_ELI_CACHE_RPOOL),
+                **parse_list_cache(_ELI_CACHE_BPOOL),
+            }
+            if cache
+            else {}
+        )
+        with (
+            patch_sh(_plan_mock()),
+            patch.object(mount_mod, "root_is_empty", return_value=False),
+        ):
+            plan = mount_mod._plan_origin_layout(  # pylint: disable=protected-access
+                "backup",
+                _BE,
+                "/mnt/zark/backup",
+                c,
+            )
+        return {m.rel: m for m in plan}
+
+    def test_datasets_go_where_origin_mounts_them(self):
+        plan = self._plan()
+        assert plan["rpool/USERDATA/home_cgx8je"].target == "/mnt/zark/backup/home"
+        assert plan["rpool/var/lib/docker"].target == "/mnt/zark/backup/var/lib/docker"
+        assert plan[f"rpool/ROOT/{_BE}/var/lib"].target == "/mnt/zark/backup/var/lib"
+        assert plan[f"bpool/BOOT/{_BE}"].target == "/mnt/zark/backup/boot"
+
+    def test_containers_and_off_datasets_are_not_mounted(self):
+        plan = self._plan()
+        for rel in ("rpool", "rpool/ROOT", "rpool/USERDATA", f"rpool/ROOT/{_BE}"):
+            assert rel not in plan  # created containers and the BE root itself
+        assert plan["rpool/var"].target == "" and "canmount=off" in plan["rpool/var"].reason
+        assert plan["rpool/var/lib"].target == ""
+        assert plan[f"rpool/ROOT/{_BE}/usr"].target == ""
+
+    def test_without_cache_the_ubuntu_layout_still_places_the_system(self):
+        plan = self._plan(cache=False)
+        assert plan["rpool/USERDATA/home_cgx8je"].target == "/mnt/zark/backup/home"
+        assert plan[f"rpool/ROOT/{_BE}/var"].target == ""  # layout: off
+        assert plan["rpool/var/lib/docker"].target == "/mnt/zark/backup/var/lib/docker"
+
+    def test_mount_never_creates_directories_in_the_backup(self):
+        mock = MockShell()
+        mock.on("zfs list -H -o name -r backup/rpool/ROOT").succeeds(
+            f"backup/rpool/ROOT\nbackup/rpool/ROOT/{_BE}",
+        )
+        mock.on_prefix("mount -t zfs -o ro,zfsutil").succeeds()
+        mock.on("mkdir -p /mnt/zark/backup").succeeds()
+        plan = [
+            mount_mod.LayoutMount("rpool/var/lib/docker", "/mnt/zark/backup/var/lib/docker"),
+            mount_mod.LayoutMount("rpool/USERDATA/home_x", "/mnt/zark/backup/home"),
+            mount_mod.LayoutMount(f"rpool/ROOT/{_BE}/var/lib", "/mnt/zark/backup/var/lib"),
+        ]
+        present = {"/mnt/zark/backup/home", "/mnt/zark/backup/var/lib"}
+        with (
+            patch_sh(mock),
+            patch.object(mount_mod, "_plan_origin_layout", return_value=plan),
+            patch.object(mount_mod.Path, "is_file", return_value=False),
+            patch.object(
+                mount_mod.Path,
+                "is_dir",
+                autospec=True,
+                side_effect=lambda self: str(self) in present,
+            ),
+            redirect_stdout(StringIO()),
+        ):
+            mounted, skipped = mount_mod._mount_origin_layout(  # pylint: disable=protected-access
+                "backup",
+                "/mnt/zark/backup",
+                make_log(),
+            )
+        mounts = [c for c in mock.calls if c.startswith("mount -t zfs")]
+        assert mounts == [
+            f"mount -t zfs -o ro,zfsutil backup/rpool/ROOT/{_BE} /mnt/zark/backup",
+            "mount -t zfs -o ro,zfsutil backup/rpool/USERDATA/home_x /mnt/zark/backup/home",
+            f"mount -t zfs -o ro,zfsutil backup/rpool/ROOT/{_BE}/var/lib /mnt/zark/backup/var/lib",
+        ]
+        assert mounted == 3
+        assert [s.rel for s in skipped] == ["rpool/var/lib/docker"]
+        assert not any(c.startswith("mkdir") and "/mnt/zark/backup/" in c for c in mock.calls)
+
+    def test_umount_never_unmounts_every_zfs_dataset(self):
+        # `zfs unmount -a` would also hit the running system's datasets.
+        src = Path(umount_mod.__file__).read_text(encoding="utf-8")
+        assert 'sh.run("zfs unmount -a")' not in src.split("def run(")[1]
 
 
 def main() -> int:

@@ -58,6 +58,12 @@ from pathlib import Path
 from typing import NoReturn
 
 from lib import apt_guard, grub_guard, sh
+from lib.backup_layout import (
+    find_be as _find_be,
+    list_datasets as _list_datasets,
+    root_is_empty,
+    zark_props as _zark_props,
+)
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config
 from lib.drives import backup_device, scan_connected_drives, select_drive
@@ -519,15 +525,6 @@ class RestorePlan:  # pylint: disable=too-many-instance-attributes
         return sum(r.referenced for r in self.rows if r.rel.startswith("bpool/") and r.restored)
 
 
-def _find_be(pool: str) -> str:
-    """Boot environment name: the first child of <pool>/rpool/ROOT."""
-    for line in sh.run(f"zfs list -H -o name -r {pool}/rpool/ROOT").lines:
-        ds = line.strip()
-        if ds.count("/") == 3 and "@" not in ds:
-            return ds.split("/")[-1]
-    return ""
-
-
 def _list_snapshots(pool: str) -> list[Snap]:
     snaps: list[Snap] = []
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
@@ -535,37 +532,6 @@ def _list_snapshots(pool: str) -> list[Snap]:
         if r.ok:
             snaps += parse_snapshots(r.lines, pool)
     return snaps
-
-
-def _list_datasets(pool: str) -> dict[str, str]:
-    """{relative name: type} under <pool>/rpool and <pool>/bpool."""
-    out: dict[str, str] = {}
-    for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        r = sh.run(f"zfs list -Hp -o name,type -r {root}")
-        for line in r.lines if r.ok else []:
-            fields = line.split("\t")
-            if len(fields) == 2 and fields[0].startswith(f"{pool}/"):
-                out[fields[0][len(pool) + 1 :]] = fields[1]
-    return out
-
-
-def _zark_props(pool: str) -> dict[str, tuple[str, str]]:
-    """org.zark:canmount / org.zark:mountpoint recorded on the destination (M2+)."""
-    found: dict[str, dict[str, str]] = {}
-    for root in (f"{pool}/rpool", f"{pool}/bpool"):  # one query each: bpool may be absent
-        r = sh.run(
-            "zfs get -Hp -s local -o name,property,value "
-            + f"org.zark:canmount,org.zark:mountpoint -r {root}",
-        )
-        for line in r.lines if r.ok else []:
-            fields = line.split("\t")
-            if len(fields) == 3 and fields[0].startswith(f"{pool}/"):
-                found.setdefault(fields[0][len(pool) + 1 :], {})[fields[1]] = fields[2]
-    return {
-        ds: (p["org.zark:canmount"], p["org.zark:mountpoint"])
-        for ds, p in found.items()
-        if "org.zark:canmount" in p and "org.zark:mountpoint" in p
-    }
 
 
 def _referenced(snapshots: list[str]) -> dict[str, int]:
@@ -620,13 +586,7 @@ def _probe_be(full_snap: str, log: Log) -> tuple[str, str, str]:
 
 def _empty_root(full_snap: str) -> bool | None:
     """True when the snapshot's root directory has no entries; None if unreadable."""
-    if not _mount_snapshot(full_snap):
-        return None
-    try:
-        r = sh.run(f"find {PROBE_MNT} -mindepth 1 -maxdepth 1 -print -quit")
-        return r.ok and not r.output
-    finally:
-        _umount_probe()
+    return root_is_empty(full_snap, PROBE_MNT, zfsutil=False)
 
 
 def _choose_point(points: list[Point], log: Log) -> Point:

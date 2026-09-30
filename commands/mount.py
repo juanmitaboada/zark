@@ -15,23 +15,138 @@
 zark mount — Mount a backup pool for inspection.
 
 Imports the pool once under the altroot /mnt/zark/<pool> (``-N -R``, plus
-``readonly=on`` in read-only mode), unlocks its keystore, loads the keys and
-mounts each dataset with ``zfs mount``. Read-only mode never writes to the
-backup: the pool itself is imported read-only.
+``readonly=on`` in read-only mode), unlocks its keystore and loads the keys.
+
+Read-only mode rebuilds origin's tree under /mnt/zark/<pool> the way recover
+restores it: the boot environment's root first, then every other dataset at
+origin's mountpoint, taken from ``org.zark:*`` → origin's zfs-list.cache in
+the boot environment → the Ubuntu layout → structure (lib/mount_props). It
+never writes to the backup: the pool is imported read-only and a dataset
+whose mountpoint directory does not exist in its parent is skipped.
+Read-write mode mounts each dataset with ``zfs mount`` at its stored
+mountpoint under the altroot.
 """
 
+from dataclasses import dataclass
+from pathlib import Path
+
 from lib import sh
+from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
 from lib.cleanup import Cleanup
 from lib.config import Config
 from lib.drives import backup_device, scan_connected_drives, select_drive
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import mount_system_pools
+from lib.mount_props import (
+    BPOOL_CONTAINERS,
+    CREATED_CONTAINERS,
+    choose,
+    effective_mountpoint,
+    parse_list_cache,
+    rpool_root_mountpoint,
+)
 from lib.zfs import ZFS
 
 MNT_BASE = "/mnt/zark"
+PROBE_DIR = "/run/zark/probe"
 SYSTEM_MNT = "/mnt/zark/system"
 SYSTEM_TARGETS = ("local", "system", "rpool")
+
+
+@dataclass(frozen=True)
+class LayoutMount:
+    """One dataset of the read-only tree: where it goes, or why it does not."""
+
+    rel: str  # relative to the backup pool (rpool/var/lib/docker)
+    target: str  # absolute directory; "" when skipped
+    reason: str = ""  # why it is not mounted
+
+
+def _plan_origin_layout(  # pylint: disable=too-many-locals
+    pool: str,
+    be: str,
+    mnt: str,
+    cache: dict[str, tuple[str, str]],
+) -> list[LayoutMount]:
+    """Where every filesystem of ``pool`` goes under ``mnt``, as on origin.
+
+    The boot environment's root (already mounted at ``mnt``) is not listed.
+    Mount order is the order of the returned targets sorted by path.
+    """
+    types = list_datasets(pool)
+    zark = zark_props(pool)
+    children = {ds for ds in types for other in types if other.startswith(f"{ds}/")}
+    be_root = f"rpool/ROOT/{be}"
+    effective: dict[str, str] = {
+        "rpool": rpool_root_mountpoint(cache)[0],
+        **CREATED_CONTAINERS,
+        **BPOOL_CONTAINERS,
+        be_root: "/",
+    }
+    plan: list[LayoutMount] = []
+    for rel in sorted(types):
+        if types[rel] != "filesystem" or rel in effective:
+            continue
+        parent, leaf = rel.rsplit("/", 1)
+        other_be = rel.startswith(("rpool/ROOT/", "bpool/BOOT/")) and not (
+            rel == f"bpool/BOOT/{be}" or rel.startswith(f"{be_root}/")
+        )
+        if other_be:
+            plan.append(LayoutMount(rel, "", "another boot environment"))
+            continue
+        if parent not in effective:
+            plan.append(LayoutMount(rel, "", f"parent {parent} is not part of the tree"))
+            continue
+        needs_probe = rel not in zark and rel not in cache and rel in children
+        empty = bool(
+            needs_probe and root_is_empty(f"{pool}/{rel}", PROBE_DIR, zfsutil=True),
+        )
+        props = choose(rel, be, zark=zark, cache=cache, empty_with_children=empty)
+        eff = effective_mountpoint(props, effective[parent], leaf)
+        effective[rel] = eff
+        if props.canmount != "on":
+            plan.append(LayoutMount(rel, "", f"canmount={props.canmount} [{props.source}]"))
+        elif not eff.startswith("/"):
+            plan.append(LayoutMount(rel, "", f"mountpoint={eff or 'unknown'} [{props.source}]"))
+        else:
+            plan.append(LayoutMount(rel, f"{mnt.rstrip('/')}{eff}"))
+    return plan
+
+
+def _mount_origin_layout(pool: str, mnt: str, log: Log) -> tuple[int, list[LayoutMount]]:
+    """Read-only mount of the backup with origin's tree; (mounted count, skipped)."""
+    be = find_be(pool)
+    if not be:
+        log.fatal(f"No boot environment under {pool}/rpool/ROOT")
+    _ = sh.run(f"mkdir -p {mnt}")
+    if not sh.run(f"mount -t zfs -o ro,zfsutil {pool}/rpool/ROOT/{be} {mnt}", log=log).ok:
+        log.fatal(f"Cannot mount the boot environment {pool}/rpool/ROOT/{be}")
+    cache_dir = Path(mnt) / "etc/zfs/zfs-list.cache"
+    cache: dict[str, tuple[str, str]] = {}
+    for name in ("rpool", "bpool"):
+        f = cache_dir / name
+        if f.is_file():
+            cache.update(parse_list_cache(f.read_text(encoding="utf-8")))
+    if not cache:
+        log.warn("No zfs-list.cache in the backup — mountpoints come from the Ubuntu layout")
+
+    mounted = 1
+    skipped: list[LayoutMount] = []
+    plan = _plan_origin_layout(pool, be, mnt, cache)
+    # Parents before children: compare path components, not strings.
+    for item in sorted((m for m in plan if m.target), key=lambda m: Path(m.target).parts):
+        if not Path(item.target).is_dir():
+            # Creating it would write to the read-only backup.
+            skipped.append(LayoutMount(item.rel, "", f"no directory {item.target}"))
+            continue
+        r = sh.run(f"mount -t zfs -o ro,zfsutil {pool}/{item.rel} {item.target}")
+        if r.ok:
+            mounted += 1
+        else:
+            skipped.append(LayoutMount(item.rel, "", r.stderr.strip() or "mount failed"))
+    skipped += [m for m in plan if not m.target]
+    return mounted, skipped
 
 
 def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
@@ -168,14 +283,19 @@ def run(
     datasets = zfs.list_datasets(f"{pool_name}/rpool", recursive=True)
 
     mounted = 0
-    for ds in datasets:
-        if ds.canmount == "off" or ds.mountpoint in ("none", "-", "legacy"):
-            continue
-        r = sh.run(f"zfs mount {ds.name}")
-        if r.ok:
-            mounted += 1
-        else:
-            log.dbg(f"Skip {ds.name}: {r.stderr.strip()}")
+    if readonly:
+        mounted, skipped = _mount_origin_layout(pool_name, mnt_point, log)
+        for item in skipped:
+            log.dbg(f"Not mounted: {item.rel} — {item.reason}")
+    else:
+        for ds in datasets:
+            if ds.canmount == "off" or ds.mountpoint in ("none", "-", "legacy"):
+                continue
+            r = sh.run(f"zfs mount {ds.name}")
+            if r.ok:
+                mounted += 1
+            else:
+                log.dbg(f"Skip {ds.name}: {r.stderr.strip()}")
 
     log.ok(f"Mounted {mounted} datasets")
 
@@ -192,7 +312,9 @@ def run(
             root_ds = ds.name
             break
     root_path = ""
-    if root_ds:
+    if readonly:
+        root_path = mnt_point  # the boot environment is mounted there
+    elif root_ds:
         # Effective mountpoint with altroot
         root_path = zfs.get_property(root_ds, "mountpoint")
 

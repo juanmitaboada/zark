@@ -135,9 +135,9 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
         )
         selected = mounted[idx]
 
-    # Unmount all ZFS datasets for this pool
+    # Only this pool's tree: `zfs unmount -a` would also try every dataset
+    # of the running system. zpool export unmounts anything left.
     log.info("Unmounting datasets...")
-    _ = sh.run("zfs unmount -a")
     _ = sh.run(f"umount -R {MNT_BASE}/{selected}")
 
     # Close keystore

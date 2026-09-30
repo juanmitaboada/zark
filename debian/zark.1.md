@@ -411,9 +411,17 @@ for the canonical end-to-end sequences.
 **mount** \[*target*\]
 :   Mount a backup pool for inspection, **chroot**(1) entry or manual
     recovery work. Imports the chosen pool by its exact device with an
-    alternate root of */mnt/zark/<poolname>/* and mounts every dataset
-    there. Asks interactively whether to mount read-only (recommended, and
-    the default; the pool itself is imported read-only) or read-write.
+    alternate root of */mnt/zark/<poolname>/*. Asks interactively whether
+    to mount read-only (recommended, and the default) or read-write.
+
+    Read-only imports the pool read-only and rebuilds the backed-up
+    system's tree under */mnt/zark/<poolname>/* the way **recover** would
+    restore it: the boot environment at the top, */home*, */boot* and every
+    other dataset at the origin's mountpoint (from the origin's
+    *zfs-list.cache* inside the backup, else the Ubuntu layout). Nothing
+    is written to the drive; a dataset whose mountpoint directory does not
+    exist is listed as not mounted. Read-write mounts each dataset at its
+    stored mountpoint under the alternate root.
 
     With no argument, scans for connected backup drives. With the
     *target* **local** (aliases **system**, **rpool**) it instead mounts
@@ -423,8 +431,9 @@ for the canonical end-to-end sequences.
     The complementary command is **umount**.
 
 **umount** \[*target*\]
-:   Unmount a previously **mount**-ed backup pool. Walks the dataset tree
-    in reverse, closes the LUKS keystore and exports the pool cleanly.
+:   Unmount a previously **mount**-ed backup pool. Unmounts only the tree
+    under */mnt/zark/<poolname>/*, closes the LUKS keystore and exports the
+    pool cleanly.
 
     With the *target* **local** (aliases **system**, **rpool**) it exports
     the installed system's pools mounted by **mount local**. As a safety

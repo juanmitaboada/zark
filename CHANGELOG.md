@@ -135,6 +135,21 @@ consolidation that preceded it.
   when that is absent or `none` (a `none` there is what the old recover
   left). It is set at `zpool create` (the backup pool and its keystore zvol
   are imported, so no later `zfs set`) and shown in the plan table.
+- `zark mount` read-only mounted nothing useful. M1 imports the pool
+  `readonly=on`, but the old path mounted each dataset at its stored
+  mountpoint and relied on ZFS creating the directories; on a backup
+  `<pool>/rpool`, `ROOT` and `USERDATA` are `canmount=on` (raw sends carry
+  no properties), so the empty `<pool>/rpool` covered the altroot and no
+  child could get a directory. Read-only mode now rebuilds origin's tree:
+  the boot environment at `/mnt/zark/<pool>`, then every dataset at
+  origin's mountpoint (`org.zark:*` → origin's zfs-list.cache in the
+  boot environment → Ubuntu layout → structure, as in recover) with
+  `mount -t zfs -o ro,zfsutil`, parents first; containers, `canmount=off`,
+  other boot environments and datasets whose directory does not exist
+  are listed as not mounted. Nothing is written to the drive.
+- `zark umount` ran `zfs unmount -a`, which also tries every dataset of
+  the running system; it now unmounts only `/mnt/zark/<pool>` (and
+  `zpool export` unmounts whatever of the pool is left).
 - repair-boot ran `update-grub` before regenerating the initrds, so with
   missing initrds (found on eli by deleting them) `10_linux_zfs` listed no
   kernel; it then restored a `grub.cfg.pre-repair` left by an earlier run
