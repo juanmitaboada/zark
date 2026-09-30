@@ -6985,9 +6985,9 @@ class TestFixRpoolSignals:  # pylint: disable=missing-function-docstring
             events = events_file.read_text(encoding="utf-8").split() if events_file.exists() else []
         return r.returncode, final, events
 
-    def _assert_torn_down(self, scenario: str, code: int) -> None:
+    def _assert_torn_down(self, scenario: str, *codes: int) -> None:
         rc, final, events = self._run(scenario)
-        assert (rc, final, events) == (code, "0", ["export(inhibit=1)"]), (
+        assert rc in codes and (final, events) == ("0", ["export(inhibit=1)"]), (
             scenario,
             rc,
             final,
@@ -7016,8 +7016,12 @@ class TestFixRpoolSignals:  # pylint: disable=missing-function-docstring
 
     def test_a_dead_stdout_does_not_kill_the_teardown(self):
         # V-6: `| tee` killed by the same Ctrl-C; zark runs with SIGPIPE at SIG_DFL.
-        self._assert_torn_down("deadpipe:INT", 128 + signal.SIGINT)
-        self._assert_torn_down("deadpipe:HUP", 128 + signal.SIGHUP)
+        # The teardown must complete. Afterwards SIGPIPE is SIG_DFL again, and
+        # Python's exit-time flush of the lines the teardown could not write may
+        # kill the process (-SIGPIPE, seen on carmen's Python 3.14): harmless.
+        after = -signal.SIGPIPE
+        self._assert_torn_down("deadpipe:INT", 128 + signal.SIGINT, after)
+        self._assert_torn_down("deadpipe:HUP", 128 + signal.SIGHUP, after)
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
