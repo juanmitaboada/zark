@@ -43,14 +43,16 @@ class Log:
     _STRIP_RE = re.compile(r"\x1b\[[0-9;]*m")
 
     def __init__(self, log_file: str | None = None):
-        if log_file is None:
-            if self._is_live_usb():
-                # Live USB: log next to the script (on the pendrive — survives reboot)
-                zark_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-                log_file = os.path.join(zark_root, "zark.log")
-            else:
-                log_file = "/var/log/zark.log"
-        self.log_file = log_file
+        self.log_file = log_file if log_file is not None else self.default_file()
+
+    @classmethod
+    def default_file(cls) -> str:
+        """Where a Log without an explicit file writes."""
+        if cls._is_live_usb():
+            # Live USB: log next to the script (on the pendrive — survives reboot)
+            zark_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+            return os.path.join(zark_root, "zark.log")
+        return "/var/log/zark.log"
 
     @staticmethod
     def _is_live_usb() -> bool:

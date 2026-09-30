@@ -27,10 +27,12 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 # only test code lives here — production modules stay under the standard
 # line limit.
 
+import atexit
 import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -228,6 +230,34 @@ def make_log() -> Log:
     return Log(log_file="/dev/null")
 
 
+# Commands under test build Log() with its default file: as root that is the
+# machine's real /var/log/zark.log (or the live stick's). Redirect it for the
+# whole module, under either runner; main() checks the real files stayed put.
+_REAL_LOG_FILES = (
+    "/var/log/zark.log",
+    str(Path(__file__).resolve().parent.parent / "zark.log"),
+)
+_TEST_LOG_DIR = tempfile.mkdtemp(prefix="zark-test-log-")
+atexit.register(shutil.rmtree, _TEST_LOG_DIR, ignore_errors=True)
+_ = patch.object(
+    Log,
+    "default_file",
+    classmethod(lambda _cls: os.path.join(_TEST_LOG_DIR, "zark.log")),
+).start()
+
+
+def _real_log_state() -> dict[str, tuple[int, int] | None]:
+    """(size, mtime_ns) of each real log file, None when absent."""
+    state: dict[str, tuple[int, int] | None] = {}
+    for path in _REAL_LOG_FILES:
+        try:
+            st = os.stat(path)
+            state[path] = (st.st_size, st.st_mtime_ns)
+        except FileNotFoundError:
+            state[path] = None
+    return state
+
+
 def make_config(**overrides) -> Config:
     """Create a Config with sane defaults for testing."""
     cfg = Config()
@@ -414,6 +444,11 @@ class TestConfig:
 
 class TestLog:
     """Tests for Log ANSI stripping and fatal error handling."""
+
+    def test_default_log_file_is_redirected_in_tests(self):
+        """A Log() built by a command under test never targets a real log (R2-3)."""
+        assert Log().log_file == os.path.join(_TEST_LOG_DIR, "zark.log")
+        assert Log().log_file not in _REAL_LOG_FILES
 
     def test_strip_ansi(self):
         """Log strips ANSI codes for file output."""
@@ -6729,6 +6764,7 @@ def main() -> int:
     process exit status.
     """
     passed = failed = 0
+    real_logs = _real_log_state()
     test_classes = [
         obj
         for name, obj in sorted(globals().items())
@@ -6752,6 +6788,12 @@ def main() -> int:
             except Exception as e:  # pylint: disable=broad-except
                 print(f"    \033[0;31m✗\033[0m {name}: {e}")
                 failed += 1
+
+    if _real_log_state() != real_logs:
+        print(
+            f"\n    \033[0;31m✗\033[0m the run wrote a real log file: {', '.join(_REAL_LOG_FILES)}"
+        )
+        failed += 1
 
     print(f"\n  {passed} passed, {failed} failed")
     return failed
