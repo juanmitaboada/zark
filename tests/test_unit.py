@@ -4897,7 +4897,7 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         mock.on("zpool list rpool").succeeds("rpool")
         mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
         mock.on("zpool list bpool").succeeds("bpool")
-        mock.on("zfs unmount -a").succeeds()
+        mock.on("umount -R /mnt/zark/system").succeeds()
         mock.on("zfs unload-key -r bpool").succeeds()
         mock.on("zfs unload-key -r rpool").succeeds()
         mock.on("zpool export bpool").succeeds()
@@ -4907,6 +4907,21 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
             _umount_local_system(make_log())
         assert mock.was_called("zpool export rpool")
         assert mock.was_called("zpool export bpool")
+        # R2-5: only the system's tree; a backup mounted alongside stays.
+        assert mock.was_called("umount -R /mnt/zark/system")
+        assert mock.was_not_called("zfs unmount")
+
+    def test_refuses_an_altroot_that_only_starts_like_mnt_zark(self):
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zarkfoo")
+        with patch_sh(mock), redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            try:
+                _umount_local_system(make_log())
+            except SystemExit:
+                assert mock.was_not_called("umount") and mock.was_not_called("zpool export")
+                return
+        raise AssertionError("Expected SystemExit for an altroot outside /mnt/zark/")
 
     def test_closes_keystore_before_export(self):
         """umount local must close the LUKS keystore (cryptsetup) before
@@ -4916,7 +4931,7 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         mock.on("zpool list rpool").succeeds("rpool")
         mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
         mock.on("zpool list bpool").succeeds("bpool")
-        mock.on("zfs unmount -a").succeeds()
+        mock.on("umount -R /mnt/zark/system").succeeds()
         mock.on("zfs unload-key -r bpool").succeeds()
         mock.on("zfs unload-key -r rpool").succeeds()
         mock.on("zpool export bpool").succeeds()
@@ -6932,9 +6947,73 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         assert not any(c.startswith("mkdir") and "/mnt/zark/backup/" in c for c in mock.calls)
 
     def test_umount_never_unmounts_every_zfs_dataset(self):
-        # `zfs unmount -a` would also hit the running system's datasets.
+        # `zfs unmount -a` would also hit the running system's datasets (R2-5: both branches).
         src = Path(umount_mod.__file__).read_text(encoding="utf-8")
-        assert 'sh.run("zfs unmount -a")' not in src.split("def run(")[1]
+        assert 'sh.run("zfs unmount -a")' not in src
+
+    def test_targets_that_resolve_outside_the_altroot_are_skipped(self):
+        # R2-6: an absolute symlink or a .. in the backup must not reach the live system.
+        with tempfile.TemporaryDirectory() as td:
+            mnt = os.path.join(td, "backup")
+            outside = os.path.join(td, "live-big")
+            for d in (f"{mnt}/srv/ok", f"{mnt}/etc", outside):
+                os.makedirs(d)
+            os.symlink(outside, f"{mnt}/data")  # /data -> /mnt/big on origin
+            plan = [
+                mount_mod.LayoutMount("rpool/srv", f"{mnt}/srv/ok"),
+                mount_mod.LayoutMount("rpool/data", f"{mnt}/data"),
+                mount_mod.LayoutMount("rpool/up", f"{mnt}/etc/../.."),
+            ]
+            mock = MockShell()
+            mock.on("zfs list -H -o name -r backup/rpool/ROOT").succeeds(
+                f"backup/rpool/ROOT\nbackup/rpool/ROOT/{_BE}",
+            )
+            mock.on_prefix("mount -t zfs -o ro,zfsutil").succeeds()
+            with (
+                patch_sh(mock),
+                patch.object(mount_mod, "_plan_origin_layout", return_value=plan),
+                redirect_stdout(StringIO()),
+            ):
+                mounted, skipped = mount_mod._mount_origin_layout(  # pylint: disable=protected-access
+                    "backup",
+                    mnt,
+                    make_log(),
+                )
+            mounts = [c for c in mock.calls if c.startswith("mount -t zfs")]
+            assert mounts[1:] == [
+                f"mount -t zfs -o ro,zfsutil backup/rpool/srv {os.path.realpath(mnt)}/srv/ok",
+            ]
+            assert mounted == 2
+            assert {x.rel for x in skipped} == {"rpool/data", "rpool/up"}
+            assert all("resolves to" in x.reason for x in skipped)
+
+    @staticmethod
+    def _umount_backup(export_ok: bool) -> MockShell:
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds("backup")
+        if export_ok:
+            mock.on("zpool export backup").succeeds()
+        else:
+            mock.on("zpool export backup").fails("pool is busy")
+            mock.on("zpool export -f backup").fails("pool is busy")
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "backup", "home"))
+            with (
+                patch_sh(mock),
+                patch.object(umount_mod, "MNT_BASE", td),
+                patch.object(umount_mod.Config, "load", return_value=make_config()),
+                patch.object(umount_mod, "flush_device_cache"),
+                patch("builtins.input", return_value="y"),
+                redirect_stdout(StringIO()),
+            ):
+                umount_mod.run([])
+        return mock
+
+    def test_umount_cleans_directories_only_after_the_export(self):
+        # Review §8: with the pool still imported, find would delete inside the backup.
+        assert self._umount_backup(export_ok=False).was_not_called("find")
+        ok = self._umount_backup(export_ok=True)
+        assert any(c.startswith("find ") and " -xdev " in c for c in ok.calls)
 
 
 class TestStableVdevs:  # pylint: disable=missing-function-docstring

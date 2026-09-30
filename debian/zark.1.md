@@ -435,7 +435,9 @@ for the canonical end-to-end sequences.
     other dataset at the origin's mountpoint (from the origin's
     *zfs-list.cache* inside the backup, else the Ubuntu layout). Nothing
     is written to the drive; a dataset whose mountpoint directory does not
-    exist is listed as not mounted. Read-write mounts each dataset at its
+    exist, or whose path resolves outside */mnt/zark/<poolname>/* (through
+    a symbolic link or *..* inside the backup), is listed as not mounted.
+    Read-write mounts each dataset at its
     stored mountpoint under the alternate root.
 
     With no argument, scans for connected backup drives. With the
@@ -451,7 +453,8 @@ for the canonical end-to-end sequences.
     pool cleanly.
 
     With the *target* **local** (aliases **system**, **rpool**) it exports
-    the installed system's pools mounted by **mount local**. As a safety
+    the installed system's pools mounted by **mount local**, unmounting
+    only the tree under their alternate root. As a safety
     measure it refuses to export any pool whose alternate root is not
     under */mnt/zark/* — that is the guard against exporting the running
     system's own **rpool**.

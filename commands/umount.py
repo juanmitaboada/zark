@@ -43,7 +43,7 @@ def _umount_local_system(log: Log) -> None:
         return
 
     altroot = sh.run("zpool get -H -o value altroot rpool").output.strip()
-    if not altroot.startswith(MNT_BASE):
+    if not altroot.startswith(f"{MNT_BASE}/"):
         log.fatal(
             "rpool was not imported by zark under an altroot "
             f"(altroot={altroot or '-'}).\n"
@@ -51,11 +51,13 @@ def _umount_local_system(log: Log) -> None:
             "  live-USB inspection mount.",
         )
 
+    # Only the system's tree: `zfs unmount -a` would also unmount a backup
+    # mounted with `zark mount` in the same session. zpool export unmounts the rest.
     log.info("Unmounting system datasets...")
-    sh.run("zfs unmount -a")
+    _ = sh.run(f"umount -R {altroot}")
 
     # Close the rpool keystore (LUKS over the keystore zvol) BEFORE exporting.
-    # `zfs unmount -a` and `unload-key` do not close the cryptsetup mapping, so
+    # Unmounting and `unload-key` do not close the cryptsetup mapping, so
     # without this the zvol keeps a device-mapper holder and `zpool export
     # rpool` hangs in taskq_wait waiting for the zvol to be released. This is
     # the same teardown the chroot path performs on exit.
@@ -188,10 +190,13 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     if exported_ok:
         flush_device_cache(log)
 
-    # Clean up mount directories
+    # Clean up mount directories — only once the pool is gone: with it still
+    # imported, find would delete empty directories inside the backup itself.
     mnt_dir = Path(f"{MNT_BASE}/{selected}")
-    if mnt_dir.exists():
-        _ = sh.run(f"find {mnt_dir} -depth -type d -empty -delete")
+    if not exported_ok:
+        log.warn(f"{mnt_dir} left as is (the pool may still be mounted there)")
+    elif mnt_dir.exists():
+        _ = sh.run(f"find {mnt_dir} -xdev -depth -type d -empty -delete")
         if mnt_dir.exists():
             _ = sh.run(f"rmdir {mnt_dir}")
 

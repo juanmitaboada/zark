@@ -27,6 +27,7 @@ Read-write mode mounts each dataset with ``zfs mount`` at its stored
 mountpoint under the altroot.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,13 +135,20 @@ def _mount_origin_layout(pool: str, mnt: str, log: Log) -> tuple[int, list[Layou
     mounted = 1
     skipped: list[LayoutMount] = []
     plan = _plan_origin_layout(pool, be, mnt, cache)
+    root = os.path.realpath(mnt)
     # Parents before children: compare path components, not strings.
     for item in sorted((m for m in plan if m.target), key=lambda m: Path(m.target).parts):
-        if not Path(item.target).is_dir():
+        # Resolved as mount(8) will: a symlink or .. in the backup must not lead
+        # out of the tree onto the running system. The resolved path is mounted.
+        target = os.path.realpath(item.target)
+        if not target.startswith(f"{root}/"):
+            skipped.append(LayoutMount(item.rel, "", f"{item.target} resolves to {target}"))
+            continue
+        if not Path(target).is_dir():
             # Creating it would write to the read-only backup.
             skipped.append(LayoutMount(item.rel, "", f"no directory {item.target}"))
             continue
-        r = sh.run(f"mount -t zfs -o ro,zfsutil {pool}/{item.rel} {item.target}")
+        r = sh.run(f"mount -t zfs -o ro,zfsutil {pool}/{item.rel} {target}")
         if r.ok:
             mounted += 1
         else:

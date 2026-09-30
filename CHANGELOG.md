@@ -157,8 +157,11 @@ consolidation that preceded it.
   origin's mountpoint (`org.zark:*` → origin's zfs-list.cache in the
   boot environment → Ubuntu layout → structure, as in recover) with
   `mount -t zfs -o ro,zfsutil`, parents first; containers, `canmount=off`,
-  other boot environments and datasets whose directory does not exist
-  are listed as not mounted. Nothing is written to the drive.
+  other boot environments, datasets whose directory does not exist and
+  datasets whose path resolves outside `/mnt/zark/<pool>` (an absolute
+  symbolic link or `..` inside the backup would otherwise lead onto the
+  running system) are listed as not mounted; the resolved path is what
+  gets mounted. Nothing is written to the drive.
 - recover created bpool and rpool on kernel names (`/dev/sda2`,
   `/dev/sda4`), and every later import recorded whatever names the disk
   had then. On eli a USB stick plugged in at power-on took `sda`; the
@@ -173,7 +176,13 @@ consolidation that preceded it.
   rpool/bpool still record kernel names.
 - `zark umount` ran `zfs unmount -a`, which also tries every dataset of
   the running system; it now unmounts only `/mnt/zark/<pool>` (and
-  `zpool export` unmounts whatever of the pool is left).
+  `zpool export` unmounts whatever of the pool is left). `umount local`
+  does the same with the system's altroot, so a backup mounted alongside
+  it stays mounted, and it requires that altroot to be below
+  `/mnt/zark/`, not merely to start with that string. After a failed
+  export, umount no longer deletes empty directories under
+  `/mnt/zark/<pool>`: with the pool still mounted there, `find -delete`
+  removed empty directories of the backup itself.
 - repair-boot ran `update-grub` before regenerating the initrds, so with
   missing initrds (found on eli by deleting them) `10_linux_zfs` listed no
   kernel; it then restored a `grub.cfg.pre-repair` left by an earlier run
