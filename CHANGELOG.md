@@ -254,11 +254,17 @@ consolidation that preceded it.
   SIGHUP is not handled, and with SIGPIPE at SIG_DFL a Ctrl-C on a
   command piped to `tee` kills it before `atexit` runs, leaving the
   pools of recover, repair-boot or chroot imported. (hallazgo 12)
-- `umount` does not release dataset copies that another mount namespace
-  keeps (a snap namespace pinned in `/run/snapd/ns` whose copies were
-  stacked while the tree was private, seen on eli with an intermediate
-  version of this milestone): it reports the pool as still imported and
-  exits 1; rebooting the live session releases it.
+- `umount` leaves dataset copies in other mount namespaces (systemd
+  services, snaps, the namespaces snapd pins in `/run/snapd/ns`) when a
+  non-ZFS mount under the tree has a mount of its own below it: a `zark
+  chroot` that died without its cleanup (`/dev` with `/dev/pts`, `/sys`
+  with `efivars`), or a bind whose host directory received a mount after
+  it was bound. The pool stays busy and `umount` ends in SYSTEM / BACKUP
+  NOT UNMOUNTED with exit 1. Rebooting the live session releases it; the
+  installed system may then stop at an emergency shell, where `zpool
+  import -N -f rpool; exit` continues the boot (and `zpool import -N -f
+  bpool` if it asks for it; seen on eli). (review 2, W-1; with hallazgo
+  12)
 
 #### Removed
 
