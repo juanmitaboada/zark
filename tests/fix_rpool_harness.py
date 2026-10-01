@@ -27,6 +27,7 @@ Scenarios (the signals are sent before ``_fix`` runs, or during the export):
     export:INT              a KeyboardInterrupt in _fix, then SIGINT during the export
     export:TERM,HUP         both pending, delivered during the export
     deadpipe:INT            stdout becomes a pipe with no reader, then SIGINT
+    deadpipe:               stdout becomes a pipe with no reader, then a log line
 
 ``<workdir>/events`` gets one line per export with the parameter's
 value at that moment; ``<workdir>/zvol_inhibit_dev`` is the parameter.
@@ -49,7 +50,7 @@ from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-po
 
 
 def _signals(names: str) -> list[signal.Signals]:
-    return [signal.Signals[f"SIG{n}"] for n in names.split(",")]
+    return [signal.Signals[f"SIG{n}"] for n in names.split(",") if n]
 
 
 def _send_pending(sigs: list[signal.Signals]) -> None:
@@ -95,7 +96,7 @@ def main() -> None:  # pylint: disable=too-many-locals
         note("export")
         return True
 
-    def fix(_zfs: ZFS, _log: Log, _turned_off: list[str]) -> bool:
+    def fix(_zfs: ZFS, log: Log, _turned_off: list[str]) -> bool:
         if kind == "sig":
             os.kill(os.getpid(), sigs[0])
         elif kind == "pending":
@@ -104,7 +105,11 @@ def main() -> None:  # pylint: disable=too-many-locals
             raise KeyboardInterrupt
         elif kind == "deadpipe":
             _kill_stdout()
-            os.kill(os.getpid(), sigs[0])
+            if sigs:
+                os.kill(os.getpid(), sigs[0])
+            else:
+                # The reader went away on its own; _fix's next line meets the dead pipe.
+                log.info("rpool: mountpoint none → /")
         return False
 
     mock = MockShell()

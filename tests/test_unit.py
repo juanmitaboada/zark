@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # isort: split
 
+from unittest import SkipTest  # pylint: disable=wrong-import-position # noqa: E402
 from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa: E402
 
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -7066,6 +7067,12 @@ class TestFixRpoolSignals:  # pylint: disable=missing-function-docstring
         self._assert_torn_down("deadpipe:INT", 128 + signal.SIGINT, after)
         self._assert_torn_down("deadpipe:HUP", 128 + signal.SIGHUP, after)
 
+    def test_a_reader_that_goes_away_with_no_signal_does_not_kill_the_run(self):
+        # W-3: only the SIGPIPE ignore set before the parameter is written saves
+        # this case; the teardown's own ignore comes too late. The run ends in
+        # its NOT FIXED verdict (exit 1), or dies on SIGPIPE after the teardown.
+        self._assert_torn_down("deadpipe:", 1, -signal.SIGPIPE)
+
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
     """G4: read-only `zark mount` rebuilds origin's tree without writing."""
@@ -7195,8 +7202,9 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
             assert all("resolves to" in x.reason for x in skipped)
 
     @staticmethod
-    def _umount_backup(export_ok: bool) -> MockShell:
+    def _umount_backup(export_ok: bool) -> tuple[MockShell, str]:
         mock = MockShell()
+        buf = StringIO()
         mock.on("zpool list backup").succeeds("backup")
         if export_ok:
             mock.on("zpool export backup").succeeds()
@@ -7211,7 +7219,7 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
                 patch.object(umount_mod.Config, "load", return_value=make_config()),
                 patch.object(umount_mod, "flush_device_cache"),
                 patch("builtins.input", return_value="y"),
-                redirect_stdout(StringIO()),
+                redirect_stdout(buf),
             ):
                 try:
                     umount_mod.run([])
@@ -7219,20 +7227,96 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
                     assert not export_ok and e.code == 1, e.code
                 else:
                     assert export_ok, "a failed export must end with exit status 1"
-        return mock
+        return mock, buf.getvalue()
 
     def test_umount_cleans_directories_only_after_the_export(self):
         # Review §8: with the pool still imported, find would delete inside the backup.
-        assert self._umount_backup(export_ok=False).was_not_called("find /")
-        ok = self._umount_backup(export_ok=True)
+        assert self._umount_backup(export_ok=False)[0].was_not_called("find /")
+        ok, _ = self._umount_backup(export_ok=True)
         assert any(c.startswith("find ") and " -xdev " in c for c in ok.calls)
+
+    def test_a_failed_backup_export_is_not_reported_as_unmounted(self):
+        # W-3: the exit status alone does not pin the banner the operator reads.
+        _, out = self._umount_backup(export_ok=False)
+        assert "BACKUP NOT UNMOUNTED" in out and "backup is still imported" in out, out
+        assert "exported ✓" not in out, out
 
     def test_umount_lets_the_zfs_unmount_propagate(self):
         # eli K6: a private backup tree left its copies mounted in the service
         # and snap namespaces, and the export failed "busy".
-        calls = self._umount_backup(export_ok=True).calls
+        calls = self._umount_backup(export_ok=True)[0].calls
         assert not any(c.startswith("mount --make-rprivate") for c in calls)
         assert [c for c in calls if c.startswith("umount -R ")][-1].endswith("/backup")
+
+
+class TestUmountPropagation:  # pylint: disable=missing-function-docstring
+    """Review 2 §11.3: commands.umount._unmount_tree on real mounts, two namespaces.
+
+    tests/umount_propagation_harness.py runs the function unmodified in a mount
+    namespace of its own (tmpfs for ZFS, only findmnt's FSTYPE rewritten), next to
+    a slave namespace that plays a systemd service or a snap. Mocked findmnt
+    tables cannot show propagation: this is what would have caught commit 28
+    before eli did. Needs root and mount namespaces; skipped otherwise.
+    """
+
+    _unavailable: str | None = None
+    _probed = False
+
+    @classmethod
+    def _skip_unless_possible(cls) -> None:
+        if not cls._probed:
+            cls._probed = True
+            if os.geteuid() != 0:
+                cls._unavailable = "needs root (mount namespaces)"
+            elif not shutil.which("unshare"):
+                cls._unavailable = "unshare(1) not found"
+            else:
+                probe = subprocess.run(
+                    [sys.executable, "-c", "import os; os.unshare(os.CLONE_NEWNS)"],
+                    capture_output=True,
+                    check=False,
+                )
+                if probe.returncode != 0:
+                    cls._unavailable = "cannot create a mount namespace here"
+        if cls._unavailable:
+            raise SkipTest(cls._unavailable)
+
+    def _run(self, case: str) -> dict[str, list[str]]:
+        self._skip_unless_possible()
+        harness = Path(__file__).parent / "umount_propagation_harness.py"
+        with tempfile.TemporaryDirectory() as td:
+            r = subprocess.run(
+                [sys.executable, str(harness), td, case],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+        assert r.returncode == 0, (case, r.returncode, r.stderr[-2000:])
+        result: dict[str, list[str]] = json.loads(r.stdout.strip().splitlines()[-1])
+        return result
+
+    def test_datasets_leave_nothing_in_another_namespace(self):
+        # eli K6: a private tree (commit 28) left both datasets in the other namespace.
+        r = self._run("datasets")
+        assert r == {"other_left": [], "tree_left": [], "host_lost": []}, r
+
+    def test_an_empty_bind_leaves_nothing_in_another_namespace(self):
+        r = self._run("bind")
+        assert r == {"other_left": [], "tree_left": [], "host_lost": []}, r
+
+    def test_a_host_mount_below_a_bound_directory_survives(self):
+        # V-3: a plain `umount -R` (commit 21) unmounted it through the shared bind.
+        # The copies left in the other namespace are W-1 (M4, with hallazgo 12).
+        r = self._run("bind-hostmount")
+        assert r["host_lost"] == [], r
+
+    def test_nested_binds_as_chroot_makes_lose_no_host_mount(self):
+        # /dev with /dev/pts inside it. What stays in the other namespace, and the
+        # stacked copy left on the host's /dev/pts, is W-1 (M4, with hallazgo 12).
+        r = self._run("nested-bind")
+        assert r["host_lost"] == [], r
 
 
 class TestStableVdevs:  # pylint: disable=missing-function-docstring
@@ -7279,7 +7363,7 @@ def main() -> int:
     Returns the number of failed tests (0 on full success), suitable as a
     process exit status.
     """
-    passed = failed = 0
+    passed = failed = skipped = 0
     real_logs = _real_log_state()
     test_classes = [
         obj
@@ -7301,6 +7385,9 @@ def main() -> int:
                 method()
                 print(f"    \033[0;32m✓\033[0m {name}")
                 passed += 1
+            except SkipTest as e:
+                print(f"    \033[0;33m-\033[0m {name}: skipped ({e})")
+                skipped += 1
             except Exception as e:  # pylint: disable=broad-except
                 print(f"    \033[0;31m✗\033[0m {name}: {e}")
                 failed += 1
@@ -7310,7 +7397,7 @@ def main() -> int:
         print(f"\n    \033[0;31m✗\033[0m the run wrote a real log file: {', '.join(changed)}")
         failed += 1
 
-    print(f"\n  {passed} passed, {failed} failed")
+    print(f"\n  {passed} passed, {failed} failed" + (f", {skipped} skipped" if skipped else ""))
     return failed
 
 
