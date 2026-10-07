@@ -12,31 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark backup — Run incremental backup to connected drive.
+zark backup — Back up this system to a connected, registered drive.
 
-Auto-detects connected known drive, imports pool, loads key,
-runs syncoid (raw send), syncs bpool, exports pool.
+Imports the drive under I-G, takes one backup point ``zark_<UTC>`` of every
+replicated dataset and brings each of them to it with zark's own send/receive
+loop (lib/engine.py): ``-I`` from the drive's newest snapshot, or from this
+drive's bookmark when origin no longer has it. Nothing on the drive is ever
+destroyed unless the user chose it for that dataset in the questions asked
+before the first byte is sent (ROLLBACK, DIVERGED, datasets only on the
+drive). Success means every expected dataset reached the point; the
+per-dataset table goes to the terminal and to zark.log.
 
 Refuses to run from live USB (would back up the wrong system).
-
-Divergence handling: when syncoid aborts with "cowardly refusing"
-(no common snapshots between source and target), backup invokes the
-auto-repair logic in ``lib.repair`` to destroy any divergent datasets
-under 64MB and re-run syncoid so it recreates them via initial
-replication. Datasets above 64MB abort with a clear message asking
-the user to run ``zark repair-divergent`` interactively.
 """
 
+import socket
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from functools import partial
 
-from lib import repair, sh
+from lib import engine, sh
 from lib.cleanup import Cleanup, prompt_eject_or_attach
-from lib.config import Config, now_utc_iso
+from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
     backup_device,
     drive_staleness_days,
-    drives_in_danger_zone,
     scan_connected_drives,
     select_drive,
 )
@@ -44,8 +46,8 @@ from lib.identity import by_id_names, preferred_by_id, whole_disk
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
-from lib.sanoid_retention import worst_case_retention_days
-from lib.zfs import ZFS, PoolInfo, syncoid_exclude_flag
+from lib.replication import TRANSFERABLE, DatasetPlan, State, point_name
+from lib.zfs import ZFS, PoolInfo
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
 # so it is never the answer to "out of space" (hallazgo 8).
@@ -54,11 +56,6 @@ _FREE_SPACE_HINT = (
     "keeping each dataset's newest one (never a % range) — "
     "zfs list -t snapshot -o name,used -s creation -r <pool>"
 )
-
-# How many days before retention runs out we start mentioning a drive
-# at the end of a successful backup. With 90-day retention, drives
-# untouched for 60+ days appear in the "danger zone" list.
-_DANGER_ZONE_MARGIN_DAYS = 30
 
 
 def _detect_live_usb() -> bool:
@@ -84,78 +81,24 @@ def _notify(title: str, message: str):
         )
 
 
-def _report_staleness_at_end(
-    cfg: Config,
-    pool_name: str,
-    age_at_start: int | None,
-    retention: int | None,
-    log: Log,
-) -> None:
-    """Print staleness reporting *after* the backup completes successfully.
+def _report_rpo(cfg: Config, pool_name: str, log: Log) -> None:
+    """Days since every other registered drive's last backup (decision 15).
 
-    Two distinct messages, both purely informative (no FATAL):
-
-    1. If the just-backed-up drive was already past the retention horizon
-       when we started this run, WARN the operator that it had crossed
-       the line — the backup we just finished may have only worked
-       because some shared snapshot happened to still exist, and next
-       time around it might not. Also explicitly notes that
-       ``zark repair-divergent`` does NOT fix staleness — it only fixes
-       divergence after a syncoid abort, which is a different problem.
-
-    2. INFO list of *other* known drives whose age has reached the
-       danger zone (``≥ retention - 30 days``), so the operator knows
-       which drive to grab next. The drive we just backed up is
-       intentionally excluded — its age is now zero and listing it
-       would be misleading.
-
-    Both messages are no-ops when ``retention`` is None (sanoid.conf
-    missing or empty) — staleness reporting is unavailable in that
-    case, with no value lost.
+    Bookmark-anchored drives never lose their anchor through origin
+    retention, so there is no divergence deadline to warn about: only how
+    old each drive's newest point is.
     """
-    if retention is None:
-        return
+    for name, info in sorted(cfg.known_drives.items()):
+        if name == pool_name:
+            continue
+        age = drive_staleness_days(info)
+        if age is None:
+            log.info(f"  {name}: no backup recorded")
+        else:
+            log.info(f"  {name}: {age} day(s) since its last backup")
 
-    # Message 1: drive that was expired at the start of the run.
-    if age_at_start is not None and age_at_start > retention:
-        log.warn(
-            f"Drive '{pool_name}' was {age_at_start} day(s) old when this "
-            f"backup started — past the {retention}-day retention horizon",
-        )
-        log.info(
-            "  This run succeeded, but next time the source's sanoid retention",
-        )
-        log.info(
-            "  may have purged the last shared snapshot. Consider rotating to",
-        )
-        log.info(
-            "  a fresher drive, or fully reinitialize this one:",
-        )
-        log.info(
-            "    sudo ./zark purge /dev/sdX  &&  sudo ./zark prepare /dev/sdX",
-        )
-        log.info(
-            "  Note: 'zark repair-divergent' does NOT fix staleness — it only",
-        )
-        log.info(
-            "  helps after syncoid aborts on actual divergent datasets.",
-        )
 
-    # Message 2: other drives in the danger zone.
-    danger = drives_in_danger_zone(
-        cfg.known_drives,
-        retention,
-        _DANGER_ZONE_MARGIN_DAYS,
-        exclude=pool_name,
-    )
-    if danger:
-        log.info("Other drives approaching retention horizon:")
-        for name, age in danger:
-            remaining = max(0, retention - age)
-            log.info(
-                f"  {name}: {age} day(s) old, ~{remaining} day(s) left before divergence",
-            )
-
+TOTAL_STEPS = 8
 
 # Free-space margin: 1% of the source's used data, with a 1 GiB floor.
 # Lax by design — only fires when the target is essentially full, where
@@ -232,62 +175,206 @@ def _check_target_space(
         )
 
 
-# ── Snapshot policy ─────────────────────────────────────────────────────
-#
-# Sanoid takes snapshots automatically via its systemd timer (enabled
-# by `zark setup`), typically hourly. That means when an operator
-# runs `zark backup` they may be replicating state that is up to ~1
-# hour old. Since taking a snapshot is cheap (seconds, no I/O on the
-# backup drive, idempotent — sanoid won't duplicate within the same
-# retention window), backup now invokes `sanoid --take-snapshots`
-# before every replication. Result: the backup drive always holds
-# the most current state of the source pool.
-#
-# `--no-snapshot` exists as an escape hatch. Realistic uses are
-# narrow (re-running backup after a transient failure when the
-# operator already triggered sanoid by hand, or pure paranoia about
-# triple-tagging a pool that's tightly bounded by retention) but the
-# flag is cheap to keep and lets a script declare its intent
-# explicitly.
-
-
 @dataclass
 class BackupArgs:
     """Parsed backup command-line arguments."""
 
-    take_snapshots: bool = True  # default: always take snapshots before syncoid
+    # ``--no-snapshot`` predates the backup point, which now replaces the
+    # pre-backup sanoid run; the flag is accepted and has no effect.
+    take_snapshots: bool = True
 
 
 def _parse_args(args: list[str]) -> BackupArgs:
-    """Parse backup's command-line arguments.
-
-    Recognised arguments (all optional, any order):
-      --no-snapshot    skip the sanoid snapshot stage and replicate
-                       whatever snapshots already exist
-
-    Unknown flags are ignored, consistent with the rest of the
-    codebase.
-    """
+    """Parse backup's command-line arguments (unknown flags are ignored)."""
     parsed = BackupArgs()
     if "--no-snapshot" in args:
         parsed.take_snapshots = False
     return parsed
 
 
-def _take_snapshots(log: Log) -> None:
-    """Run `sanoid --take-snapshots` with friendly logging.
+def _require_bookmark_v2(log: Log) -> None:
+    """Refuse without bookmark_v2 on rpool (M2 decision 4a; `zark setup` enables it)."""
+    state = engine.bookmark_feature("rpool")
+    if state not in ("enabled", "active"):
+        log.fatal(
+            f"rpool feature@bookmark_v2 is {state or 'unknown'}",
+            causes=["zark's backup anchors are rpool bookmarks, which need this feature"],
+            solutions=["Run: sudo zark setup  (it explains the change and asks first)"],
+        )
 
-    A failure here is non-fatal: sanoid may emit warnings about a few
-    datasets while still snapshotting the rest, and we'd rather
-    proceed with backup than abort because of a noisy edge case. The
-    operator sees the warning in the log either way.
-    """
-    log.info("Taking fresh snapshots via sanoid...")
-    r = sh.run("sanoid --take-snapshots", timeout=300, log=log)
-    if r.ok:
-        log.ok("Sanoid snapshots taken")
-    else:
-        log.warn("sanoid --take-snapshots had errors — proceeding with backup anyway")
+
+def _gib(n: int) -> str:
+    return sh.humanize_bytes(n)
+
+
+def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    plans: list[DatasetPlan],
+    eng: engine.Run,
+    pool_name: str,
+    dst_info: PoolInfo | None,
+    log: Log,
+) -> bool:
+    """Show the plan, ask every question before the first byte is sent,
+    check space, then apply the user's choices. False aborts the run."""
+    sizes = {p.rel: eng.estimate(p) for p in plans if p.state in TRANSFERABLE}
+    counts: dict[str, int] = {}
+    for p in plans:
+        counts[str(p.state)] = counts.get(str(p.state), 0) + 1
+    log.info("Plan: " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())))
+    for p in plans:
+        if p.state is State.EXCLUDED:
+            log.warn(f"  {p.rel}: NOT BACKED UP ({p.note})")
+        elif p.state is State.VIA_BOOKMARK:
+            log.info(f"  {p.rel}: from this drive's bookmark")
+    avail = dst_info.avail_bytes if dst_info else 0
+    needed = sum(sizes.values())
+    actions: list[Callable[[], object]] = []
+    confirmed_any = False
+
+    # Datasets origin no longer has (decision 18).
+    for p in plans:
+        if p.state is not State.ORPHAN:
+            continue
+        if p.kept:
+            log.info(f"  {p.rel}: only on the backup, kept")
+            continue
+        opts = [
+            "ask again next time",
+            "keep it (not asked again)",
+            f"destroy it on the backup (frees {_gib(p.used)})",
+        ]
+        if p.rename_to:
+            opts.append(f"follow the rename in origin: {p.rel} → {p.rename_to}")
+        pick = log.ask_choice(f"{p.rel} exists only on the backup ({_gib(p.used)}):", opts, 0)
+        if pick == 1:
+            actions.append(partial(eng.keep_orphan, p, datetime.now(UTC).strftime("%Y-%m-%d")))
+        elif pick == 2 and _typed(
+            log, "DESTROY", f"destroy {pool_name}/{p.rel} and everything below it"
+        ):
+            actions.append(partial(eng.destroy, p))
+            confirmed_any = True
+        elif pick == 3:
+            actions.append(partial(eng.follow_rename, p))
+
+    # Only an older common snapshot left (§7 migration; recovered older point).
+    rollbacks = [p for p in plans if p.state is State.ROLLBACK]
+    if rollbacks:
+        pre_v2 = engine.read_metadata(pool_name).get("format") != engine.FORMAT
+        log.warn(
+            f"{len(rollbacks)} dataset(s) on {pool_name} hold snapshots newer than anything origin "
+            + (
+                "still has: first run of this zark on a drive written by an older one."
+                if pre_v2
+                else "still has: was this system recovered from an older point?"
+            ),
+        )
+        destroyed = 0
+        for p in rollbacks:
+            destroyed += len(p.newer)
+            shown = ", ".join(n.lstrip("@") for n in p.newer[:3]) + (
+                " …" if len(p.newer) > 3 else ""
+            )
+            log.info(f"  {p.rel}: common {p.common.lstrip('@')}; newer on the backup: {shown}")
+        full = {p.rel: eng.estimate(p, full=True) for p in rollbacks}
+        opts = ["abort the backup (nothing changes)"]
+        fits = needed + sum(full.values()) <= avail
+        if fits:
+            opts.append(
+                f"archive those lineages and resend them in full ({_gib(sum(full.values()))})"
+            )
+        opts.append(f"roll back: destroy the {destroyed} newer snapshot(s) listed above")
+        pick = log.ask_choice("How should this backup continue?", opts, 0)
+        if pick == 0:
+            return False
+        if fits and pick == 1:
+            needed += sum(full.values())
+            actions += [partial(eng.archive, p) for p in rollbacks]
+        else:
+            if not _typed(log, "ROLLBACK", f"destroy {destroyed} snapshot(s) on {pool_name}"):
+                return False
+            actions += [partial(eng.rollback, p) for p in rollbacks]
+            confirmed_any = True
+
+    # Nothing in common (D17).
+    for p in plans:
+        if p.state is not State.DIVERGED:
+            continue
+        full_size = eng.estimate(p, full=True)
+        opts = ["skip it this time (the backup will be INCOMPLETE)"]
+        fits = needed + full_size <= avail
+        if fits:
+            opts.append(f"archive the old lineage and resend it in full ({_gib(full_size)})")
+        opts.append(f"destroy it on the backup and resend it in full ({_gib(p.used)} destroyed)")
+        log.warn(f"  {p.rel}: no snapshot in common with the backup ({p.note})")
+        pick = log.ask_choice(f"{p.rel} has diverged:", opts, 0)
+        if pick == 0:
+            continue
+        needed += full_size
+        if fits and pick == 1:
+            actions.append(partial(eng.archive, p))
+        elif _typed(log, "DESTROY", f"destroy {pool_name}/{p.rel} and everything below it"):
+            actions.append(partial(eng.destroy, p))
+            confirmed_any = True
+
+    log.info(f"Estimated transfer: {_gib(needed)}; available on {pool_name}: {_gib(avail)}")
+    if dst_info and needed > avail:
+        log.fatal(
+            f"Not enough space on {pool_name} for this backup",
+            causes=[f"Needs about {_gib(needed)}, {_gib(avail)} available"],
+            solutions=[_FREE_SPACE_HINT, "Connect a larger backup drive"],
+        )
+    if confirmed_any:
+        log.ok("Applying the confirmed changes on the backup")
+    for act in actions:
+        _ = act()
+    return True
+
+
+def _typed(log: Log, word: str, what: str) -> bool:
+    """Typed confirmation for anything that destroys data on the backup."""
+    answer = log.ask_text(
+        f"    Type {word} to {what}: ", accept=(word,), label=f"Type {word} to {what}"
+    )
+    if answer != word:
+        log.info("Not confirmed — nothing destroyed")
+        return False
+    return True
+
+
+def _show_table(res: engine.Result, point: str, log: Log) -> None:
+    """Per-dataset outcome, in the terminal and zark.log (I-D, I19)."""
+    log.info(f"Per-dataset result for {point}:")
+    for p in res.plans:
+        out = res.outcomes.get(p.rel)
+        if p.state is State.AT_POINT:
+            mark = "ok"
+            if p.rel in res.anchor_failed:
+                mark = "ok, but its anchor could not be created (next run may need a decision)"
+        elif p.state is State.ORPHAN:
+            mark = "only on backup" + (", kept" if p.kept else "")
+        elif p.state is State.EXCLUDED:
+            mark = f"NOT BACKED UP ({p.note})"
+        else:
+            mark = f"NOT at the point: {out.error if out and out.error else p.state}"
+        line = f"  {p.rel:<48} {mark}"
+        if p.state is State.AT_POINT:
+            log.info(line)
+        else:
+            log.warn(line)
+
+
+def _write_metadata(pool_name: str, source_pool: str, point: str, log: Log) -> None:
+    """Decision 17a. The point and its time are recorded only for a complete run."""
+    rpool_guid = sh.run(f"zpool get -H -o value guid {source_pool}").output.strip()
+    fields = {
+        "format": engine.FORMAT,
+        "version": VERSION,
+        "origin-host": socket.gethostname(),
+        "origin-rpool-guid": rpool_guid,
+    }
+    if point:
+        fields |= {"last-backup-at": now_utc_iso(), "last-point": point}
+    _ = engine.write_metadata(pool_name, fields, log)
 
 
 def _heal_drive_id(cfg: Config, pool_name: str, device: str | None, log: Log) -> None:
@@ -323,6 +410,7 @@ def run(
     cleanup.register()
 
     log.banner("ZFS BACKUP", f"Source: {cfg.source_pool}")
+    started = time.time()
 
     # ── Refuse live USB ──────────────────────────────────────────────────
     if _detect_live_usb():
@@ -337,9 +425,10 @@ def run(
 
     warn_rpool_mountpoint_lost(log)
     warn_kernel_named_vdevs(log)
+    _require_bookmark_v2(log)
 
     # ── Find and select drive ────────────────────────────────────────────
-    log.step(1, 10, "Scanning for known backup drives...")
+    log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")
     drives = scan_connected_drives(cfg, log)
     known = [d for d in drives if d.known]
 
@@ -365,23 +454,13 @@ def run(
     pool_name = drive.name
     pool_guid = drive.guid
 
-    # Capture how old the recorded backup is before we overwrite it. The
-    # value is reported back to the operator at the end of the run if
-    # the drive was already past the retention horizon when we started.
     selected_info = cfg.known_drives.get(pool_name)
-    age_at_start: int | None = (
-        drive_staleness_days(selected_info) if selected_info is not None else None
-    )
+    age_at_start = drive_staleness_days(selected_info) if selected_info is not None else None
     if age_at_start is not None:
-        log.dbg(f"Last backup on {pool_name}: {age_at_start} day(s) ago")
-
-    # Worst-case retention horizon from sanoid.conf. Read once per
-    # backup run and reused for the staleness reporting at the end and
-    # for the --no-snapshot anchor check below.
-    retention_days = worst_case_retention_days(log)
+        log.info(f"Last backup on {pool_name}: {age_at_start} day(s) ago")
 
     # ── Import pool ──────────────────────────────────────────────────────
-    log.step(2, 10, f"Importing pool {pool_name}...")
+    log.step(2, TOTAL_STEPS, f"Importing pool {pool_name}...")
 
     device = backup_device(drive)
     if not zfs.import_backup_pool(pool_name, device, guid=pool_guid):
@@ -415,7 +494,7 @@ def run(
     _heal_drive_id(cfg, pool_name, device, log)
 
     # ── Check health ─────────────────────────────────────────────────────
-    log.step(3, 10, "Checking pool health...")
+    log.step(3, TOTAL_STEPS, "Checking pool health...")
 
     for pool in (cfg.source_pool, pool_name):
         health = zfs.pool_health(pool)
@@ -432,7 +511,7 @@ def run(
             log.fatal(f"{pool} is {health}", solutions=[f"Run: zpool status {pool}"])
 
     # ── Pool info summary ────────────────────────────────────────────────
-    log.step(4, 10, "Gathering pool info...")
+    log.step(4, TOTAL_STEPS, "Gathering pool info...")
 
     src_info = zfs.pool_info(cfg.source_pool)
     dst_info = zfs.pool_info(pool_name)
@@ -457,7 +536,7 @@ def run(
     )
 
     # ── Load encryption key ──────────────────────────────────────────────
-    log.step(5, 10, "Loading encryption key...")
+    log.step(5, TOTAL_STEPS, "Loading encryption key...")
 
     keystatus = zfs.get_property(f"{pool_name}/rpool", "keystatus")
     ks = Keystore(log)
@@ -487,289 +566,72 @@ def run(
             )
         log.ok(f"Encryption key loaded ({loaded} datasets)")
 
-    # ── Take fresh snapshots ─────────────────────────────────────────────
-    log.step(6, 10, "Taking fresh snapshots before backup...")
-    if opts.take_snapshots:
-        _take_snapshots(log)
-    else:
-        log.info("--no-snapshot: replicating existing snapshots")
-        # When --no-snapshot is in effect, this run relies entirely on
-        # whatever snapshots already exist on source. If sanoid hasn't
-        # run recently enough to leave a fresh anchor that is also
-        # present on the target, syncoid will abort. Surface a WARN
-        # here so the operator sees the risk before syncoid emits its
-        # own (much noisier) error. Best-effort: if the check itself
-        # fails, we don't block — syncoid is the authoritative answer.
-        anchor = sh.run(
-            f"zfs list -H -o name -t snapshot -s creation {cfg.source_pool} | tail -1",
-        )
-        if not anchor.ok or not anchor.output.strip():
-            log.warn(
-                "--no-snapshot is set but no recent source snapshot was found; "
-                "syncoid may abort with no shared anchor",
-            )
-
-    # ── Run syncoid ──────────────────────────────────────────────────────
-    log.step(7, 10, "Running syncoid (this may take a while)...")
+    # ── Backup point, plan and questions ─────────────────────────────────
+    log.step(6, TOTAL_STEPS, "Taking the backup point and planning every dataset...")
+    if not opts.take_snapshots:
+        log.info("--no-snapshot has no effect: the backup point is taken by zark itself")
+    eng = engine.Run(pool_name, pool_guid, log, point_name(datetime.now(UTC)))
+    _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
     log.info("Tip: run 'sudo ./zark monitor' in another terminal for progress")
 
-    _notify("🔄 Backup started", f"Syncing {cfg.source_pool} → {pool_name}...")
+    def decide(plans: list[DatasetPlan], run_: engine.Run) -> bool:
+        return _decide(plans, run_, pool_name, dst_info, log)
 
-    target_pool = f"{pool_name}/rpool"
-    start = time.time()
+    log.step(7, TOTAL_STEPS, "Replicating (this may take a while)...")
+    res = engine.execute(eng, cleanup, decide)
+    if res.aborted:
+        log.fatal(f"Backup not started: {res.error or 'aborted'}")
 
-    # The base sync command. Held in a variable because we may need to
-    # invoke it twice: once normally, and once after auto-repair if
-    # syncoid aborts with "cowardly refusing" due to divergent datasets.
-    #
-    # ``--no-sync-snap`` tells syncoid not to create its own
-    # ``@syncoid_<host>_<ts>`` snapshots and instead anchor every
-    # incremental on the most recent snapshot it finds in source.
-    # Sanoid (run in step 6) provides those anchors already, so the
-    # extra ``syncoid_*`` snapshot is redundant. More importantly,
-    # without ``--no-sync-snap`` syncoid runs ``pruneoldsyncsnaps``
-    # after each transfer, which destroys *both* the source and
-    # target's previous ``@syncoid_*`` snapshots — including ones the
-    # other backup drives still depend on. The result was the
-    # alternating "could not find any snapshots to destroy / WARNING:
-    # zfs destroy ... failed: 256" cascade visible whenever the user
-    # rotated between drives. Disabling sync-snap eliminates the bug
-    # at the source.
-    #
-    # syncoid 2.3.0+ uses --exclude-datasets; older releases use
-    # --exclude.
-    excl = syncoid_exclude_flag()
-    rpool_syncoid_cmd = (
-        "syncoid --recursive --no-privilege-elevation --no-sync-snap "
-        + "--sendoptions=w --recvoptions=u "
-        + f"{excl}=rpool/keystore "
-        + f"{cfg.source_pool} {target_pool}"
-    )
-    r = sh.run(rpool_syncoid_cmd, log=log)
+    _show_table(res, eng.point, log)
+    used_after = zfs.pool_info(pool_name)  # P0-4: after the transfer
+    _write_metadata(pool_name, cfg.source_pool, eng.point if res.ok else "", log)
 
-    # If syncoid aborted with "cowardly refusing" (divergent datasets that
-    # exist on both sides without a common snapshot), try auto-repair: any
-    # divergent dataset under 64MB is destroyed so the next syncoid run
-    # recreates it via initial replication. Datasets above the threshold
-    # may contain real user data and are not touched — we abort with a
-    # clear pointer to the interactive `zark repair-divergent` command.
-    if not r.ok and repair.is_divergence_error(r.stdout):
-        log.warn("Source and target have no common snapshots on one or more datasets")
-        log.info(
-            "This usually means the drive has been disconnected longer than "
-            "your sanoid retention policy. Attempting auto-repair of small "
-            "datasets (< 64MB)...",
-        )
-        ok, big = repair.auto_repair_under_64mb(zfs, cfg.source_pool, pool_name, log)
-        if not ok:
-            log.fatal(
-                "Auto-repair could not resolve all divergent datasets",
-                causes=[
-                    f"{len(big)} dataset(s) exceed the 64MB safety limit:",
-                    *[f"  {d.target}  used: {d.used_human}" for d in big],
-                    "These may contain real data — zark refuses to destroy them silently",
-                ],
-                solutions=[
-                    "Run 'sudo ./zark repair-divergent' for an interactive review",
-                ],
-            )
-        log.info("Re-running syncoid after auto-repair...")
-        # Sleep 2s so any new syncoid_* snapshot from the failed attempt
-        # doesn't collide with the next one (timestamp resolution: 1 s).
-        time.sleep(2)
-        r = sh.run(rpool_syncoid_cmd, log=log)
-
-    elapsed = int(time.time() - start)
-    mins, secs = divmod(elapsed, 60)
-
-    # syncoid returns non-zero on partial success; check actual transfers
-    if not r.ok:
-        # Reactive ENOSPC: must be checked BEFORE the "sent > 0 → warn"
-        # branch below, otherwise a syncoid that managed to copy the
-        # first dataset and then ran out of space would fall through
-        # as a "partial success" and continue to bpool sync (which
-        # would also ENOSPC). Checking here turns it into a clean fatal.
-        if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
-            log.fatal(
-                f"Backup ran out of space on {pool_name} after {mins}m",
-                causes=[
-                    f"{pool_name} filled up during transfer",
-                    "Incremental was larger than estimated, or target was already nearly full",
-                ],
-                solutions=[
-                    _FREE_SPACE_HINT,
-                    "Connect a larger backup drive",
-                    "Then re-run: sudo ./zark backup (syncoid resumes)",
-                ],
-            )
-        sent = r.stdout.count("Sending") + r.stdout.count("INFO: Sending")
-        if sent > 0:
-            log.warn(f"Syncoid had warnings but transferred {sent} dataset(s)")
-        else:
-            log.fatal(
-                f"Syncoid failed after {mins}m",
-                causes=[
-                    "USB interruption",
-                    "Out of space",
-                    "Snapshot deleted during sync",
-                ],
-                solutions=[
-                    f"Check log: {cfg.log_file}",
-                    "Syncoid will resume from where it left off on next run",
-                ],
-            )
-
-    log.ok(f"rpool synced in {mins}m {secs}s")
-
-    # ── Sync bpool ───────────────────────────────────────────────────────
-    log.step(8, 10, "Syncing bpool (kernels + grub)...")
-
-    if zfs.pool_exists("bpool"):
-        bpool_syncoid_cmd = (
-            "syncoid --recursive --no-privilege-elevation --no-sync-snap "
-            + "--preserve-properties --recvoptions=u "
-            + f"bpool {pool_name}/bpool"
-        )
-        r = sh.run(bpool_syncoid_cmd, log=log)
-        if r.ok:
-            log.ok("bpool synced")
-        elif sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
-            # bpool ENOSPC: do not auto-recreate. Auto-recreate destroys
-            # the stale target and re-sends from scratch — but if rpool
-            # already filled the drive, bpool will not fit either, and
-            # destroying the stale bpool leaves the user with no boot
-            # backup at all. Fatal here, preserving whatever bpool data
-            # is still on the target.
-            log.fatal(
-                f"bpool backup ran out of space on {pool_name}",
-                causes=[
-                    f"{pool_name} has no room for bpool after rpool sync",
-                    "rpool likely consumed the headroom intended for bpool",
-                ],
-                solutions=[
-                    _FREE_SPACE_HINT,
-                    "Connect a larger backup drive",
-                    "Then re-run: sudo ./zark backup",
-                ],
-            )
-        elif "no snapshots matching" in r.stdout.lower():
-            # bpool is small (~150MB) and recover regenerates initrd via
-            # dracut anyway, so destroying the stale target and resending
-            # from scratch is safe and fast. Always auto-recreate.
-            log.info(
-                "No common snapshots with "
-                + f"{pool_name}/bpool — recreating from scratch "
-                + "(sanoid purged the shared syncoid snapshot)",
-            )
-            r = sh.run(f"zfs destroy -r {pool_name}/bpool", log=log)
-            if not r.ok:
-                log.warn(
-                    f"Could not destroy {pool_name}/bpool — "
-                    + "bpool backup is stale (recover still works via dracut)",
-                )
-            else:
-                # Sleep 2s before relaunching so the next syncoid generates
-                # a fresh timestamp and doesn't collide with the failed run.
-                time.sleep(2)
-                r = sh.run(bpool_syncoid_cmd, log=log)
-                if r.ok:
-                    log.ok("bpool resynced from scratch ✓")
-                elif sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
-                    # Same reasoning as above: ENOSPC during a from-scratch
-                    # bpool resync means the drive is full. Fatal.
-                    log.fatal(
-                        f"bpool resync ran out of space on {pool_name}",
-                        causes=[f"{pool_name} is full after rpool sync"],
-                        solutions=[
-                            _FREE_SPACE_HINT,
-                            "Connect a larger backup drive",
-                        ],
-                    )
-                else:
-                    log.warn(
-                        "bpool resync failed — bpool backup is stale "
-                        + "(recover still works via dracut, but consider "
-                        + "investigating)",
-                    )
-        else:
-            log.warn(
-                f"bpool sync failed (rc={r.returncode}) — bpool backup may "
-                + "be stale (recover still works via dracut --regenerate-all)",
-            )
-    else:
-        log.dbg("No bpool found — skipping")
-
-    # ── Sync properties ──────────────────────────────────────────────────
-    log.step(9, 10, "Syncing ZFS properties...")
-
-    # Find ubuntu dataset name
-    ubuntu_ds = sh.run(
-        "zfs list -H -o name -r rpool/ROOT "
-        + "| grep -v '^rpool/ROOT$' | grep -v '@' | awk -F/ 'NF==3' | head -1",
-    ).output
-    if ubuntu_ds:  # pylint: disable=too-many-nested-blocks
-        # ubuntu_suffix = ubuntu_ds.replace("rpool/ROOT/", "")
-        # Sync canmount from source to backup
-        r = sh.run(f"zfs get -H -o name,value canmount -r {ubuntu_ds}")
-        if r.ok:
-            for line in r.lines:
-                parts = line.split("\t")
-                if len(parts) >= 2 and "@" not in parts[0]:
-                    src_ds = parts[0].strip()
-                    src_val = parts[1].strip()
-                    dst_ds = src_ds.replace("rpool/", f"{pool_name}/rpool/", 1)
-                    if zfs.dataset_exists(dst_ds):
-                        cur = zfs.get_property(dst_ds, "canmount")
-                        if cur != src_val:
-                            _ = zfs.set_property(dst_ds, "canmount", src_val)
-                            log.dbg(f"Fixed canmount {dst_ds}: {cur} → {src_val}")
-        log.ok("Properties synced")
-
-    # ── Unmount keystore and cleanup ─────────────────────────────────────
+    # ── Export and read back ─────────────────────────────────────────────
     ks.umount()
     cleanup.run()
+    elapsed = int(time.time() - started)  # P0-2: the whole run
+    mins, secs = divmod(elapsed, 60)
 
-    # ── Read-back verification (post-export, pre-success) ────────────────
-    # cleanup.run() has exported the pool and flushed. But on USB-SATA
-    # bridges that lie about FUA, a successful export does NOT prove the
-    # pool is reimportable: the bridge can ack a flush whose data never hit
-    # NAND, leaving spacemaps corrupt (metaslab_init error 52) while labels
-    # and uberblocks survive. The only way to know is to read it back. We
-    # re-import read-only (cache dropped first so we read the device, not
-    # RAM) and require ONLINE before we ever tell the operator the backup is
-    # safe. A failure here means the backup is NOT trustworthy even though
-    # syncoid and export both reported success.
-    if pool_name in cleanup.exported_pools():
-        log.step(10, 10, f"Verifying {pool_name} is reimportable...")
-        if not zfs.verify_exported_pool_readback(pool_name, device=device):
-            log.banner_error(
-                "BACKUP NOT VERIFIED",
-                [
-                    "The pool exported but could NOT be re-imported.",
-                    "Data transfer succeeded but the on-disk pool is not",
-                    "readable back — this is the signature of a USB-SATA",
-                    "bridge that lies about cache flushing (FUA).",
-                    "",
-                    "Do NOT rely on this backup.",
-                    "What to do:",
-                    "  → Check the enclosure / cable (try a different one)",
-                    "  → See docs/HARDWARE.md (UAS quirk for 0634:5604)",
-                    "  → Re-run the backup after addressing the bridge",
-                ],
-            )
-            _notify("❌ Backup NOT verified", f"{pool_name} not reimportable")
-            return
-        log.ok(f"{pool_name} verified reimportable (ONLINE)")
+    log.step(8, TOTAL_STEPS, f"Verifying {pool_name} is reimportable...")
+    if pool_name not in cleanup.exported_pools():
+        # H17: an export that failed is a failed backup, never a skipped check.
+        log.banner_error(
+            "BACKUP NOT VERIFIED",
+            [
+                f"{pool_name} could not be exported, so it was not read back.",
+                "Do NOT disconnect the drive. Check: zpool status; then",
+                f"  sudo zpool export {pool_name}",
+            ],
+        )
+        _notify("❌ Backup NOT verified", f"{pool_name} could not be exported")
+        raise SystemExit(1)
+    rb = zfs.verify_exported_pool_readback(pool_name, device=device)
+    if not rb.ok:
+        log.banner_error("BACKUP NOT VERIFIED", [*rb.describe(), "", "Do NOT rely on this backup."])
+        _notify("❌ Backup NOT verified", f"{pool_name} failed its read-back")
+        raise SystemExit(1)
+    log.ok(f"{pool_name} verified reimportable (ONLINE)")
 
-    # ── Persist last_backup_at on the selected drive ─────────────────────
-    # Marks the drive as freshly backed up so future staleness reporting
-    # has a baseline. Done after cleanup so we don't write the timestamp
-    # if cleanup itself failed to export the pool — exporting failures
-    # do not alter the data we just transferred but are worth flagging
-    # in the recorded state, and this ordering keeps the file simple
-    # ("written iff backup truly finished"). A write failure here is a
-    # warn, not fatal: the backup itself succeeded; missing the timestamp
-    # only weakens the next run's reporting by one cycle.
+    if not res.ok:
+        missing = [
+            p.rel
+            for p in res.plans
+            if p.state not in (State.AT_POINT, State.ORPHAN, State.EXCLUDED)
+        ]
+        log.banner_error(
+            "BACKUP INCOMPLETE",
+            [
+                f"{len(missing)} dataset(s) did not reach {eng.point}:",
+                *[f"  {rel}" for rel in missing[:15]],
+                "",
+                "The drive keeps everything it had. Run backup again;",
+                "an interrupted transfer resumes where it stopped.",
+            ],
+        )
+        _notify("❌ Backup incomplete", f"{len(missing)} dataset(s) not backed up")
+        raise SystemExit(1)
+
+    # ── Persist last_backup_at (only for a complete, verified backup) ────
     info = cfg.known_drives.get(pool_name)
     if info is not None:
         info.last_backup_at = now_utc_iso()
@@ -779,28 +641,17 @@ def run(
         except OSError as e:
             log.warn(f"Could not persist last_backup_at for {pool_name}: {e}")
 
-    # ── Summary ──────────────────────────────────────────────────────────
-    dst_info2 = zfs.pool_info(pool_name) if zfs.pool_exists(pool_name) else dst_info
-
     log.banner_ok(
         "BACKUP COMPLETED",
         [
+            f"Point:          {log.W}{eng.point}{log.N}",
             f"Duration:       {log.W}{mins}m {secs}s{log.N}",
-            f"Used on target: {log.W}{dst_info2.used if dst_info2 else '?'}{log.N}",
-            f"Available:      {log.W}{dst_info2.avail if dst_info2 else '?'}{log.N}",
+            f"Used on target: {log.W}{used_after.used if used_after else '?'}{log.N}",
+            f"Available:      {log.W}{used_after.avail if used_after else '?'}{log.N}",
         ],
     )
+    _report_rpo(cfg, pool_name, log)
 
-    # ── Staleness reporting (post-banner, informative only) ──────────────
-    _report_staleness_at_end(cfg, pool_name, age_at_start, retention_days, log)
-
-    # By this point cleanup.run() has exported the pool and issued the
-    # kernel-side flush (sync + sleep). Ask the operator whether to also
-    # power the bridge down now. Default is "yes" because the typical
-    # path after a backup is "I'm done, I'll unplug" — Enter ejects. For
-    # operators rotating multiple backups in one session, "n" keeps the
-    # drive in /dev so the next zark command can use it without
-    # unplug/replug.
     prompt_eject_or_attach(
         device,
         pool_name,

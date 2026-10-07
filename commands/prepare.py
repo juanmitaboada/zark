@@ -249,7 +249,7 @@ def run(
     # ONLINE before we register it as a trusted backup target. If it fails,
     # do NOT register the drive — the prepared pool is not trustworthy even
     # though every step above reported success.
-    if not zfs.verify_exported_pool_readback(new_pool, device=ident.part1):
+    if not zfs.verify_exported_pool_readback(new_pool, device=ident.part1).ok:
         log.banner_error(
             "DRIVE NOT VERIFIED",
             [

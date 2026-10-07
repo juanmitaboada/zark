@@ -411,6 +411,31 @@ class Run:  # pylint: disable=too-many-instance-attributes
         self.resume_sanoid()
 
 
+def write_metadata(pool: str, fields: dict[str, str], log: Log) -> bool:
+    """Record ``org.zark:<key>=<value>`` on the backup pool's root dataset
+    (M2 decision 17a): readable without the passphrase, and a user property
+    mounts nothing, so the zvol rule does not apply."""
+    pairs = " ".join(_q(f"org.zark:{k}={v}") for k, v in sorted(fields.items()))
+    r = sh.run(f"zfs set {pairs} {_q(pool)}", log=log)
+    if not r.ok:
+        log.warn(f"Could not record zark metadata on {pool}: {r.stderr.strip()}")
+    return r.ok
+
+
+def read_metadata(pool: str) -> dict[str, str]:
+    """``org.zark:*`` user properties set on the backup pool's root dataset."""
+    r = sh.run(f"zfs get -H -s local -o property,value all {_q(pool)}")
+    out: dict[str, str] = {}
+    for line in r.lines if r.ok else []:
+        f = line.split("\t")
+        if len(f) == 2 and f[0].startswith("org.zark:"):
+            out[f[0][len("org.zark:") :]] = f[1]
+    return out
+
+
+FORMAT = "2"  # org.zark:format of a backup made with points and anchors
+
+
 def anchored_disks(origin: dict[str, Origin]) -> set[str]:
     """Pool GUIDs that hold anchors in origin (bookmarks or bpool snapshots)."""
     disks: set[str] = set()

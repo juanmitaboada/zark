@@ -146,6 +146,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zfs", "rename"): self._rename,
             ("zfs", "rollback"): self._rollback,
             ("zfs", "set"): self._set,
+            ("zfs", "get"): self._get,
+            ("zpool", "export"): lambda _a: _ok(),
+            ("zfs", "unload-key"): lambda _a: _ok(),
             ("systemctl", "is-active"): self._is_active,
             ("systemctl", "stop"): self._unit_set("inactive"),
             ("systemctl", "start"): self._unit_set("active"),
@@ -168,7 +171,19 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         prop, pool = args[-2], args[-1]
         if pool not in self.pools:
             return _err("no such pool")
+        if prop == "guid":
+            return _ok(f"9{abs(hash(pool)) % 10**8}\n")
         return _ok(self.features[pool] + "\n") if prop == "feature@bookmark_v2" else _err("?")
+
+    def _get(self, args: list[str]) -> RunResult:
+        """``zfs get -H [-s local] -o value|property,value <prop|all> <ds>``."""
+        ds, prop = args[-1], args[-2]
+        if ds not in self.ds:
+            return _err("does not exist")
+        props = self.ds[ds].props
+        if prop == "all":
+            return _ok("".join(f"{k}\t{v}\n" for k, v in sorted(props.items()) if ":" in k))
+        return _ok(props.get(prop, "-") + "\n")
 
     def _is_active(self, args: list[str]) -> RunResult:
         state = self.units.get(args[0], "inactive")
@@ -330,7 +345,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
 
     def _send_dry(self, args: list[str]) -> RunResult:
         if "-nvP" in args:
-            return _ok("size\t4096\n")
+            incremental = any(a in args for a in ("-i", "-I", "-t"))
+            return _ok(f"size\t{4096 if incremental else 10**9}\n")
         return _err("fake: send outside a pipe")
 
     def _receive_abort(self, args: list[str]) -> RunResult:

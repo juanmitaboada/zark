@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from unittest import SkipTest  # pylint: disable=wrong-import-position # noqa: E402
 from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa: E402
 
+import commands.backup as backup_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.finish as finish_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -68,9 +69,11 @@ import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: 
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
+    _decide,
     _detect_live_usb,
     _parse_args as _backup_parse_args,
-    _report_staleness_at_end,
+    _report_rpo,
+    _show_table,
 )
 from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
 from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -222,10 +225,11 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
     DatasetInfo,
     PoolInfo,
+    Readback,
     fix_grub_bpool_uuid,
     syncoid_exclude_flag,
 )
-from tests.fake_zfs import FakeZfs  # pylint: disable=wrong-import-position # noqa: E402
+from tests.fake_zfs import FakeZfs, FSnap  # pylint: disable=wrong-import-position # noqa: E402
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -3711,98 +3715,35 @@ class TestSetupTemplateDiff:  # pylint: disable=missing-function-docstring
 # ═════════════════════════════════════════════════════════════════════════
 
 
-class TestBackupStalenessReporting:  # pylint: disable=missing-function-docstring
-    """``_report_staleness_at_end`` is purely informative — never
-    fatals. Tests check that:
-      - the WARN about the drive being expired at start fires only when
-        ``age_at_start > retention_days``
-      - the INFO list of other drives in danger zone excludes the
-        just-backed-up drive
-      - both messages are skipped when retention is None (sanoid.conf
-        unavailable)
-    """
+class TestBackupRpoReporting:  # pylint: disable=missing-function-docstring
+    """Decision 15: after a backup, how old every other drive's newest point is."""
 
-    @staticmethod
-    def _cfg(*, drives: dict[str, DriveInfo]) -> Config:
+    def test_other_drives_listed_with_their_age(self):
+        old = (datetime.now(UTC) - timedelta(days=34)).strftime("%Y-%m-%dT%H:%M:%SZ")
         cfg = make_config()
-        cfg.known_drives.update(drives)
-        return cfg
-
-    def test_silent_when_retention_unknown(self):
-        """``retention=None`` is the "no sanoid.conf" path — no
-        output at all."""
-        cfg = self._cfg(drives={})
-        log = make_log()
-        buf = StringIO()
-        with redirect_stdout(buf):
-            _report_staleness_at_end(cfg, "black", 100, None, log)
-        assert buf.getvalue() == "", "Expected no output when retention is None"
-
-    def test_warn_when_drive_expired_at_start(self):
-        """Selected drive was past retention when run started → WARN +
-        purge+prepare hint + 'repair-divergent does not fix
-        staleness' note."""
-        cfg = self._cfg(drives={})
-        log = make_log()
-        buf = StringIO()
-        with redirect_stdout(buf):
-            _report_staleness_at_end(cfg, "black", age_at_start=100, retention=90, log=log)
-        out = buf.getvalue()
-        assert "100 day(s) old" in out
-        assert "90-day retention" in out
-        assert "purge" in out and "prepare" in out
-        assert "repair-divergent" in out and "does NOT fix staleness" in out
-
-    def test_no_warn_when_drive_was_fresh(self):
-        cfg = self._cfg(drives={})
-        log = make_log()
-        buf = StringIO()
-        with redirect_stdout(buf):
-            _report_staleness_at_end(cfg, "black", age_at_start=10, retention=90, log=log)
-        out = buf.getvalue()
-        assert "past the" not in out
-
-    def test_lists_other_drives_in_danger_zone(self):
-        """Drives other than the backed-up one whose age ≥ (retention -
-        30) appear in the INFO list."""
-        five_days_ago = (datetime.now(UTC) - timedelta(days=70)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        recent = (datetime.now(UTC) - timedelta(days=5)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        cfg = self._cfg(
-            drives={
-                "blue": DriveInfo("blue", "1", "d1", last_backup_at=recent),
-                "green": DriveInfo("green", "2", "d2", last_backup_at=five_days_ago),
+        cfg.known_drives.update(
+            {
+                "blue": DriveInfo("blue", "1", "d1", last_backup_at=old),
+                "black": DriveInfo("black", "2", "d2"),
+                "green": DriveInfo("green", "3", "d3", last_backup_at=old),
             },
         )
-        log = make_log()
         buf = StringIO()
         with redirect_stdout(buf):
-            _report_staleness_at_end(cfg, "blue", age_at_start=0, retention=90, log=log)
+            _report_rpo(cfg, "green", make_log())
         out = buf.getvalue()
-        assert "green" in out  # green is at 70 days (> 90 - 30)
-        assert "Other drives approaching" in out
+        assert "blue: 34 day(s) since its last backup" in out
+        assert "black: no backup recorded" in out
+        assert "green" not in out
+        assert "divergence" not in out and "retention" not in out
 
-    def test_excludes_just_backed_up_drive_from_danger_list(self):
-        """Drive we just finished backing up has age 0 now; if we
-        included it the user would be confused. Test that ``exclude``
-        works."""
-        old = (datetime.now(UTC) - timedelta(days=80)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        cfg = self._cfg(
-            drives={"black": DriveInfo("black", "1", "d", last_backup_at=old)},
-        )
-        log = make_log()
+    def test_silent_with_no_other_drive(self):
+        cfg = make_config()
+        cfg.known_drives["blue"] = DriveInfo("blue", "1", "d1")
         buf = StringIO()
         with redirect_stdout(buf):
-            # age_at_start=0 simulates "just-backed-up" semantics.
-            _report_staleness_at_end(cfg, "black", age_at_start=0, retention=90, log=log)
-        out = buf.getvalue()
-        assert "Other drives approaching" not in out
-        assert "black" not in out
+            _report_rpo(cfg, "blue", make_log())
+        assert buf.getvalue() == ""
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -4444,7 +4385,7 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         mock.on("zpool export black").succeeds()
         with patch_sh(mock):
             zfs = ZFS(make_log())
-            assert zfs.verify_exported_pool_readback("black", device=self.DEV)
+            assert zfs.verify_exported_pool_readback("black", device=self.DEV).ok
         # Cache must be dropped before the read-back import.
         assert mock.was_called("drop_caches")
         # Pool must be left exported again.
@@ -4459,7 +4400,9 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         )
         with patch_sh(mock):
             zfs = ZFS(make_log())
-            assert not zfs.verify_exported_pool_readback("black", device=self.DEV)
+            rb = zfs.verify_exported_pool_readback("black", device=self.DEV)
+        assert not rb.ok and not rb.imported
+        assert "insufficient replicas" in "\n".join(rb.describe())
 
     def test_fails_when_health_not_online(self):
         mock = MockShell()
@@ -4467,12 +4410,33 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         mock.on("drop_caches").succeeds()
         mock.on(self.IMPORT).succeeds()
         mock.on("zpool list -H -o health black").succeeds("DEGRADED")
+        mock.on("zpool status -v black").succeeds("errors: 3 data errors\n  black/rpool/x:<0x1>")
         mock.on("zpool export black").succeeds()
         with patch_sh(mock):
             zfs = ZFS(make_log())
-            assert not zfs.verify_exported_pool_readback("black", device=self.DEV)
+            rb = zfs.verify_exported_pool_readback("black", device=self.DEV)
+        assert not rb.ok and rb.imported and rb.reexported
+        text = "\n".join(rb.describe())
+        # I6: says what happened, shows the errors, blames no bridge.
+        assert "re-imported, but its health is DEGRADED" in text
+        assert "3 data errors" in text
+        assert "FUA" not in text and "bridge" not in text
         # Even on failure, the pool is re-exported to restore on-entry state.
         assert mock.was_called("zpool export black")
+
+    def test_fails_when_reexport_fails(self):
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on(self.IMPORT).succeeds()
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("zpool export").fails("pool is busy")
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            rb = zfs.verify_exported_pool_readback("black", device=self.DEV)
+        # I12: a pool left imported is not a verified backup.
+        assert not rb.ok and not rb.reexported
+        assert mock.was_called("zpool export -f black")
 
 
 class TestHealthChecks:  # pylint: disable=missing-function-docstring
@@ -5588,7 +5552,11 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
             patch.object(prepare_mod, "validate_external_block_device", return_value=ident),
             patch.object(prepare_mod, "check_device", return_value=report),
             patch.object(prepare_mod.Path, "exists", return_value=True),
-            patch.object(ZFS, "verify_exported_pool_readback", return_value=True),
+            patch.object(
+                ZFS,
+                "verify_exported_pool_readback",
+                return_value=Readback(imported=True, health="ONLINE", reexported=True),
+            ),
             patch.object(ZFS, "pool_export", return_value=True),
             patch("lib.log.Log.ask", return_value=True),
             patch("lib.log.Log.ask_input", return_value="blue"),
@@ -7624,6 +7592,15 @@ def _origin_points(fake: FakeZfs) -> list[str]:
     )
 
 
+def _fresh_fake(pools: tuple[str, ...] = ("backup",)) -> FakeZfs:
+    """The origin fixture plus empty backup pools."""
+    fake = FakeZfs()
+    _origin_fixture(fake)
+    for p in pools:
+        fake.pool(p)
+    return fake
+
+
 P1, P2, P3 = (
     "zark_2026-10-07_10:00:00Z",
     "zark_2026-10-08_10:00:00Z",
@@ -7635,11 +7612,7 @@ class TestEngine:
     """The engine end to end against FakeZfs (redesign §4, I-A…I-G)."""
 
     def _fresh(self, pools: tuple[str, ...] = ("backup",)) -> FakeZfs:
-        fake = FakeZfs()
-        _origin_fixture(fake)
-        for p in pools:
-            fake.pool(p)
-        return fake
+        return _fresh_fake(pools)
 
     def test_first_run_brings_every_dataset_to_the_point(self) -> None:
         """NEW everywhere; keystore and zvols stay out; I-D holds."""
@@ -7959,6 +7932,191 @@ class TestSetupBookmarkV2:
         """A pool whose compatibility set lacks the feature stays as it is."""
         ok, _ = self._run("disabled", True, set_rc=1)
         assert not ok
+
+
+class TestBackupDecide:
+    """backup's questions before the first byte (decisions 7, 8, 18)."""
+
+    def _plans(self, fake: FakeZfs) -> tuple[list[repl.DatasetPlan], engine.Run]:
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            _ = eng.take_point()
+            return eng.survey(), eng
+
+    def _decide(
+        self,
+        fake: FakeZfs,
+        choices: list[int],
+        typed: str = "",
+        avail: int = 10**12,
+    ) -> tuple[bool, engine.Run]:
+        plans, eng = self._plans(fake)
+        dst = PoolInfo("backup", avail_bytes=avail)
+        with (
+            patch_sh(fake),
+            patch.object(Log, "ask_choice", side_effect=choices),
+            patch.object(Log, "ask_text", return_value=typed),
+            redirect_stdout(StringIO()),
+        ):
+            return _decide(plans, eng, "backup", dst, Log()), eng
+
+    def _with_rollback(self) -> FakeZfs:
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        # The destination's newest (P1) is gone from origin with no bookmark,
+        # and the destination also holds an older snapshot origin still has.
+        fake.ds["rpool/ROOT/be"].bookmarks.clear()
+        daily = fake.ds["rpool/ROOT/be"].snaps[0]
+        fake.ds["backup/rpool/ROOT/be"].snaps.insert(
+            0, FSnap(daily.name, daily.guid, 1, daily.creation)
+        )
+        return fake
+
+    def test_rollback_default_aborts(self) -> None:
+        """The default answer changes nothing."""
+        fake = self._with_rollback()
+        ok, _ = self._decide(fake, [0])
+        assert not ok
+        assert P1 in fake.names("backup/rpool/ROOT/be")
+
+    def test_rollback_needs_the_typed_word(self) -> None:
+        """Choosing rollback without typing ROLLBACK aborts and destroys nothing."""
+        fake = self._with_rollback()
+        ok, _ = self._decide(fake, [2], typed="yes")
+        assert not ok
+        assert P1 in fake.names("backup/rpool/ROOT/be")
+        ok, _ = self._decide(fake, [2], typed="ROLLBACK")
+        assert ok
+        assert P1 not in fake.names("backup/rpool/ROOT/be")
+
+    def test_archive_offered_only_when_it_fits(self) -> None:
+        """Without room for a full resend, option 2 is the rollback."""
+        fake = self._with_rollback()
+        ok, _ = self._decide(fake, [1], typed="ROLLBACK", avail=10**6)
+        assert ok
+        assert not any(".archived-" in d for d in fake.ds)
+
+    def test_orphan_keep_and_destroy(self) -> None:
+        """Keep marks the dataset; destroy needs DESTROY typed."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.ds.pop("rpool/var/lib/docker")
+        ok, _ = self._decide(fake, [1])
+        assert ok
+        assert fake.ds["backup/rpool/var/lib/docker"].props["org.zark:orphan"].startswith("kept@")
+        fake.ds["backup/rpool/var/lib/docker"].props.pop("org.zark:orphan")
+        ok, _ = self._decide(fake, [2], typed="no")
+        assert ok and "backup/rpool/var/lib/docker" in fake.ds
+        ok, _ = self._decide(fake, [2], typed="DESTROY")
+        assert ok and "backup/rpool/var/lib/docker" not in fake.ds
+
+    def test_no_space_is_fatal_before_any_change(self) -> None:
+        """The space check runs after the questions and before applying them."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.ds.pop("rpool/var/lib/docker")
+        try:
+            with patch("builtins.input", return_value=""):
+                _ = self._decide(fake, [2], typed="DESTROY", avail=1)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("expected a fatal")
+        assert "backup/rpool/var/lib/docker" in fake.ds
+
+    def test_table_names_every_dataset_short_of_the_point(self) -> None:
+        """I-D table: failures and exclusions are warnings with their reason."""
+        res = engine.Result(
+            plans=[
+                repl.DatasetPlan("rpool", repl.State.AT_POINT),
+                repl.DatasetPlan("rpool/x", repl.State.RESUME),
+                repl.DatasetPlan("rpool/vm", repl.State.EXCLUDED, note="zvol, not backed up"),
+            ],
+            outcomes={"rpool/x": engine.Outcome("rpool/x", False, "out of space")},
+        )
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _show_table(res, P1, Log())
+        out = buf.getvalue()
+        assert "NOT at the point: out of space" in out
+        assert "NOT BACKED UP (zvol, not backed up)" in out
+
+
+class TestBackupCommand:
+    """`zark backup` end to end on FakeZfs (drive discovery and keystore stubbed)."""
+
+    def _run(self, fake: FakeZfs) -> tuple[Config, int]:
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "usb-X-0:0", autoeject=False)
+        drive = ConnectedDrive(
+            "backup", "111", "usb-X-0:0", "/dev/sdb", True, False, False, "exported"
+        )
+        rc = 0
+        readback = Readback(imported=True, health="ONLINE", reexported=True)
+        info = PoolInfo("x", used_bytes=10**9, avail_bytes=10**13, size_bytes=10**13)
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                patch.object(Config, "load", return_value=cfg),
+                patch.object(backup_mod, "_detect_live_usb", return_value=False),
+                patch.object(backup_mod, "warn_rpool_mountpoint_lost"),
+                patch.object(backup_mod, "warn_kernel_named_vdevs"),
+                patch.object(backup_mod, "scan_connected_drives", return_value=[drive]),
+                patch.object(backup_mod, "select_drive", return_value=drive),
+                patch.object(backup_mod, "_heal_drive_id"),
+                patch.object(backup_mod, "_notify"),
+                patch.object(backup_mod, "prompt_eject_or_attach"),
+                patch.object(ZFS, "import_backup_pool", return_value=True),
+                patch.object(ZFS, "pool_guid", return_value="111"),
+                patch.object(ZFS, "pool_health", return_value="ONLINE"),
+                patch.object(ZFS, "pool_info", return_value=info),
+                patch.object(ZFS, "get_property", return_value="available"),
+                patch.object(ZFS, "verify_exported_pool_readback", return_value=readback),
+                patch("lib.log.Log.ask", return_value=True),
+                patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+                patch("builtins.input", return_value=""),
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+            ):
+                stack.enter_context(cm)
+            try:
+                backup_mod.run([])
+            except SystemExit as e:
+                rc = int(e.code or 0)
+        return cfg, rc
+
+    def test_complete_backup(self) -> None:
+        """Every dataset at the point, metadata written, last_backup_at recorded."""
+        fake = _fresh_fake()
+        cfg, rc = self._run(fake)
+        assert rc == 0
+        points = [n for n in fake.names("backup/rpool/USERDATA/home") if repl.POINT_RE.match(n)]
+        assert len(points) == 1
+        meta = fake.ds["backup"].props
+        assert meta["org.zark:format"] == "2" and meta["org.zark:last-point"] == points[0]
+        assert cfg.known_drives["backup"].last_backup_at
+        assert _origin_points(fake) == []
+        assert fake.units["sanoid.timer"] == "active"
+        assert not any(c.startswith("syncoid") or "sanoid --take" in c for c in fake.calls)
+
+    def test_incomplete_backup_exits_1_without_last_backup_at(self) -> None:
+        """I-D/H2/I1: one dataset short is a failure, not a WARN plus success."""
+        fake = _fresh_fake()
+        fake.inject["backup/rpool/var/lib/docker"] = ("interrupt", 0)
+        cfg, rc = self._run(fake)
+        assert rc == 1
+        assert not cfg.known_drives["backup"].last_backup_at
+        assert "org.zark:last-point" not in fake.ds["backup"].props
+        assert fake.ds["backup"].props["org.zark:format"] == "2"
+
+    def test_refuses_without_bookmark_v2(self) -> None:
+        """Decision 4a: no bookmark_v2 on rpool, no backup."""
+        fake = _fresh_fake()
+        fake.features["rpool"] = "disabled"
+        _, rc = self._run(fake)
+        assert rc == 1
+        assert "backup/rpool" not in fake.ds
 
 
 class TestRunner:

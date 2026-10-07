@@ -44,6 +44,39 @@ class PoolInfo:  # pylint: disable=too-many-instance-attributes
 
 
 @dataclass
+class Readback:
+    """Outcome of :meth:`ZFS.verify_exported_pool_readback`."""
+
+    imported: bool
+    health: str = ""
+    status: str = ""  # `zpool status -v` when health is not ONLINE
+    reexported: bool = False
+    error: str = ""  # the import's stderr when it failed
+
+    @property
+    def ok(self) -> bool:
+        """Re-imported, ONLINE and exported again."""
+        return self.imported and self.health == "ONLINE" and self.reexported
+
+    def describe(self) -> list[str]:
+        """What happened, without guessing a cause (I6)."""
+        if not self.imported:
+            return [
+                "The pool exported but could NOT be re-imported:",
+                f"  {self.error or 'no error text'}",
+                "One known cause is a USB-SATA bridge that acknowledges cache",
+                "flushes it never performs (docs/HARDWARE.md).",
+            ]
+        lines: list[str] = []
+        if self.health != "ONLINE":
+            lines.append(f"The pool re-imported, but its health is {self.health or 'unknown'}:")
+            lines += [f"  {line}" for line in self.status.splitlines() if line.strip()][:20]
+        if not self.reexported:
+            lines.append("The read-back import could not be exported again: it is still imported.")
+        return lines
+
+
+@dataclass
 class DatasetInfo:  # pylint: disable=too-many-instance-attributes
     """Information about a ZFS dataset."""
 
@@ -297,7 +330,7 @@ class ZFS:
         self,
         name: str,
         device: str | None = None,
-    ) -> bool:
+    ) -> "Readback":
         """Confirm an already-exported pool can be re-imported and reads clean.
 
         This is the only reliable guard against USB-SATA bridges that lie
@@ -314,31 +347,25 @@ class ZFS:
              from the device (NAND) and not from RAM still holding the data
              we just wrote — without this we would "verify" against cache and
              a silently-corrupt pool would pass.
-          2. Re-import read-only, no-mount, by the exact device (so it does
-             not latch onto the bogus shared WWN alias — see ``pool_import``).
-          3. Require health ONLINE.
-          4. Re-export so the caller is left with the pool exported again,
-             exactly as it was on entry.
+          2. Re-import read-only, no-mount, by the exact device, under an
+             altroot (I-G).
+          3. Read its health; when it is not ONLINE, keep ``zpool status -v``.
+          4. Re-export, checked and logged: a pool left imported is a failed
+             verification too (I12).
 
-        Returns True only when the pool re-imported and reported ONLINE.
-        On any failure the pool is left exported (a best-effort export is
-        attempted if the verify-import succeeded but health was bad). The
-        caller MUST treat False as "the backup is not trustworthy — do not
-        tell the operator it is safe to disconnect".
+        The caller MUST treat a result that is not ``ok`` as "the backup is
+        not trustworthy — do not tell the operator it is safe to disconnect".
 
         Note: this performs one extra import/export cycle. That is fine for
         backup targets; the "no rapid export/import cycles" rule applies only
         to the live-USB overlay during ``recover``, not to external backup
         pools.
         """
-        # 1. Force the read-back to hit the device, not RAM.
         run("sync")
         # Best-effort; if drop_caches is unavailable the verify still runs,
         # it just might read warm cache (weaker guarantee, never wrong-way).
         run("sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
 
-        # 2. Re-import read-only, no-mount, by exact device, under an altroot
-        #    so the verification import never lands in zpool.cache (I-G).
         root = backup_altroot(name)
         run(f"mkdir -p {root}")
         cmd = f"zpool import -o readonly=on -N -R {root}"
@@ -347,25 +374,28 @@ class ZFS:
         cmd += f" {name}"
         r = run(cmd, log=self.log)
         if not r.ok:
-            # This is the FUA-lie signature: export said OK, re-import fails.
-            self.log.error(
-                f"Read-back verification FAILED for {name}: {r.stderr.strip()}",
-            )
-            return False
+            self.log.error(f"Read-back of {name}: could not re-import: {r.stderr.strip()}")
+            return Readback(imported=False, error=r.stderr.strip())
 
-        # 3. Health must be ONLINE.
         health = self.pool_health(name)
-        ok = health == "ONLINE"
-        if not ok:
-            self.log.error(
-                f"Read-back verification FAILED for {name}: health={health}",
-            )
+        status = ""
+        if health != "ONLINE":
+            status = run(f"zpool status -v {name}").output
+            self.log.error(f"Read-back of {name}: re-imported, health={health}")
 
-        # 4. Re-export to restore the on-entry state regardless of outcome.
-        if not run(f"zpool export {name}").ok:
-            run(f"zpool export -f {name}")
+        reexported = (
+            run(f"zpool export {name}", log=self.log).ok
+            or run(
+                f"zpool export -f {name}",
+                log=self.log,
+            ).ok
+        )
         run("sync")
-        return ok
+        if reexported:
+            self.log.ok(f"Read-back of {name}: exported again")
+        else:
+            self.log.error(f"Read-back of {name}: could NOT export it again — still imported")
+        return Readback(imported=True, health=health, status=status, reexported=reexported)
 
     def pool_guid(self, name: str) -> str:
         """Get pool GUID (decimal string)."""
