@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from lib import apt_guard, sh
+from lib.engine import bookmark_feature
 
 # from lib.config import Config
 from lib.log import Log
@@ -575,6 +576,36 @@ def _signed_alternative_status(name: str) -> tuple[Path | None, Path | None]:
     return current, latest
 
 
+def ensure_bookmark_v2(log: Log) -> bool:
+    """Make sure rpool can hold zark's bookmark anchors (M2 decision 4a).
+
+    A raw incremental from a bookmark needs the snapshot's IV-set GUID,
+    which a bookmark stores only when ``feature@bookmark_v2`` is enabled on
+    the pool at bookmark creation. Enabling it cannot be undone; GRUB never
+    reads rpool, so the boot chain is unaffected (bpool never gets
+    bookmarks). Returns True when the feature is enabled or active.
+    """
+    state = bookmark_feature("rpool")
+    if state in ("enabled", "active"):
+        log.ok(f"rpool feature@bookmark_v2: {state}")
+        return True
+    if state != "disabled":
+        log.warn(f"Cannot read feature@bookmark_v2 on rpool ({state or 'no value'})")
+        return False
+    log.warn("rpool feature@bookmark_v2 is disabled — zark backups need it for their anchors")
+    log.info("  Enabling it cannot be undone. GRUB does not read rpool, so booting is unaffected.")
+    if not log.ask("Enable feature@bookmark_v2 on rpool now?", default=False):
+        log.warn("Not enabled — zark backup and prepare will refuse until it is")
+        return False
+    r = sh.run("zpool set feature@bookmark_v2=enabled rpool", log=log)
+    if not r.ok:
+        # e.g. rpool's 'compatibility' property does not list the feature
+        log.error(f"Could not enable it: {r.stderr.strip()}")
+        return False
+    log.ok("rpool feature@bookmark_v2: enabled")
+    return True
+
+
 def _check_secure_boot_alternatives(log: Log) -> None:
     """Detect systems whose Secure Boot binaries are pinned to ``.previous``.
 
@@ -670,7 +701,7 @@ def run(
     log.banner("BACKUP SYSTEM SETUP", "Install dependencies and configure sanoid")
 
     # ── 1. Dependencies ──────────────────────────────────────────────────
-    log.step(1, 5, "Checking dependencies...")
+    log.step(1, 6, "Checking dependencies...")
     missing: list[str] = []
     for cmd, pkg in DEPS.items():
         # Use `which` (real binary at /usr/bin/which), not `command -v`
@@ -696,7 +727,7 @@ def run(
         log.ok("All dependencies present")
 
     # ── 2. Sanoid configuration ──────────────────────────────────────────
-    log.step(2, 5, "Configuring sanoid...")
+    log.step(2, 6, "Configuring sanoid...")
 
     ubuntu_name = _detect_ubuntu_ds()
     if not ubuntu_name:
@@ -766,13 +797,13 @@ def run(
             return
 
     # ── 3. Enable sanoid timer ───────────────────────────────────────────
-    log.step(3, 5, "Enabling sanoid timer...")
+    log.step(3, 6, "Enabling sanoid timer...")
     _ = sh.run("systemctl enable sanoid.timer", timeout=10, log=log)
     _ = sh.run("systemctl start sanoid.timer", timeout=10, log=log)
     log.ok("sanoid.timer enabled and started")
 
     # ── 4. Initial snapshots ─────────────────────────────────────────────
-    log.step(4, 5, "Checking snapshots...")
+    log.step(4, 6, "Checking snapshots...")
     snap_count = len(zfs.list_snapshots("rpool", "autosnap"))
 
     if snap_count == 0:
@@ -786,11 +817,15 @@ def run(
     else:
         log.ok(f"{snap_count} autosnap snapshots exist")
 
-    # ── 5. Secure Boot binary check ──────────────────────────────────────
+    # ── 5. Bookmark anchors ──────────────────────────────────────────────
+    log.step(5, 6, "Checking bookmark support on rpool...")
+    ensure_bookmark_v2(log)
+
+    # ── 6. Secure Boot binary check ──────────────────────────────────────
     # See _check_secure_boot_alternatives for full rationale on why this
     # exists. TL;DR: subiquity sometimes leaves systems pinned to the
     # older shim variant, which is rejected after SBAT updates.
-    log.step(5, 5, "Verifying Secure Boot binaries...")
+    log.step(6, 6, "Verifying Secure Boot binaries...")
     _check_secure_boot_alternatives(log)
 
     # Install the apt guard on this (running) productive system. Unlike the

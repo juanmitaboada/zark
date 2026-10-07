@@ -107,6 +107,7 @@ from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E4
     _parse_sanoid_conf,
     _print_diff,
     _signed_alternative_status,
+    ensure_bookmark_v2,
 )
 from commands.simulate import (  # pylint: disable=wrong-import-position # noqa: E402
     OVMF_CODE_CANDIDATES,
@@ -7921,6 +7922,43 @@ class TestCleanupActions:
             c.disable()
             c.run()
         assert not order
+
+
+class TestSetupBookmarkV2:
+    """setup enables feature@bookmark_v2 on rpool only after a confirmation (decision 4a)."""
+
+    def _run(self, state: str, answer: bool, set_rc: int = 0) -> tuple[bool, MockShell]:
+        mock = MockShell()
+        mock.on("zpool get -H -o value feature@bookmark_v2 rpool").succeeds(state)
+        mock.on("zpool set feature@bookmark_v2=enabled rpool").returns(
+            set_rc,
+            stderr="not specified in this pool's current compatibility set",
+        )
+        with (
+            patch_sh(mock),
+            patch.object(Log, "ask", return_value=answer),
+            redirect_stdout(StringIO()),
+        ):
+            ok = ensure_bookmark_v2(Log())
+        return ok, mock
+
+    def test_already_there(self) -> None:
+        """Enabled or active: nothing asked, nothing set."""
+        for state in ("enabled", "active"):
+            ok, mock = self._run(state, False)
+            assert ok and mock.was_not_called("zpool set")
+
+    def test_enabled_on_yes_only(self) -> None:
+        """Disabled: set only when the user says yes."""
+        ok, mock = self._run("disabled", True)
+        assert ok and mock.was_called("zpool set feature@bookmark_v2=enabled rpool")
+        ok, mock = self._run("disabled", False)
+        assert not ok and mock.was_not_called("zpool set")
+
+    def test_compatibility_refusal_is_reported(self) -> None:
+        """A pool whose compatibility set lacks the feature stays as it is."""
+        ok, _ = self._run("disabled", True, set_rc=1)
+        assert not ok
 
 
 class TestRunner:
