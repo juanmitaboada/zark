@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
-from lib import apt_guard, grub_guard, sh
+from lib import apt_guard, engine, grub_guard, sh
 from lib.backup_layout import (
     find_be as _find_be,
     list_datasets as _list_datasets,
@@ -81,7 +81,7 @@ from lib.mount_props import (
     receive_options,
     rpool_root_mountpoint,
 )
-from lib.restore_points import Point, Snap, parse_snapshots, resolve, restore_points
+from lib.restore_points import Point, Snap, logical, parse_snapshots, resolve, restore_points
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 # bpool features safe for GRUB 2.12 (Ubuntu 24.04 / initramfs-tools)
@@ -590,11 +590,18 @@ def _empty_root(full_snap: str) -> bool | None:
 
 
 def _choose_point(points: list[Point], log: Log) -> Point:
+    """Backup points (``zark_``) first-class; other runs as carried intermediates,
+    each with how many datasets it holds (redesign §4.2)."""
+    total = len({ds for p in points for ds in p.members})
     options = []
     for p in points:
+        held = f"{len(p.members)}/{total} datasets"
+        if p.family == "zark_":
+            options.append(f"{p.label_utc()}  backup point  ({held})")
+            continue
         kinds = sorted({s.name.split("_")[-1] for m in p.members.values() for s in m})
-        detail = "/".join(kinds) if p.family == "autosnap_" else f"{len(p.members)} datasets"
-        options.append(f"{p.label_utc()}  {p.family.rstrip('_')}  ({detail})")
+        detail = "/".join(kinds) if p.family == "autosnap_" else p.family.rstrip("_")
+        options.append(f"{p.label_utc()}    carried: {detail}  ({held})")
     idx = log.ask_choice("Restore point (newest is the default):", options, len(points) - 1)
     return points[idx]
 
@@ -608,7 +615,18 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
     log: Log,
 ) -> RestorePlan:
     """Resolve every dataset for ``point`` and decide its mount properties."""
-    types = _list_datasets(pool)
+    stored = _list_datasets(pool)
+    # Archived lineages count as earlier snapshots of their dataset (decision 19).
+    types: dict[str, str] = {}
+    for ds in sorted(stored, key=lambda d: logical(d) != d):
+        types.setdefault(logical(ds), stored[ds])
+    archived = sorted(ds for ds in stored if logical(ds) != ds)
+    if archived:
+        log.info(
+            f"Archived lineages on this backup ({len(archived)}), used for points before them:"
+        )
+        for ds in archived:
+            log.info(f"  {ds}")
     wanted = [
         ds
         for ds in sorted(types)
@@ -619,7 +637,7 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
     be_row_snap = resolved.get(f"rpool/ROOT/{be}")
     cache_r, cache_b, hostid = ("", "", "")
     if be_row_snap:
-        cache_r, cache_b, hostid = _probe_be(f"{pool}/rpool/ROOT/{be}@{be_row_snap.name}", log)
+        cache_r, cache_b, hostid = _probe_be(f"{pool}/{be_row_snap.stored}@{be_row_snap.name}", log)
     cache = {**parse_list_cache(cache_r), **parse_list_cache(cache_b)}
     zark = _zark_props(pool)
     children = {ds for ds in types for other in types if other.startswith(f"{ds}/")}
@@ -643,7 +661,7 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
             rows.append(row)
             continue
         assert snap is not None
-        full = f"{pool}/{ds}@{snap.name}"
+        full = f"{pool}/{snap.stored}@{snap.name}"
         needs_probe = ds not in zark and ds not in cache and ds in children
         empty = bool(needs_probe and _empty_root(full))
         row.props = choose(ds, be, zark=zark, cache=cache, empty_with_children=empty)
@@ -661,10 +679,12 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
         effective[ds] = row.effective
         rows.append(row)
 
-    refs = _referenced([f"{pool}/{r.rel}@{r.snap.name}" for r in rows if r.restored and r.snap])
+    refs = _referenced(
+        [f"{pool}/{r.snap.stored}@{r.snap.name}" for r in rows if r.restored and r.snap],
+    )
     for r in rows:
         if r.restored and r.snap:
-            r.referenced = refs.get(f"{pool}/{r.rel}@{r.snap.name}", -1)
+            r.referenced = refs.get(f"{pool}/{r.snap.stored}@{r.snap.name}", -1)
 
     ks = sh.run(f"zfs list -Hp -t snapshot -o name,createtxg -s createtxg {pool}/keystore")
     ks_snap = ks.lines[-1].split("\t")[0] if ks.ok and ks.lines else ""
@@ -739,9 +759,11 @@ def _show_plan(plan: RestorePlan, log: Log) -> None:
         delta = _fmt_delta(r.snap.creation - plan.point.label)
         size = sh.humanize_bytes(r.referenced) if r.referenced >= 0 else "?"
         mark = log.Y if r.props.source == "inferred" else ""
+        origin = " (from archive)" if r.snap.source else ""
         log.raw(
             f"  {r.rel:44} {r.snap.name:44} {delta:>9} {size:>7}  "
-            + f"{mark}{r.props.canmount} {r.effective} [{r.props.source}]{log.N if mark else ''}",
+            + f"{mark}{r.props.canmount} {r.effective} [{r.props.source}]{log.N if mark else ''}"
+            + origin,
         )
     log.raw(f"  {'keystore':44} {plan.keystore_snap.split('@')[-1]:44} (newest, independent)")
 
@@ -1178,6 +1200,7 @@ def run(
     if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
+    _ = engine.log_metadata(pool_name, log)
     backup_disk = whole_disk(device)
 
     ks = Keystore(log)
@@ -1308,7 +1331,7 @@ def run(
     for row in plan.rpool_rows:
         assert row.snap is not None
         ok = _receive(
-            f"{pool_name}/{row.rel}@{row.snap.name}",
+            f"{pool_name}/{row.snap.stored}@{row.snap.name}",
             row.rel,
             row.options,
             raw=True,
@@ -1380,7 +1403,7 @@ def run(
     if bpool_row is not None and bpool_row.restored and bpool_row.snap is not None:
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
         bpool_received = _receive(
-            f"{pool_name}/{bpool_row.rel}@{bpool_row.snap.name}",
+            f"{pool_name}/{bpool_row.snap.stored}@{bpool_row.snap.name}",
             bpool_row.rel,
             bpool_row.options,
             raw=False,

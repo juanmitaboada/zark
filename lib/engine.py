@@ -447,6 +447,19 @@ def read_metadata(pool: str) -> dict[str, str]:
 FORMAT = "2"  # org.zark:format of a backup made with points and anchors
 
 
+def log_metadata(pool: str, log: Log) -> dict[str, str]:
+    """Show who wrote this drive and when (decision 17a); return the values."""
+    meta = read_metadata(pool)
+    if not meta:
+        log.info(f"{pool}: no zark metadata (written by zark <= 2.0.0-rc1)")
+        return meta
+    log.info(
+        f"{pool}: written by zark {meta.get('version', '?')} on {meta.get('origin-host', '?')}"
+        + f", last point {meta.get('last-point', 'none')} ({meta.get('last-backup-at', '?')})",
+    )
+    return meta
+
+
 def anchored_disks(origin: dict[str, Origin]) -> set[str]:
     """Pool GUIDs that hold anchors in origin (bookmarks or bpool snapshots)."""
     disks: set[str] = set()

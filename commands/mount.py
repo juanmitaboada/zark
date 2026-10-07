@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import sh
+from lib import engine, sh
 from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
 from lib.cleanup import Cleanup
 from lib.config import Config
@@ -87,6 +87,9 @@ def _plan_origin_layout(  # pylint: disable=too-many-locals
     }
     plan: list[LayoutMount] = []
     for rel in sorted(types):
+        if ".archived-" in rel:
+            plan.append(LayoutMount(rel, "", "archived lineage (listed apart)"))
+            continue
         if types[rel] != "filesystem" or rel in effective:
             continue
         parent, leaf = rel.rsplit("/", 1)
@@ -115,13 +118,25 @@ def _plan_origin_layout(  # pylint: disable=too-many-locals
     return plan
 
 
-def _mount_origin_layout(pool: str, mnt: str, log: Log) -> tuple[int, list[LayoutMount]]:
-    """Read-only mount of the backup with origin's tree; (mounted count, skipped)."""
+def _mount_origin_layout(  # pylint: disable=too-many-locals
+    pool: str,
+    mnt: str,
+    log: Log,
+    readonly: bool = True,
+) -> tuple[int, list[LayoutMount]]:
+    """Mount the backup with origin's tree; (mounted count, skipped).
+
+    Explicit ``mount -t zfs -o [ro,]zfsutil`` of each dataset: the backup's
+    own mount properties are ``canmount=noauto`` and an inherited
+    ``mountpoint=none`` (M2 decision 1), and mount.zfs with ``zfsutil``
+    checks neither (cmd/mount_zfs.c:300-326).
+    """
+    opts = "ro,zfsutil" if readonly else "zfsutil"
     be = find_be(pool)
     if not be:
         log.fatal(f"No boot environment under {pool}/rpool/ROOT")
     _ = sh.run(f"mkdir -p {mnt}")
-    if not sh.run(f"mount -t zfs -o ro,zfsutil {pool}/rpool/ROOT/{be} {mnt}", log=log).ok:
+    if not sh.run(f"mount -t zfs -o {opts} {pool}/rpool/ROOT/{be} {mnt}", log=log).ok:
         log.fatal(f"Cannot mount the boot environment {pool}/rpool/ROOT/{be}")
     cache_dir = Path(mnt) / "etc/zfs/zfs-list.cache"
     cache: dict[str, tuple[str, str]] = {}
@@ -145,10 +160,10 @@ def _mount_origin_layout(pool: str, mnt: str, log: Log) -> tuple[int, list[Layou
             skipped.append(LayoutMount(item.rel, "", f"{item.target} resolves to {target}"))
             continue
         if not Path(target).is_dir():
-            # Creating it would write to the read-only backup.
+            # Creating it would write to the backup (impossible read-only).
             skipped.append(LayoutMount(item.rel, "", f"no directory {item.target}"))
             continue
-        r = sh.run(f"mount -t zfs -o ro,zfsutil {pool}/{item.rel} {target}")
+        r = sh.run(f"mount -t zfs -o {opts} {pool}/{item.rel} {target}")
         if r.ok:
             mounted += 1
         else:
@@ -278,6 +293,7 @@ def run(
     ):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
+    _ = engine.log_metadata(pool_name, log)
 
     ks = Keystore(log)
     if not open_keystore(ks, pool_name, log, readonly=readonly):
@@ -288,22 +304,10 @@ def run(
 
     # ── Mount datasets ───────────────────────────────────────────────────
     log.info("Mounting datasets...")
-    datasets = zfs.list_datasets(f"{pool_name}/rpool", recursive=True)
-
-    mounted = 0
-    if readonly:
-        mounted, skipped = _mount_origin_layout(pool_name, mnt_point, log)
-        for item in skipped:
-            log.dbg(f"Not mounted: {item.rel} — {item.reason}")
-    else:
-        for ds in datasets:
-            if ds.canmount == "off" or ds.mountpoint in ("none", "-", "legacy"):
-                continue
-            r = sh.run(f"zfs mount {ds.name}")
-            if r.ok:
-                mounted += 1
-            else:
-                log.dbg(f"Skip {ds.name}: {r.stderr.strip()}")
+    mounted, skipped = _mount_origin_layout(pool_name, mnt_point, log, readonly=readonly)
+    archived = [item.rel for item in skipped if item.reason.startswith("archived lineage")]
+    for item in skipped:
+        log.dbg(f"Not mounted: {item.rel} — {item.reason}")
 
     log.ok(f"Mounted {mounted} datasets")
 
@@ -313,18 +317,7 @@ def run(
             solutions=[f"Check: zfs get mountpoint,canmount -r {pool_name}/rpool"],
         )
 
-    # ── Detect root dataset for chroot instructions ────────────────────
-    root_ds = ""
-    for ds in datasets:
-        if "/ROOT/" in ds.name and ds.name.count("/") == 3 and ds.canmount != "off":
-            root_ds = ds.name
-            break
-    root_path = ""
-    if readonly:
-        root_path = mnt_point  # the boot environment is mounted there
-    elif root_ds:
-        # Effective mountpoint with altroot
-        root_path = zfs.get_property(root_ds, "mountpoint")
+    root_path = mnt_point  # _mount_origin_layout mounted the boot environment there
 
     # ── Show results ─────────────────────────────────────────────────────
     result_lines = [
@@ -347,6 +340,14 @@ def run(
             f"  sudo mount --bind /sys  {root_path}/sys",
             f"  sudo mount --bind /dev  {root_path}/dev",
             f"  sudo chroot {root_path}",
+            "",
+        ]
+
+    if archived:
+        result_lines += [f"{log.Y}Archived lineages (not mounted; browse one with):{log.N}"]
+        result_lines += [f"  {pool_name}/{rel}" for rel in archived]
+        result_lines += [
+            f"  sudo mount -t zfs -o ro,zfsutil {pool_name}/<lineage> <directory>",
             "",
         ]
 

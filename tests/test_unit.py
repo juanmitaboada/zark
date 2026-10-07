@@ -212,6 +212,7 @@ from lib.repair import (  # pylint: disable=wrong-import-position # noqa: E402
 )
 from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa: E402
     Snap,
+    logical,
     parse_snapshots,
     resolve,
     restore_points,
@@ -5703,6 +5704,55 @@ _ELI_CACHE_BPOOL = f"bpool\tnone\toff\nbpool/BOOT\tnone\toff\nbpool/BOOT/{_BE}\t
 class TestRestorePoints:  # pylint: disable=missing-function-docstring
     """P0-8: points by creation, grouped per run, from the frozen stick."""
 
+    @staticmethod
+    def _v2_lines() -> list[str]:
+        """A v2 backup: two points, a carried hourly, a dataset only in the
+        second point, and the BE's first lineage archived."""
+        p1, p2 = "zark_2026-10-01_10:00:00Z", "zark_2026-10-08_10:00:00Z"
+        t1, t2, th = 1_759_312_800, 1_759_917_600, 1_759_900_000
+        be = f"backup/rpool/ROOT/{_BE}"
+        return [
+            f"{be}.archived-20261008@{p1}\t11\t10\t{t1}",
+            f"backup/rpool@{p1}\t12\t11\t{t1}",
+            f"backup/rpool@autosnap_2026-10-08_05:33:20_hourly\t13\t12\t{th}",
+            f"backup/rpool@{p2}\t14\t13\t{t2}",
+            f"{be}@{p2}\t15\t14\t{t2}",
+            f"backup/rpool/new@{p2}\t16\t15\t{t2}",
+        ]
+
+    def test_archived_lineage_serves_older_points(self):
+        snaps = parse_snapshots(self._v2_lines(), "backup")
+        be = f"rpool/ROOT/{_BE}"
+        assert logical(f"{be}.archived-20261008/var") == f"{be}/var"
+        old = [x for x in snaps if x.name.endswith("10-01_10:00:00Z") and x.dataset == be]
+        assert old and old[0].stored == f"{be}.archived-20261008"
+        points = restore_points(snaps, be)
+        assert [p.family for p in points] == ["zark_", "zark_"]
+        first = resolve(points[0], snaps, [be, "rpool"])
+        got = first[be]
+        assert got is not None and got.source == f"{be}.archived-20261008"
+
+    def test_backup_points_have_exact_membership(self):
+        # Decision 18: a dataset created after the first point is not
+        # resurrected into it, and nothing falls back to an older snapshot.
+        snaps = parse_snapshots(self._v2_lines(), "backup")
+        points = restore_points(snaps, f"rpool/ROOT/{_BE}")
+        first = resolve(points[0], snaps, ["rpool/new", "rpool"])
+        assert first["rpool/new"] is None
+        assert first["rpool"] is not None and first["rpool"].name.startswith("zark_")
+
+    def test_choice_labels_backup_points_and_carried_runs(self):
+        snaps = parse_snapshots(self._v2_lines(), "backup")
+        snaps.append(
+            Snap(f"rpool/ROOT/{_BE}", "autosnap_2026-10-08_05:33:20_hourly", "17", 9, 1_759_900_000)
+        )
+        points = restore_points(snaps, f"rpool/ROOT/{_BE}")
+        out = StringIO()
+        with patch("builtins.input", return_value=""), redirect_stdout(out):
+            assert _choose_point(points, make_log()) is points[-1]
+        text = out.getvalue()
+        assert "backup point" in text and "carried: hourly" in text
+
     def test_four_points_ordered_by_creation(self):
         points = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")
         assert [_utc(p) for p in points] == ["15:52:42", "16:00:01", "16:12:50", "17:00:01"]
@@ -7121,6 +7171,62 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         assert [s.rel for s in skipped] == ["rpool/var/lib/docker"]
         assert not any(c.startswith("mkdir") and "/mnt/zark/backup/" in c for c in mock.calls)
 
+    def test_read_write_mount_uses_the_same_tree(self):
+        # Decision 1: datasets on the backup are canmount=noauto with no
+        # mountpoint of their own, so read-write mounts them explicitly too.
+        mock = MockShell()
+        mock.on("zfs list -H -o name -r backup/rpool/ROOT").succeeds(
+            "\n".join(
+                [
+                    "backup/rpool/ROOT",
+                    f"backup/rpool/ROOT/{_BE}.archived-1",
+                    f"backup/rpool/ROOT/{_BE}",
+                ],
+            ),
+        )
+        mock.on_prefix("mount -t zfs -o zfsutil").succeeds()
+        mock.on("mkdir -p /mnt/zark/backup").succeeds()
+        plan = [mount_mod.LayoutMount("rpool/USERDATA/home_x", "/mnt/zark/backup/home")]
+        with (
+            patch_sh(mock),
+            patch.object(mount_mod, "_plan_origin_layout", return_value=plan),
+            patch.object(mount_mod.Path, "is_file", return_value=False),
+            patch.object(mount_mod.Path, "is_dir", return_value=True),
+            redirect_stdout(StringIO()),
+        ):
+            mounted, _ = mount_mod._mount_origin_layout(  # pylint: disable=protected-access
+                "backup",
+                "/mnt/zark/backup",
+                make_log(),
+                readonly=False,
+            )
+        mounts = [c for c in mock.calls if c.startswith("mount -t zfs")]
+        assert mounts[0] == f"mount -t zfs -o zfsutil backup/rpool/ROOT/{_BE} /mnt/zark/backup"
+        assert mounted == 2
+
+    def test_archived_lineages_are_not_part_of_the_tree(self):
+        with (
+            patch_sh(_plan_mock()),
+            patch.object(mount_mod, "root_is_empty", return_value=False),
+            patch.object(
+                mount_mod,
+                "list_datasets",
+                return_value={
+                    "rpool/var/lib/docker": "filesystem",
+                    "rpool/var/lib/docker.archived-20261001": "filesystem",
+                },
+            ),
+        ):
+            plan = mount_mod._plan_origin_layout(  # pylint: disable=protected-access
+                "backup",
+                _BE,
+                "/mnt/zark/backup",
+                {},
+            )
+        by_rel = {m.rel: m for m in plan}
+        assert by_rel["rpool/var/lib/docker.archived-20261001"].target == ""
+        assert "archived" in by_rel["rpool/var/lib/docker.archived-20261001"].reason
+
     def test_umount_never_unmounts_every_zfs_dataset(self):
         # `zfs unmount -a` would also hit the running system's datasets (R2-5: both branches).
         src = Path(umount_mod.__file__).read_text(encoding="utf-8")
@@ -8106,6 +8212,32 @@ class TestBackupCommand:
         _, rc = self._run(fake)
         assert rc == 1
         assert "backup/rpool" not in fake.ds
+
+
+class TestDriveMetadata:
+    """Decision 17a: drive metadata written by backup, shown by recover and mount."""
+
+    def test_round_trip_and_display(self):
+        """What write_metadata stores, read_metadata and log_metadata show."""
+        fake = _fresh_fake()
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            assert engine.write_metadata(
+                "backup",
+                {"format": "2", "version": "2.0.0-rc2", "origin-host": "eli", "last-point": P1},
+                Log(),
+            )
+            meta = engine.log_metadata("backup", Log())
+        assert meta["format"] == "2" and meta["origin-host"] == "eli"
+        assert f"written by zark 2.0.0-rc2 on eli, last point {P1}" in out.getvalue()
+
+    def test_pre_v2_drive(self):
+        """A drive without org.zark:* is named as written by an older zark."""
+        fake = _fresh_fake()
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            assert not engine.log_metadata("backup", Log())
+        assert "zark <= 2.0.0-rc1" in out.getvalue()
 
 
 class TestRunner:

@@ -39,7 +39,7 @@ def find_be(pool: str) -> str:
     """Boot environment name: the first child of <pool>/rpool/ROOT."""
     for line in run(f"zfs list -H -o name -r {pool}/rpool/ROOT").lines:
         ds = line.strip()
-        if ds.count("/") == 3 and "@" not in ds:
+        if ds.count("/") == 3 and "@" not in ds and ".archived-" not in ds:
             return ds.split("/")[-1]
     return ""
 

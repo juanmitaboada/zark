@@ -38,7 +38,15 @@ Resolution (hallazgo 3): for the chosen point every dataset uses its own
 snapshot from that run; a dataset absent from the run uses its newest
 snapshot whose ``creation`` is not after the end of the run. Never a later
 one: a dataset with nothing at or before the point is reported, not
-silently restored from the future.
+silently restored from the future. A zark backup point is taken of every
+replicated dataset at once, so for one of those membership is exact: a
+dataset without the point's snapshot did not exist then (or did not reach
+it) and is not restored from an older one.
+
+Archived lineages (``<dataset>.archived-YYYYMMDD[-N]``, left by a backup that
+had to resend a dataset in full) are read as earlier snapshots of the same
+dataset, so points older than the archive stay restorable; ``Snap.source``
+names where such a snapshot is actually stored.
 """
 
 import re
@@ -50,8 +58,16 @@ from datetime import UTC, datetime
 REPEAT_GAP = 300
 
 
+_ARCHIVED = re.compile(r"\.archived-[^/]*")
+
+
+def logical(rel: str) -> str:
+    """Dataset name with any ``.archived-…`` suffix removed from its components."""
+    return _ARCHIVED.sub("", rel)
+
+
 @dataclass(frozen=True)
-class Snap:
+class Snap:  # pylint: disable=too-many-instance-attributes
     """One snapshot, with ``dataset`` relative to the backup pool."""
 
     dataset: str
@@ -59,6 +75,12 @@ class Snap:
     guid: str
     createtxg: int
     creation: int
+    source: str = ""  # stored under this archived lineage, when not "dataset"
+
+    @property
+    def stored(self) -> str:
+        """Dataset that actually holds the snapshot on the backup."""
+        return self.source or self.dataset
 
     @property
     def family(self) -> str:
@@ -95,9 +117,11 @@ def parse_snapshots(lines: list[str], pool: str) -> list[Snap]:
         full, name = fields[0].split("@", 1)
         if not full.startswith(prefix):
             continue
+        rel = full[len(prefix) :]
+        source = rel if logical(rel) != rel else ""
         try:
             snaps.append(
-                Snap(full[len(prefix) :], name, fields[1], int(fields[2]), int(fields[3])),
+                Snap(logical(rel), name, fields[1], int(fields[2]), int(fields[3]), source),
             )
         except ValueError:
             continue
@@ -157,6 +181,9 @@ def resolve(point: Point, snaps: list[Snap], datasets: list[str]) -> dict[str, S
         own = point.members.get(ds)
         if own:
             out[ds] = _newest(own)
+            continue
+        if point.family == "zark_":
+            out[ds] = None
             continue
         earlier = [s for s in snaps if s.dataset == ds and s.creation <= end]
         out[ds] = _newest(earlier) if earlier else None
