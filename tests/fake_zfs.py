@@ -148,6 +148,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zfs", "set"): self._set,
             ("zfs", "get"): self._get,
             ("zpool", "export"): lambda _a: _ok(),
+            ("zpool", "create"): self._zpool_create,
             ("zfs", "unload-key"): lambda _a: _ok(),
             ("systemctl", "is-active"): self._is_active,
             ("systemctl", "stop"): self._unit_set("inactive"),
@@ -163,6 +164,13 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return self._pipe(shlex.split(cmd1)[2:], shlex.split(cmd2)[2:])
 
     # ── zpool / systemctl ────────────────────────────────────────────────
+
+    def _zpool_create(self, args: list[str]) -> RunResult:
+        name = args[-2]
+        if name in self.pools:
+            return _err(f"pool '{name}' already exists")
+        self.pool(name)
+        return _ok()
 
     def _zpool_list(self, args: list[str]) -> RunResult:
         return _ok(args[-1] + "\n") if args[-1] in self.pools else _err("no such pool")
@@ -392,9 +400,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             d.token = ""
             return _ok()
         src_ds = to.split("@")[0]
-        if src_ds.startswith("rpool") and not raw:
-            return _err("encrypted dataset: raw send (-w) required")
         origin = self.ds[src_ds]
+        if src_ds.startswith("rpool") and origin.props.get("encryption") != "off" and not raw:
+            return _err("encrypted dataset: raw send (-w) required")
         to_snap = next(s for s in origin.snaps if s.name == to.split("@")[1])
         d = self.ds.get(dst)
         if d is not None and d.token:

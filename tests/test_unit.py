@@ -227,7 +227,6 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     PoolInfo,
     Readback,
     fix_grub_bpool_uuid,
-    syncoid_exclude_flag,
 )
 from tests.fake_zfs import FakeZfs, FSnap  # pylint: disable=wrong-import-position # noqa: E402
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
@@ -2448,61 +2447,6 @@ class TestFixGrubBpoolUuid:
         assert f"# Comment with hex like {self.OLD_HEX}" in new
         assert f"set unrelated_var={self.OLD_HEX}" in new
         os.unlink(p)
-
-
-# ═════════════════════════════════════════════════════════════════════════
-#  lib/zfs.py — syncoid_exclude_flag helper
-# ═════════════════════════════════════════════════════════════════════════
-
-
-class TestSyncoidExcludeFlag:
-    """Tests for the syncoid version-aware exclude-flag helper.
-
-    syncoid 2.3.0 (Ubuntu 26.04) renamed --exclude to --exclude-datasets.
-    On Ubuntu 22.04 - 25.10 (sanoid 2.1.0 - 2.2.0-2), only --exclude exists
-    and the new name aborts syncoid mid-run with "Unknown option:
-    exclude-datasets". The helper picks the right flag at runtime by
-    inspecting `syncoid --help`.
-    """
-
-    HELP_2_3 = """\
-syncoid [options]... SOURCE TARGET
-
-  --exclude=REGEX           DEPRECATED. Equivalent to --exclude-datasets.
-  --exclude-datasets=REGEX  Exclude specific datasets which match the given regex.
-  --exclude-snaps=REGEX     Exclude specific snapshots that match the given regex.
-"""
-
-    HELP_2_2 = """\
-syncoid [options]... SOURCE TARGET
-
-  --exclude=REGEX           Exclude specific datasets which match the given regex.
-                            Can be specified multiple times
-  --sendoptions=OPTIONS     Use advanced options for zfs send.
-"""
-
-    def test_returns_exclude_datasets_on_syncoid_2_3(self):
-        """syncoid 2.3+ help text mentions --exclude-datasets explicitly."""
-        mock = MockShell()
-        mock.on("syncoid --help").succeeds(self.HELP_2_3)
-        with patch_sh(mock):
-            assert syncoid_exclude_flag() == "--exclude-datasets"
-
-    def test_returns_exclude_on_syncoid_2_2(self):
-        """syncoid 2.2 (Ubuntu 22.04 - 25.10) only knows --exclude."""
-        mock = MockShell()
-        mock.on("syncoid --help").succeeds(self.HELP_2_2)
-        with patch_sh(mock):
-            assert syncoid_exclude_flag() == "--exclude"
-
-    def test_returns_exclude_when_help_emitted_to_stderr(self):
-        """syncoid emits --help text to stderr, not stdout. Helper must
-        check both fields so detection works regardless of which side
-        the version chose to use."""
-        mock = MockShell()
-        mock.on("syncoid --help").fails(self.HELP_2_3)  # rc!=0, output via stderr
-        with patch_sh(mock):
-            assert syncoid_exclude_flag() == "--exclude-datasets"
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -5527,6 +5471,35 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
 class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
     """I16/I22/I23 + I-G in prepare."""
 
+    def _prepare(self, fake: FakeZfs, cfg_dir: Path) -> int:
+        ident = _purge_ident(None)
+        report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
+        readback = Readback(imported=True, health="ONLINE", reexported=True)
+        rc = 0
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                patch.object(Config, "default_config_dir", return_value=cfg_dir),
+                patch.object(prepare_mod, "validate_external_block_device", return_value=ident),
+                patch.object(prepare_mod, "check_device", return_value=report),
+                patch.object(prepare_mod.Path, "exists", return_value=True),
+                patch.object(ZFS, "verify_exported_pool_readback", return_value=readback),
+                patch.object(ZFS, "pool_guid", return_value="777"),
+                patch("lib.log.Log.ask", return_value=True),
+                patch("lib.log.Log.ask_input", return_value="blue"),
+                patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+                patch("builtins.input", return_value=""),
+                patch.object(prepare_mod, "prompt_eject_or_attach"),
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+            ):
+                stack.enter_context(cm)
+            try:
+                prepare_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
+            except SystemExit as e:
+                rc = int(e.code or 0)
+        return rc
+
     def test_prepare_by_id_replaces_stale_entry_and_uses_by_id_vdev(self):
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(
@@ -5536,50 +5509,46 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
                 "black": {"guid": "2", "drive_id": "usb-Micron-0:0"},
             },
         )
-        ident = _purge_ident(None)
-        mock = MockShell()
-        mock.on("lsblk -no NAME /dev/sdb | tail -n +2").succeeds("")
-        mock.on("blkid /dev/sdb").fails()
-        mock.on("zpool list blue").fails()
-        mock.on_prefix("zpool create").succeeds()
-        mock.on_prefix("syncoid").succeeds()
-        mock.on("zpool list bpool").succeeds("bpool")
-        mock.on("zpool get -H -o value guid blue").succeeds("777")
-        report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
-        with (
-            patch_sh(mock),
-            patch.object(Config, "default_config_dir", return_value=cfg_dir),
-            patch.object(prepare_mod, "validate_external_block_device", return_value=ident),
-            patch.object(prepare_mod, "check_device", return_value=report),
-            patch.object(prepare_mod.Path, "exists", return_value=True),
-            patch.object(
-                ZFS,
-                "verify_exported_pool_readback",
-                return_value=Readback(imported=True, health="ONLINE", reexported=True),
-            ),
-            patch.object(ZFS, "pool_export", return_value=True),
-            patch("lib.log.Log.ask", return_value=True),
-            patch("lib.log.Log.ask_input", return_value="blue"),
-            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
-            patch.object(prepare_mod, "prompt_eject_or_attach"),
-            redirect_stdout(StringIO()),
-        ):
-            prepare_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
-        create = next(c for c in mock.calls if c.startswith("zpool create"))
+        fake = _fresh_fake(())
+        assert self._prepare(fake, cfg_dir) == 0
+        create = next(c for c in fake.calls if c.startswith("zpool create"))
         assert "-R /run/zark/altroot/blue" in create
         assert create.endswith(f"blue /dev/disk/by-id/{_KINGSTON_ID}")
-        syncoids = [c for c in mock.calls if c.startswith("syncoid --recursive")]
-        assert len(syncoids) == 2
-        assert all("--recvoptions=u" in c for c in syncoids)
-        assert mock.was_called("zfs receive -u -F blue/keystore")
         data = json.loads((cfg_dir / "known_drives.json").read_text())
-        assert data["blue"] == {
-            "guid": "777",
-            "drive_id": _KINGSTON_ID,
-            "last_backup_at": None,
-            "autoeject": True,
-        }
+        assert data["blue"]["guid"] == "777"
+        assert data["blue"]["drive_id"] == _KINGSTON_ID
+        assert data["blue"]["autoeject"] is True
+        assert data["blue"]["last_backup_at"]  # I13
         assert data["black"]["guid"] == "2"
+
+    def test_prepare_on_the_engine(self):
+        """Decision 2, I14/F9, R2§8.5, M1P.14: one point, no syncoid, no
+        residues in origin, no native mount properties on the drive."""
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        assert self._prepare(fake, cfg_dir) == 0
+        assert not any(c.startswith("syncoid") for c in fake.calls)
+        sets = [c for c in fake.calls if c.startswith("zfs set")]
+        assert not any("mountpoint=" in c or " canmount=" in c for c in sets)
+        home = fake.names("blue/rpool/USERDATA/home")
+        assert len(home) == 1 and repl.POINT_RE.match(home[0])  # the point only
+        assert fake.ds["blue/rpool/ROOT/be"].props["canmount"] == "noauto"
+        assert fake.ds["blue/rpool/var"].props["org.zark:canmount"] == "off"
+        assert "blue/keystore" in fake.ds
+        assert _origin_points(fake) == []
+        assert not any(n.startswith("prepare_") for n in fake.names("rpool/keystore"))  # I-B
+        assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("777", home[0])]
+        assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
+
+    def test_prepare_does_not_register_an_incomplete_drive(self):
+        """H16: a dataset that did not land means no registration and exit 1."""
+        fake = _fresh_fake(())
+        fake.inject["blue/rpool/USERDATA/home"] = ("enospc", 0)
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        assert self._prepare(fake, cfg_dir) == 1
+        assert "blue" not in json.loads((cfg_dir / "known_drives.json").read_text())
 
     def test_prepare_refuses_disk_without_by_id(self):
         ident = DiskIdentity(disk="/dev/sdb", by_id="")
@@ -7547,7 +7516,7 @@ def _origin_fixture(fake: FakeZfs) -> None:
         ("bpool/BOOT/be", {"canmount": "on", "mountpoint": "/boot"}),
     ):
         fake.dataset(name, **props)
-    fake.dataset("rpool/keystore", kind="volume")
+    fake.dataset("rpool/keystore", kind="volume", encryption="off")
     fake.dataset("rpool/vm", kind="volume")
     for ds in list(fake.ds):
         if fake.ds[ds].kind == "filesystem":

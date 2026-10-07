@@ -14,22 +14,27 @@
 """
 zark prepare — Prepare a new blank drive for backup.
 
-Creates ZFS pool (no encryption — raw send brings its own),
-does initial raw send from rpool, sends keystore, sends bpool,
-registers the drive in known_drives.json.
+Asks every question first, creates the pool (no encryption of its own —
+the raw send brings rpool's), brings every replicated dataset to one backup
+point with zark's engine (point only, no history), sends the keystore,
+reads the pool back and only then registers the drive. Leaves nothing in
+origin but this drive's anchors.
 """
 
+import socket
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import sh
-from lib.cleanup import flush_device_cache, prompt_eject_or_attach
-from lib.config import Config, DriveInfo
+from lib import engine, sh
+from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
+from lib.config import VERSION, Config, DriveInfo, now_utc_iso
 from lib.drives import validate_external_block_device
 from lib.health import check_device, render_report
 from lib.log import Log
 from lib.mount import warn_rpool_mountpoint_lost
-from lib.zfs import ZFS, backup_altroot, syncoid_exclude_flag
+from lib.replication import DatasetPlan, State, point_name
+from lib.zfs import ZFS, backup_altroot
 
 
 def run(
@@ -47,6 +52,7 @@ def run(
 
     log.banner("PREPARE NEW BACKUP DRIVE")
     warn_rpool_mountpoint_lost(log)
+    engine.require_bookmark_v2(log)
 
     # ── Verify rpool keystore accessible ─────────────────────────────────
     if not Path("/run/keystore/rpool/system.key").exists():
@@ -137,6 +143,14 @@ def run(
 
     log.ok(f"Pool name: {new_pool}")
 
+    # Per-drive auto-eject preference, asked now so nothing waits for the
+    # operator after the long send (incident §8). When enabled, this drive's
+    # eject prompt (here and in later backup/umount runs) gets a 10 s
+    # countdown that applies the default automatically. Default no.
+    autoeject = log.ask(
+        "Enable auto-eject (timed eject prompt) for this drive?",
+    )
+
     # ── Confirmation ─────────────────────────────────────────────────────
     log.info("The pool will be created WITHOUT its own encryption.")
     log.info("Encryption comes from rpool raw send (same key/passphrase).")
@@ -145,9 +159,11 @@ def run(
         return
 
     start = time.time()
+    cleanup = Cleanup(log)
+    cleanup.register()
 
     # ── Create pool ──────────────────────────────────────────────────────
-    log.step(1, 3, f"Creating ZFS pool '{new_pool}'...")
+    log.step(1, 4, f"Creating ZFS pool '{new_pool}'...")
 
     # -R: the new pool never enters zpool.cache and nothing it will hold can
     # mount over the running system (I-G). The vdev is named by its by-id so
@@ -162,124 +178,86 @@ def run(
     )
     if not r.ok:
         log.fatal(f"Failed to create pool: {r.stderr.strip()}")
+    cleanup.track_pool(new_pool)
     log.ok(f"Pool '{new_pool}' created")
 
-    # ── Initial raw send ─────────────────────────────────────────────────
-    log.step(2, 3, f"Initial raw send from rpool → {new_pool}/rpool...")
-
+    # ── Initial send: the backup point only (decision 2) ─────────────────
+    log.step(2, 4, f"Sending a backup point of rpool and bpool → {new_pool}...")
     rpool_used = sh.run("zfs list -H -o used rpool").output
     log.info(f"~{rpool_used} to transfer")
-
-    # Syncoid raw send (excludes keystore — sent separately).
-    # syncoid 2.3.0+ uses --exclude-datasets; older Ubuntu releases
-    # (22.04 - 25.10, sanoid 2.1.0 - 2.2.0-2) only know --exclude.
-    excl = syncoid_exclude_flag()
-    r = sh.run(
-        "syncoid --recursive --no-privilege-elevation --sendoptions=w --recvoptions=u "
-        + f"{excl}=rpool/keystore "
-        + f"rpool {new_pool}/rpool",
-        log=log,
-    )
-    if r.ok:
-        log.ok("rpool synced ✓")
-    else:
-        log.warn("rpool sync had warnings — check log")
-
-    # Send keystore separately (outside rpool tree to avoid encryption dependency)
-    log.info("Sending keystore...")
-    snap_ts = sh.run("date '+%Y%m%d_%H%M%S'").output
-    _ = sh.run(f"zfs snapshot rpool/keystore@prepare_{snap_ts}")
-    r = sh.run_pipe(
-        f"zfs send rpool/keystore@prepare_{snap_ts}",
-        f"zfs receive -u -F {new_pool}/keystore",
-    )
-    if r.ok:
-        log.ok(f"Keystore synced to {new_pool}/keystore ✓")
-    else:
-        log.warn("Keystore sync had errors")
-
-    # Sync bpool.
-    if zfs.pool_exists("bpool"):
-        log.info("Syncing bpool (kernels + grub)...")
-        r = sh.run(
-            f"syncoid --recursive --no-privilege-elevation --recvoptions=u bpool {new_pool}/bpool",
-            log=log,
-        )
-        if r.ok:
-            log.ok("bpool synced ✓")
-        else:
-            log.warn("bpool sync had warnings")
-
-    # Fix keylocation
-    log.info("Configuring keystore location...")
-    _ = zfs.set_property(
-        f"{new_pool}/rpool",
-        "keylocation",
-        "file:///run/keystore/rpool/system.key",
-    )
-
-    # Sync mountpoints from origin
-    log.info("Syncing mountpoints from origin...")
-    r = sh.run("zfs list -H -o name,mountpoint rpool")
-    if r.ok:
-        for line in r.lines:
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                ds, mp = parts[0].strip(), parts[1].strip()
-                if mp in ("none", "-", "legacy"):
-                    continue
-                dst = f"{new_pool}/{ds}"
-                if zfs.dataset_exists(dst):
-                    _ = zfs.set_property(dst, "mountpoint", mp)
-    log.ok("Mountpoints synced ✓")
-
-    # ── Register and export ──────────────────────────────────────────────
-    log.step(3, 3, "Registering drive...")
-
     new_guid = zfs.pool_guid(new_pool)
+    eng = engine.Run(new_pool, new_guid, log, point_name(datetime.now(UTC)))
+
+    def decide(plans: list[DatasetPlan], _eng: engine.Run) -> bool:
+        return all(p.state in (State.NEW, State.EXCLUDED) for p in plans)
+
+    res = engine.execute(eng, cleanup, decide)
+    if res.aborted:
+        log.fatal(f"Initial send not started: {res.error or 'the new pool is not empty'}")
+    for p in res.plans:
+        if p.state is not State.AT_POINT:
+            out = res.outcomes.get(p.rel)
+            log.warn(f"  {p.rel}: {p.note or (out.error if out else p.state)}")
+
+    _ = zfs.set_property(
+        f"{new_pool}/rpool", "keylocation", "file:///run/keystore/rpool/system.key"
+    )
+    prepared_at = now_utc_iso()
+    rpool_guid = sh.run("zpool get -H -o value guid rpool").output.strip()
+    fields = {
+        "format": engine.FORMAT,
+        "version": VERSION,
+        "prepared-at": prepared_at,
+        "origin-host": socket.gethostname(),
+        "origin-rpool-guid": rpool_guid,
+    }
+    if res.ok:
+        fields |= {"last-backup-at": prepared_at, "last-point": eng.point}
+    _ = engine.write_metadata(new_pool, fields, log)
+
+    # ── Keystore: outside the rpool tree, the last ZFS work before export ─
+    log.step(3, 4, "Sending the keystore...")
+    keystore_ok = _send_keystore(new_pool, log)
+    complete = res.ok and keystore_ok
+
+    # ── Export, read back, register ──────────────────────────────────────
+    log.step(4, 4, "Verifying and registering the drive...")
     log.ok(f"Pool GUID: {new_guid}")
+    exported = zfs.pool_export(new_pool)
+    if exported:
+        cleanup.untrack_pool(new_pool)
+        flush_device_cache(log)
 
-    _ = zfs.pool_export(new_pool)
-    flush_device_cache(log)
-
-    # ── Read-back verification ───────────────────────────────────────────
-    # prepare has just written the entire rpool raw send (real write load
-    # with transaction churn) and exported. That is exactly the workload
-    # that exposes a bridge lying about FUA, so verify the pool re-imports
-    # ONLINE before we register it as a trusted backup target. If it fails,
-    # do NOT register the drive — the prepared pool is not trustworthy even
-    # though every step above reported success.
-    if not zfs.verify_exported_pool_readback(new_pool, device=ident.part1).ok:
+    if not complete:
+        # H16: a drive whose data or keystore did not land is never registered.
         log.banner_error(
-            "DRIVE NOT VERIFIED",
+            "DRIVE NOT REGISTERED",
             [
-                "The pool was created and filled but could NOT be",
-                "re-imported afterwards — the signature of a USB-SATA",
-                "bridge that lies about cache flushing (FUA).",
-                "",
-                "The drive has NOT been registered.",
-                "What to do:",
-                "  → See docs/HARDWARE.md (UAS quirk for known bridges)",
-                "  → Address the enclosure, then re-run prepare",
+                "The initial send did not complete:"
+                if not res.ok
+                else "The keystore did not land.",
+                "See the messages above. The drive has NOT been registered.",
+                f"Wipe and retry: sudo zark purge {ident.by_id_path}",
             ],
         )
-        return
+        raise SystemExit(1)
 
-    # Per-drive auto-eject preference. When enabled, this drive's eject
-    # prompt (here and in future backup/umount/... runs) gets a 10 s
-    # countdown that applies the default automatically — handy for
-    # unattended rotation. Default no: the prompt waits for the operator.
-    autoeject = log.ask(
-        "Enable auto-eject (timed eject prompt) for this drive?",
-    )
+    rb = zfs.verify_exported_pool_readback(new_pool, device=ident.part1) if exported else None
+    if rb is None or not rb.ok:
+        lines = (
+            rb.describe() if rb else [f"{new_pool} could not be exported, so it was not read back."]
+        )
+        log.banner_error("DRIVE NOT VERIFIED", [*lines, "", "The drive has NOT been registered."])
+        raise SystemExit(1)
+    log.ok(f"{new_pool} verified reimportable (ONLINE)")  # I13: the verdict is logged
 
-    # Auto-register in known_drives.json (replacing this drive's stale entries)
     for name in replace:
         del cfg.known_drives[name]
     cfg.known_drives[new_pool] = DriveInfo(
         name=new_pool,
         guid=new_guid,
         drive_id=base_drive_id,
+        last_backup_at=prepared_at,  # I13: prepare is a full backup
         autoeject=autoeject,
     )
     cfg.save_drives()
@@ -292,6 +270,7 @@ def run(
         [
             f"Pool:     {log.W}{new_pool}{log.N}  (GUID: {new_guid})",
             f"Drive ID: {log.W}{base_drive_id}{log.N}",
+            f"Point:    {log.W}{eng.point}{log.N}",
             f"Duration: {log.W}{mins}m {secs}s{log.N}",
             "",
             f"Registered in: {log.W}{cfg.drives_file_path}{log.N}",
@@ -311,3 +290,18 @@ def run(
         default_eject=False,
         autoeject=autoeject,
     )
+
+
+def _send_keystore(new_pool: str, log: Log) -> bool:
+    """Send rpool's keystore zvol, then drop the snapshot that carried it (I-B)."""
+    snap = f"rpool/keystore@prepare_{datetime.now(UTC):%Y%m%d_%H%M%S}"
+    if not sh.run(f"zfs snapshot {snap}", log=log).ok:
+        log.error("Could not snapshot the keystore")
+        return False
+    r = sh.run_pipe(f"zfs send {snap}", f"zfs receive -u {new_pool}/keystore", log=log)
+    _ = sh.run(f"zfs destroy {snap}", log=log)
+    if not r.ok:
+        log.error(f"Keystore send failed: {r.stderr.strip()}")
+        return False
+    log.ok(f"Keystore sent to {new_pool}/keystore")
+    return True

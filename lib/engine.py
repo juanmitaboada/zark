@@ -156,6 +156,17 @@ def bookmark_feature(pool: str = "rpool") -> str:
     return r.output.strip() if r.ok else ""
 
 
+def require_bookmark_v2(log: Log) -> None:
+    """Refuse without bookmark_v2 on rpool (M2 decision 4a; `zark setup` enables it)."""
+    state = bookmark_feature("rpool")
+    if state not in ("enabled", "active"):
+        log.fatal(
+            f"rpool feature@bookmark_v2 is {state or 'unknown'}",
+            causes=["zark's backup anchors are rpool bookmarks, which need this feature"],
+            solutions=["Run: sudo zark setup  (it explains the change and asks first)"],
+        )
+
+
 @dataclass
 class Outcome:
     """Result of one dataset's transfer."""

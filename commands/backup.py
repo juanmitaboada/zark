@@ -103,7 +103,7 @@ TOTAL_STEPS = 8
 # Free-space margin: 1% of the source's used data, with a 1 GiB floor.
 # Lax by design — only fires when the target is essentially full, where
 # any incremental will fail. The reactive ENOSPC handler in run() catches
-# in-flight exhaustion. This guard avoids starting a long syncoid run
+# in-flight exhaustion. This guard avoids starting a long transfer
 # that is mathematically guaranteed to fail.
 _ENOSPC_GUARD_FLOOR_BYTES = 1024**3  # 1 GiB
 _ENOSPC_GUARD_PCT_OF_SOURCE = 100  # divisor: used_bytes // 100 == 1%
@@ -128,7 +128,7 @@ def _check_target_space(
 
     2. Preventive ENOSPC (fatal): if the target's free space is below
        1% of the source's used data (with a 1 GiB floor), refuse to
-       start. This prevents kicking off a long syncoid run that is
+       start. This prevents kicking off a long transfer that is
        guaranteed to ENOSPC mid-stream.
 
     Either check is silently skipped when the corresponding PoolInfo
@@ -190,17 +190,6 @@ def _parse_args(args: list[str]) -> BackupArgs:
     if "--no-snapshot" in args:
         parsed.take_snapshots = False
     return parsed
-
-
-def _require_bookmark_v2(log: Log) -> None:
-    """Refuse without bookmark_v2 on rpool (M2 decision 4a; `zark setup` enables it)."""
-    state = engine.bookmark_feature("rpool")
-    if state not in ("enabled", "active"):
-        log.fatal(
-            f"rpool feature@bookmark_v2 is {state or 'unknown'}",
-            causes=["zark's backup anchors are rpool bookmarks, which need this feature"],
-            solutions=["Run: sudo zark setup  (it explains the change and asks first)"],
-        )
 
 
 def _gib(n: int) -> str:
@@ -425,7 +414,7 @@ def run(
 
     warn_rpool_mountpoint_lost(log)
     warn_kernel_named_vdevs(log)
-    _require_bookmark_v2(log)
+    engine.require_bookmark_v2(log)
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")
