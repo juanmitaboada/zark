@@ -150,7 +150,7 @@ def prompt_eject_or_attach(
       * ``backup``, ``umount``, ``purge``, ``recover``  → True
         Operator is typically done with the drive; one Enter unplugs.
 
-      * ``prepare``, ``repair-divergent``               → False
+      * ``prepare``                                    → False
         Typical next step is ``backup`` against the same drive; auto-
         ejecting would force a pointless unplug/replug cycle.
 
@@ -174,7 +174,7 @@ def prompt_eject_or_attach(
     drive into a timed prompt: a 10 s countdown
     (``EJECT_TIMEOUT_SECONDS``) after which the drive is **ejected**
     (auto-eject means auto-eject, so the command's no-eject default —
-    used by ``prepare``/``repair-divergent`` for the manual path — is
+    used by ``prepare`` for the manual path — is
     overridden here). Any keypress cancels the countdown and falls back to
     a normal prompt. When ``False`` (default), the prompt waits for the
     operator indefinitely, exactly as before.
@@ -191,7 +191,7 @@ def prompt_eject_or_attach(
     if autoeject:
         # The operator opted this drive into auto-eject, so the countdown
         # ejects on expiry regardless of the command's own default. This is
-        # what the name promises: in prepare/repair-divergent the no-eject
+        # what the name promises: in prepare the no-eject
         # default exists only for the manual path; once auto-eject is on, the
         # drive is meant to power down on its own.
         decision = log.ask_timeout(question, True, EJECT_TIMEOUT_SECONDS)

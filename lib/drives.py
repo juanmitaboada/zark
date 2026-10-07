@@ -378,21 +378,13 @@ def validate_external_block_device(
 
 # ── last_backup_at staleness helpers ─────────────────────────────────────────
 #
-# Backup drives that go unbacked for a long time are at risk of divergence
-# because the source pool's sanoid retention will eventually purge the
-# snapshots that are still on the target. The only authoritative answer
-# to "how long is too long" is the source's actual sanoid retention, so
-# these helpers stay generic over the threshold and let
-# ``commands/backup.py`` (which calls :func:`lib.sanoid_retention.
-# worst_case_retention_days`) decide the value at runtime.
-#
-# The reporting is purely informative: WARN at the end of a successful
-# backup if the selected drive *was* expired when the run started, INFO
-# listing other drives that are getting close. No FATAL — even an
-# expired drive's backup may still succeed (because some shared
-# snapshot might still be there), and when it doesn't, the existing
-# divergence handling in ``commands/backup.py`` and ``lib/repair.py``
-# already takes over.
+# Backup drives anchored only on shared snapshots (written by zark <=
+# 2.0.0-rc1) diverge once the source pool's sanoid retention purges the
+# snapshots still on the target. These helpers stay generic over that
+# threshold (lib.sanoid_retention.worst_case_retention_days computes it).
+# Bookmark-anchored drives have no such horizon: backup reports only the
+# days since each drive's last backup. No command calls
+# drives_in_danger_zone; it is kept for the legacy-drive report (M3).
 
 
 def drive_staleness_days(info: DriveInfo, *, now: datetime | None = None) -> int | None:

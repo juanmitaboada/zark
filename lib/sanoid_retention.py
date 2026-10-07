@@ -15,10 +15,10 @@
 Read sanoid's retention configuration to compute the worst-case overlap
 window between a backup drive and the source pool.
 
-Used by ``commands/backup.py`` and ``commands/repair_divergent.py`` to
-report drives that are getting close to their retention horizon —
-beyond that horizon the snapshot chain shared between source and target
-is gone and syncoid would abort with "cowardly refusing".
+It applies to drives anchored only on shared snapshots (written by zark
+<= 2.0.0-rc1): beyond the horizon the snapshot chain shared between
+source and target is gone. No command calls it (bookmark-anchored drives
+have no horizon); it is kept for the staleness report of such drives (M3).
 
 Why parse sanoid.conf at runtime instead of a hardcoded constant: the
 operator can edit ``/etc/sanoid/sanoid.conf`` freely and the retention

@@ -20,11 +20,27 @@ Shows pool health, sync progress, snapshot counts.
 
 import sys
 import time
+from datetime import UTC, datetime
 
 from lib import sh
 from lib.config import Config
 from lib.log import Log
+from lib.restore_points import parse_snapshots
 from lib.zfs import ZFS
+
+# A zark backup or prepare in progress (the transfers run as its children).
+_RUNNING = r"zark (backup|prepare)( |$)"
+
+
+def _latest(pool: str) -> str:
+    """Newest snapshot on the backup by creation (names mix UTC and local time)."""
+    r = sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {pool}/rpool")
+    snaps = parse_snapshots(r.lines if r.ok else [], pool)
+    if not snaps:
+        return ""
+    newest = max(snaps, key=lambda s: (s.creation, s.createtxg))
+    when = datetime.fromtimestamp(newest.creation, UTC).strftime("%Y-%m-%d %H:%M UTC")
+    return f"{newest.name}  ({when})"
 
 
 def _draw_bar(pct: int, width: int = 38) -> str:
@@ -77,13 +93,12 @@ def run(args: list[str]):  # pylint: disable=too-many-statements, too-many-local
 
             abar = _draw_bar(pct)
 
-            snaps = len(zfs.list_snapshots(f"{monitor_pool}/rpool", "autosnap"))
-            snap_names = zfs.unique_snap_names(f"{monitor_pool}/rpool")
-            latest = snap_names[-1] if snap_names else ""
+            snaps = len(zfs.list_snapshots(f"{monitor_pool}/rpool"))
+            latest = _latest(monitor_pool)
 
-            is_running = sh.run("pgrep -x syncoid").ok
+            is_running = sh.run(f"pgrep -o -f '{_RUNNING}'").ok
             if is_running:
-                pid = sh.run("pgrep -x syncoid | head -1").output
+                pid = sh.run(f"pgrep -o -f '{_RUNNING}'").output
                 pstart = sh.run(f"stat -c %Y /proc/{pid}").output
                 elapsed = int(time.time()) - int(pstart) if pstart.isdigit() else 0
                 em, es = divmod(elapsed, 60)

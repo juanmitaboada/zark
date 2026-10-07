@@ -57,6 +57,7 @@ import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # 
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.finish as finish_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.monitor as monitor_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.mount as mount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -88,16 +89,6 @@ from commands.recover import (  # pylint: disable=wrong-import-position # noqa: 
     _preflight,
     _target_candidates,
 )
-from commands.repair_divergent import (  # pylint: disable=wrong-import-position # noqa: E402
-    DOUBLE_CONFIRM_BYTES,
-    _destroy_loop,
-    _hint_for,
-    _prompt_action,
-    _prompt_double_confirm,
-    _prompt_failure_policy,
-    _shared_snapshot_with_source,
-    _snapshot_creation_dates,
-)
 from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E402
     _TEMPLATE_MINIMAL_EXPECTED,
     SanoidDiff,
@@ -125,7 +116,6 @@ from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E
 from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
     engine,
-    repair,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
     Cleanup,
@@ -203,12 +193,6 @@ from lib.registry import (  # pylint: disable=wrong-import-position # noqa: E402
     parse as registry_parse,
     serialize as registry_serialize,
     write_atomic as registry_write_atomic,
-)
-from lib.repair import (  # pylint: disable=wrong-import-position # noqa: E402
-    SIZE_LIMIT_BYTES,
-    DivergentDataset,
-    find_divergent,
-    is_divergence_error,
 )
 from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa: E402
     Snap,
@@ -817,18 +801,6 @@ class TestZFS:  # pylint: disable=missing-function-docstring
             snaps = zfs.list_snapshots("rpool", pattern="autosnap")
             assert len(snaps) == 2
 
-    def test_unique_snap_names(self):
-        mock, zfs = make_mock_zfs()
-        mock.on("zfs list -H -o name -t snapshot -r rpool").succeeds(
-            "rpool/ROOT/ubuntu@autosnap_2025-01-01\n"
-            "rpool/ROOT/ubuntu/home@autosnap_2025-01-01\n"
-            "rpool/ROOT/ubuntu@autosnap_2025-01-02\n"
-            "rpool/ROOT/ubuntu/home@autosnap_2025-01-02\n",
-        )
-        with patch_sh(mock):
-            names = zfs.unique_snap_names("rpool")
-            assert names == ["autosnap_2025-01-01", "autosnap_2025-01-02"]
-
     def test_dataset_exists(self):
         mock, zfs = make_mock_zfs()
         mock.on("zfs list rpool/keystore").succeeds()
@@ -1273,7 +1245,7 @@ class TestPromptEjectOrAttach:
         assert mock.was_called("eject /dev/sdb")
 
     def test_prompt_default_eject_false_on_eof(self):
-        """Non-interactive run with default=False (prepare / repair-divergent)
+        """Non-interactive run with default=False (prepare)
         does NOT eject. Matches the post-prepare workflow where the next
         step is `backup` against the same drive."""
         mock = MockShell()
@@ -2976,288 +2948,6 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
         assert parsed["tank/games"]["use_template"] == "production"
 
 
-class TestLibRepair:  # pylint: disable=missing-function-docstring
-    """Tests for lib/repair's detection logic.
-
-    Used by both ``zark backup`` (silent path) and ``zark repair-divergent``
-    (interactive path). Safety hinges on find_divergent correctly identifying
-    datasets without shared snapshots — false positives would destroy
-    real data, false negatives would leave the user with a broken backup.
-    """
-
-    def _setup_mock(  # pylint: disable=too-many-locals
-        self,
-        target_pool: str,
-        target_datasets: list[tuple[str, str]],  # (name, type)
-        target_snaps: dict[str, list[str]],  # dataset → snapshot suffixes
-        source_snaps: dict[str, list[str]],
-        source_exists: set[str] | None = None,
-        used_bytes: dict[str, int] | None = None,
-    ) -> tuple[MockShell, ZFS]:
-        """Wire up a MockShell that answers all the queries find_divergent makes."""
-        mock, zfs = make_mock_zfs()
-
-        # list_datasets call
-        rows = []
-        for name, type_ in target_datasets:
-            rows.append(f"{name}\tnone\t8K\t8K\toff\t{type_}")
-        mock.on(
-            "zfs list -H -o name,mountpoint,used,refer,canmount,type "
-            + f"-t filesystem,volume -r {target_pool}",
-        ).succeeds("\n".join(rows) + "\n")
-
-        # snapshots and `dataset_exists` per (target, source) pair
-        all_targets = [n for n, t in target_datasets if t == "filesystem"]
-        for tgt in all_targets:
-            snaps = target_snaps.get(tgt, [])
-            mock.on(f"zfs list -H -o name -t snapshot {tgt}").succeeds(
-                "\n".join(f"{tgt}@{s}" for s in snaps) + ("\n" if snaps else ""),
-            )
-
-        # Compute source counterparts (target_pool/X → X)
-        for tgt in all_targets:
-            if not tgt.startswith(target_pool + "/"):
-                continue
-            src = tgt[len(target_pool) + 1 :]
-            # `zfs list <source>` for dataset_exists
-            if source_exists is None or src in source_exists:
-                mock.on(f"zfs list {src}").succeeds(f"{src}\t-\t-\t-\t-\n")
-            else:
-                mock.on(f"zfs list {src}").fails(f"cannot open '{src}': dataset does not exist")
-            # snapshots on source
-            snaps = source_snaps.get(src, [])
-            mock.on(f"zfs list -H -o name -t snapshot {src}").succeeds(
-                "\n".join(f"{src}@{s}" for s in snaps) + ("\n" if snaps else ""),
-            )
-            # used size — both -p numeric and human-readable
-            ub = (used_bytes or {}).get(tgt, 8 * 1024)  # default 8K
-            mock.on(f"zfs get -H -p -o value used {tgt}").succeeds(f"{ub}\n")
-            # human form: anything plausible — caller doesn't parse
-            mock.on(f"zfs get -H -o value used {tgt}").succeeds(f"{ub}B\n")
-
-        return mock, zfs
-
-    def test_no_divergence_when_snapshots_overlap(self):
-        """Common snapshot present → not divergent."""
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[
-                ("blue", "filesystem"),
-                ("blue/rpool", "filesystem"),
-                ("blue/rpool/var", "filesystem"),
-            ],
-            target_snaps={
-                "blue": [],
-                "blue/rpool": ["snap_A"],
-                "blue/rpool/var": ["snap_A", "snap_B"],
-            },
-            source_snaps={
-                "rpool": ["snap_A"],
-                "rpool/var": ["snap_B", "snap_C"],
-            },
-        )
-        with patch_sh(mock):
-            divergent = find_divergent(zfs, "rpool", "blue", make_log())
-        assert not divergent
-
-    def test_detects_dataset_with_no_shared_snapshots(self):
-        """Target has a snapshot, source has different ones, no overlap → divergent."""
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[
-                ("blue", "filesystem"),
-                ("blue/rpool", "filesystem"),
-                ("blue/rpool/var", "filesystem"),
-            ],
-            target_snaps={
-                "blue/rpool": ["shared_anchor"],
-                "blue/rpool/var": ["old_april_snap"],
-            },
-            source_snaps={
-                "rpool": ["shared_anchor"],
-                "rpool/var": ["may_snap_1", "may_snap_2"],  # disjoint from old_april_snap
-            },
-        )
-        with patch_sh(mock):
-            divergent = find_divergent(zfs, "rpool", "blue", make_log())
-        names = [d.target for d in divergent]
-        assert "blue/rpool/var" in names
-        assert "blue/rpool" not in names  # this one has overlap
-
-    def test_skips_dataset_with_no_target_snapshots(self):
-        """A target with no snapshots at all is a different bug — don't flag it.
-
-        Without snapshots there's nothing meaningful to compare; the user
-        should investigate why the dataset exists empty (e.g. someone ran
-        `zfs create blue/rpool/foo` manually).
-        """
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[
-                ("blue", "filesystem"),
-                ("blue/rpool", "filesystem"),
-                ("blue/rpool/empty", "filesystem"),
-            ],
-            target_snaps={"blue/rpool": ["s1"], "blue/rpool/empty": []},
-            source_snaps={"rpool": ["s1"], "rpool/empty": ["src_snap"]},
-        )
-        with patch_sh(mock):
-            divergent = find_divergent(zfs, "rpool", "blue", make_log())
-        assert not divergent
-
-    def test_skips_dataset_when_source_missing(self):
-        """A target dataset whose source doesn't exist is not divergent —
-        it's orphaned. Different problem, not handled here."""
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[
-                ("blue", "filesystem"),
-                ("blue/rpool", "filesystem"),
-                ("blue/rpool/orphan", "filesystem"),
-            ],
-            target_snaps={"blue/rpool": ["s1"], "blue/rpool/orphan": ["snap"]},
-            source_snaps={"rpool": ["s1"]},  # rpool/orphan absent below
-            source_exists={"rpool"},  # explicitly: rpool/orphan does NOT exist
-        )
-        with patch_sh(mock):
-            divergent = find_divergent(zfs, "rpool", "blue", make_log())
-        assert not divergent
-
-    def test_skips_zvols(self):
-        """Zvols are replicated by prepare/recover, never by syncoid → ignore."""
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[
-                ("blue", "filesystem"),
-                ("blue/keystore", "volume"),
-            ],
-            target_snaps={"blue/keystore": ["whatever"]},
-            source_snaps={"rpool/keystore": ["different"]},
-        )
-        with patch_sh(mock):
-            divergent = find_divergent(zfs, "rpool", "blue", make_log())
-        assert not divergent
-
-    def test_size_limit_constant_is_64mb(self):
-        """The SIZE_LIMIT_BYTES constant is the safety threshold the command
-        documents to the user; pinning it here so a careless edit becomes
-        a failing test."""
-        assert SIZE_LIMIT_BYTES == 64 * 1024 * 1024
-
-    def test_used_bytes_recorded_in_divergent(self):
-        """The DivergentDataset records the destination's actual size, not
-        just the human-readable form. The size guards the 64MB safety
-        check, so it must be parsed numerically."""
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[
-                ("blue", "filesystem"),
-                ("blue/rpool", "filesystem"),
-                ("blue/rpool/var", "filesystem"),
-            ],
-            target_snaps={"blue/rpool": ["s1"], "blue/rpool/var": ["old"]},
-            source_snaps={"rpool": ["s1"], "rpool/var": ["new"]},
-            used_bytes={"blue/rpool/var": 8192},  # 8 KB
-        )
-        with patch_sh(mock):
-            divergent = find_divergent(zfs, "rpool", "blue", make_log())
-        assert len(divergent) == 1
-        assert divergent[0].used_bytes == 8192
-
-    # ── is_divergence_error ─────────────────────────────────────────────
-
-    def test_is_divergence_error_matches_cowardly_refusing(self):
-        """The exact phrase syncoid prints on divergence-protected aborts."""
-        s = (
-            "CRITICAL ERROR: Target blue/rpool/var exists but has no "
-            "snapshots matching with rpool/var! Replication to target would "
-            "require destroying existing target. Cowardly refusing to "
-            "destroy your existing target."
-        )
-        assert is_divergence_error(s)
-
-    def test_is_divergence_error_matches_no_snapshots_matching(self):
-        """The other phrasing syncoid uses for the same condition."""
-        s = "no snapshots matching with rpool/var"
-        assert is_divergence_error(s)
-
-    def test_is_divergence_error_is_case_insensitive(self):
-        """Defensive: never trust exact case from third-party stderr."""
-        s = "COWARDLY REFUSING to destroy your existing target"
-        assert is_divergence_error(s)
-
-    def test_is_divergence_error_does_not_match_other_failures(self):
-        """Real failures unrelated to divergence must not trigger auto-repair."""
-        assert not is_divergence_error("CRITICAL ERROR: out of space")
-        assert not is_divergence_error("syncoid succeeded")
-        assert not is_divergence_error("")
-
-    # ── auto_repair_under_64mb ──────────────────────────────────────────
-
-    def test_auto_repair_returns_ok_true_when_no_divergence(self):
-        """No divergent datasets → return (True, []) immediately."""
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[("blue", "filesystem"), ("blue/rpool", "filesystem")],
-            target_snaps={"blue/rpool": ["autosnap_2026-01-01"]},
-            source_snaps={"rpool": ["autosnap_2026-01-01"]},  # overlap
-        )
-        with patch_sh(mock):
-            ok, too_big = repair.auto_repair_under_64mb(
-                zfs,
-                "rpool",
-                "blue",
-                make_log(),
-            )
-        assert ok is True
-        assert too_big == []
-
-    def test_auto_repair_destroys_small_divergent_datasets(self):
-        """All divergent < 64MB → destroy each, return (True, [])."""
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[("blue", "filesystem"), ("blue/rpool/var", "filesystem")],
-            target_snaps={"blue/rpool/var": ["X"]},
-            source_snaps={"rpool/var": ["Y"]},  # no overlap → divergent
-            used_bytes={"blue/rpool/var": 8192},  # 8KB, well below 64MB
-        )
-        # The destroy call must be wired up to succeed.
-        mock.on("zfs destroy -r blue/rpool/var").succeeds("")
-        with patch_sh(mock):
-            ok, too_big = repair.auto_repair_under_64mb(
-                zfs,
-                "rpool",
-                "blue",
-                make_log(),
-            )
-        assert ok is True
-        assert too_big == []
-
-    def test_auto_repair_aborts_when_dataset_exceeds_64mb(self):
-        """Anything > 64MB → return (False, [those_datasets]) without
-        destroying anything. Caller must surface this to the user."""
-        big_size = repair.SIZE_LIMIT_BYTES + 1
-        mock, zfs = self._setup_mock(
-            target_pool="blue",
-            target_datasets=[("blue", "filesystem"), ("blue/rpool/home", "filesystem")],
-            target_snaps={"blue/rpool/home": ["X"]},
-            source_snaps={"rpool/home": ["Y"]},
-            used_bytes={"blue/rpool/home": big_size},
-        )
-        # Note: NO mock for `zfs destroy`. If auto-repair tried to destroy
-        # this dataset, MockShell would raise — this is the test invariant.
-        with patch_sh(mock):
-            ok, too_big = repair.auto_repair_under_64mb(
-                zfs,
-                "rpool",
-                "blue",
-                make_log(),
-            )
-        assert ok is False
-        assert len(too_big) == 1
-        assert too_big[0].target == "blue/rpool/home"
-
-
 # ═════════════════════════════════════════════════════════════════════════
 #  commands/recover.py — Secure Boot .latest variant pinning
 # ═════════════════════════════════════════════════════════════════════════
@@ -3870,392 +3560,6 @@ class TestDrivesInDangerZone:  # pylint: disable=missing-function-docstring
         }
         result = drives_in_danger_zone(drives, retention_days=90, margin_days=30)
         assert [name for name, _ in result] == ["older", "younger"]
-
-
-# ═════════════════════════════════════════════════════════════════════════
-#  commands/repair_divergent.py — interactive flow
-# ═════════════════════════════════════════════════════════════════════════
-
-
-def _make_div(target: str, used_bytes: int, used_human: str = "") -> DivergentDataset:
-    """Tiny factory for DivergentDataset fixtures."""
-    return DivergentDataset(
-        source=target.split("/", 1)[1] if "/" in target else target,
-        target=target,
-        used_bytes=used_bytes,
-        used_human=used_human or f"{used_bytes}B",
-    )
-
-
-class TestRepairDivergentHints:  # pylint: disable=missing-function-docstring
-    """``_hint_for`` classification — covers the three main cases the
-    operator sees in the per-dataset prompt block."""
-
-    def test_orphan_when_source_missing(self):
-        h = _hint_for("blue/rpool/old", source_exists=False, children=0)
-        assert "orphan" in h
-
-    def test_container_when_has_children(self):
-        h = _hint_for("blue/rpool", source_exists=True, children=5)
-        assert "container" in h
-
-    def test_leaf_when_no_children(self):
-        h = _hint_for("blue/rpool/var/log", source_exists=True, children=0)
-        assert "leaf" in h
-
-
-class TestRepairDivergentDoubleConfirm:  # pylint: disable=missing-function-docstring
-    """``_prompt_double_confirm`` — accepts only the literal string
-    ``DESTROY``. Anything else (yes, y, the dataset name, empty)
-    cancels."""
-
-    def test_accepts_literal_destroy(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="DESTROY"):
-            assert _prompt_double_confirm(log, "blue/rpool", "100G") is True
-
-    def test_rejects_lowercase(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="destroy"):
-            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
-
-    def test_rejects_yes(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="yes"):
-            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
-
-    def test_rejects_y(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="y"):
-            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
-
-    def test_rejects_empty(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
-            assert _prompt_double_confirm(log, "blue/rpool", "100G") is False
-
-    def test_accepts_destroy_with_whitespace(self):
-        """``.strip()`` on input means surrounding whitespace is OK —
-        the operator who hits space before pressing Enter shouldn't be
-        punished."""
-        log = make_log()
-        with (
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                return_value="  DESTROY  ",
-            ),
-        ):
-            assert _prompt_double_confirm(log, "blue/rpool", "100G") is True
-
-
-class TestRepairDivergentActionPrompt:  # pylint: disable=missing-function-docstring
-    """``_prompt_action`` and ``_prompt_failure_policy`` — verify the
-    selected index maps correctly to the documented sentinel
-    string. ``ask_choice`` reads via ``input()`` so we patch that."""
-
-    def test_action_destroy_first_choice(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="1"):
-            assert _prompt_action(log) == "destroy"
-
-    def test_action_skip_second_choice(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="2"):
-            assert _prompt_action(log) == "skip"
-
-    def test_action_abort_third_choice(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="3"):
-            assert _prompt_action(log) == "abort"
-
-    def test_action_default_skip_on_empty(self):
-        """Default is index=1 (skip) — the only fully reversible
-        choice. Empty input falls back to that."""
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
-            assert _prompt_action(log) == "skip"
-
-    def test_failure_policy_continue(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="1"):
-            assert _prompt_failure_policy(log) == "continue"
-
-    def test_failure_policy_abort(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="2"):
-            assert _prompt_failure_policy(log) == "abort"
-
-    def test_failure_policy_keep_state_abort(self):
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value="3"):
-            assert _prompt_failure_policy(log) == "keep_state_abort"
-
-
-class TestRepairDivergentLoop:  # pylint: disable=missing-function-docstring
-    """``_destroy_loop`` end-to-end with mocked sh.run + input.
-
-    The loop has three branches under the prompt:
-      - small (≤ 64 MB) auto-destroyed
-      - big (> 64 MB) goes through prompt → destroy / skip / abort
-      - big (> 1 GiB) requires extra DESTROY confirmation
-      - any failed destroy triggers the once-per-session policy prompt
-    """
-
-    @staticmethod
-    def _make_zfs() -> ZFS:
-        return ZFS(make_log())
-
-    def test_auto_destroys_small_datasets(self):
-        """Datasets ≤ 64 MB are destroyed silently, no prompt."""
-        small = _make_div("blue/rpool/var", used_bytes=10 * 1024 * 1024)  # 10 MiB
-        mock = MockShell()
-        mock.on(f"zfs destroy -r {small.target}").succeeds()
-        with patch_sh(mock), redirect_stdout(StringIO()):
-            destroyed, skipped, aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [small],
-            )
-        assert destroyed == [small.target]
-        assert not skipped
-        assert aborted is False
-
-    def test_big_destroy_with_user_confirm(self):
-        """A > 64 MB but ≤ 1 GiB dataset goes through the action
-        prompt. User picks ``destroy`` (option 1) and the destroy
-        succeeds — no double confirm because under 1 GiB."""
-        big = _make_div("blue/rpool", used_bytes=200 * 1024 * 1024)  # 200 MiB
-        mock = MockShell()
-        mock.on(f"zfs destroy -r {big.target}").succeeds()
-        # Children query for the dataset block — return empty.
-        mock.on_prefix("zfs list").succeeds()
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                return_value="1",  # action: destroy
-            ),
-        ):
-            destroyed, skipped, aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [big],
-            )
-        assert destroyed == [big.target]
-        assert not skipped
-        assert aborted is False
-
-    def test_big_skip(self):
-        """User skips — no destroy attempted."""
-        big = _make_div("blue/rpool", used_bytes=200 * 1024 * 1024)
-        mock = MockShell()
-        mock.on_prefix("zfs list").succeeds()
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                return_value="2",  # action: skip
-            ),
-        ):
-            destroyed, skipped, aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [big],
-            )
-        assert not destroyed
-        assert skipped == [big.target]
-        assert aborted is False
-        # No destroy command should have been invoked.
-        assert mock.was_not_called(f"zfs destroy -r {big.target}")
-
-    def test_big_abort_skips_remaining(self):
-        """User aborts on first big dataset — second one not even
-        prompted, both end up in ``skipped``."""
-        d1 = _make_div("blue/rpool", used_bytes=200 * 1024 * 1024)
-        d2 = _make_div("blue/rpool/x", used_bytes=200 * 1024 * 1024)
-        mock = MockShell()
-        mock.on_prefix("zfs list").succeeds()
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                return_value="3",  # action: abort
-            ),
-        ):
-            destroyed, skipped, aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [d1, d2],
-            )
-        assert not destroyed
-        assert sorted(skipped) == sorted([d1.target, d2.target])
-        assert aborted is True
-
-    def test_double_confirm_required_above_1gib(self):
-        """A > 1 GiB destroy is gated by the typed-DESTROY prompt.
-        Two ``input()`` calls happen: action choice (1=destroy), then
-        the literal ``DESTROY``. We use a side_effect list to feed
-        them in order."""
-        huge = _make_div("blue/rpool", used_bytes=2 * 1024**3)  # 2 GiB
-        assert huge.used_bytes > DOUBLE_CONFIRM_BYTES
-        mock = MockShell()
-        mock.on(f"zfs destroy -r {huge.target}").succeeds()
-        mock.on_prefix("zfs list").succeeds()
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                side_effect=["1", "DESTROY"],
-            ),
-        ):
-            destroyed, _skipped, _aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [huge],
-            )
-        assert destroyed == [huge.target]
-
-    def test_double_confirm_cancel_skips_dataset(self):
-        """User picks destroy on a > 1 GiB dataset but types ``yes``
-        (anything other than DESTROY) at the second prompt. Result:
-        nothing is destroyed."""
-        huge = _make_div("blue/rpool", used_bytes=2 * 1024**3)
-        mock = MockShell()
-        mock.on_prefix("zfs list").succeeds()
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                side_effect=["1", "yes"],  # action: destroy, then non-DESTROY answer
-            ),
-        ):
-            destroyed, skipped, _aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [huge],
-            )
-        assert not destroyed
-        assert skipped == [huge.target]
-        assert mock.was_not_called(f"zfs destroy -r {huge.target}")
-
-    def test_failure_policy_continue(self):
-        """Two big datasets, the destroy of the first FAILS, the
-        operator picks ``continue`` (option 1). The second dataset
-        is still attempted."""
-        d1 = _make_div("blue/rpool/a", used_bytes=200 * 1024 * 1024)
-        d2 = _make_div("blue/rpool/b", used_bytes=200 * 1024 * 1024)
-        mock = MockShell()
-        mock.on_prefix("zfs list").succeeds()
-        mock.on(f"zfs destroy -r {d1.target}").fails(stderr="busy")
-        mock.on(f"zfs destroy -r {d2.target}").succeeds()
-        # Inputs in order: action=destroy (1), action=destroy (1),
-        # failure_policy=continue (1).
-        # NOTE: failure prompt fires AFTER the failed destroy of d1,
-        # then we advance to d2's action prompt.
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                side_effect=["1", "1", "1"],
-            ),
-        ):
-            destroyed, skipped, aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [d1, d2],
-            )
-        assert destroyed == [d2.target]
-        assert d1.target in skipped
-        assert aborted is False
-
-    def test_failure_policy_abort(self):
-        """First destroy fails, operator picks ``abort`` (option 2).
-        Second dataset is not touched."""
-        d1 = _make_div("blue/rpool/a", used_bytes=200 * 1024 * 1024)
-        d2 = _make_div("blue/rpool/b", used_bytes=200 * 1024 * 1024)
-        mock = MockShell()
-        mock.on_prefix("zfs list").succeeds()
-        mock.on(f"zfs destroy -r {d1.target}").fails(stderr="busy")
-        # Inputs: action=destroy (1), failure_policy=abort (2).
-        with (
-            patch_sh(mock),
-            redirect_stdout(StringIO()),
-            patch(
-                "builtins.input",
-                side_effect=["1", "2"],
-            ),
-        ):
-            destroyed, skipped, aborted = _destroy_loop(
-                make_log(),
-                self._make_zfs(),
-                [d1, d2],
-            )
-        assert not destroyed
-        assert sorted(skipped) == sorted([d1.target, d2.target])
-        assert aborted is True
-        assert mock.was_not_called(f"zfs destroy -r {d2.target}")
-
-
-class TestRepairDivergentSnapshotHelpers:  # pylint: disable=missing-function-docstring
-    """``_snapshot_creation_dates`` and ``_shared_snapshot_with_source``
-    — small zfs-list parsers that feed the per-dataset block."""
-
-    def test_creation_dates_parses_tab_output(self):
-        mock = MockShell()
-        # The query that ``_snapshot_creation_dates`` issues — match the
-        # exact prefix to avoid colliding with other zfs list calls.
-        mock.on(
-            "zfs list -H -p -o name,creation -t snapshot -s creation blue/rpool",
-        ).succeeds(
-            "blue/rpool@autosnap_2026-04-01\t1743465600\n"
-            "blue/rpool@autosnap_2026-05-01\t1746057600\n",
-        )
-        with patch_sh(mock):
-            out = _snapshot_creation_dates("blue/rpool")
-        assert len(out) == 2
-        assert out[0][0] == "blue/rpool@autosnap_2026-04-01"
-
-    def test_creation_dates_empty_on_failure(self):
-        mock = MockShell()
-        mock.on_prefix(
-            "zfs list -H -p -o name,creation -t snapshot",
-        ).fails(stderr="no datasets")
-        with patch_sh(mock):
-            assert not _snapshot_creation_dates("blue/rpool")
-
-    def test_shared_snapshot_returns_most_recent_match(self):
-        """If both sides share two snapshots, the most recent
-        (lex-last) wins."""
-        mock = MockShell()
-        # _snapshot_set in lib.repair calls ``zfs list -H -o name -t
-        # snapshot <ds>`` — replicate that for both target and source.
-        mock.on("zfs list -H -o name -t snapshot blue/rpool").succeeds(
-            "blue/rpool@autosnap_2026-04-01\nblue/rpool@autosnap_2026-05-01\n",
-        )
-        mock.on("zfs list -H -o name -t snapshot rpool").succeeds(
-            "rpool@autosnap_2026-04-01\nrpool@autosnap_2026-05-01\n",
-        )
-        with patch_sh(mock):
-            shared = _shared_snapshot_with_source("blue/rpool", "rpool")
-        assert shared == "autosnap_2026-05-01"
-
-    def test_shared_snapshot_none_when_no_overlap(self):
-        mock = MockShell()
-        mock.on("zfs list -H -o name -t snapshot blue/rpool").succeeds(
-            "blue/rpool@autosnap_2025-01-01\n",
-        )
-        mock.on("zfs list -H -o name -t snapshot rpool").succeeds(
-            "rpool@autosnap_2026-05-01\n",
-        )
-        with patch_sh(mock):
-            assert _shared_snapshot_with_source("blue/rpool", "rpool") is None
 
 
 class TestPoolImportExactDevice:  # pylint: disable=missing-function-docstring
@@ -6464,19 +5768,6 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
 class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
     """Hallazgo 5 (used=-1), hallazgo 22 (ask_choice EOF), I19 (log file)."""
 
-    def test_unreadable_size_is_never_auto_destroyed(self):
-        d = DivergentDataset("rpool/var", "blue/rpool/var", -1, "?")
-        with (
-            patch.object(repair, "find_divergent", return_value=[d]),
-            patch("lib.repair.sh.run") as run_mock,
-            redirect_stdout(StringIO()),
-        ):
-            ok, too_big = repair.auto_repair_under_64mb(
-                ZFS(make_log()), "rpool", "blue", make_log()
-            )
-        assert not ok and too_big == [d]
-        run_mock.assert_not_called()
-
     def test_ask_choice_aborts_on_eof(self):
         with (
             patch("builtins.input", side_effect=EOFError),
@@ -6578,7 +5869,7 @@ class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
     def test_destructive_confirmations_never_bypass_the_log(self):
         # A raw input() answer never reaches zark.log (I19).
         raw_input = re.compile(r"(?<![\w.])input\(")
-        for name in ("recover", "purge", "repair_boot", "fix_rpool_mountpoint"):
+        for name in ("recover", "purge", "repair_boot", "fix_rpool_mountpoint", "backup"):
             src = (Path(__file__).parent.parent / "commands" / f"{name}.py").read_text(
                 encoding="utf-8",
             )
@@ -8238,6 +7529,28 @@ class TestDriveMetadata:
         with patch_sh(fake), redirect_stdout(out):
             assert not engine.log_metadata("backup", Log())
         assert "zark <= 2.0.0-rc1" in out.getvalue()
+
+
+class TestMonitorLatest:
+    """M1P.3: the monitor's "latest" is the newest snapshot by creation."""
+
+    def test_latest_by_creation_not_name(self):
+        """A local-time sanoid name sorting after a newer UTC point loses."""
+        mock = MockShell()
+        mock.on("zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r blue/rpool").succeeds(
+            "blue/rpool@autosnap_2026-10-07_19:00:00_hourly\t1\t10\t1759856400\n"
+            "blue/rpool@zark_2026-10-07_18:30:00Z\t2\t11\t1759861800\n",
+        )
+        with patch_sh(mock):
+            latest = monitor_mod._latest("blue")  # pylint: disable=protected-access
+        assert latest.startswith("zark_2026-10-07_18:30:00Z")
+
+    def test_running_means_a_zark_backup_or_prepare(self):
+        """Transfers are zark's own children now, not a syncoid process."""
+        pattern = re.compile(monitor_mod._RUNNING)  # pylint: disable=protected-access
+        assert pattern.search("/usr/bin/python3 /usr/share/zark/zark backup")
+        assert pattern.search("python3 ./zark prepare /dev/sdb")
+        assert not pattern.search("python3 ./zark monitor")
 
 
 class TestRunner:

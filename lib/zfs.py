@@ -473,12 +473,6 @@ class ZFS:
             snaps = [s for s in snaps if pattern in s]
         return snaps
 
-    def unique_snap_names(self, root: str, pattern: str = "autosnap") -> list[str]:
-        """Get unique snapshot timestamps sorted."""
-        snaps = self.list_snapshots(root, pattern)
-        names = sorted({s.split("@")[1] for s in snaps if "@" in s})
-        return names
-
     def dataset_exists(self, name: str) -> bool:
         """Check if a dataset exists. Note: this does not check if it's mounted."""
         return run(f"zfs list {name}").ok
