@@ -7357,6 +7357,72 @@ class TestStableVdevs:  # pylint: disable=missing-function-docstring
             assert kernel_named_vdevs() == ["/dev/sdb4"]
 
 
+class TestRunner:
+    """The suite's own runner (M1P.26)."""
+
+    def test_system_exit_from_a_test_is_a_failure(self) -> None:
+        """A SystemExit(0) raised by a test fails it instead of ending the run."""
+
+        def exits() -> None:
+            raise SystemExit(0)
+
+        out = StringIO()
+        with redirect_stdout(out):
+            outcome = _run_one("test_exits", exits)
+        assert outcome == "failed"
+        assert "SystemExit(0)" in out.getvalue()
+
+    def test_outcomes(self) -> None:
+        """Pass, skip and failure are reported as such."""
+
+        def skips() -> None:
+            raise SkipTest("why")
+
+        def fails() -> None:
+            raise AssertionError("no")
+
+        with redirect_stdout(StringIO()):
+            assert _run_one("t", lambda: None) == "passed"
+            assert _run_one("t", skips) == "skipped"
+            assert _run_one("t", fails) == "failed"
+
+    def test_summary_survives_an_escaping_exception(self) -> None:
+        """An interrupt still prints the summary and counts the run as failed."""
+        out = StringIO()
+        with (
+            patch.object(sys.modules[__name__], "_run_one", side_effect=KeyboardInterrupt),
+            redirect_stdout(out),
+        ):
+            try:
+                _ = main()
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("main() swallowed the interrupt")
+        assert re.search(r"\d+ passed, 1 failed", out.getvalue())
+
+
+def _run_one(name: str, method: Callable[[], object]) -> str:
+    """Run one test and print its line; return "passed", "skipped" or "failed".
+
+    A ``SystemExit`` escaping a test is a failure: caught by nothing else, it
+    would end the whole run with that exit status and no summary line.
+    """
+    try:
+        method()
+    except SkipTest as e:
+        print(f"    \033[0;33m-\033[0m {name}: skipped ({e})")
+        return "skipped"
+    except SystemExit as e:
+        print(f"    \033[0;31m✗\033[0m {name}: raised SystemExit({e.code!r})")
+        return "failed"
+    except Exception as e:  # pylint: disable=broad-except
+        print(f"    \033[0;31m✗\033[0m {name}: {e}")
+        return "failed"
+    print(f"    \033[0;32m✓\033[0m {name}")
+    return "passed"
+
+
 def main() -> int:
     """Discover and run every Test* class in this module.
 
@@ -7371,33 +7437,36 @@ def main() -> int:
         if isinstance(obj, type) and name.startswith("Test")
     ]
 
-    for cls in test_classes:
-        instance = cls()
-        methods = [
-            (name, getattr(instance, name))
-            for name in sorted(dir(instance))
-            if name.startswith("test_")
-        ]
-        if methods:
-            print(f"\n  {cls.__name__}")
-        for name, method in methods:
-            try:
-                method()
-                print(f"    \033[0;32m✓\033[0m {name}")
-                passed += 1
-            except SkipTest as e:
-                print(f"    \033[0;33m-\033[0m {name}: skipped ({e})")
-                skipped += 1
-            except Exception as e:  # pylint: disable=broad-except
-                print(f"    \033[0;31m✗\033[0m {name}: {e}")
-                failed += 1
-
-    changed = [p for p, st in _real_log_state().items() if st != real_logs[p]]
-    if changed:
-        print(f"\n    \033[0;31m✗\033[0m the run wrote a real log file: {', '.join(changed)}")
+    try:
+        for cls in test_classes:
+            instance = cls()
+            methods = [
+                (name, getattr(instance, name))
+                for name in sorted(dir(instance))
+                if name.startswith("test_")
+            ]
+            if methods:
+                print(f"\n  {cls.__name__}")
+            for name, method in methods:
+                outcome = _run_one(name, method)
+                passed += outcome == "passed"
+                skipped += outcome == "skipped"
+                failed += outcome == "failed"
+    except KeyboardInterrupt:
+        # An interrupted run is a failed run, and it still says how far it got.
         failed += 1
-
-    print(f"\n  {passed} passed, {failed} failed" + (f", {skipped} skipped" if skipped else ""))
+        raise
+    except BaseException as e:  # pylint: disable=broad-exception-caught
+        # Anything else that escaped a test (a SystemExit not caught by
+        # _run_one) ends the run as failed instead of with its own status.
+        print(f"\n    \033[0;31m✗\033[0m run aborted: {e!r}")
+        failed += 1
+    finally:
+        changed = [p for p, st in _real_log_state().items() if st != real_logs[p]]
+        if changed:
+            print(f"\n    \033[0;31m✗\033[0m the run wrote a real log file: {', '.join(changed)}")
+            failed += 1
+        print(f"\n  {passed} passed, {failed} failed" + (f", {skipped} skipped" if skipped else ""))
     return failed
 
 
