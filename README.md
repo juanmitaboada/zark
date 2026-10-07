@@ -48,11 +48,10 @@ zark automates the entire process:
 | `explore`          | Scan for ZFS pools, show known/unknown drives                |
 | `setup`            | Install dependencies, configure sanoid for automatic snapshots |
 | `prepare`          | Initialize a new blank drive as a backup target              |
-| `backup`           | Incremental encrypted backup via syncoid raw send            |
+| `backup`           | Incremental encrypted backup: one restore point per run      |
 | `recover`          | Full bare-metal system recovery from backup                  |
 | `finish`           | Post-recovery finalization (run from the recovered system)   |
 | `repair-boot`      | Fix boot issues from a live USB without full recovery        |
-| `repair-divergent` | Reset backup datasets that diverged from the source          |
 | `chroot`           | Open an interactive chroot into the installed system (live USB) |
 | `mount`            | Mount a backup pool — or the local system (`mount local`) — for inspection/chroot |
 | `umount`           | Unmount a backup pool, or the local system (`umount local`)  |
@@ -120,19 +119,16 @@ sudo ./zark setup     # install sanoid + zfs tooling, configure snapshots
 sudo ./zark prepare   # initialize a blank drive as a backup target
 ```
 
-`prepare` creates the backup pool, registers the drive's GUID in `etc/known_drives.json`, and runs the first sync. After this, `zark backup` finds the drive automatically every time you connect it.
+`prepare` asks its questions, creates the backup pool, sends the first backup point, reads the pool back and only then registers the drive's GUID in `etc/known_drives.json`. After this, `zark backup` finds the drive automatically every time you connect it.
 
 ### Back up your system
 
 ```bash
 # Connect your backup drive, then:
 sudo ./zark backup
-
-# Or skip the snapshot pass (e.g. re-run after a transient failure):
-sudo ./zark backup --no-snapshot
 ```
 
-zark detects the backup drive by GUID, takes a fresh `sanoid` snapshot pass on the source pool, and replicates all datasets via encrypted raw send. A typical incremental backup takes seconds.
+zark detects the backup drive by GUID, takes one backup point `zark_<UTC>` of every dataset at once, and brings each dataset on the drive to it with an incremental raw send. Each backup adds a restore point and removes none. A typical incremental backup takes seconds.
 
 ### Recover from scratch
 
@@ -201,13 +197,13 @@ zark/
 │   ├── keystore.py      # Encryption key management
 │   ├── drives.py        # Drive detection and GUID verification
 │   ├── mount.py         # Mount/unmount orchestration
-│   ├── repair.py        # Divergence detection (shared by backup + repair-divergent)
+│   ├── replication.py   # Backup planner: what each dataset needs (pure)
+│   ├── engine.py        # Backup executor: point, send/receive, anchors
 │   └── cleanup.py       # Trap handler, safe teardown
 ├── commands/
 │   ├── backup.py            # Incremental encrypted backup
 │   ├── recover.py           # Full bare-metal recovery
 │   ├── repair_boot.py       # Boot chain repair from live USB
-│   ├── repair_divergent.py  # Reset diverged backup datasets (interactive)
 │   ├── finish.py            # Post-recovery finalization
 │   ├── explore.py           # Pool and drive scanner
 │   ├── setup.py             # Dependency installation, Secure Boot pre-check
@@ -235,9 +231,9 @@ Block-level replication via `zfs send -w` (raw/encrypted) is fundamentally diffe
 - **Encryption preserved** - raw send transmits encrypted blocks directly. The backup drive holds ciphertext; keys are never exposed during transfer.
 - **Efficiency** - incremental sends only transmit changed blocks since the last snapshot, regardless of file count or size.
 
-### Why not just use syncoid directly?
+### Why not syncoid?
 
-zark uses syncoid (from sanoid) as its replication engine, but adds everything syncoid doesn't handle: drive detection, pool creation with correct encryption parameters, boot pool management, keystore restoration, GRUB/EFI chain repair, dracut/initramfs hook installation, Secure Boot compliance, and safe cleanup on failure.
+zark 1.x replicated with syncoid. syncoid bases each incremental on the newest snapshot common to both sides and receives with `-F`, so every backup destroyed the drive's snapshots newer than that base — the previous backups' restore points — once the source had pruned them. zark 2 runs its own loop: the base is always the drive's newest snapshot, found in the source as a snapshot or, once pruned there, through this drive's bookmark; receives are never forced; anything that would destroy data on the drive is a question asked before the transfer starts.
 
 ### The GRUB guard
 
@@ -276,7 +272,7 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 - **Hardware tested:**
   - MINISFORUM UM890 (Ubuntu 24.04 + 25.10 + 26.04) — primary development system.
   - Dell XPS 9315 with NVMe (Ubuntu 25.10) — secondary, used for cross-host validation against the MINISFORUM.
-  - Disk-failure recovery on a separate Ubuntu 24.04 system, restoring from a syncoid backup.
+  - Disk-failure recovery on a separate Ubuntu 24.04 system, restoring from a zark 1.x (syncoid) backup.
 - **CI/test:** end-to-end QEMU/OVMF integration harness validates Phase 1 (create + backup), Phase 2 (recover), and Phase 3 (boot the recovered disk).
 
 ---
@@ -286,7 +282,7 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 - Ubuntu live USB (for recovery operations)
 - Python 3 (included in Ubuntu live environment)
 - ZFS utilities (`zfsutils-linux`, included in Ubuntu desktop)
-- sanoid/syncoid (installed automatically by `zark setup`)
+- sanoid (installed automatically by `zark setup`)
 - An external drive for backup storage
 
 ---
@@ -321,41 +317,30 @@ Example:
 
 ## Drive rotation and retention policy
 
-zark supports rotating multiple backup drives — one at home, one off-site, an archival copy in a desk drawer — and the way snapshot retention is configured determines how long a drive can stay disconnected before its next backup will fail.
+zark supports rotating multiple backup drives — one at home, one off-site, an archival copy in a desk drawer — with no limit on how long a drive stays disconnected.
 
-### How divergence happens
+### Anchors
 
-When `zark backup` runs, `syncoid` finds the most recent snapshot present on **both** the source pool (`rpool`) and the target backup drive, and replicates the delta from that anchor forwards. If the source's `sanoid` retention has purged every snapshot the target still holds, there is no anchor — `syncoid` aborts with `Cowardly refusing to destroy your existing target`. Container datasets (`rpool`, `rpool/ROOT`, `rpool/var`, `bpool`) are most exposed because they barely change and accumulate fewer snapshots than active leaves like `rpool/USERDATA`.
+After each backup, every `rpool` dataset gets a bookmark `#zark_<pool GUID>_<UTC>` for that drive (a few hundred bytes, holding no data and untouched by sanoid's pruning). The next backup to that drive starts from it even if the source no longer has any snapshot in common with the drive. `bpool` never gets bookmarks (GRUB must keep reading it); there zark keeps one snapshot per drive instead. Nothing else of zark's stays in the source between backups. `zark registry forget <name>` removes a lost drive's anchors.
 
 ### Retention windows
 
-`zark setup` writes two sanoid templates to `/etc/sanoid/sanoid.conf`:
+`zark setup` writes two sanoid templates to `/etc/sanoid/sanoid.conf` for the source's own history:
 
 | Template | Datasets | Retention |
 |---|---|---|
 | `template_production` | `rpool/ROOT/<ubuntu>`, `rpool/USERDATA`, `bpool/BOOT` | hourly=24, daily=7, weekly=4, monthly=3 |
 | `template_minimal` | `rpool`, `rpool/ROOT`, `rpool/var`, `bpool`, anything new | daily=14, weekly=8, monthly=3 |
 
-Both give a worst-case overlap window of **roughly three months** before snapshots rotate out and the drive starts diverging. `template_minimal` was tightened from the original `daily=2` (no weekly or monthly) precisely because the old values made any drive disconnected for more than two days diverge on every container dataset.
+The sanoid snapshots taken between two backups travel to the drive with the next one, as extra restore points. Drives written by zark 1.x are anchored only on shared snapshots: the first zark 2 backup to such a drive asks once how to continue when the drive holds snapshots newer than anything the source still has (abort, archive and resend, or roll back), and from then on the drive is bookmark-anchored.
 
 ### Drive staleness reporting
 
-To help spot a forgotten drive before it crosses the divergence cliff, `zark backup` records a `last_backup_at` timestamp in `etc/known_drives.json` after every successful run. Reporting is purely informative — `zark backup` does not refuse to run on a drive that has not been backed up in a long time. The actual divergence threshold depends on sanoid's retention (which the operator can change), and a backup that has crossed it may still succeed if some shared snapshot remains. When syncoid does abort, the existing divergence handling in `repair-divergent` already takes over.
+`zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host and the last point (`org.zark:*`). After a backup it lists how many days have passed since every other drive's last backup.
 
-The retention horizon is read at runtime from `/etc/sanoid/sanoid.conf` and computed as `max(daily, weekly*7, monthly*30)` over the templates actually used by `[rpool*]`/`[bpool*]` sections. After a successful backup, two informative messages may appear after the **BACKUP COMPLETED** banner:
+### Divergence and datasets only on the drive
 
-1. If the selected drive was already past the retention horizon when this run started, a **WARN** explains the situation and points at `zark purge` followed by `zark prepare` as the only remediation that fully reinitializes a drive that has aged past its anchor. The message also notes explicitly that `zark repair-divergent` does **not** fix staleness — it only fixes divergent datasets after a syncoid abort.
-2. An **INFO** list shows other known drives whose age has reached the danger zone (`>= retention - 30` days), so the operator knows which drive to grab next without running another command.
-
-The same staleness note is shown by `zark repair-divergent` when no divergent datasets are found but the selected drive is in the danger zone — an operator who came expecting a fix is told why this command can't help.
-
-### `--no-sync-snap` for syncoid
-
-`zark backup` invokes `syncoid` with `--no-sync-snap` for both `rpool` and `bpool` transfers. Without the flag, syncoid creates `@syncoid_<host>_<ts>` snapshots before each transfer and cleans up older ones afterwards via `pruneoldsyncsnaps` — but with multiple backup drives, this cleanup destroys the source snapshot that the *other* drive still uses as its anchor, producing a long cascade of "could not find any snapshots to destroy / WARNING: zfs destroy ... failed: 256" warnings on every other run. With `--no-sync-snap`, syncoid uses the most recent existing snapshot in source as the anchor (the `autosnap_*` snapshots that step 6 of `zark backup` takes via `sanoid --take-snapshots`), and the cascade is gone at its source.
-
-### `zark repair-divergent`
-
-When divergence happens despite the retention windows, `repair-divergent` walks every divergent dataset, shows size, snapshot dates, the last shared snapshot with the source, and child datasets summary, and asks per dataset whether to destroy, skip, or abort the run. Datasets above 1 GiB require typing the literal string `DESTROY` (case-sensitive) at a second prompt before being touched. The threshold is hardcoded — there is no `--yes` or `--force` flag.
+A dataset with nothing in common with the drive (recreated in the source, or its bookmark destroyed by hand) is asked about before the transfer: skip it this time, archive the drive's copy as `<name>.archived-YYYYMMDD` and send it again, or destroy it and send it again (typed `DESTROY`). A dataset that exists only on the drive can be kept (not asked again), destroyed, or renamed when the source renamed it. `recover` restores old points from archived copies too.
 
 ---
 
@@ -383,7 +368,6 @@ with a command-specific default chosen to match the typical next step:
 | `purge`            | yes           | Drive is being retired or repurposed. |
 | `recover`          | yes           | Next step is unplug + reboot. |
 | `prepare`          | no            | Canonical follow-up is `backup` against the same drive. |
-| `repair-divergent` | no            | Canonical follow-up is `backup` to validate the fix. |
 | `repair-boot`      | n/a           | No removable drive involved; no prompt. |
 
 If the prompt is answered without input (script, cron, systemd timer), the default applies. There is no `--eject` / `--no-eject` flag — the prompt with a sensible default is the only knob.
@@ -408,7 +392,7 @@ The colours and icons are deliberately disjoint so the two states are never conf
 
 ### Read-back verification
 
-A clean `zpool export` is not proof that the pool survived. The same FUA-lying bridges can also lose **spacemaps** while the labels persist, so the pool scans as `ONLINE` but fails a real open deep in `vdev_load` with `metaslab_init failed [error=52]` — discovered only when you finally need the backup. To catch this immediately, `backup` re-imports the pool **read-only** after export (dropping the page cache first so the read comes from the device, not RAM) and requires `ONLINE` before declaring the backup safe. If the re-import fails it prints **`BACKUP NOT VERIFIED`** and stops short of the safe-to-unplug prompt: the data is not trustworthy even though `syncoid` and `export` reported success. This is always on.
+A clean `zpool export` is not proof that the pool survived. The same FUA-lying bridges can also lose **spacemaps** while the labels persist, so the pool scans as `ONLINE` but fails a real open deep in `vdev_load` with `metaslab_init failed [error=52]` — discovered only when you finally need the backup. To catch this immediately, `backup` re-imports the pool **read-only** after export (dropping the page cache first so the read comes from the device, not RAM) and requires `ONLINE` before declaring the backup safe. If the re-import fails, or the pool comes back with errors, it prints **`BACKUP NOT VERIFIED`** and stops short of the safe-to-unplug prompt: the data is not trustworthy even though the transfer and the export reported success. This is always on.
 
 ### Known-bad enclosures and the UAS quirk
 
@@ -431,7 +415,7 @@ make test       # fast path: invokes the test runner directly
 make tox        # full path: runs the suite under Python 3.12, 3.13 and 3.14
 ```
 
-Currently 147 tests covering config loading, drive detection, ZFS operations, keystore handling, the recovery abort path when a keystore is missing from backup, dataset-layout drift detection, grub.cfg manipulation including cross-host UUID rewriting, the syncoid version-detection helper, and the cleanup trap handler.
+Currently 147 tests covering config loading, drive detection, ZFS operations, keystore handling, the recovery abort path when a keystore is missing from backup, dataset-layout drift detection, grub.cfg manipulation including cross-host UUID rewriting, and the cleanup trap handler.
 
 GitHub Actions runs the unit-test suite on every push and pull request, with one job per supported Python version plus a separate lint job (mypy + pylint + ruff). See `.github/workflows/ci.yml`.
 

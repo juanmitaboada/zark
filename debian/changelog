@@ -1,3 +1,28 @@
+zark (2.0.0~rc2-1) UNRELEASED; urgency=medium
+
+  * Milestone M2 of zark 2 (replication engine). Not for release: nothing
+    is published until the final 2.0.0.
+  * backup and prepare: zark's own send/receive loop replaces syncoid. One
+    backup point per run, taken atomically per pool; incremental from the
+    drive's newest snapshot, or from this drive's bookmark once origin has
+    pruned it; never a forced receive; resumable transfers; per-drive
+    anchors (rpool bookmarks, one bpool snapshot) and no other snapshot of
+    zark's left in origin.
+  * backup: every question (datasets only on the drive, older common
+    snapshot only, diverged datasets) asked before anything is sent, with
+    typed confirmations for destroys; success only when every dataset
+    reached the point; per-dataset table; truthful read-back verdicts;
+    drive metadata as org.zark:* properties.
+  * prepare: questions first, point-only initial send, registration only
+    after a complete send, keystore and read-back.
+  * Drives hold canmount=noauto and no mountpoint of their own; recover and
+    mount apply origin's values explicitly.
+  * recover: backup points first; archived lineages restorable.
+  * setup enables bookmark_v2 on rpool after a confirmation.
+  * registry forget drops the drive's anchors. repair-divergent removed.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Wed, 07 Oct 2026 22:00:00 +0200
+
 zark (2.0.0~rc1-1) UNRELEASED; urgency=medium
 
   * Milestone M1 of zark 2 (recover integrity, device identity, registry).

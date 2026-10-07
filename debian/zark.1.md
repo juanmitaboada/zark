@@ -22,10 +22,12 @@ recovery of Ubuntu systems installed on encrypted ZFS root pools (the
 installer when "encrypt the new Ubuntu installation for security" is selected
 together with the experimental ZFS option).
 
-Backups are written to a dedicated external drive using **syncoid**(8) raw
-sends, so native ZFS encryption is preserved end-to-end: the backup drive
+Backups are written to a dedicated external drive with raw **zfs send**
+streams, so native ZFS encryption is preserved end-to-end: the backup drive
 holds ciphertext only, and the original passphrase is the only thing that can
-unlock it.
+unlock it. Every backup adds one restore point to the drive and removes
+none; the only thing **zark** keeps in the source pool between backups is a
+bookmark per drive.
 
 A full restore — partitioning, **rpool** + **bpool** recreation, LUKS keystore
 reconstruction, GRUB and initramfs regeneration — runs from an Ubuntu Live USB
@@ -82,8 +84,9 @@ for the canonical end-to-end sequences.
 
 **monitor**
 :   Live progress dashboard intended to be run in a second terminal while a
-    backup is in flight. Reports pool health, the current **syncoid**(8)
-    transfer rate and snapshot counts.
+    backup is in flight. Reports pool health, whether a **backup** or
+    **prepare** is running and for how long, the snapshot count on the
+    drive and its newest snapshot by creation time.
 
 **health** \[*device*\]
 :   Interactive drive analysis and debugging tool. With a *device* it checks
@@ -124,119 +127,119 @@ for the canonical end-to-end sequences.
     (see **NOTES**) on the running system, so a background kernel or GRUB
     upgrade cannot half-apply while a backup drive is connected.
 
+    **setup** checks that **rpool** has **feature\@bookmark_v2** enabled:
+    **backup** anchors each drive on a bookmark, and a raw incremental send
+    from a bookmark needs it. When it is disabled, **setup** explains that
+    enabling it cannot be undone (GRUB never reads **rpool**) and asks; a
+    pool whose *compatibility* property does not list the feature is left
+    as it is. **backup** and **prepare** refuse to run without it.
+
 **prepare** \[*device*\]
 :   Initialise a brand-new external drive as a **zark** backup target. The
     drive may be specified as a positional argument (for example
     */dev/disk/by-id/usb-Vendor_Model_Serial-0:0*); if omitted, **zark**
     presents an interactive list of unprepared drives.
 
-    Creates an unencrypted ZFS pool on the drive (encryption is provided by
+    Every question (risk factors, stale registry entries, pool name,
+    auto-eject) is asked before anything is written. **prepare** then
+    creates an unencrypted ZFS pool on the drive (encryption is provided by
     the raw send from the encrypted source pool — adding a second layer
-    here would just hide the failure of the inner one), performs the
-    initial raw transfer of **rpool** and **bpool**, copies over the
-    **rpool/keystore** zvol, and registers the new pool in
-    **known_drives.json** under the drive's */dev/disk/by-id* name. The
-    pool is created on that by-id name with an alternate root, so it is
-    never written to */etc/zfs/zpool.cache*. A drive without a by-id name
-    is refused rather than registered as *\<unknown\>*; registry entries
-    left for the same drive are offered for replacement.
+    here would just hide the failure of the inner one) on its by-id name
+    with an alternate root, so it is never written to
+    */etc/zfs/zpool.cache*, sends one backup point of **rpool** and
+    **bpool** (the point only, not the source's snapshot history) the way
+    **backup** does, copies over the **rpool/keystore** zvol, and records
+    the drive's metadata (see **backup**). A drive without a by-id name is
+    refused rather than registered as *\<unknown\>*; registry entries left
+    for the same drive are offered for replacement.
 
     Before doing any work, **prepare** runs the same non-destructive risk
     check as **health** and, if a risk factor is present, warns and asks for
     confirmation. After the transfer it performs a read-back verification
     (identical to **backup**'s): because the initial raw send is a full
     write-under-load, a successful re-import here proves the bridge survives
-    real load. If the read-back fails the drive is **not** registered.
+    real load. The drive is registered, with *last_backup_at* set, only
+    when every dataset and the keystore landed and the read-back is
+    **ONLINE**; otherwise it is **not** registered and **prepare** exits 1.
 
 **backup** \[**--no-snapshot**\]
-:   Run an incremental backup to the connected, registered backup drive.
-    Auto-detects which known drive is plugged in, imports the pool,
-    triggers a fresh **sanoid**(8) snapshot pass on the source, and
-    uses **syncoid**(8) raw send to transfer the new snapshots. Then
-    synchronises **bpool**, exports the backup pool cleanly and (if the
-    desktop environment is running) emits a **notify-send**(1)
-    summary.
+:   Back up this system to the connected, registered backup drive.
+    Auto-detects which known drive is plugged in and imports it by its
+    exact device with **-N** and an alternate root, so nothing it holds is
+    mounted and it never enters */etc/zfs/zpool.cache*.
+
+    **Backup point.** **backup** pauses the **sanoid** timer (waiting for a
+    running snapshot or prune pass), takes one snapshot
+    **zark_YYYY-MM-DD_HH:MM:SSZ** (UTC) of every replicated dataset — one
+    **zfs snapshot** per pool, so all of **rpool** is captured in the same
+    transaction group — and brings every dataset on the drive to it with
+    **zfs send** \| **zfs receive**. The base of each transfer is the
+    drive's newest snapshot of that dataset: when the source still has it,
+    the transfer is **-I** and carries the **sanoid** snapshots taken since
+    (they become extra restore points on the drive); when the source no
+    longer has it, this drive's bookmark of it is used instead. Receives
+    are resumable (**-s**) and never forced (**-F**), so no snapshot on the
+    drive is destroyed by a transfer. Afterwards the dataset gets a new
+    bookmark **\#zark\_\<pool GUID\>\_\<UTC\>** (on **bpool**, which never
+    gets bookmarks, the point is kept as a snapshot of that name instead),
+    the drive's older anchors go, the point is destroyed in the source and
+    the timer is resumed. Datasets on the drive are received with
+    **canmount=noauto** and no mountpoint of their own; the source's values
+    are recorded as **org.zark:canmount** and **org.zark:mountpoint** and
+    used by **recover** and **mount**. Volumes other than the keystore are
+    not backed up and are listed as such.
+
+    **Questions.** Everything is asked before the first byte is sent, and
+    nothing on the drive is destroyed unless chosen here (typed
+    confirmations for destroys):
+
+    - a dataset that exists only on the drive: ask again next time (the
+      default), keep it (not asked again), destroy it, or — when the
+      source renamed it — rename it on the drive too;
+    - datasets whose only snapshot in common with the source is older than
+      the drive's newest (the first run on a drive written by an older
+      **zark**, or a source recovered from an older point): one prompt
+      listing the snapshots at stake, to abort (the default), archive those
+      datasets and send them again in full, or roll them back;
+    - a dataset with nothing in common at all: skip it this time (the
+      default), archive it and send it again in full, or destroy it and
+      send it again.
+
+    An archived dataset is renamed to *\<name\>.archived-YYYYMMDD* on the
+    drive and keeps all its snapshots. The estimated transfer is checked
+    against the drive's free space before any choice is applied.
+
+    **Verdict.** **BACKUP COMPLETED** only when every dataset reached the
+    point and the read-back is **ONLINE**; a per-dataset table is printed
+    and logged. Otherwise **BACKUP INCOMPLETE** or **BACKUP NOT VERIFIED**,
+    exit 1, and *last_backup_at* is not updated. An interrupted transfer
+    resumes at the next **backup**.
 
     **Read-back verification.** After exporting, **backup** drops the
     kernel page cache and re-imports the pool read-only by its exact
     device, requiring an **ONLINE** state before reporting the backup
-    as safe. This guards against USB-SATA bridges that misreport cache
-    flushing (FUA): such a bridge can let **zpool export** succeed over
-    a pool that is no longer importable, with labels intact but
-    spacemaps lost (the on-disk symptom is **metaslab_init failed
-    [error=52]** on the next open). When the read-back fails, **backup**
-    prints a **BACKUP NOT VERIFIED** banner and stops before the
-    safe-to-unplug prompt — the transferred data is not trustworthy even
-    though **syncoid** and **export** reported success. The check is
-    always on. See the enclosure notes in the project's
+    as safe, and exports it again. This guards against USB-SATA bridges
+    that misreport cache flushing (FUA): such a bridge can let
+    **zpool export** succeed over a pool that is no longer importable,
+    with labels intact but spacemaps lost (the on-disk symptom is
+    **metaslab_init failed [error=52]** on the next open). The verdict
+    says whether the pool could not be re-imported or re-imported with
+    errors (with the **zpool status -v** lines). An export that fails is a
+    failed backup too. See the enclosure notes in the project's
     **docs/HARDWARE.md**.
 
-    **Snapshot policy.** **sanoid**(8) takes snapshots automatically
-    via its systemd timer (enabled by **zark setup**), typically
-    hourly. To make sure the backup drive holds the most current
-    state of the source pool, **backup** runs `sanoid
-    --take-snapshots` itself before each replication, regardless of
-    when the timer last fired. This is cheap (no I/O on the backup
-    drive, idempotent within sanoid's retention windows) so it is
-    the default.
+    **Drive metadata.** The drive's root dataset records
+    **org.zark:format**, **org.zark:version**, **org.zark:origin-host**,
+    **org.zark:origin-rpool-guid** and, for a complete backup,
+    **org.zark:last-point** and **org.zark:last-backup-at**; they are
+    readable without the passphrase, and **recover** and **mount** show
+    them after importing the drive.
 
-    **--no-snapshot** skips the sanoid stage and replicates whatever
-    snapshots already exist. Useful for re-runs after a transient
-    failure, or for invocations that have already taken snapshots
-    by other means.
+    After a successful backup, **backup** lists how many days have passed
+    since every other registered drive's last backup.
 
-    **Drive staleness reporting.** A **last_backup_at** field per
-    drive in **known_drives.json** records the ISO-8601 UTC timestamp
-    of every successful backup. Reporting is purely informative —
-    **backup** does not refuse to run on a drive that has not been
-    backed up in a long time, because the actual divergence threshold
-    depends on **sanoid** retention (which the operator can change)
-    and a backup that has crossed the threshold may still succeed if
-    some shared snapshot remains. When **syncoid** does abort, the
-    existing divergence handling in **repair-divergent** takes over.
-
-    The retention horizon is read at runtime from
-    **/etc/sanoid/sanoid.conf** and computed as **max(daily,
-    weekly\\*7, monthly\\*30)** over templates actually used by
-    **\[rpool\\*\]** or **\[bpool\\*\]** sections. After a successful
-    backup, two informative messages may appear after the **BACKUP
-    COMPLETED** banner:
-
-    1. If the selected drive was already past the retention horizon
-       when this run started, a **WARN** explains the situation and
-       points at **purge** + **prepare** (the only remediation that
-       fully reinitializes a drive that has aged past its anchor),
-       with an explicit note that **repair-divergent** does *not* fix
-       staleness — it only fixes divergent datasets after a
-       **syncoid** abort, which is a different problem.
-    2. An **INFO** list shows other known drives whose age has
-       reached the danger zone (**\\>= retention - 30** days), so the
-       operator knows which drive to grab next.
-
-    The field auto-populates on the first successful backup. Drives
-    that have never been backed up since the field was introduced
-    are silently skipped by the reporting. A failure to persist the
-    timestamp at the end of a backup is a warn, not fatal — the
-    backup data itself is already on the target.
-
-    **--no-snapshot anchor check.** When **--no-snapshot** is in
-    effect, **backup** does not take a fresh **sanoid** pass and
-    relies on whatever snapshots already exist in source. If no
-    recent source snapshot is found, **backup** emits a **WARN**
-    that **syncoid** may abort with no shared anchor, then proceeds
-    so **syncoid**'s own (more authoritative) error wins if it does
-    fail.
-
-    **--no-sync-snap.** **backup** invokes **syncoid** with
-    **--no-sync-snap** for both **rpool** and **bpool** transfers,
-    avoiding the rotation-warning cascade that occurred when more
-    than one backup drive shared a source: **syncoid**'s default
-    **pruneoldsyncsnaps** cleanup destroys the source's previous
-    **\@syncoid_\<host\>_\*** snapshot after each transfer, but that
-    snapshot may still be the anchor for another drive. Without
-    creating its own anchor snapshots, **syncoid** uses the most
-    recent existing snapshot in source — typically the
-    **autosnap_\*** snapshots from step 6.
+    **--no-snapshot** is accepted and has no effect: the backup point is
+    taken by **zark** itself.
 
     **backup** refuses to run from an Ubuntu Live USB: the live filesystem
     is not the system the user means to back up, and confusing the two
@@ -257,7 +260,9 @@ for the canonical end-to-end sequences.
 :   Inspect and repair **known_drives.json** without editing it by hand.
     **list** (the default) shows every entry, whether its disk is connected
     and whether the pool GUID on the disk matches. **forget** removes one
-    entry; the disk is not touched. **fix** rewrites *drive_id* from the
+    entry and, on the installed system, that drive's anchors in the source
+    (its bookmarks on **rpool** and snapshots on **bpool**); the drive
+    itself is not touched. **fix** rewrites *drive_id* from the
     connected disk that carries the registered pool GUID and writes every
     missing key. Every write is validated and atomic; a malformed file is
     reported with its line and column and never overwritten.
@@ -272,7 +277,12 @@ for the canonical end-to-end sequences.
     The procedure scans for backup drives, imports the chosen pool
     read-only by its exact device, prompts for the rpool passphrase and
     offers the restore points found on the drive, ordered by snapshot
-    creation time (the newest is the default). It then shows a table with
+    creation time (the newest is the default): backup points are labelled
+    as such and the **sanoid** snapshots carried between them as carried
+    points, each with how many datasets it holds. A dataset without a
+    backup point's snapshot did not exist then and is not restored for that
+    point; datasets archived by **backup** serve the points older than the
+    archive. It then shows a table with
     the snapshot every dataset will be restored from — never one newer
     than the point — and the mount properties it will get. Only after a
     full pre-flight (sizes of that point, keystore, bpool) and a typed
@@ -329,32 +339,6 @@ for the canonical end-to-end sequences.
     **chroot** refuses to run when **rpool** is already imported — if that
     is the running system you are already inside it, and if it is a
     leftover from a previous run, **clean** releases it first.
-
-**repair-divergent**
-:   Interactively review and repair backup datasets whose snapshot
-    history has diverged from the source. Divergence usually appears
-    when the backup drive has been disconnected for longer than the
-    source pool's **sanoid**(8) retention policy, so the snapshot
-    that was once shared between source and target has been pruned
-    on the source. **backup** auto-resolves divergence silently when
-    the affected dataset is under 64 MB (almost always system
-    metadata that can be recreated from the next initial
-    replication); larger datasets are left alone and **backup**
-    aborts with a pointer to this command. No source data is ever
-    touched.
-
-    For every divergent dataset above 64 MB, **repair-divergent**
-    prints a context block with the size, snapshot count and date
-    range on the target, the most recent snapshot suffix shared
-    with the source counterpart (or *none*), the child datasets
-    summary and a one-line hint, and asks the operator to choose
-    among **destroy**, **skip**, or **abort all**. Datasets above
-    1 GiB additionally require typing the literal string **DESTROY**
-    (case-sensitive) at a second prompt before being touched. If a
-    **zfs destroy** invocation fails mid-flight (busy zvol, lock
-    contention), the operator is asked once how to handle the rest
-    of the run — the choice (**continue**, **abort**, or **keep state
-    and abort**) sticks for the remainder of the session.
 
 **finish**
 :   Post-recovery finalisation, intended to be run *from inside the
@@ -442,8 +426,9 @@ for the canonical end-to-end sequences.
     is written to the drive; a dataset whose mountpoint directory does not
     exist, or whose path resolves outside */mnt/zark/<poolname>/* (through
     a symbolic link or *..* inside the backup), is listed as not mounted.
-    Read-write mounts each dataset at its
-    stored mountpoint under the alternate root.
+    Read-write mounts the same tree, writable. Archived datasets
+    (*\<name\>.archived-YYYYMMDD*) are not part of the tree; the banner lists
+    them with the command to browse one.
 
     With no argument, scans for connected backup drives. With the
     *target* **local** (aliases **system**, **rpool**) it instead mounts
@@ -574,7 +559,7 @@ To verify a recovery without rebooting:
 # DEPENDENCIES
 
 Hard runtime dependencies (declared by the Debian package): **python3** ≥
-3.12, **zfsutils-linux**, **sanoid** (which provides **syncoid**),
+3.12, **zfsutils-linux**, **sanoid** (local snapshots),
 **cryptsetup-bin**, **gdisk**, **grub2-common** and one of **dracut** or
 **initramfs-tools**.
 
@@ -696,6 +681,6 @@ Juanmi Taboada (juanmi@juanmitaboada.com)
 
 # SEE ALSO
 
-**zfs**(8), **zpool**(8), **syncoid**(8), **sanoid**(8),
+**zfs**(8), **zpool**(8), **sanoid**(8),
 **cryptsetup**(8), **dracut**(8), **grub-install**(8),
 **update-grub**(8)

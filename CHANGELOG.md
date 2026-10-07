@@ -10,8 +10,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M1 (2.0.0-rc1)** and the development-tooling
-consolidation that preceded it.
+The tree currently carries **M2 (2.0.0-rc2)** on top of M1 (2.0.0-rc1) and
+the development-tooling consolidation that preceded it.
+
+### M2 — replication engine (2.0.0-rc2)
+
+#### Added
+
+- `lib/replication.py` (pure planner) and `lib/engine.py` (executor):
+  zark's own send/receive loop for `backup` and `prepare`, replacing
+  syncoid. Per run: `sanoid.timer` paused (waiting for a running take or
+  prune) and resumed only if the run stopped it; one backup point
+  `zark_YYYY-MM-DD_HH:MM:SSZ` (UTC) taken with one `zfs snapshot` per pool
+  (a call cannot span pools); every dataset brought to it, parents first,
+  with `zfs send [-w] … | zfs receive -s -u -o canmount=noauto
+  -x mountpoint -o org.zark:canmount=… -o org.zark:mountpoint=…`, never
+  `-F`. The base is always the destination's newest snapshot: `-I` from it
+  when origin still has it (the sanoid snapshots in between travel as
+  carried restore points), or `-i` from this drive's bookmark of it and
+  then `-I` (`-I` cannot start at a bookmark) when origin pruned it. A
+  partial receive is resumed first (`send -t`); one whose origin snapshot
+  is gone is discarded with `receive -A`, which touches no snapshot.
+  After the transfers every dataset that holds the point is anchored —
+  a bookmark `#zark_<pool GUID>_<UTC>` on rpool; on bpool, which never
+  gets bookmarks, the point renamed to `@zark_<pool GUID>_<UTC>` — and the
+  drive's older anchors are destroyed one by one; the point, and any point
+  left by an interrupted run, is destroyed in origin except where a
+  partial receive still needs it. (D14–D16, redesign §4, I-A…I-G)
+- backup's questions, all asked before the first byte is sent: datasets
+  only on the drive (keep — remembered as `org.zark:orphan=kept@<date>`,
+  destroy, ask next time, or follow a rename in origin found by guid);
+  datasets whose only common snapshot is older than the drive's newest
+  (first run on a drive written by zark ≤ 2.0.0-rc1, or an origin
+  recovered from an older point) — one prompt per drive listing the
+  snapshots at stake: abort, archive and resend, or roll back (typed
+  `ROLLBACK`); diverged datasets — skip, archive as
+  `<name>.archived-YYYYMMDD` and resend, or destroy and resend (typed
+  `DESTROY`). The estimated transfer (`zfs send -nvP`) is checked against
+  the drive's free space before any choice is applied. (D17, redesign §7,
+  M2 decisions 7, 8, 18)
+- Drive metadata on the pool's root dataset, readable without the
+  passphrase: `org.zark:format` (2), `version`, `origin-host`,
+  `origin-rpool-guid`, `prepared-at`, and for a complete run `last-point`
+  and `last-backup-at`; `recover` and `mount` show them after importing a
+  drive. (decision 17a)
+- `zark setup` checks `feature@bookmark_v2` on rpool and offers to enable
+  it (default no; it cannot be undone; GRUB never reads rpool); `backup`
+  and `prepare` refuse without it. (decision 4a)
+- `tests/fake_zfs.py`: an in-memory model of the zfs/zpool commands the
+  engine runs, keeping the kernel rules it relies on and refusing `-F`;
+  the engine, `backup` and `prepare` are tested end to end against it.
+
+#### Changed
+
+- **backup.** Success means every expected dataset reached the point and
+  the read-back is ONLINE (I-D); otherwise BACKUP INCOMPLETE or BACKUP NOT
+  VERIFIED, exit 1, and `last_backup_at` is not written. A per-dataset
+  table goes to the terminal and zark.log; zvols other than the keystore
+  are listed as NOT BACKED UP. An export that fails is a failed backup
+  (H17). The banner's duration covers the whole run (P0-2) and its space
+  figures are read after the transfer (P0-4). After a backup it lists the
+  days since each other drive's last backup instead of retention-horizon
+  warnings (decision 15). The pre-backup `sanoid --take-snapshots` is
+  gone; `--no-snapshot` is accepted and has no effect. (H2/I1, I2, I3,
+  H4/D5, H13, H23/F4, I4)
+- **Read-back.** `verify_exported_pool_readback` returns what happened:
+  could not re-import, or re-imported with health X (with `zpool status
+  -v` lines), without blaming the bridge; its own re-export is checked and
+  logged. (I6, I12)
+- **prepare.** Every question is asked before the pool is created (the
+  auto-eject one used to come after the long send). The initial send is
+  the backup point only, through the engine; no `zfs set` of mount
+  properties with zvols imported, no `syncoid_*` residues, nothing of
+  another drive pruned; the keystore snapshot is destroyed once sent. The
+  drive is registered only when every dataset and the keystore landed and
+  the read-back is ONLINE, with `last_backup_at` set. (I13, I14/F9, H16,
+  R2§8.5/M1P.2, M1P.14, incident §8, decisions 2 and 14)
+- **Destination mount properties.** Every dataset on a drive is received
+  with `canmount=noauto` and no mountpoint of its own (an existing local
+  one is reverted to inherited); origin's values are recorded as
+  `org.zark:*`, which `recover` and `mount` already read. A manual `zpool
+  import` of a drive, or a boot with it attached, mounts nothing.
+  (P0-11/F11/I15/D6, redesign §9, decision 1)
+- **recover.** Backup points are labelled as such and other runs as
+  carried points, each with how many datasets it holds. A backup point's
+  membership is exact: a dataset without its snapshot is not restored from
+  an older one. Archived lineages serve the points older than them (rows
+  marked "from archive"). (redesign §4.2, decisions 18, 19)
+- **mount.** Read-write mounts the same origin tree as read-only,
+  explicitly (`mount -t zfs -o zfsutil`); archived lineages are listed
+  apart.
+- **registry forget** also destroys the drive's anchors in origin, by the
+  pool GUID they carry. (D16, M1 decision 4)
+- **monitor.** "Latest" is the newest snapshot by creation (M1P.3); a run
+  in progress is a `zark backup`/`prepare` process.
+- The unit-suite runner counts a `SystemExit` raised by a test as a
+  failure, fails the run on anything else that escapes, and always prints
+  its summary. (M1P.26)
+
+#### Removed
+
+- `zark repair-divergent` and `lib/repair.py`: the < 64 MB auto-repair
+  destroyed destination datasets without asking (against I-A) and the
+  command picked the common snapshot by name order (M1P.1). backup's own
+  questions replace both.
+- syncoid from `backup` and `prepare` (sanoid stays for local snapshots),
+  `syncoid_exclude_flag()`, `ZFS.unique_snap_names()`.
+
+#### Known limitations
+
+- A drive written by zark ≤ 2.0.0-rc1 asks once, at its first zark 2
+  backup, how to continue when it holds snapshots newer than anything the
+  source still has.
+- Destination retention, origin prune and the CAP/RPO MOTD are M3:
+  backup points and archived lineages accumulate on the drive until then,
+  and kept orphans too.
+- Volumes other than the keystore are not backed up (listed every run).
+- An anchor that could not be created leaves that dataset on its previous
+  anchor (reported in the table); the next backup may then need a
+  decision for it.
+
+#### Rejected approaches
+
+- **Keep syncoid and anchor on a real snapshot per drive kept in origin
+  (redesign 1b).** Pins origin space per drive, a lost drive blocks
+  pruning, and syncoid prefers any older common snapshot over a bookmark,
+  so its `-F` still rolls the destination back.
+- **`receive -F` when the base is the destination's newest.** It destroys
+  nothing in that case, but without `-F` the kernel itself refuses any
+  other base (ETXTBSY), so a wrong base can never destroy points.
+  Explicit, confirmed `zfs rollback -r` is the only rollback left.
+- **Bookmarks on bpool.** `bookmark_v2`/`bookmark_written` are not in
+  GRUB 2.12's read-only-compatible set; one snapshot per drive is kept
+  there instead (bpool/BOOT already keeps three monthlies).
+- **One `zfs snapshot` for rpool and bpool together.** Impossible: a
+  snapshot ioctl is bound to one pool (EXDEV).
+- **Replicating zvols with `volmode=none`.** recover would still not
+  restore them; listing them as not backed up is the honest state until
+  it does.
+- **Metadata inside the keystore's LUKS volume.** Needs the passphrase and
+  a read-write open of the keystore zvol on every backup.
+- **Keeping `repair-divergent` as a separate command.** Its decisions now
+  belong before the transfer, where backup asks them with the space
+  figures at hand.
 
 ### M1 — recover integrity, device identity and registry (2.0.0-rc1)
 
