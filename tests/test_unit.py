@@ -120,6 +120,7 @@ from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E
 )
 from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
+    engine,
     repair,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -223,6 +224,7 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     fix_grub_bpool_uuid,
     syncoid_exclude_flag,
 )
+from tests.fake_zfs import FakeZfs  # pylint: disable=wrong-import-position # noqa: E402
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -7555,6 +7557,370 @@ class TestReplicationPlanner:
         zvol = repl.DatasetPlan("rpool/vm", repl.State.EXCLUDED)
         assert repl.reached([at, orphan, zvol])
         assert not repl.reached([at, repl.DatasetPlan("rpool/x", repl.State.DIVERGED)])
+
+
+# ── Replication engine against the in-memory ZFS model (M2) ────────────────
+
+
+def _origin_fixture(fake: FakeZfs) -> None:
+    """eli-like origin: encrypted rpool tree, keystore zvol, a VM zvol, bpool."""
+    fake.pool("rpool")
+    fake.pool("bpool", bookmark_v2="disabled")
+    for name, props in (
+        ("rpool/ROOT", {"canmount": "off", "mountpoint": "none"}),
+        ("rpool/ROOT/be", {"canmount": "on", "mountpoint": "/"}),
+        ("rpool/USERDATA", {"canmount": "off", "mountpoint": "none"}),
+        ("rpool/USERDATA/home", {"canmount": "on", "mountpoint": "/home"}),
+        ("rpool/var", {"canmount": "off", "mountpoint": "/var"}),
+        ("rpool/var/lib", {"canmount": "off", "mountpoint": "/var/lib"}),
+        ("rpool/var/lib/docker", {"canmount": "on", "mountpoint": "/var/lib/docker"}),
+        ("bpool/BOOT", {"canmount": "off", "mountpoint": "none"}),
+        ("bpool/BOOT/be", {"canmount": "on", "mountpoint": "/boot"}),
+    ):
+        fake.dataset(name, **props)
+    fake.dataset("rpool/keystore", kind="volume")
+    fake.dataset("rpool/vm", kind="volume")
+    for ds in list(fake.ds):
+        if fake.ds[ds].kind == "filesystem":
+            fake.snap(ds, "autosnap_2026-10-01_00:00:00_daily")
+
+
+def _tick(fake: FakeZfs, label: str) -> None:
+    """sanoid takes a new snapshot of every filesystem."""
+    for ds in list(fake.ds):
+        if ds.split("/")[0] in ("rpool", "bpool") and fake.ds[ds].kind == "filesystem":
+            fake.snap(ds, f"autosnap_{label}")
+
+
+def _prune_all_autosnaps(fake: FakeZfs) -> None:
+    """Origin loses every sanoid snapshot (gap beyond every bucket, or a % range)."""
+    for ds in list(fake.ds):
+        if ds.split("/")[0] in ("rpool", "bpool"):
+            fake.ds[ds].snaps = [s for s in fake.ds[ds].snaps if not s.name.startswith("autosnap")]
+
+
+def _engine_run(
+    fake: FakeZfs,
+    pool: str,
+    guid: str,
+    point: str,
+    decide: "engine.Decide | None" = None,
+) -> "engine.Result":
+    with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+        log = Log()
+        eng = engine.Run(pool, guid, log, point, sleep=lambda _s: None)
+        cleanup = Cleanup(log)
+        return engine.execute(eng, cleanup, decide or (lambda _p, _r: True))
+
+
+def _origin_points(fake: FakeZfs) -> list[str]:
+    return sorted(
+        f"{ds}@{s.name}"
+        for ds, d in fake.ds.items()
+        if ds.split("/")[0] in ("rpool", "bpool")
+        for s in d.snaps
+        if repl.POINT_RE.match(s.name)
+    )
+
+
+P1, P2, P3 = (
+    "zark_2026-10-07_10:00:00Z",
+    "zark_2026-10-08_10:00:00Z",
+    "zark_2026-10-09_10:00:00Z",
+)
+
+
+class TestEngine:
+    """The engine end to end against FakeZfs (redesign §4, I-A…I-G)."""
+
+    def _fresh(self, pools: tuple[str, ...] = ("backup",)) -> FakeZfs:
+        fake = FakeZfs()
+        _origin_fixture(fake)
+        for p in pools:
+            fake.pool(p)
+        return fake
+
+    def test_first_run_brings_every_dataset_to_the_point(self) -> None:
+        """NEW everywhere; keystore and zvols stay out; I-D holds."""
+        fake = self._fresh()
+        res = _engine_run(fake, "backup", "111", P1)
+        assert res.ok, res
+        assert P1 in fake.names("backup/rpool/var/lib/docker")
+        assert P1 in fake.names("backup/bpool/BOOT/be")
+        assert "backup/rpool/keystore" not in fake.ds
+        assert "backup/rpool/vm" not in fake.ds
+        excluded = [p.rel for p in res.plans if p.state is repl.State.EXCLUDED]
+        assert excluded == ["rpool/vm"]
+
+    def test_points_atomic_per_pool(self) -> None:
+        """I-C: one snapshot call per pool, every expected dataset in it."""
+        fake = self._fresh()
+        _ = _engine_run(fake, "backup", "111", P1)
+        snaps = [c for c in fake.calls if c.startswith("zfs snapshot")]
+        assert len(snaps) == 2
+        assert all(f"@{P1}" in c for c in snaps)
+        assert "rpool/var/lib/docker@" in snaps[0] and "rpool/keystore@" not in snaps[0]
+        assert snaps[1].count("bpool") == 3
+
+    def test_origin_keeps_only_bookmarks_and_bpool_anchors(self) -> None:
+        """I-B, I-F: no point left in origin; bookmarks on rpool, none on bpool."""
+        fake = self._fresh()
+        _ = _engine_run(fake, "backup", "111", P1)
+        assert _origin_points(fake) == []
+        anchor = repl.anchor_name("111", P1)
+        assert fake.bookmarks("rpool/USERDATA/home") == [anchor]
+        assert all(not fake.bookmarks(ds) for ds in fake.ds if ds.startswith("bpool"))
+        assert anchor in fake.names("bpool/BOOT/be")
+
+    def test_destination_mount_properties(self) -> None:
+        """Decision 1: canmount=noauto, inherited mountpoint, origin values as org.zark:*."""
+        fake = self._fresh()
+        _ = _engine_run(fake, "backup", "111", P1)
+        props = fake.ds["backup/rpool/var"].props
+        assert props["canmount"] == "noauto"
+        assert "mountpoint" not in props
+        assert (props["org.zark:canmount"], props["org.zark:mountpoint"]) == ("off", "/var")
+        boot = fake.ds["backup/bpool/BOOT/be"].props
+        assert (boot["canmount"], boot["org.zark:mountpoint"]) == ("noauto", "/boot")
+
+    def test_second_run_via_bookmark_keeps_every_point(self) -> None:
+        """G3/I-A: after origin lost every common snapshot, the next run is
+        incremental (bookmark on rpool, anchor on bpool) and the backup keeps
+        the first point."""
+        fake = self._fresh()
+        _ = _engine_run(fake, "backup", "111", P1)
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        _prune_all_autosnaps(fake)
+        before = {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+        res = _engine_run(fake, "backup", "111", P2)
+        assert res.ok, res
+        states = {r: o.ok for r, o in res.outcomes.items()}
+        assert all(states.values())
+        for ds, names in before.items():
+            assert fake.names(ds)[: len(names)] == names, ds  # nothing removed (I-A)
+        assert P2 in fake.names("backup/rpool/USERDATA/home")
+        assert fake.bookmarks("rpool/USERDATA/home") == [repl.anchor_name("111", P2)]
+        assert any(" -i 'rpool/USERDATA/home#zark_111_" in c for c in fake.calls)
+
+    def test_carried_intermediates(self) -> None:
+        """D15: sanoid snapshots between the base and the point travel with -I."""
+        fake = self._fresh()
+        _ = _engine_run(fake, "backup", "111", P1)
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        res = _engine_run(fake, "backup", "111", P2)
+        assert res.ok
+        assert "autosnap_2026-10-07_12:00:00_hourly" in fake.names("backup/rpool/ROOT/be")
+
+    def test_two_disks_keep_their_own_anchors(self) -> None:
+        """§8 test 1: rotation with a gap beyond every bucket on both disks."""
+        fake = self._fresh(("black", "blue"))
+        assert _engine_run(fake, "black", "1", P1).ok
+        assert _engine_run(fake, "blue", "2", P2).ok
+        _prune_all_autosnaps(fake)
+        assert _engine_run(fake, "black", "1", P3).ok
+        marks = fake.bookmarks("rpool/ROOT/be")
+        assert sorted(marks) == sorted([repl.anchor_name("2", P2), repl.anchor_name("1", P3)])
+        assert P1 in fake.names("black/rpool/ROOT/be") and P3 in fake.names("black/rpool/ROOT/be")
+        assert P2 in fake.names("blue/rpool/ROOT/be")
+
+    def test_interrupted_transfer_resumes(self) -> None:
+        """§8 test 3: a cut stream leaves a token and the point; the next run
+        finishes it, reaches its own point and drops the leftover."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        res = _engine_run(fake, "backup", "111", P2)
+        assert not res.ok
+        assert fake.ds["backup/rpool/USERDATA/home"].token
+        assert _origin_points(fake) == [f"rpool/USERDATA/home@{P2}"]  # kept for the resume
+        res = _engine_run(fake, "backup", "111", P3)
+        assert res.ok, res
+        home = fake.names("backup/rpool/USERDATA/home")
+        assert P2 in home and P3 in home
+        assert _origin_points(fake) == []
+
+    def test_stale_token_is_discarded_not_snapshots(self) -> None:
+        """A partial receive whose origin snapshot is gone is aborted; the
+        dataset is planned again and no destination snapshot is lost."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        before = fake.names("backup/rpool/USERDATA/home")
+        fake.ds["rpool/USERDATA/home"].snaps = [
+            s for s in fake.ds["rpool/USERDATA/home"].snaps if s.name != P2
+        ]
+        res = _engine_run(fake, "backup", "111", P3)
+        assert res.ok, res
+        assert fake.names("backup/rpool/USERDATA/home")[: len(before)] == before
+
+    def test_enospc_destroys_nothing(self) -> None:
+        """§8 test 4: per-dataset failure, nothing removed, not success."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        before = {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+        fake.inject["backup/rpool"] = ("enospc", 0)
+        res = _engine_run(fake, "backup", "111", P2)
+        assert not res.ok and res.enospc
+        for ds, names in before.items():
+            assert fake.names(ds)[: len(names)] == names
+        assert fake.bookmarks("rpool") == [repl.anchor_name("111", P1)]  # anchor unchanged
+
+    def test_child_of_a_failed_new_parent_waits(self) -> None:
+        """A NEW child is not attempted when its parent failed."""
+        fake = self._fresh()
+        fake.inject["backup/rpool/var"] = ("interrupt", 0)
+        res = _engine_run(fake, "backup", "111", P1)
+        assert not res.ok
+        assert res.outcomes["rpool/var/lib"].error == "parent did not reach the point"
+
+    def test_rollback_needs_a_decision(self) -> None:
+        """H23/§7: with only an older common snapshot left, nothing transfers
+        unless the user chooses; choosing rollback destroys only the listed ones."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        assert _engine_run(fake, "backup", "111", P2).ok
+        # A 1.0.12-style backup: the destination's newest is a snapshot origin
+        # no longer has, no bookmark of it exists, an older one is common.
+        fake.ds["rpool/ROOT/be"].bookmarks.clear()
+        fake.snap("backup/rpool/ROOT/be", "autosnap_gone_hourly")
+        res = _engine_run(fake, "backup", "111", P3)
+        assert not res.ok
+        assert "autosnap_gone_hourly" in fake.names("backup/rpool/ROOT/be")
+        rb = [p for p in res.plans if p.state is repl.State.ROLLBACK]
+        assert [(p.rel, p.common) for p in rb] == [("rpool/ROOT/be", "@autosnap_h1")]
+
+        def roll(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            for p in plans:
+                if p.state is repl.State.ROLLBACK:
+                    assert p.newer == [f"@{P2}", "@autosnap_gone_hourly"]
+                    assert eng.rollback(p)
+            return True
+
+        p4 = "zark_2026-10-10_10:00:00Z"
+        assert _engine_run(fake, "backup", "111", p4, roll).ok
+        names = fake.names("backup/rpool/ROOT/be")
+        assert "autosnap_gone_hourly" not in names and P2 not in names
+        assert P1 in names and p4 in names
+
+    def test_diverged_archive_keeps_the_old_lineage(self) -> None:
+        """D17: archiving renames the old lineage; the dataset is resent in full."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.ds["rpool/var/lib/docker"].snaps.clear()  # recreated in origin
+        fake.ds["rpool/var/lib/docker"].bookmarks.clear()
+        fake.snap("rpool/var/lib/docker", "autosnap_new")
+        when = datetime(2026, 10, 9, tzinfo=UTC)
+
+        def archive(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            for p in plans:
+                if p.state is repl.State.DIVERGED:
+                    assert eng.archive(p, when)
+            return True
+
+        res = _engine_run(fake, "backup", "111", P3, archive)
+        assert res.ok, res
+        assert P1 in fake.names("backup/rpool/var/lib/docker.archived-20261009")
+        assert fake.names("backup/rpool/var/lib/docker") == [P3]
+
+    def test_orphan_kept_is_not_asked_again_and_rename_followed(self) -> None:
+        """Decision 18: keep marks the orphan; a rename in origin is followed."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.ds["rpool/USERDATA/home2"] = fake.ds.pop("rpool/USERDATA/home")
+        fake.ds.pop("rpool/var/lib/docker")
+
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            for p in plans:
+                if p.state is repl.State.ORPHAN and p.rename_to:
+                    assert (p.rel, p.rename_to) == ("rpool/USERDATA/home", "rpool/USERDATA/home2")
+                    assert eng.follow_rename(p)
+                elif p.state is repl.State.ORPHAN:
+                    assert p.rel == "rpool/var/lib/docker"
+                    assert eng.keep_orphan(p, "2026-10-09")
+            return True
+
+        res = _engine_run(fake, "backup", "111", P3, decide)
+        assert res.ok, res
+        home2 = fake.names("backup/rpool/USERDATA/home2")
+        assert P1 in home2 and P3 in home2
+        kept = [p for p in res.plans if p.state is repl.State.ORPHAN]
+        assert [(p.rel, p.kept) for p in kept] == [("rpool/var/lib/docker", True)]
+
+    def test_sanoid_paused_and_restored(self) -> None:
+        """§8 test 10: the timer is stopped for the run and started after;
+        a timer the user had stopped stays stopped."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        assert "systemctl stop sanoid.timer" in fake.calls
+        assert fake.units["sanoid.timer"] == "active"
+        fake.units["sanoid.timer"] = "inactive"
+        assert _engine_run(fake, "backup", "111", P2).ok
+        assert fake.units["sanoid.timer"] == "inactive"
+
+    def test_abort_drops_the_point(self) -> None:
+        """A run the user aborts leaves no point in origin and nothing on the backup."""
+        fake = self._fresh()
+        res = _engine_run(fake, "backup", "111", P1, lambda _p, _r: False)
+        assert res.aborted
+        assert _origin_points(fake) == []
+        assert "backup/rpool" not in fake.ds
+
+    def test_drop_disk_anchors(self) -> None:
+        """registry forget: one disk's anchors go, the other's stay."""
+        fake = self._fresh(("black", "blue"))
+        assert _engine_run(fake, "black", "1", P1).ok
+        assert _engine_run(fake, "blue", "2", P2).ok
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            n = engine.drop_disk_anchors("1", ["rpool", "bpool"], Log())
+        assert n > 0
+        assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("2", P2)]
+        assert repl.anchor_name("1", P1) not in fake.names("bpool/BOOT/be")
+        assert repl.anchor_name("2", P2) in fake.names("bpool/BOOT/be")
+
+
+class TestCleanupActions:
+    """Cleanup.track_action: undo steps run first, newest first, failures reported."""
+
+    def test_actions_run_first_newest_first(self) -> None:
+        """Order, survival of a failing action, and untracking."""
+        order: list[str] = []
+        mock = MockShell()
+        mock.on("zpool list p").succeeds("p")
+        mock.on("zfs unload-key -r p").succeeds()
+        mock.on("zpool export p").succeeds()
+        mock.on("sync").succeeds()
+
+        def boom() -> None:
+            order.append("boom")
+            raise RuntimeError("x")
+
+        def gone() -> None:
+            order.append("gone")
+
+        with patch_sh(mock), redirect_stdout(StringIO()), patch("time.sleep"):
+            c = Cleanup(Log())
+            c.track_pool("p")
+            c.track_action(lambda: order.append("first"))
+            c.track_action(boom)
+            c.track_action(gone)
+            c.untrack_action(gone)
+            c.run()
+        assert order == ["boom", "first"]
+        assert c.exported_pools() == ["p"]
+
+    def test_disable_drops_actions(self) -> None:
+        """A disabled Cleanup runs no action."""
+        order: list[str] = []
+        with redirect_stdout(StringIO()):
+            c = Cleanup(Log())
+            c.track_action(lambda: order.append("x"))
+            c.disable()
+            c.run()
+        assert not order
 
 
 class TestRunner:

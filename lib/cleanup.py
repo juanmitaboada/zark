@@ -38,6 +38,7 @@ commands that finish with an external (removable) drive still attached:
 import atexit
 import signal
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from lib.keystore import KeystoreLike
@@ -215,6 +216,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self._mounts: list[str] = []  # mount points to unmount (LIFO)
         self._keystores: list[KeystoreLike] = []  # keystores to close
         self._dirs: list[str] = []  # temp dirs to remove
+        self._actions: list[Callable[[], None]] = []  # run first, newest first
         self._exported_pools: list[str] = []  # populated by run() — query via exported_pools()
         self._registered = False
         self._disabled = False
@@ -235,6 +237,22 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self._mounts.clear()
         self._keystores.clear()
         self._dirs.clear()
+        self._actions.clear()
+
+    def track_action(self, action: Callable[[], None]):
+        """Run ``action`` at cleanup, before anything is unmounted or exported.
+
+        For undo steps that need the pools still imported (e.g. destroying
+        a backup point in origin, resuming sanoid's timer). Actions run
+        newest first; one that raises is reported and the rest still run.
+        """
+        if action not in self._actions:
+            self._actions.append(action)
+
+    def untrack_action(self, action: Callable[[], None]):
+        """Stop tracking an action. Call once it has been done the normal way."""
+        if action in self._actions:
+            self._actions.remove(action)
 
     def track_pool(self, name: str):
         """Track a pool for export on exit. Call before importing or opening.
@@ -284,11 +302,18 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         """Execute cleanup. Safe to call multiple times."""
         if getattr(self, "_disabled", False):
             return
-        if not (self._mounts or self._keystores or self._pools or self._dirs):
+        if not (self._mounts or self._keystores or self._pools or self._dirs or self._actions):
             return
         self.log.info("Cleaning up...")
 
         self._exported_pools = []
+
+        actions, self._actions = list(reversed(self._actions)), []
+        for action in actions:
+            try:
+                action()
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                self.log.warn(f"Cleanup step failed: {e}")
 
         # Unmount in reverse order (deepest first)
         for mnt in reversed(self._mounts):
