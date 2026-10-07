@@ -64,6 +64,7 @@ import commands.registry as registry_mod  # pylint: disable=wrong-import-positio
 import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -7355,6 +7356,205 @@ class TestStableVdevs:  # pylint: disable=missing-function-docstring
         mock.on("zpool list -vHP bpool").succeeds("bpool\t2G\n\t/dev/disk/by-id/ata-X-part2\t2G")
         with patch_sh(mock):
             assert kernel_named_vdevs() == ["/dev/sdb4"]
+
+
+# ── Replication planner (M2) ────────────────────────────────────────────────
+
+
+def _ref(name: str, guid: str, txg: int) -> "repl.Ref":
+    return repl.Ref(name, guid, txg, 1_700_000_000 + txg)
+
+
+P = "zark_2026-10-07_18:00:00Z"
+
+
+class TestReplicationNames:
+    """Point, anchor and archive names."""
+
+    def test_point_name_is_utc(self) -> None:
+        """Points are named in UTC whatever the local zone."""
+        tz = datetime(2026, 10, 7, 20, 0, 1).astimezone()
+        assert repl.point_name(tz) == f"zark_{tz.astimezone(UTC):%Y-%m-%d_%H:%M:%S}Z"
+        assert repl.POINT_RE.match(repl.point_name(tz))
+
+    def test_anchor_round_trip(self) -> None:
+        """An anchor carries its disk's GUID; points and sanoid names are not anchors."""
+        a = repl.anchor_name("1622", P)
+        assert a == "zark_1622_2026-10-07_18:00:00Z"
+        assert repl.anchor_disk(a) == "1622"
+        assert repl.anchor_disk(P) == ""
+        assert repl.anchor_disk("autosnap_2026-10-07_18:00:00_hourly") == ""
+        assert not repl.POINT_RE.match(a)
+
+    def test_old_anchors_only_this_disk(self) -> None:
+        """Dropping old anchors never touches another disk's."""
+        mine_old = repl.anchor_name("1", "zark_2026-09-01_00:00:00Z")
+        mine_new = repl.anchor_name("1", P)
+        other = repl.anchor_name("2", "zark_2026-08-01_00:00:00Z")
+        assert repl.old_anchors([mine_old, mine_new, other, P], "1", mine_new) == [mine_old]
+
+    def test_leftover_points(self) -> None:
+        """Points left by an interrupted run are found; anchors are not points."""
+        old = "zark_2026-10-01_00:00:00Z"
+        names = [old, P, repl.anchor_name("1", old), "autosnap_x"]
+        assert repl.leftover_points(names, P) == [old]
+
+    def test_archive_name(self) -> None:
+        """Archive names are dated and never collide."""
+        now = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
+        assert repl.archive_name("rpool/var", set(), now) == "rpool/var.archived-20261007"
+        taken = {"rpool/var.archived-20261007"}
+        assert repl.archive_name("rpool/var", taken, now) == "rpool/var.archived-20261007-2"
+        assert repl.is_archived("rpool/var.archived-20261007/lib")
+        assert not repl.is_archived("rpool/var/lib")
+
+
+class TestReplicationPlanner:
+    """Per-dataset states (redesign §4; M2 decisions 5–10, 18)."""
+
+    def _o(
+        self, rel: str, snaps: list["repl.Ref"], bms: list["repl.Ref"] | None = None
+    ) -> "repl.Origin":
+        return repl.Origin(rel, snaps=snaps, bookmarks=bms or [])
+
+    def test_new_dataset(self) -> None:
+        """A dataset missing on the backup is sent in full."""
+        o = self._o("rpool/x", [_ref(P, "9", 9)])
+        assert repl.plan_dataset(o, None, P).state is repl.State.NEW
+
+    def test_incremental_from_destination_newest(self) -> None:
+        """The base is the destination's newest snapshot, found in origin by guid."""
+        o = self._o("rpool/x", [_ref("a", "1", 1), _ref("b", "2", 2), _ref(P, "9", 9)])
+        d = repl.Dest("rpool/x", snaps=[_ref("a", "1", 1), _ref("b-renamed-on-dest", "2", 2)])
+        p = repl.plan_dataset(o, d, P)
+        assert (p.state, p.base) == (repl.State.INCREMENTAL, "@b")
+
+    def test_via_bookmark_after_range_destroy(self) -> None:
+        """R2: the snapshot is gone but this disk's bookmark anchors the send."""
+        bm = _ref(repl.anchor_name("7", "zark_2026-09-01_00:00:00Z"), "5", 5)
+        o = self._o("rpool/x", [_ref("c", "6", 6), _ref(P, "9", 9)], [bm])
+        d = repl.Dest(
+            "rpool/x", snaps=[_ref("old", "1", 1), _ref("zark_2026-09-01_00:00:00Z", "5", 5)]
+        )
+        p = repl.plan_dataset(o, d, P)
+        assert (p.state, p.base, p.first) == (repl.State.VIA_BOOKMARK, f"#{bm.name}", "@c")
+
+    def test_never_bookmark_path_on_bpool(self) -> None:
+        """I-F: bpool never anchors on a bookmark, even one somebody made."""
+        o = self._o("bpool/BOOT", [_ref(P, "9", 9)], [_ref("bm", "5", 5)])
+        d = repl.Dest("bpool/BOOT", snaps=[_ref("s", "5", 5)])
+        assert repl.plan_dataset(o, d, P).state is repl.State.DIVERGED
+
+    def test_rollback_lists_what_it_would_destroy(self) -> None:
+        """H23/F4: an older common snapshot is never used silently."""
+        o = self._o("rpool/x", [_ref("weekly", "3", 3), _ref(P, "9", 9)])
+        d = repl.Dest(
+            "rpool/x",
+            used=10,
+            snaps=[_ref("weekly", "3", 3), _ref("daily", "4", 4), _ref("hourly", "5", 5)],
+        )
+        p = repl.plan_dataset(o, d, P)
+        assert p.state is repl.State.ROLLBACK
+        assert (p.common, p.newer) == ("@weekly", ["@daily", "@hourly"])
+        assert p.base == "@weekly"
+
+    def test_diverged(self) -> None:
+        """Nothing in common: a user decision, never a transfer."""
+        o = self._o("rpool/x", [_ref(P, "9", 9)])
+        d = repl.Dest("rpool/x", snaps=[_ref("a", "1", 1)])
+        assert repl.plan_dataset(o, d, P).state is repl.State.DIVERGED
+        empty = repl.Dest("rpool/x")
+        assert repl.plan_dataset(o, empty, P).state is repl.State.DIVERGED
+
+    def test_resume_first(self) -> None:
+        """Partial receive state is finished before anything else."""
+        o = self._o("rpool/x", [_ref(P, "9", 9)])
+        d = repl.Dest("rpool/x", token="1-abc", snaps=[_ref("a", "1", 1)])
+        assert repl.plan_dataset(o, d, P).state is repl.State.RESUME
+
+    def test_at_point(self) -> None:
+        """A dataset already holding the point needs nothing."""
+        o = self._o("rpool/x", [_ref(P, "9", 9)])
+        d = repl.Dest("rpool/x", snaps=[_ref(P, "9", 9)])
+        assert repl.plan_dataset(o, d, P).state is repl.State.AT_POINT
+
+    def test_no_state_destroys_without_a_decision(self) -> None:
+        """I-A: transferable states never need a destination snapshot removed."""
+        o = self._o("rpool/x", [_ref("a", "1", 1), _ref(P, "9", 9)])
+        for d in (
+            None,
+            repl.Dest("rpool/x", snaps=[_ref("a", "1", 1)]),
+            repl.Dest("rpool/x", token="t"),
+            repl.Dest("rpool/x", snaps=[_ref(P, "9", 9)]),
+        ):
+            p = repl.plan_dataset(o, d, P)
+            assert p.state in repl.TRANSFERABLE
+            assert not p.newer
+
+    def test_expected_excludes_keystore_and_zvols(self) -> None:
+        """Decision 10: zvols are listed apart; the keystore travels apart."""
+        origin = {
+            "rpool": repl.Origin("rpool"),
+            "rpool/keystore": repl.Origin("rpool/keystore", kind="volume"),
+            "rpool/vm": repl.Origin("rpool/vm", kind="volume"),
+            "bpool": repl.Origin("bpool"),
+        }
+        assert repl.expected(origin) == ["bpool", "rpool"]
+        assert repl.excluded(origin) == ["rpool/vm"]
+        states = {p.rel: p.state for p in repl.plan(origin, {}, P)}
+        assert states["rpool/vm"] is repl.State.EXCLUDED
+        assert "rpool/keystore" not in states
+
+    def test_orphans_grouped_kept_and_archives_ignored(self) -> None:
+        """Decision 18: one entry per orphan tree; kept marks; archives are not orphans."""
+        origin = {"rpool": repl.Origin("rpool", snaps=[_ref(P, "9", 9)])}
+        dest = {
+            "rpool": repl.Dest("rpool", snaps=[_ref(P, "9", 9)]),
+            "rpool/old": repl.Dest("rpool/old", used=5, orphan="kept@2026-10-01"),
+            "rpool/old/child": repl.Dest("rpool/old/child"),
+            "rpool/gone": repl.Dest("rpool/gone", used=7),
+            "rpool/var.archived-20261001": repl.Dest("rpool/var.archived-20261001"),
+        }
+        orphans = {p.rel: p for p in repl.plan(origin, dest, P) if p.state is repl.State.ORPHAN}
+        assert set(orphans) == {"rpool/old", "rpool/gone"}
+        assert orphans["rpool/old"].kept and not orphans["rpool/gone"].kept
+
+    def test_rename_in_origin_is_followed(self) -> None:
+        """A rename in origin is recognised by guid; only the top of the tree is renamed."""
+        origin = {
+            "rpool": repl.Origin("rpool", snaps=[_ref(P, "9", 9)]),
+            "rpool/new": repl.Origin("rpool/new", snaps=[_ref("s", "4", 4), _ref(P, "10", 10)]),
+            "rpool/new/c": repl.Origin("rpool/new/c", snaps=[_ref("s", "5", 5), _ref(P, "11", 11)]),
+        }
+        dest = {
+            "rpool": repl.Dest("rpool", snaps=[_ref(P, "9", 9)]),
+            "rpool/old": repl.Dest("rpool/old", snaps=[_ref("s", "4", 4)]),
+            "rpool/old/c": repl.Dest("rpool/old/c", snaps=[_ref("s", "5", 5)]),
+        }
+        orphans = [p for p in repl.plan(origin, dest, P) if p.state is repl.State.ORPHAN]
+        assert [(p.rel, p.rename_to) for p in orphans] == [("rpool/old", "rpool/new")]
+
+    def test_rename_needs_the_new_parent_on_the_backup(self) -> None:
+        """No rename into a parent the backup does not have yet."""
+        origin = {
+            "rpool": repl.Origin("rpool", snaps=[_ref(P, "9", 9)]),
+            "rpool/a": repl.Origin("rpool/a", snaps=[_ref(P, "8", 8)]),
+            "rpool/a/x": repl.Origin("rpool/a/x", snaps=[_ref("s", "4", 4), _ref(P, "10", 10)]),
+        }
+        dest = {
+            "rpool": repl.Dest("rpool", snaps=[_ref(P, "9", 9)]),
+            "rpool/x": repl.Dest("rpool/x", snaps=[_ref("s", "4", 4)]),
+        }
+        orphans = [p for p in repl.plan(origin, dest, P) if p.state is repl.State.ORPHAN]
+        assert [(p.rel, p.rename_to) for p in orphans] == [("rpool/x", "")]
+
+    def test_reached_is_every_expected_dataset(self) -> None:
+        """I-D: one dataset short of the point is not success."""
+        at = repl.DatasetPlan("rpool", repl.State.AT_POINT)
+        orphan = repl.DatasetPlan("rpool/gone", repl.State.ORPHAN)
+        zvol = repl.DatasetPlan("rpool/vm", repl.State.EXCLUDED)
+        assert repl.reached([at, orphan, zvol])
+        assert not repl.reached([at, repl.DatasetPlan("rpool/x", repl.State.DIVERGED)])
 
 
 class TestRunner:
