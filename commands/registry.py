@@ -17,6 +17,8 @@ zark registry — inspect and repair known_drives.json without hand edits.
   zark registry list            every entry, whether its disk is connected,
                                 and whether the pool GUID on that disk matches
   zark registry forget <name>   remove an entry (e.g. a lost or retired disk)
+                                and that disk's anchors in origin (rpool
+                                bookmarks, bpool snapshots)
   zark registry fix [<name>]    rewrite drive_id from the connected disk that
                                 carries the registered pool GUID, and write
                                 every missing key
@@ -26,7 +28,7 @@ All writes go through lib.registry (validated, atomic).
 
 from pathlib import Path
 
-from lib import sh
+from lib import engine, sh
 from lib.config import Config
 from lib.drives import drive_staleness_days, get_drive_id, scan_connected_drives
 from lib.identity import BY_ID_DIR, read_pool_label
@@ -84,13 +86,20 @@ def _forget(cfg: Config, log: Log, name: str) -> None:
         log.fatal(f"'{name}' is not registered", solutions=["sudo zark registry list"])
     info = cfg.known_drives[name]
     log.warn(f"Forgetting '{name}' (GUID {info.guid}, {info.drive_id})")
-    log.info("The disk and its data are not touched; only the registry entry goes.")
+    log.info("The disk and its data are not touched: the registry entry and this")
+    log.info("disk's anchors in origin go, so its next backup may need a decision.")
     if not log.ask(f"Remove '{name}' from the registry?", default=False):
         log.info("Aborted")
         return
     del cfg.known_drives[name]
     cfg.save_drives()
     log.ok(f"'{name}' removed from {cfg.drives_file_path}")
+    pools = engine.source_pools()
+    if "rpool" not in pools:
+        log.info("rpool is not imported here: run this on the installed system to drop the anchors")
+        return
+    dropped = engine.drop_disk_anchors(info.guid, pools, log)
+    log.ok(f"{dropped} anchor(s) of '{name}' dropped from origin")
 
 
 def _fix(cfg: Config, log: Log, only: str | None) -> None:

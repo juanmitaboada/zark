@@ -5604,12 +5604,32 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
             {"blue": {"guid": "1", "drive_id": "a"}, "black": {"guid": "2", "drive_id": "b"}},
         )
         with (
+            patch_sh(MockShell()),  # no rpool here: anchors are left alone
             patch.object(Config, "default_config_dir", return_value=d),
             patch("lib.log.Log.ask", return_value=True),
             redirect_stdout(StringIO()),
         ):
             registry_mod.run(["forget", "blue"])
         assert list(json.loads((d / "known_drives.json").read_text())) == ["black"]
+
+    def test_forget_drops_that_disks_anchors(self):
+        """D16 / M1 decision 4: forget also removes the disk's anchors, by GUID."""
+        fake = _fresh_fake(("black", "blue"))
+        assert _engine_run(fake, "black", "1", P1).ok
+        assert _engine_run(fake, "blue", "2", P2).ok
+        d = self._cfg_dir(
+            {"black": {"guid": "1", "drive_id": "a"}, "blue": {"guid": "2", "drive_id": "b"}},
+        )
+        with (
+            patch_sh(fake),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch("lib.log.Log.ask", return_value=True),
+            redirect_stdout(StringIO()),
+        ):
+            registry_mod.run(["forget", "black"])
+        assert fake.bookmarks("rpool/USERDATA/home") == [repl.anchor_name("2", P2)]
+        assert not any(repl.anchor_disk(n) == "1" for n in fake.names("bpool/BOOT/be"))
+        assert any(c.startswith("zfs destroy 'rpool/") and "#zark_1_" in c for c in fake.calls)
 
     def test_forget_refuses_on_malformed_registry(self):
         d = Path(tempfile.mkdtemp())
