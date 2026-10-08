@@ -199,9 +199,6 @@ def run(
             out = res.outcomes.get(p.rel)
             log.warn(f"  {p.rel}: {p.note or (out.error if out else p.state)}")
 
-    _ = zfs.set_property(
-        f"{new_pool}/rpool", "keylocation", "file:///run/keystore/rpool/system.key"
-    )
     prepared_at = now_utc_iso()
     rpool_guid = sh.run("zpool get -H -o value guid rpool").output.strip()
     fields = {

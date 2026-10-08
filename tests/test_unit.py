@@ -6856,8 +6856,8 @@ class TestReplicationPlanner:
             "rpool/vm": repl.Origin("rpool/vm", kind="volume"),
             "bpool": repl.Origin("bpool"),
         }
-        assert repl.expected(origin) == ["bpool", "rpool"]
-        assert repl.excluded(origin) == ["rpool/vm"]
+        assert not repl.expected(origin)  # pool roots are structural
+        assert repl.excluded(origin) == [("rpool/vm", "zvol, not backed up")]
         states = {p.rel: p.state for p in repl.plan(origin, {}, P)}
         assert states["rpool/vm"] is repl.State.EXCLUDED
         assert "rpool/keystore" not in states
@@ -7020,7 +7020,8 @@ class TestEngine:
         assert len(snaps) == 2
         assert all(f"@{P1}" in c for c in snaps)
         assert "rpool/var/lib/docker@" in snaps[0] and "rpool/keystore@" not in snaps[0]
-        assert snaps[1].count("bpool") == 3
+        assert "'rpool@" not in snaps[0] and "rpool/ROOT@" not in snaps[0]  # structural
+        assert snaps[1].count("bpool") == 1
 
     def test_origin_keeps_only_bookmarks_and_bpool_anchors(self) -> None:
         """I-B, I-F: no point left in origin; bookmarks on rpool, none on bpool."""
@@ -7121,12 +7122,12 @@ class TestEngine:
         fake = self._fresh()
         assert _engine_run(fake, "backup", "111", P1).ok
         before = {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
-        fake.inject["backup/rpool"] = ("enospc", 0)
+        fake.inject["backup/rpool/ROOT/be"] = ("enospc", 0)
         res = _engine_run(fake, "backup", "111", P2)
         assert not res.ok and res.enospc
         for ds, names in before.items():
             assert fake.names(ds)[: len(names)] == names
-        assert fake.bookmarks("rpool") == [repl.anchor_name("111", P1)]  # anchor unchanged
+        assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("111", P1)]  # unchanged
 
     def test_child_of_a_failed_new_parent_waits(self) -> None:
         """A NEW child is not attempted when its parent failed."""
@@ -7228,6 +7229,52 @@ class TestEngine:
         assert res.aborted
         assert _origin_points(fake) == []
         assert "backup/rpool" not in fake.ds
+
+    def test_structural_containers_created_not_replicated(self) -> None:
+        """Decision 13: containers exist on the backup, off and unmounted, with
+        no snapshot; origin's containers get no point."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for rel in repl.STRUCTURAL:
+            d = fake.ds[f"backup/{rel}"]
+            assert (d.props["canmount"], d.props["mountpoint"]) == ("off", "none"), rel
+            assert not d.snaps, rel
+            assert not fake.bookmarks(rel), rel
+        assert P1 not in fake.names("rpool/ROOT")
+
+    def test_backup_after_recover(self) -> None:
+        """recover creates the containers anew (new guids): the next backup
+        is incremental for the data and never asks about the containers."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for rel in repl.STRUCTURAL:
+            fake.ds[rel].snaps = []
+            fake.ds[rel].bookmarks = []
+            fake.snap(rel, "autosnap_after_recover")
+
+        def no_questions(plans: list[repl.DatasetPlan], _eng: engine.Run) -> bool:
+            asked = [
+                p.rel
+                for p in plans
+                if p.state not in repl.TRANSFERABLE and p.state is not repl.State.EXCLUDED
+            ]
+            assert not asked, asked
+            return True
+
+        res = _engine_run(fake, "backup", "111", P2, no_questions)
+        assert res.ok, res
+        assert P1 in fake.names("backup/rpool/ROOT/be") and P2 in fake.names("backup/rpool/ROOT/be")
+
+    def test_structural_container_with_data_is_reported(self) -> None:
+        """A container that holds or could hold data is listed, not silently skipped."""
+        fake = self._fresh()
+        fake.ds["rpool/ROOT"].props["referenced"] = str(50 * 1024 * 1024)
+        fake.ds["rpool/USERDATA"].props.update(canmount="on", mountpoint="/userdata")
+        res = _engine_run(fake, "backup", "111", P1)
+        assert res.ok
+        notes = {p.rel: p.note for p in res.plans if p.state is repl.State.EXCLUDED}
+        assert "holding data" in notes["rpool/ROOT"]
+        assert "mountable at /userdata" in notes["rpool/USERDATA"]
 
     def test_drop_disk_anchors(self) -> None:
         """registry forget: one disk's anchors go, the other's stay."""
@@ -7457,7 +7504,7 @@ class TestBackupCommand:
                 patch.object(ZFS, "pool_guid", return_value="111"),
                 patch.object(ZFS, "pool_health", return_value="ONLINE"),
                 patch.object(ZFS, "pool_info", return_value=info),
-                patch.object(ZFS, "get_property", return_value="available"),
+                patch.object(ZFS, "datasets_needing_key", return_value=[]),
                 patch.object(ZFS, "verify_exported_pool_readback", return_value=readback),
                 patch("lib.log.Log.ask", return_value=True),
                 patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),

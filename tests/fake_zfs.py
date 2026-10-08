@@ -146,6 +146,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zfs", "rename"): self._rename,
             ("zfs", "rollback"): self._rollback,
             ("zfs", "set"): self._set,
+            ("zfs", "create"): self._create,
             ("zfs", "get"): self._get,
             ("zpool", "export"): lambda _a: _ok(),
             ("zpool", "create"): self._zpool_create,
@@ -338,6 +339,20 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         if later and "-r" not in args:
             return _err("more recent snapshots exist")
         self.ds[ds].snaps = self.ds[ds].snaps[: names.index(name) + 1]
+        return _ok()
+
+    def _create(self, args: list[str]) -> RunResult:
+        ds = args[-1]
+        if ds in self.ds:
+            return _err(f"cannot create '{ds}': dataset already exists")
+        if ds.rsplit("/", 1)[0] not in self.ds:
+            return _err(f"cannot create '{ds}': parent does not exist")
+        props = {}
+        for j, a in enumerate(args):
+            if a == "-o":
+                k, v = args[j + 1].split("=", 1)
+                props[k] = v
+        self.ds[ds] = FDataset(props=props)
         return _ok()
 
     def _set(self, args: list[str]) -> RunResult:

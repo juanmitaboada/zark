@@ -527,10 +527,11 @@ def run(
     # ── Load encryption key ──────────────────────────────────────────────
     log.step(5, TOTAL_STEPS, "Loading encryption key...")
 
-    keystatus = zfs.get_property(f"{pool_name}/rpool", "keystatus")
+    # A drive prepared by zark >= 2.0.0-rc2 has an unencrypted <pool>/rpool
+    # container, so "every key loaded" is read from the datasets below it.
     ks = Keystore(log)
 
-    if keystatus == "available":
+    if not zfs.datasets_needing_key(f"{pool_name}/rpool"):
         log.ok("Key already loaded")
         if not log.ask("Key already loaded. Proceed with backup?", default=True):
             log.fatal("Aborted by user")

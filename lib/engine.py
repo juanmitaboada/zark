@@ -22,7 +22,9 @@ One run against one backup pool (already imported under I-G by the caller):
      per pool (one txg each; a call cannot span pools).
   3. ``survey`` — read origin and destination, plan every dataset.
   4. Decisions the caller asked the user about: ``rollback``, ``archive``,
-     ``destroy``, ``keep_orphan``, ``follow_rename``; then ``survey`` again.
+     ``destroy``, ``keep_orphan``, ``follow_rename``; then the structural
+     containers are created on the destination where missing
+     (``ensure_containers``) and ``survey`` runs again.
   5. ``transfer`` for each transferable dataset, parents first:
      ``zfs send [-w] … | zfs receive -s -u -o canmount=noauto -x mountpoint
      -o org.zark:canmount=… -o org.zark:mountpoint=… <dest>``, never ``-F``.
@@ -48,6 +50,7 @@ from lib.cleanup import Cleanup
 from lib.log import Log
 from lib.replication import (
     POINT_RE,
+    STRUCTURAL,
     TRANSFERABLE,
     DatasetPlan,
     Dest,
@@ -107,11 +110,15 @@ def read_origin(pools: list[str]) -> dict[str, Origin]:
     """Origin datasets with kind, mount properties, snapshots and bookmarks."""
     origin: dict[str, Origin] = {}
     for pool in pools:
-        r = sh.run(f"zfs list -Hp -t filesystem,volume -o name,type,canmount,mountpoint -r {pool}")
+        r = sh.run(
+            "zfs list -Hp -t filesystem,volume "
+            + f"-o name,type,canmount,mountpoint,referenced -r {pool}",
+        )
         for line in r.lines if r.ok else []:
             f = line.split("\t")
-            if len(f) >= 4:
-                origin[f[0]] = Origin(f[0], kind=f[1], canmount=f[2], mountpoint=f[3])
+            if len(f) >= 5:
+                ref = int(f[4]) if f[4].isdigit() else 0
+                origin[f[0]] = Origin(f[0], f[1], f[2], f[3], ref)
         r = sh.run(
             f"zfs list -Hp -t snapshot,bookmark -o name,guid,createtxg,creation -r {pool}",
         )
@@ -325,6 +332,29 @@ class Run:  # pylint: disable=too-many-instance-attributes
         self._report(r, f"renamed {p.rel} → {p.rename_to} on the backup")
         return r.ok
 
+    def ensure_containers(self) -> list[str]:
+        """Create the structural containers missing on the destination
+        (``canmount=off``, ``mountpoint=none``, unencrypted: a raw receive
+        below them is allowed, module/zfs/dmu_recv.c:723-746). Set at create
+        time, as recover does, never with ``zfs set``. Returns the failures."""
+        failed: list[str] = []
+        for rel in STRUCTURAL:  # parents first
+            if rel not in self.origin or rel in self.dest:
+                continue
+            if parent(rel) and parent(rel) not in self.dest:
+                failed.append(rel)
+                continue
+            r = sh.run(
+                f"zfs create -o canmount=off -o mountpoint=none {_q(self._dst(rel))}",
+                log=self.log,
+            )
+            self._report(r, f"created container {self._dst(rel)}")
+            if r.ok:
+                self.dest[rel] = Dest(rel)
+            else:
+                failed.append(rel)
+        return failed
+
     def _report(self, r: sh.RunResult, what: str) -> None:
         if r.ok:
             self.log.ok(what.capitalize())
@@ -532,6 +562,9 @@ def replicate(run: Run, decide: Decide) -> Result:
     if not decide(run.survey(), run):
         res.aborted = True
         return res
+    _ = run.survey()
+    for rel in run.ensure_containers():
+        run.log.error(f"  {rel}: could not create the container on the backup")
     for _ in range(MAX_ROUNDS):
         pending = [p for p in depth_order(run.survey()) if p.state in TRANSFERABLE]
         todo = [p for p in pending if p.state is not State.AT_POINT]

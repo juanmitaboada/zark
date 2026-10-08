@@ -30,6 +30,11 @@ Model (redesign §4, M2 decisions):
   * Anchors: rpool datasets get a bookmark per disk
     ``#zark_<pool GUID>_<UTC>``; bpool never gets bookmarks (I-F) and keeps
     one snapshot per disk ``@zark_<pool GUID>_<UTC>`` instead.
+  * The structural containers (pool roots, ``rpool/ROOT``, ``rpool/USERDATA``,
+    ``bpool/BOOT``) are not replicated: they hold no data, recover creates
+    them anew (so after a recover their snapshots never match the backup's),
+    and the engine only makes sure they exist on the destination. One that
+    could hold data is listed as not backed up.
 
 Dataset names here are relative to the pool root on both sides: origin
 ``rpool/var`` is ``<backup pool>/rpool/var`` on the destination.
@@ -47,6 +52,11 @@ ANCHOR_RE = re.compile(rf"^zark_(\d+)_({_STAMP})$")
 ARCHIVE_MARK = ".archived-"
 ORPHAN_PROP = "org.zark:orphan"
 KEYSTORE = "rpool/keystore"
+# Created, never received, by recover (lib/mount_props.py CREATED_CONTAINERS
+# and BPOOL_CONTAINERS, plus the two pool roots).
+STRUCTURAL = ("rpool", "rpool/ROOT", "rpool/USERDATA", "bpool", "bpool/BOOT")
+# A structural container referencing more than this holds data of its own.
+STRUCTURAL_DATA_LIMIT = 8 * 1024 * 1024
 
 
 def point_name(now: datetime) -> str:
@@ -98,6 +108,7 @@ class Origin:
     kind: str = "filesystem"  # "filesystem" | "volume"
     canmount: str = ""
     mountpoint: str = ""
+    referenced: int = 0
     snaps: list[Ref] = field(default_factory=list)  # by createtxg
     bookmarks: list[Ref] = field(default_factory=list)
 
@@ -138,7 +149,7 @@ class State(StrEnum):
     ROLLBACK = "rollback"  # only an older common snapshot left (decision 7)
     DIVERGED = "diverged"  # nothing in common (decision 8)
     ORPHAN = "only on backup"  # destination only (decision 18)
-    EXCLUDED = "excluded"  # zvols other than the keystore (decision 10)
+    EXCLUDED = "excluded"  # zvols (decision 10), structural containers with data
 
 
 # States the engine can transfer without asking anything.
@@ -164,18 +175,37 @@ class DatasetPlan:  # pylint: disable=too-many-instance-attributes
 
 
 def expected(origin: dict[str, Origin]) -> list[str]:
-    """Datasets a backup must bring to the point: rpool tree minus the keystore
-    and other zvols, plus the bpool tree, parents first."""
+    """Datasets a backup must bring to the point: rpool tree minus the keystore,
+    other zvols and the structural containers, plus the bpool tree minus its
+    structural containers, parents first."""
     return sorted(
         rel
         for rel, o in origin.items()
-        if rel != KEYSTORE and not rel.startswith(f"{KEYSTORE}/") and o.kind != "volume"
+        if rel != KEYSTORE
+        and not rel.startswith(f"{KEYSTORE}/")
+        and o.kind != "volume"
+        and rel not in STRUCTURAL
     )
 
 
-def excluded(origin: dict[str, Origin]) -> list[str]:
-    """Volumes left out on purpose (the keystore travels apart)."""
-    return sorted(rel for rel, o in origin.items() if o.kind == "volume" and rel != KEYSTORE)
+def excluded(origin: dict[str, Origin]) -> list[tuple[str, str]]:
+    """(dataset, why) left out on purpose and worth reporting: volumes other
+    than the keystore (which travels apart), and structural containers that
+    hold or could hold data of their own."""
+    out = [
+        (rel, "zvol, not backed up")
+        for rel, o in origin.items()
+        if o.kind == "volume" and rel != KEYSTORE
+    ]
+    for rel in STRUCTURAL:
+        o = origin.get(rel)
+        if o is None:
+            continue
+        if o.referenced > STRUCTURAL_DATA_LIMIT:
+            out.append((rel, "structural container holding data, not backed up"))
+        elif o.canmount in ("on", "noauto") and o.mountpoint.startswith("/"):
+            out.append((rel, f"structural container mountable at {o.mountpoint}, not backed up"))
+    return sorted(out)
 
 
 def plan_dataset(o: Origin, d: Dest | None, point: str) -> DatasetPlan:  # pylint: disable=too-many-return-statements
@@ -230,9 +260,7 @@ def plan(origin: dict[str, Origin], dest: dict[str, Dest], point: str) -> list[D
     live = {rel: d for rel, d in dest.items() if not is_archived(rel)}
     wanted = expected(origin)
     plans = [plan_dataset(origin[rel], live.get(rel), point) for rel in wanted]
-    plans += [
-        DatasetPlan(rel, State.EXCLUDED, note="zvol, not backed up") for rel in excluded(origin)
-    ]
+    plans += [DatasetPlan(rel, State.EXCLUDED, note=why) for rel, why in excluded(origin)]
 
     orphans = sorted(rel for rel in live if rel not in origin)
     tops = [rel for rel in orphans if parent(rel) not in orphans]
