@@ -6750,12 +6750,6 @@ class TestReplicationNames:
         other = repl.anchor_name("2", "zark_2026-08-01_00:00:00Z")
         assert repl.old_anchors([mine_old, mine_new, other, P], "1", mine_new) == [mine_old]
 
-    def test_leftover_points(self) -> None:
-        """Points left by an interrupted run are found; anchors are not points."""
-        old = "zark_2026-10-01_00:00:00Z"
-        names = [old, P, repl.anchor_name("1", old), "autosnap_x"]
-        assert repl.leftover_points(names, P) == [old]
-
     def test_archive_name(self) -> None:
         """Archive names are dated and never collide."""
         now = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
@@ -7276,6 +7270,63 @@ class TestEngine:
         notes = {p.rel: p.note for p in res.plans if p.state is repl.State.EXCLUDED}
         assert "holding data" in notes["rpool/ROOT"]
         assert "mountable at /userdata" in notes["rpool/USERDATA"]
+
+    def test_failed_dataset_keeps_its_base(self) -> None:
+        """After a recover the base is a point snapshot, with no bookmark. A
+        dataset that fails keeps it, so the next run is still incremental."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        home = "rpool/USERDATA/home"
+        fake.ds[home].bookmarks.clear()
+        base = next(s for s in fake.ds[f"backup/{home}"].snaps if s.name == P1)
+        fake.ds[home].snaps.append(FSnap(P1, base.guid, 1, base.creation))  # as recover leaves it
+        fake.inject[f"backup/{home}"] = ("enospc", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        assert P1 in fake.names(home)
+        res = _engine_run(fake, "backup", "111", P3)
+        assert res.ok, res
+        assert P1 not in fake.names(home)  # superseded once the dataset is anchored
+
+    def test_failed_anchor_keeps_point_and_old_anchor(self) -> None:
+        """No verified new anchor: neither the point nor the old anchor goes."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.fail_cmds.add("zfs bookmark rpool/ROOT/be@")
+        res = _engine_run(fake, "backup", "111", P2)
+        assert "rpool/ROOT/be" in res.anchor_failed
+        assert P2 in fake.names("rpool/ROOT/be")
+        assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("111", P1)]
+        fake.fail_cmds.clear()
+        assert _engine_run(fake, "backup", "111", P3).ok
+        assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("111", P3)]
+        assert _origin_points(fake) == []
+
+    def test_nothing_dropped_when_the_backup_cannot_be_read(self) -> None:
+        """A failed listing of the backup means no removal in origin at all."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.fail_cmds.add("-o name,guid,createtxg,creation -r backup/rpool")
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        assert "Nothing removed in origin" in out.getvalue()
+        assert P2 in fake.names("rpool/ROOT/be")
+        assert repl.anchor_name("111", P1) in fake.bookmarks("rpool/ROOT/be")
+
+    def test_every_verdict_is_logged(self) -> None:
+        """Each removal and each conservation says why."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        text = out.getvalue()
+        assert f"kept rpool/USERDATA/home@{P2}: partial receive to resume" in text
+        assert f"removed rpool/ROOT/be@{P2}: on the backup, anchored as" in text
+        assert f"removed rpool/ROOT/be#{repl.anchor_name('111', P1)}: superseded by" in text
 
     def test_drop_disk_anchors(self) -> None:
         """registry forget: one disk's anchors go, the other's stay."""

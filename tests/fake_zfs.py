@@ -88,6 +88,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         self.guid = 1000
         self.clock = 1_700_000_000
         self.inject: dict[str, tuple[str, int]] = {}  # dest dataset → (kind, after)
+        self.fail_cmds: set[str] = set()  # a command containing one of these fails
 
     # ── building the model ───────────────────────────────────────────────
 
@@ -133,6 +134,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         """Interpret one command."""
         cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
         self._calls.append(cmd_str)
+        if any(f in cmd_str for f in self.fail_cmds):
+            return _err(f"fake: injected failure: {cmd_str}")
         argv = shlex.split(cmd_str)
         handler = {
             ("zpool", "list"): self._zpool_list,

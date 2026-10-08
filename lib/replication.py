@@ -320,11 +320,6 @@ def old_anchors(names: list[str], disk_guid: str, keep: str) -> list[str]:
     return [n for n in names if anchor_disk(n) == disk_guid and n != keep]
 
 
-def leftover_points(names: list[str], current: str) -> list[str]:
-    """Origin points left by an interrupted run (anchors are not points)."""
-    return [n for n in names if POINT_RE.match(n) and n != current]
-
-
 def archive_name(rel: str, taken: set[str], now: datetime) -> str:
     """``<rel>.archived-YYYYMMDD``, with ``-N`` when that name is taken."""
     base = f"{rel}{ARCHIVE_MARK}{now.astimezone(UTC):%Y%m%d}"

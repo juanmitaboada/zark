@@ -30,10 +30,13 @@ One run against one backup pool (already imported under I-G by the caller):
      -o org.zark:canmount=… -o org.zark:mountpoint=… <dest>``, never ``-F``.
   6. ``survey`` again: success iff every expected dataset is at the point.
   7. ``anchor`` — per dataset at the point: a bookmark on rpool, the point
-     renamed to the disk's anchor on bpool; this disk's older anchors go.
-  8. ``drop_points`` — the point (and points left by interrupted runs) is
-     destroyed in origin, except where the destination still holds partial
-     receive state for it, so the next run can resume.
+     renamed to the disk's anchor on bpool.
+  8. ``drop_check`` / ``drop`` — every candidate for removal in origin (this
+     run's point, points left by earlier runs, this disk's older anchors) is
+     checked against a fresh read of both sides: it goes only when the
+     dataset is verified on the backup at the new point, by guid, and its new
+     anchor exists; anything that may still be a base stays. Every verdict is
+     logged with its reason.
 
 Every ZFS behaviour relied on here was checked in OpenZFS 2.4.1 (see the
 M2 plan, §2, and the commit messages).
@@ -62,7 +65,6 @@ from lib.replication import (
     archive_name,
     expected,
     is_bpool,
-    leftover_points,
     old_anchors,
     parent,
     plan,
@@ -106,14 +108,29 @@ def source_pools() -> list[str]:
     return [p for p in ("rpool", "bpool") if sh.run(f"zpool list -H -o name {p}").ok]
 
 
-def read_origin(pools: list[str]) -> dict[str, Origin]:
-    """Origin datasets with kind, mount properties, snapshots and bookmarks."""
+class ReadError(Exception):
+    """A ``zfs list`` needed for a safe decision failed."""
+
+
+def _checked(r: sh.RunResult, strict: bool) -> sh.RunResult:
+    if strict and not r.ok:
+        raise ReadError(r.command or "zfs list")
+    return r
+
+
+def read_origin(pools: list[str], strict: bool = False) -> dict[str, Origin]:
+    """Origin datasets with kind, mount properties, snapshots and bookmarks.
+
+    ``strict`` raises :class:`ReadError` when a listing fails instead of
+    returning what could be read.
+    """
     origin: dict[str, Origin] = {}
     for pool in pools:
         r = sh.run(
             "zfs list -Hp -t filesystem,volume "
             + f"-o name,type,canmount,mountpoint,referenced -r {pool}",
         )
+        r = _checked(r, strict)
         for line in r.lines if r.ok else []:
             f = line.split("\t")
             if len(f) >= 5:
@@ -122,14 +139,18 @@ def read_origin(pools: list[str]) -> dict[str, Origin]:
         r = sh.run(
             f"zfs list -Hp -t snapshot,bookmark -o name,guid,createtxg,creation -r {pool}",
         )
+        r = _checked(r, strict)
         for rel, (snaps, bms) in _parse_refs(r.lines if r.ok else [], "").items():
             if rel in origin:
                 origin[rel].snaps, origin[rel].bookmarks = snaps, bms
     return origin
 
 
-def read_dest(pool: str) -> dict[str, Dest]:
-    """Destination datasets under ``<pool>/rpool`` and ``<pool>/bpool``, by origin name."""
+def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
+    """Destination datasets under ``<pool>/rpool`` and ``<pool>/bpool``, by origin name.
+
+    ``strict`` raises :class:`ReadError` when a listing of an existing root fails.
+    """
     dest: dict[str, Dest] = {}
     strip = f"{pool}/"
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
@@ -139,6 +160,7 @@ def read_dest(pool: str) -> dict[str, Dest]:
             "zfs list -Hp -t filesystem,volume "
             + f"-o name,type,receive_resume_token,{_ORPHAN},used -r {root}",
         )
+        r = _checked(r, strict)
         for line in r.lines if r.ok else []:
             f = line.split("\t")
             if len(f) >= 5 and f[0].startswith(strip):
@@ -147,7 +169,10 @@ def read_dest(pool: str) -> dict[str, Dest]:
                 token = "" if f[2] in ("-", "") else f[2]
                 orphan = "" if f[3] in ("-", "") else f[3]
                 dest[rel] = Dest(rel, kind=f[1], token=token, orphan=orphan, used=used)
-        r = sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}")
+        r = _checked(
+            sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}"),
+            strict,
+        )
         for rel, (snaps, _) in _parse_refs(r.lines if r.ok else [], strip).items():
             if rel in dest:
                 dest[rel].snaps = snaps
@@ -182,6 +207,15 @@ class Outcome:
     ok: bool
     error: str = ""
     enospc: bool = False
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """Whether one snapshot or bookmark in origin may be destroyed, and why."""
+
+    target: str  # "ds@snap" or "ds#bookmark"
+    drop: bool
+    reason: str
 
 
 @dataclass
@@ -403,43 +437,82 @@ class Run:  # pylint: disable=too-many-instance-attributes
     # ── after the transfers ──────────────────────────────────────────────
 
     def anchor(self, at_point: list[str]) -> list[str]:
-        """Anchor every dataset that reached the point; return the failures."""
+        """Anchor every dataset that reached the point; return the failures.
+
+        Older anchors are not removed here: :meth:`drop_check` decides.
+        """
         failed: list[str] = []
         keep = anchor_name(self.disk_guid, self.point)
         for rel in at_point:
-            o = self.origin.get(rel)
-            if o is None:
+            if rel not in self.origin:
                 continue
             if is_bpool(rel):
                 # I-F: bpool keeps a per-disk snapshot instead of a bookmark.
                 cmd = f"zfs rename {_q(f'{rel}@{self.point}')} {_q(f'{rel}@{keep}')}"
-                olds = old_anchors([s.name for s in o.snaps], self.disk_guid, keep)
-                drop = [f"{rel}@{n}" for n in olds]
             else:
                 cmd = f"zfs bookmark {_q(f'{rel}@{self.point}')} {_q(f'{rel}#{keep}')}"
-                olds = old_anchors([b.name for b in o.bookmarks], self.disk_guid, keep)
-                drop = [f"{rel}#{n}" for n in olds]
             if not sh.run(cmd, log=self.log).ok:
                 failed.append(rel)
-                continue
-            for name in drop:
-                # Bookmarks go one by one, by exact name (F5).
-                _ = sh.run(f"zfs destroy {_q(name)}", log=self.log)
         return failed
 
-    def drop_points(self) -> int:
-        """Destroy this run's point and points left by interrupted runs in
-        origin, except where the destination holds partial receive state."""
-        self.origin = read_origin(self.pools)
-        self.dest = read_dest(self.pool)
+    def drop_check(self) -> list[Verdict]:  # pylint: disable=too-many-locals
+        """Decide, against a fresh read of both sides, what may go from origin.
+
+        Candidates are this run's point, points left by earlier runs and this
+        disk's older anchors; another disk's anchors are never candidates.
+        Nothing goes when either side cannot be read.
+        """
+        try:
+            origin = read_origin(self.pools, strict=True)
+            dest = read_dest(self.pool, strict=True)
+        except ReadError as e:
+            self.log.warn(f"Nothing removed in origin: could not read {e}")
+            return []
+        wanted = set(expected(origin))
+        keep = anchor_name(self.disk_guid, self.point)
+        verdicts: list[Verdict] = []
+        for rel, o in sorted(origin.items()):
+            d = dest.get(rel)
+            on_backup = {s.guid for s in d.snaps} if d else set()
+            sep = "@" if is_bpool(rel) else "#"
+            new = o.snaps if is_bpool(rel) else o.bookmarks
+            anchor = next((a for a in new if a.name == keep), None)
+            point_snap = next((s for s in o.snaps if s.name == self.point), None)
+            # Verified on the backup, by guid, and anchored.
+            verified = anchor is not None and anchor.guid in on_backup
+            partial = d is not None and bool(d.token)
+            for s in o.snaps:
+                if not POINT_RE.match(s.name):
+                    continue
+                target = f"{rel}@{s.name}"
+                if rel not in wanted:
+                    verdicts.append(Verdict(target, True, "dataset not replicated"))
+                elif partial:
+                    verdicts.append(Verdict(target, False, "partial receive to resume"))
+                elif verified:
+                    verdicts.append(Verdict(target, True, f"on the backup, anchored as {keep}"))
+                elif s is point_snap and s.guid not in on_backup:
+                    verdicts.append(Verdict(target, True, "not on the backup, nothing to resume"))
+                else:
+                    verdicts.append(Verdict(target, False, "may be the base of the next run"))
+            for name in old_anchors([a.name for a in new], self.disk_guid, keep):
+                target = f"{rel}{sep}{name}"
+                if verified:
+                    verdicts.append(Verdict(target, True, f"superseded by {keep}"))
+                else:
+                    verdicts.append(Verdict(target, False, "new anchor not verified"))
+        return verdicts
+
+    def drop(self, verdicts: list[Verdict]) -> int:
+        """Destroy what :meth:`drop_check` allowed, one by one by exact name (F5)."""
         dropped = 0
-        for rel, o in sorted(self.origin.items()):
-            d = self.dest.get(rel)
-            if d is not None and d.token:
+        for v in verdicts:
+            if not v.drop:
+                self.log.info(f"  kept {v.target}: {v.reason}")
                 continue
-            for name in leftover_points([s.name for s in o.snaps], ""):
-                if sh.run(f"zfs destroy {_q(f'{rel}@{name}')}", log=self.log).ok:
-                    dropped += 1
+            if sh.run(f"zfs destroy {_q(v.target)}", log=self.log).ok:
+                self.log.info(f"  removed {v.target}: {v.reason}")
+                dropped += 1
         return dropped
 
     def undo_point(self) -> None:
@@ -598,7 +671,7 @@ def replicate(run: Run, decide: Decide) -> Result:
     res.plans = run.survey()
     at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
     res.anchor_failed = run.anchor(at_point)
-    _ = run.drop_points()
+    _ = run.drop(run.drop_check())
     return res
 
 
