@@ -6987,6 +6987,7 @@ def _fresh_fake(pools: tuple[str, ...] = ("backup",)) -> FakeZfs:
     return fake
 
 
+TODAY = datetime.now(UTC).strftime("%Y%m%d")
 P1, P2, P3 = (
     "zark_2026-10-07_10:00:00Z",
     "zark_2026-10-08_10:00:00Z",
@@ -7457,6 +7458,78 @@ class TestBackupDecide:
         else:
             raise AssertionError("expected a fatal")
         assert "backup/rpool/var/lib/docker" in fake.ds
+
+    @staticmethod
+    def _var_tree_rolled_ahead() -> FakeZfs:
+        """rpool/var and both children hold a snapshot origin never had, and
+        their bookmarks are gone: ROLLBACK for the three, common autosnap_h1."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        assert _engine_run(fake, "backup", "111", P2).ok
+        for ds in ("rpool/var", "rpool/var/lib", "rpool/var/lib/docker"):
+            fake.ds[ds].bookmarks.clear()
+            fake.snap(f"backup/{ds}", "autosnap_gone")
+        return fake
+
+    @staticmethod
+    def _run_with_answers(
+        fake: FakeZfs,
+        choices: list[int],
+        typed: str = "",
+        avail: int = 10**12,
+    ) -> "engine.Result":
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            return _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=avail), Log())
+
+        with (
+            patch.object(Log, "ask_choice", side_effect=choices),
+            patch.object(Log, "ask_text", return_value=typed),
+        ):
+            return _engine_run(fake, "backup", "111", P3, decide)
+
+    def test_archive_renames_only_the_top_of_a_subtree(self) -> None:
+        """Archiving rpool/var moves its children with it: one rename, no
+        failed renames, the three resent in full, every old snapshot kept."""
+        fake = self._var_tree_rolled_ahead()
+        res = self._run_with_answers(fake, [1])
+        assert res.ok, res
+        renames = [c for c in fake.calls if c.startswith("zfs rename backup/")]
+        assert renames == [f"zfs rename backup/rpool/var backup/rpool/var.archived-{TODAY}"]
+        archived = next(d for d in fake.ds if d.startswith("backup/rpool/var.archived-"))
+        assert "autosnap_gone" in fake.names(f"{archived}/lib/docker")
+        assert fake.names("backup/rpool/var/lib/docker") == [P3]
+
+    def test_archive_space_counts_the_whole_subtree(self) -> None:
+        """Room for the top alone is not room for its subtree: no archive option."""
+        fake = self._var_tree_rolled_ahead()
+        # Full sends are 1e9 each in the fake: 3e9 for the subtree, 1e9 for the top.
+        res = self._run_with_answers(fake, [1], typed="ROLLBACK", avail=2 * 10**9)
+        assert res.ok, res
+        assert not any(".archived-" in d for d in fake.ds)  # option 1 was the rollback
+        assert "autosnap_gone" not in fake.names("backup/rpool/var")
+
+    def test_diverged_children_of_an_archived_top_are_not_asked(self) -> None:
+        """One question for a diverged subtree; the children go with their parent."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for ds in ("rpool/var", "rpool/var/lib", "rpool/var/lib/docker"):
+            fake.ds[ds].snaps.clear()
+            fake.ds[ds].bookmarks.clear()
+            fake.snap(ds, "autosnap_recreated")
+        asked: list[str] = []
+
+        def choice(question: str, _opts: list[str], _default: int = 0) -> int:
+            asked.append(question)
+            return 1
+
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            return _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+
+        with patch.object(Log, "ask_choice", side_effect=choice):
+            res = _engine_run(fake, "backup", "111", P3, decide)
+        assert res.ok, res
+        assert asked == ["rpool/var has diverged:"]
 
     def test_table_names_every_dataset_short_of_the_point(self) -> None:
         """I-D table: failures and exclusions are warnings with their reason."""

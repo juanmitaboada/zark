@@ -216,9 +216,17 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         elif p.state is State.VIA_BOOKMARK:
             log.info(f"  {p.rel}: from this drive's bookmark")
     avail = dst_info.avail_bytes if dst_info else 0
-    needed = sum(sizes.values())
     actions: list[Callable[[], object]] = []
     confirmed_any = False
+    moved: set[str] = set()  # tops archived or destroyed: their subtrees go with them
+
+    def resend(top: str) -> int:
+        """Full sizes of everything a rename or destroy of ``top`` sends again."""
+        total = 0
+        for q in _subtree(plans, top):
+            sizes[q.rel] = eng.estimate(q, full=True)
+            total += sizes[q.rel]
+        return total
 
     # Datasets origin no longer has (decision 18).
     for p in plans:
@@ -264,47 +272,65 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
                 " …" if len(p.newer) > 3 else ""
             )
             log.info(f"  {p.rel}: common {p.common.lstrip('@')}; newer on the backup: {shown}")
-        full = {p.rel: eng.estimate(p, full=True) for p in rollbacks}
+        tops = _tops([p.rel for p in rollbacks])
+        before = dict(sizes)
+        full = sum(resend(t) for t in tops)
+        archived_sizes, sizes = sizes, before
         opts = ["abort the backup (nothing changes)"]
-        fits = needed + sum(full.values()) <= avail
+        fits = sum(archived_sizes.values()) <= avail
         if fits:
+            below = sum(len(_subtree(plans, t)) for t in tops) - len(tops)
             opts.append(
-                f"archive those lineages and resend them in full ({_gib(sum(full.values()))})"
+                f"archive {', '.join(tops)}"
+                + (f" (and {below} dataset(s) below)" if below else "")
+                + f" and resend in full ({_gib(full)})",
             )
         opts.append(f"roll back: destroy the {destroyed} newer snapshot(s) listed above")
         pick = log.ask_choice("How should this backup continue?", opts, 0)
         if pick == 0:
             return False
         if fits and pick == 1:
-            needed += sum(full.values())
-            actions += [partial(eng.archive, p) for p in rollbacks]
+            sizes = archived_sizes
+            moved.update(tops)
+            actions += [partial(eng.archive, p) for p in rollbacks if p.rel in tops]
         else:
             if not _typed(log, "ROLLBACK", f"destroy {destroyed} snapshot(s) on {pool_name}"):
                 return False
             actions += [partial(eng.rollback, p) for p in rollbacks]
             confirmed_any = True
 
-    # Nothing in common (D17).
+    # Nothing in common (D17). A dataset below one already archived or
+    # destroyed goes with it and is not asked about.
     for p in plans:
-        if p.state is not State.DIVERGED:
+        if p.state is not State.DIVERGED or _under(p.rel, moved):
             continue
-        full_size = eng.estimate(p, full=True)
+        before = dict(sizes)
+        full_size = resend(p.rel)
+        below = len(_subtree(plans, p.rel)) - 1
+        extra = f" (and {below} dataset(s) below)" if below else ""
         opts = ["skip it this time (the backup will be INCOMPLETE)"]
-        fits = needed + full_size <= avail
+        fits = sum(sizes.values()) <= avail
         if fits:
-            opts.append(f"archive the old lineage and resend it in full ({_gib(full_size)})")
-        opts.append(f"destroy it on the backup and resend it in full ({_gib(p.used)} destroyed)")
+            opts.append(f"archive the old lineage{extra} and resend in full ({_gib(full_size)})")
+        opts.append(
+            f"destroy it{extra} on the backup and resend in full ({_gib(p.used)} destroyed)"
+        )
         log.warn(f"  {p.rel}: no snapshot in common with the backup ({p.note})")
         pick = log.ask_choice(f"{p.rel} has diverged:", opts, 0)
         if pick == 0:
+            sizes = before
             continue
-        needed += full_size
         if fits and pick == 1:
+            moved.add(p.rel)
             actions.append(partial(eng.archive, p))
         elif _typed(log, "DESTROY", f"destroy {pool_name}/{p.rel} and everything below it"):
+            moved.add(p.rel)
             actions.append(partial(eng.destroy, p))
             confirmed_any = True
+        else:
+            sizes = before
 
+    needed = sum(sizes.values())
     log.info(f"Estimated transfer: {_gib(needed)}; available on {pool_name}: {_gib(avail)}")
     if dst_info and needed > avail:
         log.fatal(
@@ -317,6 +343,26 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
     for act in actions:
         _ = act()
     return True
+
+
+def _subtree(plans: list[DatasetPlan], top: str) -> list[DatasetPlan]:
+    """Planned datasets at or below ``top`` that a rename or destroy of it moves."""
+    return [
+        p
+        for p in plans
+        if (p.rel == top or p.rel.startswith(f"{top}/"))
+        and p.state not in (State.ORPHAN, State.EXCLUDED)
+    ]
+
+
+def _under(rel: str, tops: set[str]) -> bool:
+    """True when ``rel`` is one of ``tops`` or below one of them."""
+    return any(rel == t or rel.startswith(f"{t}/") for t in tops)
+
+
+def _tops(rels: list[str]) -> list[str]:
+    """The datasets in ``rels`` with no ancestor in ``rels`` (a rename moves the rest)."""
+    return sorted(r for r in rels if not any(r.startswith(f"{t}/") for t in rels))
 
 
 def _typed(log: Log, word: str, what: str) -> bool:
