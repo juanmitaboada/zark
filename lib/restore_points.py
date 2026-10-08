@@ -39,9 +39,11 @@ snapshot from that run; a dataset absent from the run uses its newest
 snapshot whose ``creation`` is not after the end of the run. Never a later
 one: a dataset with nothing at or before the point is reported, not
 silently restored from the future. A zark backup point is taken of every
-replicated dataset at once, so for one of those membership is exact: a
-dataset without the point's snapshot did not exist then (or did not reach
-it) and is not restored from an older one.
+replicated dataset at once, so a dataset without the point's snapshot
+either no longer existed (its lineage ends before the point: it is not
+restored, so a dataset destroyed in origin is not brought back) or was
+missed by a run that did not reach it (it has later snapshots: it is
+resolved like any other absent dataset, from its newest earlier snapshot).
 
 Archived lineages (``<dataset>.archived-YYYYMMDD[-N]``, left by a backup that
 had to resend a dataset in full) are read as earlier snapshots of the same
@@ -182,9 +184,10 @@ def resolve(point: Point, snaps: list[Snap], datasets: list[str]) -> dict[str, S
         if own:
             out[ds] = _newest(own)
             continue
-        if point.family == "zark_":
-            out[ds] = None
+        mine = [s for s in snaps if s.dataset == ds]
+        if point.family == "zark_" and not any(s.creation > end for s in mine):
+            out[ds] = None  # its lineage ends before the point
             continue
-        earlier = [s for s in snaps if s.dataset == ds and s.creation <= end]
+        earlier = [s for s in mine if s.creation <= end]
         out[ds] = _newest(earlier) if earlier else None
     return out

@@ -5036,14 +5036,40 @@ class TestRestorePoints:  # pylint: disable=missing-function-docstring
         got = first[be]
         assert got is not None and got.source == f"{be}.archived-20261008"
 
-    def test_backup_points_have_exact_membership(self):
-        # Decision 18: a dataset created after the first point is not
-        # resurrected into it, and nothing falls back to an older snapshot.
-        snaps = parse_snapshots(self._v2_lines(), "backup")
+    def test_backup_points_never_resurrect_a_destroyed_dataset(self):
+        # Decision 18: a dataset whose lineage ends before a point (destroyed
+        # in origin) is not restored for it; one created after it has nothing.
+        p1, p2 = "zark_2026-10-01_10:00:00Z", "zark_2026-10-08_10:00:00Z"
+        lines = [
+            *self._v2_lines(),
+            f"backup/rpool/gone@autosnap_2026-09-30_10:00:00_daily\t21\t9\t{1_759_226_400}",
+        ]
+        snaps = parse_snapshots(lines, "backup")
         points = restore_points(snaps, f"rpool/ROOT/{_BE}")
-        first = resolve(points[0], snaps, ["rpool/new", "rpool"])
+        assert [p.members[f"rpool/ROOT/{_BE}"][0].name for p in points] == [p1, p2]
+        second = resolve(points[1], snaps, ["rpool/gone", "rpool/new"])
+        assert second["rpool/gone"] is None
+        first = resolve(points[0], snaps, ["rpool/new"])
         assert first["rpool/new"] is None
-        assert first["rpool"] is not None and first["rpool"].name.startswith("zark_")
+
+    def test_a_dataset_missed_by_a_run_falls_back(self):
+        # Decision 14: a run that did not reach a dataset leaves the point
+        # without it; the dataset still has later snapshots, so the point
+        # restores it from its newest earlier one instead of leaving it out.
+        p1, p2 = "zark_2026-10-01_10:00:00Z", "zark_2026-10-08_10:00:00Z"
+        t0, t1, t2 = 1_759_226_400, 1_759_312_800, 1_759_917_600
+        usr = f"backup/rpool/ROOT/{_BE}/usr"
+        lines = [
+            *self._v2_lines(),
+            f"{usr}@autosnap_2026-09-30_10:00:00_daily\t31\t9\t{t0}",
+            f"{usr}@{p2}\t32\t14\t{t2}",
+        ]
+        snaps = parse_snapshots(lines, "backup")
+        points = restore_points(snaps, f"rpool/ROOT/{_BE}")
+        assert points[0].members[f"rpool/ROOT/{_BE}"][0].name == p1
+        first = resolve(points[0], snaps, [f"rpool/ROOT/{_BE}/usr"])
+        got = first[f"rpool/ROOT/{_BE}/usr"]
+        assert got is not None and got.name.startswith("autosnap_") and got.creation < t1
 
     def test_choice_labels_backup_points_and_carried_runs(self):
         snaps = parse_snapshots(self._v2_lines(), "backup")
