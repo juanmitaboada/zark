@@ -33,10 +33,21 @@ the development-tooling consolidation that preceded it.
   is gone is discarded with `receive -A`, which touches no snapshot.
   After the transfers every dataset that holds the point is anchored —
   a bookmark `#zark_<pool GUID>_<UTC>` on rpool; on bpool, which never
-  gets bookmarks, the point renamed to `@zark_<pool GUID>_<UTC>` — and the
-  drive's older anchors are destroyed one by one; the point, and any point
-  left by an interrupted run, is destroyed in origin except where a
-  partial receive still needs it. (D14–D16, redesign §4, I-A…I-G)
+  gets bookmarks, the point renamed to `@zark_<pool GUID>_<UTC>`. Every
+  removal in origin (this run's point, points left by earlier runs, the
+  drive's older anchors) is then checked against a fresh read of both
+  sides: it goes only when the dataset is verified on the backup at the
+  new point, by guid, and anchored; whatever may still be a base stays,
+  nothing goes when a side cannot be read, another drive's anchors are
+  never candidates, and every verdict is logged with its reason.
+  (D14–D16, redesign §4, I-A…I-G)
+- The structural containers (`rpool`, `bpool`, `rpool/ROOT`,
+  `rpool/USERDATA`, `bpool/BOOT`) are not replicated: recover creates them
+  anew, so after a recover their snapshots never match the backup's, and
+  they hold no data. The engine creates the missing ones on the
+  destination (`canmount=off`, `mountpoint=none`, unencrypted) and lists
+  one that holds data (> 8 MiB) or can mount as not backed up.
+  (decision 13)
 - backup's questions, all asked before the first byte is sent: datasets
   only on the drive (keep — remembered as `org.zark:orphan=kept@<date>`,
   destroy, ask next time, or follow a rename in origin found by guid);
@@ -46,14 +57,23 @@ the development-tooling consolidation that preceded it.
   snapshots at stake: abort, archive and resend, or roll back (typed
   `ROLLBACK`); diverged datasets — skip, archive as
   `<name>.archived-YYYYMMDD` and resend, or destroy and resend (typed
-  `DESTROY`). The estimated transfer (`zfs send -nvP`) is checked against
-  the drive's free space before any choice is applied. (D17, redesign §7,
-  M2 decisions 7, 8, 18)
+  `DESTROY`). Archiving or destroying acts on the top of a subtree only:
+  the datasets below move or go with it, are not asked about, and are
+  resent in full. The estimated transfer (`zfs send -nvP`, including those
+  full resends) is checked against the drive's free space before any
+  choice is applied. (D17, redesign §7, M2 decisions 7, 8, 18)
 - Drive metadata on the pool's root dataset, readable without the
   passphrase: `org.zark:format` (2), `version`, `origin-host`,
-  `origin-rpool-guid`, `prepared-at`, and for a complete run `last-point`
-  and `last-backup-at`; `recover` and `mount` show them after importing a
-  drive. (decision 17a)
+  `origin-rpool-guid`, `origin-machine-id`, `prepared-at`, and for a
+  complete run `last-point` and `last-backup-at`; `recover` and `mount`
+  show them after importing a drive. (decision 17a)
+- backup refuses, before any question or change, a drive whose
+  `org.zark:origin-machine-id` is not this system's `/etc/machine-id`: it
+  names the drive's host and last date, and the way out (the system's own
+  drive, or purge and prepare). machine-id, not the rpool GUID, because
+  recover creates rpool anew while `/etc/machine-id` lives in the restored
+  boot environment. A drive without the property is accepted as before.
+  (decided 2026-10-08)
 - `zark setup` checks `feature@bookmark_v2` on rpool and offers to enable
   it (default no; it cannot be undone; GRUB never reads rpool); `backup`
   and `prepare` refuse without it. (decision 4a)
@@ -87,16 +107,20 @@ the development-tooling consolidation that preceded it.
   the read-back is ONLINE, with `last_backup_at` set. (I13, I14/F9, H16,
   R2§8.5/M1P.2, M1P.14, incident §8, decisions 2 and 14)
 - **Destination mount properties.** Every dataset on a drive is received
-  with `canmount=noauto` and no mountpoint of its own (an existing local
-  one is reverted to inherited); origin's values are recorded as
-  `org.zark:*`, which `recover` and `mount` already read. A manual `zpool
-  import` of a drive, or a boot with it attached, mounts nothing.
+  with `canmount=noauto` and, when new, no mountpoint of its own
+  (`-x mountpoint`; a mountpoint already set locally on the destination is
+  kept: libzfs skips the exclusion then, lib/libzfs/libzfs_sendrecv.c:
+  4313–4326); origin's values are recorded as `org.zark:*`, which `recover`
+  and `mount` already read. A manual `zpool import` of a drive, or a boot
+  with it attached, mounts nothing.
   (P0-11/F11/I15/D6, redesign §9, decision 1)
 - **recover.** Backup points are labelled as such and other runs as
-  carried points, each with how many datasets it holds. A backup point's
-  membership is exact: a dataset without its snapshot is not restored from
-  an older one. Archived lineages serve the points older than them (rows
-  marked "from archive"). (redesign §4.2, decisions 18, 19)
+  carried points, each with how many datasets it holds. A dataset missing
+  from a backup point is left out when its lineage ends before the point
+  (destroyed in origin, never brought back) and otherwise, when a run
+  simply did not reach it, restored from its newest earlier snapshot.
+  Archived lineages serve the points older than them (rows marked "from
+  archive"). (redesign §4.2, decisions 14, 18, 19)
 - **mount.** Read-write mounts the same origin tree as read-only,
   explicitly (`mount -t zfs -o zfsutil`); archived lineages are listed
   apart.
@@ -127,8 +151,13 @@ the development-tooling consolidation that preceded it.
   and kept orphans too.
 - Volumes other than the keystore are not backed up (listed every run).
 - An anchor that could not be created leaves that dataset on its previous
-  anchor (reported in the table); the next backup may then need a
-  decision for it.
+  anchor and point (reported in the table and the log); the next backup
+  continues from the point.
+- On a drive written by zark ≤ 2.0.0-rc1, mountpoints set locally by the
+  old code stay (`<pool>/rpool` at `/`, `bpool/BOOT/<be>` at `/boot`):
+  `canmount=noauto` keeps the datasets from mounting, and `<pool>/rpool`,
+  encrypted, cannot mount without its key. Clearing them needs a
+  `zfs set` with the drive's keystore zvol present (M4).
 
 #### Rejected approaches
 
@@ -150,6 +179,19 @@ the development-tooling consolidation that preceded it.
   it does.
 - **Metadata inside the keystore's LUKS volume.** Needs the passphrase and
   a read-write open of the keystore zvol on every backup.
+- **recover receiving the containers instead of creating them.** It would
+  keep `rpool/ROOT`, `rpool/USERDATA` and `bpool/BOOT` on the backup's
+  lineage, but not the pool roots, which `zpool create` makes and a forced
+  receive cannot replace on an encrypted root; the containers hold nothing
+  to back up anyway.
+- **Exact membership for backup points.** It kept destroyed datasets out of
+  later points, but a run interrupted before reaching a dataset left a
+  point that restored without it (an unbootable system if that was part of
+  the boot environment); the lineage-end rule keeps the first property
+  without the second.
+- **Identifying the drive's system by the rpool GUID.** recover creates
+  rpool anew, so every recovered system would look foreign to its own
+  drive; `/etc/machine-id` travels in the boot environment.
 - **Keeping `repair-divergent` as a separate command.** Its decisions now
   belong before the transfer, where backup asks them with the space
   figures at hand.

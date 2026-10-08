@@ -321,7 +321,7 @@ zark supports rotating multiple backup drives — one at home, one off-site, an 
 
 ### Anchors
 
-After each backup, every `rpool` dataset gets a bookmark `#zark_<pool GUID>_<UTC>` for that drive (a few hundred bytes, holding no data and untouched by sanoid's pruning). The next backup to that drive starts from it even if the source no longer has any snapshot in common with the drive. `bpool` never gets bookmarks (GRUB must keep reading it); there zark keeps one snapshot per drive instead. Nothing else of zark's stays in the source between backups. `zark registry forget <name>` removes a lost drive's anchors.
+After each backup, every `rpool` dataset gets a bookmark `#zark_<pool GUID>_<UTC>` for that drive (a few hundred bytes, holding no data and untouched by sanoid's pruning). The next backup to that drive starts from it even if the source no longer has any snapshot in common with the drive. `bpool` never gets bookmarks (GRUB must keep reading it); there zark keeps one snapshot per drive instead. Nothing else of zark's stays in the source between backups. Before anything is removed in the source, zark re-reads the drive and checks that the dataset is there at the new point and anchored. `zark registry forget <name>` removes a lost drive's anchors.
 
 ### Retention windows
 
@@ -336,7 +336,7 @@ The sanoid snapshots taken between two backups travel to the drive with the next
 
 ### Drive staleness reporting
 
-`zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host and the last point (`org.zark:*`). After a backup it lists how many days have passed since every other drive's last backup.
+`zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host, its machine-id and the last point (`org.zark:*`). A drive whose machine-id is not this system's is refused before anything is touched. After a backup it lists how many days have passed since every other drive's last backup.
 
 ### Divergence and datasets only on the drive
 

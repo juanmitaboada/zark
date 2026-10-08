@@ -166,7 +166,11 @@ for the canonical end-to-end sequences.
 :   Back up this system to the connected, registered backup drive.
     Auto-detects which known drive is plugged in and imports it by its
     exact device with **-N** and an alternate root, so nothing it holds is
-    mounted and it never enters */etc/zfs/zpool.cache*.
+    mounted and it never enters */etc/zfs/zpool.cache*. A drive whose
+    metadata names another system (**org.zark:origin-machine-id** differs
+    from */etc/machine-id*) is refused before anything is asked or
+    changed; the message names the drive's host and last date. Drives
+    written by an older **zark**, without that property, are accepted.
 
     **Backup point.** **backup** pauses the **sanoid** timer (waiting for a
     running snapshot or prune pass), takes one snapshot
@@ -183,8 +187,17 @@ for the canonical end-to-end sequences.
     bookmark **\#zark\_\<pool GUID\>\_\<UTC\>** (on **bpool**, which never
     gets bookmarks, the point is kept as a snapshot of that name instead),
     the drive's older anchors go, the point is destroyed in the source and
-    the timer is resumed. Datasets on the drive are received with
-    **canmount=noauto** and no mountpoint of their own; the source's values
+    the timer is resumed. Each removal in the source is checked first
+    against the drive: a point or an old anchor goes only when the dataset
+    is verified on the drive at the new point and anchored, and every
+    decision is logged with its reason. The structural containers
+    (**rpool**, **bpool**, **rpool/ROOT**, **rpool/USERDATA**,
+    **bpool/BOOT**) are not replicated, since **recover** creates them anew:
+    **backup** creates them on the drive when missing, and lists one that
+    holds data or can mount as not backed up. Datasets on the drive are
+    received with **canmount=noauto** and, when new, no mountpoint of their
+    own (a mountpoint an older **zark** set on the drive stays, but cannot
+    mount anything with **canmount=noauto**); the source's values
     are recorded as **org.zark:canmount** and **org.zark:mountpoint** and
     used by **recover** and **mount**. Volumes other than the keystore are
     not backed up and are listed as such.
@@ -206,8 +219,10 @@ for the canonical end-to-end sequences.
       send it again.
 
     An archived dataset is renamed to *\<name\>.archived-YYYYMMDD* on the
-    drive and keeps all its snapshots. The estimated transfer is checked
-    against the drive's free space before any choice is applied.
+    drive and keeps all its snapshots; archiving or destroying a dataset
+    takes the datasets below it along, which are not asked about and are
+    sent again in full. The estimated transfer, those full sends included,
+    is checked against the drive's free space before any choice is applied.
 
     **Verdict.** **BACKUP COMPLETED** only when every dataset reached the
     point and the read-back is **ONLINE**; a per-dataset table is printed
@@ -230,7 +245,8 @@ for the canonical end-to-end sequences.
 
     **Drive metadata.** The drive's root dataset records
     **org.zark:format**, **org.zark:version**, **org.zark:origin-host**,
-    **org.zark:origin-rpool-guid** and, for a complete backup,
+    **org.zark:origin-rpool-guid**, **org.zark:origin-machine-id** and, for
+    a complete backup,
     **org.zark:last-point** and **org.zark:last-backup-at**; they are
     readable without the passphrase, and **recover** and **mount** show
     them after importing the drive.
@@ -280,9 +296,10 @@ for the canonical end-to-end sequences.
     creation time (the newest is the default): backup points are labelled
     as such and the **sanoid** snapshots carried between them as carried
     points, each with how many datasets it holds. A dataset without a
-    backup point's snapshot did not exist then and is not restored for that
-    point; datasets archived by **backup** serve the points older than the
-    archive. It then shows a table with
+    backup point's snapshot is not restored for that point when it no
+    longer existed then; when a backup simply did not reach it, its newest
+    earlier snapshot is used and shown with its offset. Datasets archived
+    by **backup** serve the points older than the archive. It then shows a table with
     the snapshot every dataset will be restored from — never one newer
     than the point — and the mount properties it will get. Only after a
     full pre-flight (sizes of that point, keystore, bpool) and a typed
