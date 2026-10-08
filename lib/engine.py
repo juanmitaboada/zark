@@ -47,6 +47,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from lib import sh
 from lib.cleanup import Cleanup
@@ -529,7 +530,7 @@ def write_metadata(pool: str, fields: dict[str, str], log: Log) -> bool:
     """Record ``org.zark:<key>=<value>`` on the backup pool's root dataset
     (M2 decision 17a): readable without the passphrase, and a user property
     mounts nothing, so the zvol rule does not apply."""
-    pairs = " ".join(_q(f"org.zark:{k}={v}") for k, v in sorted(fields.items()))
+    pairs = " ".join(_q(f"org.zark:{k}={v}") for k, v in sorted(fields.items()) if v)
     r = sh.run(f"zfs set {pairs} {_q(pool)}", log=log)
     if not r.ok:
         log.warn(f"Could not record zark metadata on {pool}: {r.stderr.strip()}")
@@ -548,6 +549,48 @@ def read_metadata(pool: str) -> dict[str, str]:
 
 
 FORMAT = "2"  # org.zark:format of a backup made with points and anchors
+
+# The system's identity across a recover: rpool is created anew (new GUID),
+# but /etc/machine-id lives in the boot environment recover restores.
+MACHINE_ID_PATH = "/etc/machine-id"
+
+
+def machine_id() -> str:
+    """This system's /etc/machine-id, "" when it cannot be read."""
+    try:
+        return Path(MACHINE_ID_PATH).read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def check_drive_owner(pool: str, log: Log) -> None:
+    """Refuse a drive whose metadata names another system (2026-10-08).
+
+    A drive without ``org.zark:origin-machine-id`` (written by zark <=
+    2.0.0-rc2) is accepted as before.
+    """
+    meta = read_metadata(pool)
+    theirs = meta.get("origin-machine-id", "")
+    if not theirs:
+        return
+    mine = machine_id()
+    if mine and mine == theirs:
+        log.ok(f"{pool} belongs to this system (machine-id matches)")
+        return
+    when = meta.get("last-backup-at") or meta.get("prepared-at") or "?"
+    log.fatal(
+        f"{pool} is the backup of another system — nothing was changed",
+        causes=[
+            f"Drive written for host {meta.get('origin-host', '?')} (last: {when})",
+            f"Its machine-id {theirs} is not this system's "
+            + (mine or f"(cannot read {MACHINE_ID_PATH})"),
+        ],
+        solutions=[
+            "Connect this system's own backup drive",
+            "To reuse this drive for this system, wipe and re-prepare it: "
+            + "sudo zark purge <device> && sudo zark prepare <device>",
+        ],
+    )
 
 
 def log_metadata(pool: str, log: Log) -> dict[str, str]:

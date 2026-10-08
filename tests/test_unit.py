@@ -4795,6 +4795,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
                 patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
                 patch("builtins.input", return_value=""),
                 patch.object(prepare_mod, "prompt_eject_or_attach"),
+                patch.object(Cleanup, "register", lambda _self: None),
                 redirect_stdout(StringIO()),
                 redirect_stderr(StringIO()),
             ):
@@ -7650,6 +7651,10 @@ class TestBackupCommand:
                 patch.object(backup_mod, "_heal_drive_id"),
                 patch.object(backup_mod, "_notify"),
                 patch.object(backup_mod, "prompt_eject_or_attach"),
+                # No atexit/SIGTERM hook outliving the test: a refused run
+                # leaves its Cleanup armed, and at exit it would act on a
+                # real pool of the same name.
+                patch.object(Cleanup, "register", lambda _self: None),
                 patch.object(ZFS, "import_backup_pool", return_value=True),
                 patch.object(ZFS, "pool_guid", return_value="111"),
                 patch.object(ZFS, "pool_health", return_value="ONLINE"),
@@ -7692,6 +7697,77 @@ class TestBackupCommand:
         assert not cfg.known_drives["backup"].last_backup_at
         assert "org.zark:last-point" not in fake.ds["backup"].props
         assert fake.ds["backup"].props["org.zark:format"] == "2"
+
+    def _machine_id(self, value: str) -> str:
+        path = os.path.join(tempfile.mkdtemp(), "machine-id")
+        Path(path).write_text(value + "\n", encoding="ascii")
+        return path
+
+    def test_drive_records_this_machine_id(self) -> None:
+        """Every backup writes origin-machine-id; the next one accepts it."""
+        fake = _fresh_fake()
+        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
+            _, rc = self._run(fake)
+            assert rc == 0
+            assert fake.ds["backup"].props["org.zark:origin-machine-id"] == "aaaa1111"
+            _, rc = self._run(fake)
+        assert rc == 0
+
+    def test_drive_of_another_system_is_refused_untouched(self) -> None:
+        """A mismatch is fatal before any question, key, point or sanoid change."""
+        fake = _fresh_fake()
+        fake.ds["backup"].props.update(
+            {
+                "org.zark:origin-machine-id": "bbbb2222",
+                "org.zark:origin-host": "carmen",
+                "org.zark:last-backup-at": "2026-10-01T10:00:00Z",
+            },
+        )
+        out = StringIO()
+        with (
+            patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")),
+            patch("sys.stdout", out),
+        ):
+            _, rc = self._run(fake)
+        assert rc == 1
+        assert not any(
+            c.startswith(("zfs snapshot", "systemctl stop", "zfs set")) for c in fake.calls
+        )
+        assert "backup/rpool" not in fake.ds
+
+    def test_drive_without_machine_id_is_accepted(self) -> None:
+        """A drive written by an older zark has no origin-machine-id: as before."""
+        fake = _fresh_fake()
+        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
+            _, rc = self._run(fake)
+        assert rc == 0
+
+    def test_owner_check_messages(self) -> None:
+        """The refusal names the drive's host and date and the way out."""
+        fake = _fresh_fake()
+        fake.ds["backup"].props.update(
+            {
+                "org.zark:origin-machine-id": "bbbb2222",
+                "org.zark:origin-host": "carmen",
+                "org.zark:last-backup-at": "2026-10-01T10:00:00Z",
+            },
+        )
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            try:
+                engine.check_drive_owner("backup", Log())
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected a refusal")
+        text = out.getvalue()
+        assert "backup of another system" in text and "carmen" in text
+        assert "2026-10-01T10:00:00Z" in text and "re-prepare" in text
 
     def test_refuses_without_bookmark_v2(self) -> None:
         """Decision 4a: no bookmark_v2 on rpool, no backup."""

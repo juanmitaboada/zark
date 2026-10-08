@@ -406,6 +406,7 @@ def _write_metadata(pool_name: str, source_pool: str, point: str, log: Log) -> N
         "version": VERSION,
         "origin-host": socket.gethostname(),
         "origin-rpool-guid": rpool_guid,
+        "origin-machine-id": engine.machine_id(),
     }
     if point:
         fields |= {"last-backup-at": now_utc_iso(), "last-point": point}
@@ -526,6 +527,9 @@ def run(
         )
 
     log.ok(f"Pool {pool_name} imported (GUID: {actual_guid} ✓)")
+    # By content, not only by the registry: a drive of another system is
+    # refused before anything is asked or written.
+    engine.check_drive_owner(pool_name, log)
     _heal_drive_id(cfg, pool_name, device, log)
 
     # ── Check health ─────────────────────────────────────────────────────

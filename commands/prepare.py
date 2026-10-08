@@ -206,6 +206,7 @@ def run(
         "version": VERSION,
         "prepared-at": prepared_at,
         "origin-host": socket.gethostname(),
+        "origin-machine-id": engine.machine_id(),
         "origin-rpool-guid": rpool_guid,
     }
     if res.ok:
