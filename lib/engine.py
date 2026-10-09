@@ -656,9 +656,13 @@ def write_metadata(pool: str, fields: dict[str, str], log: Log) -> bool:
     return r.ok
 
 
-def read_metadata(pool: str) -> dict[str, str]:
-    """``org.zark:*`` user properties set on the backup pool's root dataset."""
-    r = sh.run(f"zfs get -H -s local -o property,value all {_q(pool)}")
+def read_metadata(pool: str, strict: bool = False) -> dict[str, str]:
+    """``org.zark:*`` user properties set on the backup pool's root dataset.
+
+    ``strict`` raises :class:`ReadError` when ``zfs get`` fails, instead of
+    returning nothing (which reads as a drive without metadata).
+    """
+    r = _checked(sh.run(f"zfs get -H -s local -o property,value all {_q(pool)}"), strict)
     out: dict[str, str] = {}
     for line in r.lines if r.ok else []:
         f = line.split("\t")
@@ -686,9 +690,17 @@ def check_drive_owner(pool: str, log: Log) -> None:
     """Refuse a drive whose metadata names another system (2026-10-08).
 
     A drive without ``org.zark:origin-machine-id`` (written by zark <=
-    2.0.0-rc2) is accepted as before.
+    2.0.0-rc2) is accepted as before; one whose metadata cannot be read is
+    refused, since unreadable would otherwise pass as absent (M2R-7).
     """
-    meta = read_metadata(pool)
+    try:
+        meta = read_metadata(pool, strict=True)
+    except ReadError as e:
+        log.fatal(
+            f"Cannot read the zark metadata of {pool} — nothing was changed",
+            causes=[str(e)],
+            solutions=["Check the drive: zpool status " + pool, "Reconnect it and run again"],
+        )
     theirs = meta.get("origin-machine-id", "")
     if not theirs:
         return

@@ -8444,7 +8444,8 @@ class TestBackupDecide:
 class TestBackupCommand:
     """`zark backup` end to end on FakeZfs (drive discovery and keystore stubbed)."""
 
-    def _run(self, fake: FakeZfs) -> tuple[Config, int]:
+    def _run(self, fake: FakeZfs, *extra: AbstractContextManager[object]) -> tuple[Config, int]:
+        """``extra`` patches are entered last, so they override the defaults."""
         cfg = make_config()
         cfg.known_drives["backup"] = DriveInfo("backup", "111", "usb-X-0:0", autoeject=False)
         drive = ConnectedDrive(
@@ -8482,6 +8483,8 @@ class TestBackupCommand:
                 redirect_stderr(StringIO()),
             ):
                 stack.enter_context(cm)
+            for override in extra:
+                _ = stack.enter_context(override)
             try:
                 backup_mod.run([])
             except SystemExit as e:
@@ -8575,6 +8578,44 @@ class TestBackupCommand:
         assert not any(
             c.startswith(("zfs snapshot", "systemctl stop", "zfs set")) for c in fake.calls
         )
+        assert "backup/rpool" not in fake.ds
+
+    def test_owner_is_checked_before_health_keys_and_questions(self) -> None:
+        """The refusal comes before the health check, the keystore and the
+        first question (review mutation O2)."""
+        fake = _fresh_fake()
+        fake.ds["backup"].props["org.zark:origin-machine-id"] = "bbbb2222"
+        reached = AssertionError("reached past the owner check")
+        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
+            _, rc = self._run(
+                fake,
+                patch.object(ZFS, "pool_health", side_effect=reached),
+                patch.object(ZFS, "datasets_needing_key", side_effect=reached),
+                patch("lib.log.Log.ask", side_effect=reached),
+            )
+        assert rc == 1
+
+    def test_unreadable_machine_id_is_refused(self) -> None:
+        """A drive that names an owner, and this system's machine-id cannot be
+        read: refused, never taken for a match (mutation O3)."""
+        fake = _fresh_fake()
+        fake.ds["backup"].props["org.zark:origin-machine-id"] = "bbbb2222"
+        missing = os.path.join(tempfile.mkdtemp(), "no-machine-id")
+        with patch.object(engine, "MACHINE_ID_PATH", missing):
+            _, rc = self._run(fake)
+        assert rc == 1
+        assert "backup/rpool" not in fake.ds
+
+    def test_unreadable_metadata_is_refused(self) -> None:
+        """M2R-7 (E11b): `zfs get` fails on a drive that names another system:
+        refused, not taken for a drive without an owner."""
+        fake = _fresh_fake()
+        fake.ds["backup"].props["org.zark:origin-machine-id"] = "bbbb2222"
+        fake.fail_cmds.add("zfs get -H -s local -o property,value all")
+        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
+            _, rc = self._run(fake)
+        assert rc == 1
+        assert not any(c.startswith(("zfs snapshot", "systemctl stop")) for c in fake.calls)
         assert "backup/rpool" not in fake.ds
 
     def test_drive_without_machine_id_is_accepted(self) -> None:
