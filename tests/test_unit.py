@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # isort: split
 
 from unittest import SkipTest  # pylint: disable=wrong-import-position # noqa: E402
-from unittest.mock import patch  # pylint: disable=wrong-import-position # noqa: E402
+from unittest.mock import MagicMock, patch  # pylint: disable=wrong-import-position # noqa: E402
 
 import commands.backup as backup_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -7568,14 +7568,43 @@ class TestBackupDecide:
         assert P1 in fake.names("backup/rpool/ROOT/be")
 
     def test_rollback_needs_the_typed_word(self) -> None:
-        """Choosing rollback without typing ROLLBACK aborts and destroys nothing."""
+        """A wrong word asks the question again (O10); abort then changes nothing."""
         fake = self._with_rollback()
-        ok, _ = self._decide(fake, [2], typed="yes")
-        assert not ok
+        plans, eng = self._plans(fake)
+        choice = MagicMock(side_effect=[2, 0])
+        with (
+            patch_sh(fake),
+            patch.object(Log, "ask_choice", choice),
+            patch.object(Log, "ask_text", return_value="rollback"),
+            redirect_stdout(StringIO()),
+        ):
+            ok = _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+        assert not ok and choice.call_count == 2
         assert P1 in fake.names("backup/rpool/ROOT/be")
         ok, _ = self._decide(fake, [2], typed="ROLLBACK")
         assert ok
         assert P1 not in fake.names("backup/rpool/ROOT/be")
+
+    def test_rollback_counts_the_incrementals_that_follow(self) -> None:
+        """O11: after "roll back" the estimate holds each post-rollback incremental."""
+        fake = self._with_rollback()
+        plans, eng = self._plans(fake)
+        estimated: list[tuple[repl.State, bool]] = []
+        real = eng.estimate
+
+        def spy(p: repl.DatasetPlan, full: bool = False) -> int:
+            estimated.append((p.state, full))
+            return real(p, full)
+
+        with (
+            patch_sh(fake),
+            patch.object(eng, "estimate", spy),
+            patch.object(Log, "ask_choice", side_effect=[2]),
+            patch.object(Log, "ask_text", return_value="ROLLBACK"),
+            redirect_stdout(StringIO()),
+        ):
+            assert _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+        assert (repl.State.ROLLBACK, False) in estimated
 
     def test_archive_offered_only_when_it_fits(self) -> None:
         """Without room for a full resend, option 2 is the rollback."""
@@ -7593,7 +7622,8 @@ class TestBackupDecide:
         assert ok
         assert fake.ds["backup/rpool/var/lib/docker"].props["org.zark:orphan"].startswith("kept@")
         fake.ds["backup/rpool/var/lib/docker"].props.pop("org.zark:orphan")
-        ok, _ = self._decide(fake, [2], typed="no")
+        # A wrong word asks again (O10); "ask again next time" then keeps it.
+        ok, _ = self._decide(fake, [2, 0], typed="no")
         assert ok and "backup/rpool/var/lib/docker" in fake.ds
         ok, _ = self._decide(fake, [2], typed="DESTROY")
         assert ok and "backup/rpool/var/lib/docker" not in fake.ds

@@ -242,12 +242,15 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         ]
         if p.rename_to:
             opts.append(f"follow the rename in origin: {p.rel} → {p.rename_to}")
-        pick = log.ask_choice(f"{p.rel} exists only on the backup ({_gib(p.used)}):", opts, 0)
+        pick = _ask_confirmed(
+            log,
+            f"{p.rel} exists only on the backup ({_gib(p.used)}):",
+            opts,
+            {2: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it")},
+        )
         if pick == 1:
             actions.append(partial(eng.keep_orphan, p, datetime.now(UTC).strftime("%Y-%m-%d")))
-        elif pick == 2 and _typed(
-            log, "DESTROY", f"destroy {pool_name}/{p.rel} and everything below it"
-        ):
+        elif pick == 2:
             actions.append(partial(eng.destroy, p))
             confirmed_any = True
         elif pick == 3:
@@ -286,7 +289,12 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
                 + f" and resend in full ({_gib(full)})",
             )
         opts.append(f"roll back: destroy the {destroyed} newer snapshot(s) listed above")
-        pick = log.ask_choice("How should this backup continue?", opts, 0)
+        pick = _ask_confirmed(
+            log,
+            "How should this backup continue?",
+            opts,
+            {len(opts) - 1: ("ROLLBACK", f"destroy {destroyed} snapshot(s) on {pool_name}")},
+        )
         if pick == 0:
             return False
         if fits and pick == 1:
@@ -294,8 +302,8 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             moved.update(tops)
             actions += [partial(eng.archive, p) for p in rollbacks if p.rel in tops]
         else:
-            if not _typed(log, "ROLLBACK", f"destroy {destroyed} snapshot(s) on {pool_name}"):
-                return False
+            # After the rollback each one is an incremental from its common snapshot.
+            sizes.update({p.rel: eng.estimate(p) for p in rollbacks})
             actions += [partial(eng.rollback, p) for p in rollbacks]
             confirmed_any = True
 
@@ -316,19 +324,21 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             f"destroy it{extra} on the backup and resend in full ({_gib(p.used)} destroyed)"
         )
         log.warn(f"  {p.rel}: no snapshot in common with the backup ({p.note})")
-        pick = log.ask_choice(f"{p.rel} has diverged:", opts, 0)
+        pick = _ask_confirmed(
+            log,
+            f"{p.rel} has diverged:",
+            opts,
+            {len(opts) - 1: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it")},
+        )
         if pick == 0:
             sizes = before
             continue
+        moved.add(p.rel)
         if fits and pick == 1:
-            moved.add(p.rel)
             actions.append(partial(eng.archive, p))
-        elif _typed(log, "DESTROY", f"destroy {pool_name}/{p.rel} and everything below it"):
-            moved.add(p.rel)
+        else:
             actions.append(partial(eng.destroy, p))
             confirmed_any = True
-        else:
-            sizes = before
 
     needed = sum(sizes.values())
     log.info(f"Estimated transfer: {_gib(needed)}; available on {pool_name}: {_gib(avail)}")
@@ -370,10 +380,22 @@ def _typed(log: Log, word: str, what: str) -> bool:
     answer = log.ask_text(
         f"    Type {word} to {what}: ", accept=(word,), label=f"Type {word} to {what}"
     )
-    if answer != word:
-        log.info("Not confirmed — nothing destroyed")
-        return False
-    return True
+    return answer == word
+
+
+def _ask_confirmed(
+    log: Log, question: str, opts: list[str], confirm: dict[int, tuple[str, str]]
+) -> int:
+    """Numbered choice whose destructive options need a typed word.
+
+    A word that does not match is no answer: the same question is asked
+    again, so a typo can neither destroy nor silently pick another option.
+    """
+    while True:
+        pick = log.ask_choice(question, opts, 0)
+        if pick not in confirm or _typed(log, *confirm[pick]):
+            return pick
+        log.info(f"Not confirmed ({confirm[pick][0]} was not typed) — choose again")
 
 
 def _show_table(res: engine.Result, point: str, log: Log) -> None:
