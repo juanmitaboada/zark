@@ -149,6 +149,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zfs", "rename"): self._rename,
             ("zfs", "rollback"): self._rollback,
             ("zfs", "set"): self._set,
+            ("zfs", "inherit"): self._inherit,
             ("zfs", "create"): self._create,
             ("zfs", "get"): self._get,
             ("zpool", "export"): lambda _a: _ok(),
@@ -365,6 +366,14 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         for kv in args[:-1]:
             k, v = kv.split("=", 1)
             self.ds[ds].props[k] = v
+        return _ok()
+
+    def _inherit(self, args: list[str]) -> RunResult:
+        ds = args[-1]
+        if ds not in self.ds:
+            return _err("does not exist")
+        for k in args[:-1]:
+            _ = self.ds[ds].props.pop(k, None)
         return _ok()
 
     # ── send / receive ───────────────────────────────────────────────────

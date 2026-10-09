@@ -22,9 +22,10 @@ One run against one backup pool (already imported under I-G by the caller):
      per pool (one txg each; a call cannot span pools).
   3. ``survey`` — read origin and destination, plan every dataset.
   4. Decisions the caller asked the user about: ``rollback``, ``archive``,
-     ``destroy``, ``keep_orphan``, ``follow_rename``; then the structural
-     containers are created on the destination where missing
-     (``ensure_containers``) and ``survey`` runs again.
+     ``destroy``, ``keep_orphan``, ``follow_rename``; then ``survey`` runs
+     again, the "kept" mark of an orphan origin has again is cleared
+     (``clear_orphan_marks``) and the structural containers are created on
+     the destination where missing (``ensure_containers``).
   5. ``transfer`` for each transferable dataset, parents first:
      ``zfs send [-w] … | zfs receive -s -u -o canmount=noauto -x mountpoint
      -o org.zark:canmount=… -o org.zark:mountpoint=… <dest>``, never ``-F``.
@@ -358,6 +359,26 @@ class Run:  # pylint: disable=too-many-instance-attributes
         self._report(r, f"keeping {p.rel} (only on backup)")
         return r.ok
 
+    def clear_orphan_marks(self) -> list[str]:
+        """Drop the "kept" mark of datasets origin has again; return them.
+
+        A kept orphan that reappears in origin (a recover of an earlier
+        point) is replicated again; left marked, a later removal in origin
+        would be kept without asking.
+        """
+        cleared: list[str] = []
+        for rel, d in sorted(self.dest.items()):
+            if not d.orphan or rel not in self.origin:
+                continue
+            r = sh.run(f"zfs inherit {_ORPHAN} {_q(self._dst(rel))}", log=self.log)
+            if r.ok:
+                d.orphan = ""
+                cleared.append(rel)
+                self.log.info(f"  {rel}: back in origin, no longer kept as an orphan")
+            else:
+                self.log.warn(f"  {rel}: could not clear {_ORPHAN}: {r.stderr.strip()}")
+        return cleared
+
     def follow_rename(self, p: DatasetPlan) -> bool:
         """Rename an orphan to the name its lineage now has in origin."""
         r = sh.run(
@@ -679,6 +700,7 @@ def replicate(run: Run, decide: Decide) -> Result:
         res.aborted = True
         return res
     _ = run.survey()
+    _ = run.clear_orphan_marks()
     for rel in run.ensure_containers():
         run.log.error(f"  {rel}: could not create the container on the backup")
     for _ in range(MAX_ROUNDS):

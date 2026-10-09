@@ -7628,6 +7628,19 @@ class TestBackupDecide:
         ok, _ = self._decide(fake, [2], typed="DESTROY")
         assert ok and "backup/rpool/var/lib/docker" not in fake.ds
 
+    def test_kept_orphan_back_in_origin_loses_its_mark(self) -> None:
+        """O13: a kept orphan origin has again (after a recover) is replicated
+        and unmarked, so a later removal in origin is asked about again."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        docker = "backup/rpool/var/lib/docker"
+        fake.ds[docker].props["org.zark:orphan"] = "kept@2026-10-09"
+        res = _engine_run(fake, "backup", "111", P2)
+        assert res.ok, res
+        assert "org.zark:orphan" not in fake.ds[docker].props
+        assert P2 in fake.names(docker)
+
     def test_no_space_is_fatal_before_any_change(self) -> None:
         """The space check runs after the questions and before applying them."""
         fake = _fresh_fake()
