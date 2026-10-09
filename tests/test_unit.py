@@ -8431,6 +8431,39 @@ class TestBackupDecide:
             _show_table(res, P1, Log())
         assert "NOT at the point: not attempted (via bookmark)" in buf.getvalue()
 
+    def test_table_shows_the_whole_zfs_message(self) -> None:
+        """M2R-12: libzfs's two-line refusals reach the table whole."""
+        modified = (
+            "cannot receive incremental stream: destination backup/rpool/x has been modified\n"
+            "since most recent snapshot\n"
+        )
+        mismatch = (
+            "warning: something earlier\n"
+            "cannot receive incremental stream: most recent snapshot of backup/rpool/x does not\n"
+            "match incremental source\n"
+        )
+        assert engine.last_message(modified) == (
+            "cannot receive incremental stream: destination backup/rpool/x has been modified "
+            "since most recent snapshot"
+        )
+        assert engine.last_message(mismatch).endswith("does not match incremental source")
+        assert not engine.last_message(mismatch).startswith("warning")
+        assert engine.last_message("plain error\n") == "plain error"
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        real_pipe = fake.mock_run_pipe
+
+        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+            if "rpool/var" in cmd2 and "rpool/var/" not in cmd2:
+                return RunResult(1, "", modified, "")
+            return real_pipe(cmd1, cmd2, log)
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        res = _engine_run(fake, "backup", "111", P2)
+        assert res.outcomes["rpool/var"].error.endswith(
+            "has been modified since most recent snapshot"
+        )
+
     def test_report_keeps_dataset_names(self) -> None:
         """O1: "Rolled back rpool/ROOT/…@zark_…Z", not "rpool/root/…z"."""
         with patch_sh(_fresh_fake()), redirect_stdout(StringIO()) as buf:

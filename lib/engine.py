@@ -530,9 +530,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         for args in self._send_args(p):
             r = sh.run_pipe(f"zfs send {args}", self._recv(p.rel, resume), log=self.log)
             if not r.ok:
-                err = (
-                    r.stderr.strip().splitlines()[-1] if r.stderr.strip() else f"rc={r.returncode}"
-                )
+                err = last_message(r.stderr) or f"rc={r.returncode}"
                 enospc = sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout)
                 return Outcome(p.rel, False, err, enospc)
         return Outcome(p.rel, True)
@@ -834,6 +832,19 @@ def leftover_points(origin: dict[str, Origin]) -> list[str]:
 def is_point(name: str) -> bool:
     """True for a backup point name."""
     return bool(POINT_RE.match(name))
+
+
+def last_message(stderr: str) -> str:
+    """The last error message of a zfs command, on one line.
+
+    libzfs prints ``<action>: <reason>`` and some reasons span two lines
+    ("destination %s has been modified\\nsince most recent snapshot",
+    lib/libzfs/libzfs_sendrecv.c:5159-5174), so the message runs from the
+    last line that starts with "cannot " to the end.
+    """
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    starts = [i for i, ln in enumerate(lines) if ln.startswith("cannot ")]
+    return " ".join(lines[starts[-1] :]) if starts else (lines[-1] if lines else "")
 
 
 def depth_order(plans: list[DatasetPlan]) -> list[DatasetPlan]:
