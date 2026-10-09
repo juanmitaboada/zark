@@ -488,6 +488,7 @@ def run(
     warn_rpool_mountpoint_lost(log)
     warn_kernel_named_vdevs(log)
     engine.require_bookmark_v2(log)
+    engine.require_boot_pool(log)
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")

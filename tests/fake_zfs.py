@@ -90,6 +90,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         self.clock = 1_700_000_000
         self.inject: dict[str, tuple[str, int]] = {}  # dest dataset → (kind, after)
         self.fail_cmds: set[str] = set()  # a command containing one of these fails
+        self.importable: set[str] = set()  # pools `zpool import` lists (exported here)
 
     # ── building the model ───────────────────────────────────────────────
 
@@ -138,6 +139,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         if any(f in cmd_str for f in self.fail_cmds):
             return _err(f"fake: injected failure: {cmd_str}")
         argv = shlex.split(cmd_str)
+        if argv and argv[0] == "env":  # `env LC_ALL=C <command>`
+            argv = [a for a in argv[1:] if "=" not in a]
         handler = {
             ("zpool", "list"): self._zpool_list,
             ("zpool", "get"): self._zpool_get,
@@ -154,6 +157,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zfs", "create"): self._create,
             ("zfs", "get"): self._get,
             ("zpool", "export"): lambda _a: _ok(),
+            ("zpool", "import"): self._zpool_import_list,
             ("zpool", "create"): self._zpool_create,
             ("zfs", "unload-key"): lambda _a: _ok(),
             ("systemctl", "is-active"): self._is_active,
@@ -177,6 +181,18 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err(f"pool '{name}' already exists")
         self.pool(name)
         return _ok()
+
+    def _zpool_import_list(self, args: list[str]) -> RunResult:
+        """``zpool import`` without a pool name: list the importable pools."""
+        if args:
+            return _err("fake: only the listing form of zpool import")
+        if not self.importable:
+            return _err("no pools available to import")
+        return _ok(
+            "".join(
+                f"   pool: {p}\n     id: 4242\n  state: ONLINE\n\n" for p in sorted(self.importable)
+            )
+        )
 
     def _zpool_list(self, args: list[str]) -> RunResult:
         return _ok(args[-1] + "\n") if args[-1] in self.pools else _err("no such pool")

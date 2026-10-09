@@ -43,6 +43,7 @@ Every ZFS behaviour relied on here was checked in OpenZFS 2.4.1 (see the
 M2 plan, §2, and the commit messages).
 """
 
+import re
 import shlex
 import time
 from collections.abc import Callable
@@ -204,6 +205,34 @@ def require_bookmark_v2(log: Log) -> None:
             causes=["zark's backup anchors are rpool bookmarks, which need this feature"],
             solutions=["Run: sudo zark setup  (it explains the change and asks first)"],
         )
+
+
+def require_boot_pool(log: Log) -> None:
+    """Refuse while a pool named bpool can be imported here but is not (M2R-4).
+
+    With bpool not imported ``/boot`` is not mounted either, so the pool's
+    absence from ``zpool list`` is all there is to see; a run would then
+    leave the kernels and initrds out and still call itself complete.
+    ``zpool import`` without a pool name only lists what could be imported
+    (cmd/zpool/zpool_main.c:3986-4017).
+    """
+    if sh.run("zpool list -H -o name bpool").ok:
+        return
+    r = sh.run("env LC_ALL=C zpool import")
+    m = re.search(r"^\s*pool: bpool\s*\n\s*id: (\d+)", r.stdout, re.MULTILINE)
+    if m is None:
+        return
+    log.fatal(
+        "bpool is not imported",
+        causes=[
+            f"`zpool import` lists a pool named bpool (id {m.group(1)}) that is not imported",
+            "Without it the backup would leave out /boot: the kernels and initrds",
+        ],
+        solutions=[
+            "Import it, then run again: sudo zpool import bpool",
+            "If that bpool belongs to another system's disk, disconnect that disk",
+        ],
+    )
 
 
 @dataclass

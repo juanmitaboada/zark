@@ -53,6 +53,7 @@ def run(
     log.banner("PREPARE NEW BACKUP DRIVE")
     warn_rpool_mountpoint_lost(log)
     engine.require_bookmark_v2(log)
+    engine.require_boot_pool(log)
 
     # ── Verify rpool keystore accessible ─────────────────────────────────
     if not Path("/run/keystore/rpool/system.key").exists():

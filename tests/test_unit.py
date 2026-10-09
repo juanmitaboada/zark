@@ -4853,6 +4853,18 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
         assert _marked(fake, "blue") == {home[0]}
 
+    def test_prepare_refuses_while_bpool_is_not_imported(self):
+        """M2R-4 (E4b): a new drive would be prepared without bpool."""
+        fake = _fresh_fake(())
+        for n in [n for n in fake.ds if n == "bpool" or n.startswith("bpool/")]:
+            _ = fake.ds.pop(n)
+        fake.pools.discard("bpool")
+        fake.importable.add("bpool")
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        assert self._prepare(fake, cfg_dir) == 1
+        assert not any(c.startswith("zpool create") for c in fake.calls)
+
     def test_prepare_records_the_machine_id(self):
         """The drive-owner check reads what prepare wrote (2026-10-08)."""
         fake = _fresh_fake(())
@@ -8174,6 +8186,32 @@ class TestBackupCommand:
         assert _origin_points(fake) == []
         assert fake.units["sanoid.timer"] == "active"
         assert not any(c.startswith("syncoid") or "sanoid --take" in c for c in fake.calls)
+
+    @staticmethod
+    def _without_bpool(importable: bool) -> FakeZfs:
+        fake = _fresh_fake()
+        for n in [n for n in fake.ds if n == "bpool" or n.startswith("bpool/")]:
+            _ = fake.ds.pop(n)
+        fake.pools.discard("bpool")
+        if importable:
+            fake.importable.add("bpool")
+        return fake
+
+    def test_bpool_not_imported_is_refused(self) -> None:
+        """M2R-4 (M2F-2): a bpool `zpool import` can see but that is not
+        imported stops the backup before the drive is touched."""
+        fake = self._without_bpool(importable=True)
+        _cfg, rc = self._run(fake)
+        assert rc == 1
+        assert not any(c.startswith("zfs snapshot") for c in fake.calls)
+        assert "backup/rpool" not in fake.ds
+
+    def test_a_system_without_bpool_backs_up(self) -> None:
+        """No bpool anywhere: the backup runs without it."""
+        fake = self._without_bpool(importable=False)
+        _cfg, rc = self._run(fake)
+        assert rc == 0
+        assert "backup/bpool/BOOT/be" not in fake.ds
 
     def test_incomplete_backup_exits_1_without_last_backup_at(self) -> None:
         """I-D/H2/I1: one dataset short is a failure, not a WARN plus success."""
