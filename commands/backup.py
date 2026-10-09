@@ -413,6 +413,8 @@ def _show_table(res: engine.Result, point: str, log: Log) -> None:
             mark = f"NOT BACKED UP ({p.note})"
         elif out is None:
             mark = f"NOT at the point: not attempted ({p.state})"
+        elif res.unverified and out.ok:
+            mark = "transferred, not verified"
         else:
             mark = f"NOT at the point: {out.error or p.state}"
         line = f"  {p.rel:<48} {mark}"
@@ -688,6 +690,11 @@ def run(
         log.banner_error(
             "BACKUP INCOMPLETE",
             [
+                *(
+                    [f"The result could not be checked: {res.unverified}", ""]
+                    if res.unverified
+                    else []
+                ),
                 f"{len(missing)} dataset(s) did not reach {eng.point}:",
                 *[f"  {rel}" for rel in missing[:15]],
                 *(

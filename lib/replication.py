@@ -262,7 +262,9 @@ def plan(origin: dict[str, Origin], dest: dict[str, Dest], point: str) -> list[D
     plans = [plan_dataset(origin[rel], live.get(rel), point) for rel in wanted]
     plans += [DatasetPlan(rel, State.EXCLUDED, note=why) for rel, why in excluded(origin)]
 
-    orphans = sorted(rel for rel in live if rel not in origin)
+    # A structural container is never offered for destruction: its absence
+    # from origin means a pool not imported or a listing that failed.
+    orphans = sorted(rel for rel in live if rel not in origin and rel not in STRUCTURAL)
     tops = [rel for rel in orphans if parent(rel) not in orphans]
     new_names = {p.rel for p in plans if p.state is State.NEW}
     renames = _renames(tops, new_names, origin, live)

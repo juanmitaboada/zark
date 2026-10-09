@@ -117,7 +117,7 @@ class ReadError(Exception):
 
 def _checked(r: sh.RunResult, strict: bool) -> sh.RunResult:
     if strict and not r.ok:
-        raise ReadError(r.command or "zfs list")
+        raise ReadError(f"could not read: {r.command or 'zfs list'}")
     return r
 
 
@@ -152,10 +152,14 @@ def read_origin(pools: list[str], strict: bool = False) -> dict[str, Origin]:
 def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
     """Destination datasets under ``<pool>/rpool`` and ``<pool>/bpool``, by origin name.
 
-    ``strict`` raises :class:`ReadError` when a listing of an existing root fails.
+    ``strict`` raises :class:`ReadError` when the pool does not list (an
+    exported pool is not an empty one) or a listing of an existing root fails;
+    a missing ``<pool>/rpool`` or ``<pool>/bpool`` is accepted only then.
     """
     dest: dict[str, Dest] = {}
     strip = f"{pool}/"
+    if strict:
+        _ = _checked(sh.run(f"zfs list -H -o name {_q(pool)}"), strict)
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
         if not sh.run(f"zfs list -H -o name {root}").ok:
             continue
@@ -266,7 +270,11 @@ class Run:  # pylint: disable=too-many-instance-attributes
 
     def take_point(self) -> bool:
         """Snapshot every expected dataset as ``self.point``, one call per pool (I-C)."""
-        self.origin = read_origin(self.pools)
+        try:
+            self.origin = read_origin(self.pools, strict=True)
+        except ReadError as e:
+            self.log.error(f"Cannot take {self.point}: {e}")
+            return False
         wanted = expected(self.origin)
         for pool in self.pools:
             names = [rel for rel in wanted if rel == pool or rel.startswith(f"{pool}/")]
@@ -282,9 +290,22 @@ class Run:  # pylint: disable=too-many-instance-attributes
         return True
 
     def survey(self) -> list[DatasetPlan]:
-        """Read both sides and plan every dataset."""
-        self.origin = read_origin(self.pools)
-        self.dest = read_dest(self.pool)
+        """Read both sides and plan every dataset.
+
+        Strict: what origin "has" decides what is expected and what the drive
+        holds only for itself, so a listing that fails raises
+        :class:`ReadError` rather than shrinking either side. So does a pool
+        tree the drive holds whose origin pool is not imported.
+        """
+        self.origin = read_origin(self.pools, strict=True)
+        self.dest = read_dest(self.pool, strict=True)
+        for pool in ("rpool", "bpool"):
+            held = any(rel == pool or rel.startswith(f"{pool}/") for rel in self.dest)
+            if held and pool not in self.pools:
+                raise ReadError(
+                    f"{pool} is not imported, and {self.pool} holds its backup "
+                    + f"(import it first: sudo zpool import {pool})"
+                )
         return plan(self.origin, self.dest, self.point)
 
     # ── sizes ────────────────────────────────────────────────────────────
@@ -479,7 +500,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 failed.append(rel)
         return failed
 
-    def drop_check(self) -> list[Verdict]:  # pylint: disable=too-many-locals
+    def drop_check(self) -> list[Verdict]:  # pylint: disable=too-many-locals,too-many-branches
         """Decide, against a fresh read of both sides, what may go from origin.
 
         Candidates are this run's point, points left by earlier runs and this
@@ -490,7 +511,12 @@ class Run:  # pylint: disable=too-many-instance-attributes
             origin = read_origin(self.pools, strict=True)
             dest = read_dest(self.pool, strict=True)
         except ReadError as e:
-            self.log.warn(f"Nothing removed in origin: could not read {e}")
+            self.log.warn(f"Nothing removed in origin: {e}")
+            return []
+        gone = self._gone_from(dest)
+        if gone:
+            # The drive changed under the run: no verdict can rest on it.
+            self.log.warn(f"Nothing removed in origin: {self.pool}/{gone} is no longer listed")
             return []
         wanted = set(expected(origin))
         keep = anchor_name(self.disk_guid, self.point)
@@ -526,6 +552,10 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 else:
                     verdicts.append(Verdict(target, False, "new anchor not verified"))
         return verdicts
+
+    def _gone_from(self, dest: dict[str, Dest]) -> str:
+        """First dataset of the last survey that a fresh read of the drive lacks."""
+        return next((rel for rel in sorted(self.dest) if rel not in dest), "")
 
     def drop(self, verdicts: list[Verdict]) -> int:
         """Destroy what :meth:`drop_check` allowed, one by one by exact name (F5)."""
@@ -720,11 +750,12 @@ class Result:
     aborted: bool = False
     enospc: bool = False
     error: str = ""
+    unverified: str = ""  # why the state after the transfers could not be read
 
     @property
     def ok(self) -> bool:
         """I-D: every expected dataset reached the point (and is anchored)."""
-        return not self.aborted and bool(self.plans) and reached(self.plans)
+        return not self.aborted and not self.unverified and bool(self.plans) and reached(self.plans)
 
 
 Decide = Callable[[list[DatasetPlan], "Run"], bool]
@@ -736,15 +767,38 @@ def replicate(run: Run, decide: Decide) -> Result:
     """Survey, let ``decide`` apply the user's decisions, transfer, verify,
     anchor and drop the points (steps 3–8 of the module docstring)."""
     res = Result()
-    if not decide(run.survey(), run):
+    try:
+        plans = run.survey()
+    except ReadError as e:
+        res.aborted, res.error = True, str(e)
+        return res
+    if not decide(plans, run):
         res.aborted = True
         return res
-    _ = run.survey()
+    try:
+        _transfer(run, res)
+        res.plans = run.survey()
+    except ReadError as e:
+        # After the user's choices were applied: the run is not a success,
+        # and nothing in origin is anchored or removed on a guess.
+        res.unverified = str(e)
+        run.log.error(f"Cannot check the backup: {e}")
+        return res
+    at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
+    res.anchor_failed = run.anchor(at_point)
+    _ = run.drop(run.drop_check())
+    return res
+
+
+def _transfer(run: Run, res: Result) -> None:
+    """Every transfer round; ``res.plans`` holds the latest survey."""
+    res.plans = run.survey()
     _ = run.clear_orphan_marks()
     for rel in run.ensure_containers():
         run.log.error(f"  {rel}: could not create the container on the backup")
     for _ in range(MAX_ROUNDS):
-        pending = [p for p in depth_order(run.survey()) if p.state in TRANSFERABLE]
+        res.plans = run.survey()
+        pending = [p for p in depth_order(res.plans) if p.state in TRANSFERABLE]
         todo = [p for p in pending if p.state is not State.AT_POINT]
         if not todo:
             break
@@ -773,11 +827,6 @@ def replicate(run: Run, decide: Decide) -> Result:
                 again = True
         if res.enospc or not again:
             break
-    res.plans = run.survey()
-    at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
-    res.anchor_failed = run.anchor(at_point)
-    _ = run.drop(run.drop_check())
-    return res
 
 
 def execute(run: Run, cleanup: Cleanup, decide: Decide) -> Result:

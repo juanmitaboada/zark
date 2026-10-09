@@ -218,7 +218,7 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     Readback,
     fix_grub_bpool_uuid,
 )
-from tests.fake_zfs import FakeZfs, FSnap  # pylint: disable=wrong-import-position # noqa: E402
+from tests.fake_zfs import FakeZfs, FDataset, FSnap  # pylint: disable=wrong-import-position # noqa: E402
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -6978,6 +6978,19 @@ class TestReplicationPlanner:
     ) -> "repl.Origin":
         return repl.Origin(rel, snaps=snaps, bookmarks=bms or [])
 
+    def test_structural_container_is_never_an_orphan(self) -> None:
+        """M2R-4: a container origin does not list is never offered for
+        destruction; what lies below it still is."""
+        origin = {"rpool/var": repl.Origin("rpool/var")}
+        dest = {
+            "rpool": repl.Dest("rpool"),
+            "rpool/USERDATA": repl.Dest("rpool/USERDATA"),
+            "rpool/USERDATA/home": repl.Dest("rpool/USERDATA/home"),
+            "rpool/var": repl.Dest("rpool/var"),
+        }
+        orphans = [p.rel for p in repl.plan(origin, dest, P) if p.state is repl.State.ORPHAN]
+        assert orphans == ["rpool/USERDATA/home"]
+
     def test_keystore_never_expected(self) -> None:
         """The keystore travels apart, whatever its kind."""
         origin = {
@@ -7520,17 +7533,152 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert _origin_points(fake) == []
 
     def test_nothing_dropped_when_the_backup_cannot_be_read(self) -> None:
-        """A failed listing of the backup means no removal in origin at all."""
+        """A listing of the backup that fails when drop_check reads it means
+        no removal in origin at all."""
         fake = self._fresh()
         assert _engine_run(fake, "backup", "111", P1).ok
-        fake.fail_cmds.add("-o name,guid,createtxg,creation -r backup/rpool")
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
             eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            real_check = eng.drop_check
+
+            def check() -> list[engine.Verdict]:
+                fake.fail_cmds.add("-o name,guid,createtxg,creation -r backup/rpool")
+                return real_check()
+
+            eng.drop_check = check  # type: ignore[method-assign]
             _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
         assert "Nothing removed in origin" in out.getvalue()
         assert P2 in fake.names("rpool/ROOT/be")
         assert repl.anchor_name("111", P1) in fake.bookmarks("rpool/ROOT/be")
+
+    def _stopped_before_the_questions(self, failing: str) -> None:
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        fake.fail_cmds.add(failing)
+        asked: list[str] = []
+
+        def decide(plans: list[repl.DatasetPlan], _r: engine.Run) -> bool:
+            asked.extend(p.rel for p in plans)
+            return True
+
+        res = _engine_run(fake, "backup", "111", P2, decide)
+        assert res.aborted and "could not" in res.error, failing
+        assert not asked
+        assert _origin_points(fake) == []
+        assert repl.anchor_name("111", P1) in fake.bookmarks("rpool/ROOT/be")
+
+    def test_a_listing_that_fails_stops_the_run_before_the_questions(self) -> None:
+        """M2R-4 (E6a): what origin or the drive "has" is never a shrunken
+        listing; the run stops, asks nothing and leaves only the anchors."""
+        self._stopped_before_the_questions("-o name,guid,createtxg,creation -r backup/rpool")
+        self._stopped_before_the_questions("-o name,type,canmount,mountpoint,referenced -r rpool")
+
+    def test_a_listing_that_fails_after_the_transfers_is_not_success(self) -> None:
+        """M2R-4 (E6b): the final check cannot read origin: not complete,
+        nothing anchored, nothing removed."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            real_transfer = eng.transfer
+            done: list[str] = []
+
+            def transfer(p: repl.DatasetPlan) -> engine.Outcome:
+                o = real_transfer(p)
+                done.append(p.rel)
+                if len(done) == 6:
+                    fake.fail_cmds.add("-o name,type,canmount,mountpoint,referenced -r rpool")
+                return o
+
+            eng.transfer = transfer  # type: ignore[method-assign]
+            res = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        assert not res.ok and "could not read" in res.unverified
+        assert repl.anchor_name("111", P2) not in fake.bookmarks("rpool/ROOT/be")
+        assert P2 in fake.names("rpool/ROOT/be")  # still a base for the next run
+
+    def test_a_pool_that_is_gone_is_not_an_empty_one(self) -> None:
+        """M2R-3 (E3b): the backup pool exported under the run before the final
+        survey: no point in origin is removed as "not on the backup"."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-02_08:00:00_hourly")
+        hidden: dict[str, FDataset] = {}
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            real_transfer = eng.transfer
+            done: list[str] = []
+
+            def transfer(p: repl.DatasetPlan) -> engine.Outcome:
+                o = real_transfer(p)
+                done.append(p.rel)
+                if len(done) == 6:
+                    for name in [n for n in fake.ds if n == "backup" or n.startswith("backup/")]:
+                        hidden[name] = fake.ds.pop(name)
+                    fake.pools.discard("backup")
+                return o
+
+            eng.transfer = transfer  # type: ignore[method-assign]
+            res = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        assert not res.ok
+        assert sorted(p.split("@")[0] for p in _origin_points(fake)) == sorted(done)
+        fake.ds.update(hidden)
+        fake.pools.add("backup")
+        _prune_all_autosnaps(fake)
+        res = _engine_run(fake, "backup", "111", P3)
+        assert res.ok, res  # every dataset incremental from P2, no rollback
+
+    def _drive_changes_before_drop_check(self, what: str) -> None:
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            real_anchor = eng.anchor
+
+            def anchor_then_lose(at_point: list[str]) -> list[str]:
+                failed = real_anchor(at_point)
+                names = [n for n in fake.ds if n == "backup" or n.startswith("backup/")]
+                if what == "dataset":
+                    names = ["backup/rpool/var/lib/docker"]
+                for name in names:
+                    _ = fake.ds.pop(name)
+                if what == "pool":
+                    fake.pools.discard("backup")
+                return failed
+
+            eng.anchor = anchor_then_lose  # type: ignore[method-assign]
+            _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        assert "Nothing removed in origin" in out.getvalue(), what
+        assert P2 in fake.names("rpool/ROOT/be"), what
+        assert repl.anchor_name("111", P1) in fake.bookmarks("rpool/ROOT/be"), what
+
+    def test_drop_check_stops_when_the_drive_changed_under_the_run(self) -> None:
+        """M2R-3: the pool exported after the anchors and before drop_check
+        (E3), or a dataset gone from it: nothing is removed in origin."""
+        self._drive_changes_before_drop_check("pool")
+        self._drive_changes_before_drop_check("dataset")
+
+    def test_bpool_not_imported_stops_the_run(self) -> None:
+        """M2R-4 (E4a): a drive holding bpool's backup while origin's bpool is
+        not imported: no "only on the backup" question, no COMPLETED."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for n in [n for n in fake.ds if n == "bpool" or n.startswith("bpool/")]:
+            fake.ds.pop(n)
+        fake.pools.discard("bpool")
+        asked: list[str] = []
+
+        def decide(plans: list[repl.DatasetPlan], _r: engine.Run) -> bool:
+            asked.extend(p.rel for p in plans)
+            return True
+
+        res = _engine_run(fake, "backup", "111", P2, decide)
+        assert res.aborted and "bpool is not imported" in res.error
+        assert not asked
+        assert _origin_points(fake) == []
 
     def test_every_verdict_is_logged(self) -> None:
         """Each removal and each conservation says why."""
