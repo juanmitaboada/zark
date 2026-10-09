@@ -50,6 +50,7 @@ class FSnap:
     txg: int
     creation: int
     ivset: bool = True
+    props: dict[str, str] = field(default_factory=dict)  # user properties set on a snapshot
 
 
 @dataclass
@@ -259,7 +260,10 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 vals.append(d.token or "-")
             elif f == "used":
                 vals.append(str(1024 * (1 + len(d.snaps))))
+            elif s is not None and f in s.props:
+                vals.append(s.props[f])
             else:
+                # A snapshot inherits its dataset's user properties.
                 vals.append(d.props.get(f, "-"))
         return "\t".join(vals)
 
@@ -360,12 +364,23 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return _ok()
 
     def _set(self, args: list[str]) -> RunResult:
-        ds = args[-1]
-        if ds not in self.ds:
-            return _err("does not exist")
-        for kv in args[:-1]:
-            k, v = kv.split("=", 1)
-            self.ds[ds].props[k] = v
+        """``zfs set k=v [k=v]… <dataset|snapshot>…``."""
+        kvs = [a.split("=", 1) for a in args if "=" in a]
+        targets = [a for a in args if "=" not in a]
+        if not targets:
+            return _err("missing dataset name(s)")
+        for t in targets:
+            ds, _, snap = t.partition("@")
+            if ds not in self.ds or (snap and snap not in self.names(ds)):
+                return _err(f"cannot open '{t}': dataset does not exist")
+        for t in targets:
+            ds, _, snap = t.partition("@")
+            if snap:
+                props = next(x for x in self.ds[ds].snaps if x.name == snap).props
+            else:
+                props = self.ds[ds].props
+            for k, v in kvs:
+                props[k] = v
         return _ok()
 
     def _inherit(self, args: list[str]) -> RunResult:

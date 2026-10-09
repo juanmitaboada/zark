@@ -64,6 +64,11 @@ from datetime import UTC, datetime
 
 from lib.replication import POINT_RE
 
+# Set to "yes" on every snapshot of a backup point whose run brought every
+# expected dataset to it. Only ever set on snapshots: user properties are
+# inherited, so a value on a filesystem would show on all its snapshots.
+COMPLETE_PROP = "org.zark:point-complete"
+
 # Two snapshots of one dataset further apart than this belong to different
 # runs (sanoid takes all of a dataset's buckets within a few seconds).
 REPEAT_GAP = 300
@@ -87,6 +92,7 @@ class Snap:  # pylint: disable=too-many-instance-attributes
     createtxg: int
     creation: int
     source: str = ""  # stored under this archived lineage, when not "dataset"
+    complete: bool = False  # carries COMPLETE_PROP: its backup run reached every dataset
 
     @property
     def stored(self) -> str:
@@ -118,7 +124,8 @@ class Point:
 
 
 def parse_snapshots(lines: list[str], pool: str) -> list[Snap]:
-    """Parse ``zfs list -Hp -t snapshot -o name,guid,createtxg,creation`` lines."""
+    """Parse ``zfs list -Hp -t snapshot -o name,guid,createtxg,creation[,COMPLETE_PROP]``
+    lines."""
     snaps: list[Snap] = []
     prefix = f"{pool}/"
     for line in lines:
@@ -131,8 +138,11 @@ def parse_snapshots(lines: list[str], pool: str) -> list[Snap]:
         rel = full[len(prefix) :]
         source = rel if logical(rel) != rel else ""
         try:
+            complete = len(fields) > 4 and fields[4] == "yes"
             snaps.append(
-                Snap(logical(rel), name, fields[1], int(fields[2]), int(fields[3]), source),
+                Snap(
+                    logical(rel), name, fields[1], int(fields[2]), int(fields[3]), source, complete
+                ),
             )
         except ValueError:
             continue
@@ -226,3 +236,41 @@ def ended(mine: list[Snap], backups: list[tuple[int, set[str]]]) -> bool:
     ds = mine[0].dataset
     last = max(s.creation for s in mine)
     return any(t >= last and ds not in held for t, held in backups)
+
+
+def legacy_complete(snaps: list[Snap], last_point: str) -> set[str]:
+    """Backup points of a drive written before completion was recorded on it.
+
+    Only a complete run wrote ``org.zark:last-point``, so a backup point
+    newer than it is incomplete. One at or before it counts as complete
+    unless a dataset continues across it without it (a snapshot of that
+    dataset before and after the point, none of the point): the run that
+    took the point did not reach that dataset. Zark point names are UTC
+    and fixed-width, so they compare in time order.
+    """
+    if not last_point:
+        return set()
+    points: dict[str, list[Snap]] = {}
+    for s in snaps:
+        if POINT_RE.match(s.name) and s.name <= last_point:
+            points.setdefault(s.name, []).append(s)
+    by_ds: dict[str, list[int]] = {}
+    for s in snaps:
+        by_ds.setdefault(s.dataset, []).append(s.creation)
+    out: set[str] = set()
+    for name, members in points.items():
+        held = {m.dataset for m in members}
+        when = max(m.creation for m in members)
+        missed = any(
+            ds not in held and min(times) < when < max(times) for ds, times in by_ds.items()
+        )
+        if not missed:
+            out.add(name)
+    return out
+
+
+def complete_points(snaps: list[Snap], last_point: str) -> set[str]:
+    """Names of the complete backup points on a drive: the marked ones, or,
+    on a drive with no mark yet, :func:`legacy_complete`."""
+    marked = {s.name for s in snaps if s.complete and POINT_RE.match(s.name)}
+    return marked or legacy_complete(snaps, last_point)

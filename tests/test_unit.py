@@ -196,7 +196,10 @@ from lib.registry import (  # pylint: disable=wrong-import-position # noqa: E402
     write_atomic as registry_write_atomic,
 )
 from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa: E402
+    COMPLETE_PROP,
     Snap,
+    complete_points,
+    legacy_complete,
     logical,
     parse_snapshots,
     resolve,
@@ -4847,6 +4850,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert not any(n.startswith("prepare_") for n in fake.names("rpool/keystore"))  # I-B
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("777", home[0])]
         assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
+        assert _marked(fake, "blue") == {home[0]}
 
     def test_prepare_records_the_machine_id(self):
         """The drive-owner check reads what prepare wrote (2026-10-08)."""
@@ -8016,6 +8020,7 @@ class TestBackupCommand:
         assert len(points) == 1
         meta = fake.ds["backup"].props
         assert meta["org.zark:format"] == "2" and meta["org.zark:last-point"] == points[0]
+        assert _marked(fake) == {points[0]}
         assert cfg.known_drives["backup"].last_backup_at
         assert _origin_points(fake) == []
         assert fake.units["sanoid.timer"] == "active"
@@ -8030,6 +8035,7 @@ class TestBackupCommand:
         assert not cfg.known_drives["backup"].last_backup_at
         assert "org.zark:last-point" not in fake.ds["backup"].props
         assert fake.ds["backup"].props["org.zark:format"] == "2"
+        assert not _marked(fake)
 
     def _machine_id(self, value: str) -> str:
         path = os.path.join(tempfile.mkdtemp(), "machine-id")
@@ -8135,6 +8141,111 @@ class TestDriveMetadata:
         with patch_sh(fake), redirect_stdout(out):
             assert not engine.log_metadata("backup", Log())
         assert "zark <= 2.0.0-rc1" in out.getvalue()
+
+
+def _marked(fake: FakeZfs, pool: str = "backup") -> set[str]:
+    """Names of the backup points marked complete on a drive."""
+    return {
+        s.name
+        for ds, d in fake.ds.items()
+        if ds.startswith(f"{pool}/")
+        for s in d.snaps
+        if s.props.get(COMPLETE_PROP) == "yes"
+    }
+
+
+def _record(fake: FakeZfs, point: str, pool: str = "backup") -> None:
+    """record_complete for every expected dataset, as backup does after a complete run."""
+    with patch_sh(fake), redirect_stdout(StringIO()):
+        rels = repl.expected(engine.read_origin(["rpool", "bpool"]))
+        assert engine.record_complete(pool, point, rels, Log())
+
+
+class TestCompletePoints:
+    """M2R-1: which backup points are complete is recorded on the drive."""
+
+    def test_marks_every_snapshot_of_the_point(self) -> None:
+        """Every dataset's snapshot of the point carries the mark, nothing else."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _record(fake, P1)
+        marked = [
+            f"{ds}@{s.name}"
+            for ds, d in fake.ds.items()
+            for s in d.snaps
+            if s.props.get(COMPLETE_PROP) == "yes"
+        ]
+        rels = [
+            "rpool/ROOT/be",
+            "rpool/USERDATA/home",
+            "rpool/var",
+            "rpool/var/lib",
+            "rpool/var/lib/docker",
+            "bpool/BOOT/be",
+        ]
+        assert sorted(marked) == sorted(f"backup/{rel}@{P1}" for rel in rels)
+        assert not any(COMPLETE_PROP in d.props for d in fake.ds.values())  # never a filesystem
+
+    def test_legacy_drive_is_marked_once_by_its_last_point(self) -> None:
+        """A drive written before marks existed: points up to org.zark:last-point
+        are marked unless their run missed a dataset that continues across
+        them; points after it are incomplete."""
+        fake = _fresh_fake()
+        p0 = "zark_2026-10-06_10:00:00Z"
+        assert _engine_run(fake, "backup", "111", p0).ok
+        _tick(fake, "2026-10-07_08:00:00_hourly")
+        # No partial state, so origin drops P1 there and no later run carries it.
+        fake.inject["backup/rpool/USERDATA/home"] = ("enospc", 0)
+        assert not _engine_run(fake, "backup", "111", P1).ok  # home missed P1
+        assert _engine_run(fake, "backup", "111", P2).ok
+        _tick(fake, "2026-10-08_12:00:00_hourly")
+        fake.inject["backup/rpool/var/lib/docker"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P3).ok  # after the last complete run
+        fake.ds["backup"].props["org.zark:last-point"] = P2
+        p4 = "zark_2026-10-10_10:00:00Z"
+        assert _engine_run(fake, "backup", "111", p4).ok
+        _record(fake, p4)
+        assert _marked(fake) == {p0, P2, p4}
+
+    def test_a_marked_drive_is_not_marked_again(self) -> None:
+        """Once a drive carries marks, only the new point is marked."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _record(fake, P1)
+        _tick(fake, "2026-10-08_08:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        fake.ds["backup"].props["org.zark:last-point"] = P2  # even if it were wrong
+        assert _engine_run(fake, "backup", "111", P3).ok
+        _record(fake, P3)
+        assert _marked(fake) == {P1, P3}
+
+    def test_complete_points_pure(self) -> None:
+        """Marks win; without marks the legacy rule; without last-point, none."""
+        be, home = "rpool/ROOT/be", "rpool/USERDATA/home"
+        snaps = [
+            Snap(be, P1, "1", 1, 100),
+            Snap(home, P1, "2", 2, 100),
+            Snap(be, P2, "3", 3, 200),  # home missed it
+            Snap(be, P3, "4", 4, 300),
+            Snap(home, P3, "5", 5, 300),
+        ]
+        assert legacy_complete(snaps, P3) == {P1, P3}
+        assert legacy_complete(snaps, P1) == {P1}
+        assert legacy_complete(snaps, "") == set()
+        marked = [*snaps[:2], Snap(be, P3, "4", 4, 300, complete=True)]
+        assert complete_points(marked, P1) == {P3}
+        assert complete_points(snaps, P3) == {P1, P3}
+
+    def test_parse_reads_the_mark(self) -> None:
+        """The fifth column is the mark; four-column lines still parse."""
+        lines = [
+            f"backup/rpool/ROOT/be@{P1}\t1\t1\t100\tyes",
+            f"backup/rpool/ROOT/be@{P2}\t2\t2\t200\t-",
+            f"backup/rpool/ROOT/be@{P3}\t3\t3\t300",
+        ]
+        snaps = parse_snapshots(lines, "backup")
+        assert [s.complete for s in snaps] == [True, False, False]
 
 
 class TestMonitorLatest:

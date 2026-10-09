@@ -648,6 +648,9 @@ def run(
 
     _show_table(res, eng.point, log)
     used_after = zfs.pool_info(pool_name)  # P0-4: after the transfer
+    if res.ok:
+        at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
+        _ = engine.record_complete(pool_name, eng.point, at_point, log)
     _write_metadata(pool_name, cfg.source_pool, eng.point if res.ok else "", log)
 
     # ── Export and read back ─────────────────────────────────────────────

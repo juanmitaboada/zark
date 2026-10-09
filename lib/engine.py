@@ -72,6 +72,7 @@ from lib.replication import (
     plan,
     reached,
 )
+from lib.restore_points import COMPLETE_PROP, Snap, legacy_complete, parse_snapshots
 
 SANOID_UNITS = ("sanoid.service", "sanoid-prune.service")
 SANOID_WAIT_SECONDS = 600
@@ -626,6 +627,44 @@ def log_metadata(pool: str, log: Log) -> dict[str, str]:
         + f", last point {meta.get('last-point', 'none')} ({meta.get('last-backup-at', '?')})",
     )
     return meta
+
+
+def drive_snapshots(pool: str) -> list[Snap]:
+    """Every snapshot under ``<pool>/rpool`` and ``<pool>/bpool``, archived
+    lineages folded into their dataset, with the completion mark."""
+    snaps: list[Snap] = []
+    for root in (f"{pool}/rpool", f"{pool}/bpool"):
+        r = sh.run(
+            f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation,{COMPLETE_PROP} -r {root}"
+        )
+        if r.ok:
+            snaps += parse_snapshots(r.lines, pool)
+    return snaps
+
+
+def record_complete(pool: str, point: str, rels: list[str], log: Log) -> bool:
+    """Mark ``point`` complete on the drive: every one of its snapshots gets
+    ``COMPLETE_PROP=yes`` (M2R-1; a user property, nothing mounts).
+
+    On a drive with no mark yet (written before marks existed) the backup
+    points :func:`legacy_complete` accepts are marked too, once, while
+    ``org.zark:last-point`` still names the previous complete run.
+    """
+    targets = [f"{pool}/{rel}@{point}" for rel in rels]
+    snaps = drive_snapshots(pool)
+    if not any(s.complete for s in snaps):
+        old = legacy_complete(snaps, read_metadata(pool).get("last-point", ""))
+        targets += [f"{pool}/{s.stored}@{s.name}" for s in snaps if s.name in old]
+    if not targets:
+        return True
+    names = " ".join(_q(t) for t in dict.fromkeys(targets))
+    r = sh.run(f"zfs set {COMPLETE_PROP}=yes {names}", log=log)
+    if not r.ok:
+        log.warn(
+            f"Could not mark {point} complete on {pool}: {r.stderr.strip()} "
+            + "(recover will list it as incomplete)"
+        )
+    return r.ok
 
 
 def anchored_disks(origin: dict[str, Origin]) -> set[str]:

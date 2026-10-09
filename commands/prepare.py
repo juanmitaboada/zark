@@ -199,6 +199,9 @@ def run(
             out = res.outcomes.get(p.rel)
             log.warn(f"  {p.rel}: {p.note or (out.error if out else p.state)}")
 
+    if res.ok:
+        at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
+        _ = engine.record_complete(new_pool, eng.point, at_point, log)
     prepared_at = now_utc_iso()
     rpool_guid = sh.run("zpool get -H -o value guid rpool").output.strip()
     fields = {
