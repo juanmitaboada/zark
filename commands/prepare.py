@@ -231,7 +231,9 @@ def run(
         flush_device_cache(log)
 
     if not complete:
-        # H16: a drive whose data or keystore did not land is never registered.
+        # H16: a drive whose data or keystore did not land is never registered,
+        # so the anchors its datasets got would belong to no entry (M2R-6).
+        left = engine.drop_anchors_of(new_guid, log)
         log.banner_error(
             "DRIVE NOT REGISTERED",
             [
@@ -240,6 +242,7 @@ def run(
                 else "The keystore did not land.",
                 "See the messages above. The drive has NOT been registered.",
                 f"Wipe and retry: sudo zark purge {ident.by_id_path}",
+                *([left] if left else []),
             ],
         )
         raise SystemExit(1)
@@ -249,11 +252,19 @@ def run(
         lines = (
             rb.describe() if rb else [f"{new_pool} could not be exported, so it was not read back."]
         )
-        log.banner_error("DRIVE NOT VERIFIED", [*lines, "", "The drive has NOT been registered."])
+        left = engine.drop_anchors_of(new_guid, log)
+        log.banner_error(
+            "DRIVE NOT VERIFIED",
+            [*lines, "", "The drive has NOT been registered.", *([left] if left else [])],
+        )
         raise SystemExit(1)
     log.ok(f"{new_pool} verified reimportable (ONLINE)")  # I13: the verdict is logged
 
     for name in replace:
+        # The same disk, now blank: the replaced pool's anchors are useless.
+        left = engine.drop_anchors_of(cfg.known_drives[name].guid, log)
+        if left:
+            log.warn(left)
         del cfg.known_drives[name]
     cfg.known_drives[new_pool] = DriveInfo(
         name=new_pool,

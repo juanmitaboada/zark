@@ -15,10 +15,15 @@
 zark registry — inspect and repair known_drives.json without hand edits.
 
   zark registry list            every entry, whether its disk is connected,
-                                and whether the pool GUID on that disk matches
+                                and whether the pool GUID on that disk matches;
+                                on the installed system also the drives that
+                                hold anchors in origin without an entry, and
+                                the backup points left by interrupted runs
   zark registry forget <name>   remove an entry (e.g. a lost or retired disk)
                                 and that disk's anchors in origin (rpool
                                 bookmarks, bpool snapshots)
+  zark registry forget <GUID>   the same by pool GUID; for a GUID with no
+                                entry, only its anchors
   zark registry fix [<name>]    rewrite drive_id from the connected disk that
                                 carries the registered pool GUID, and write
                                 every missing key
@@ -26,6 +31,7 @@ zark registry — inspect and repair known_drives.json without hand edits.
 All writes go through lib.registry (validated, atomic).
 """
 
+import shlex
 from pathlib import Path
 
 from lib import engine, sh
@@ -34,7 +40,7 @@ from lib.drives import drive_staleness_days, get_drive_id, scan_connected_drives
 from lib.identity import BY_ID_DIR, read_pool_label
 from lib.log import Log
 
-USAGE = "Usage: sudo zark registry list | forget <name> | fix [<name>]"
+USAGE = "Usage: sudo zark registry list | forget <name|GUID> | fix [<name>]"
 
 
 def _connected_by_id_for_guid(guid: str, cfg: Config, log: Log) -> str:
@@ -79,9 +85,34 @@ def _list(cfg: Config, log: Log) -> None:
         log.raw(f"      last backup: {last}")
         log.raw(f"      autoeject:   {'yes' if info.autoeject else 'no'}")
         log.raw(f"      state:       {state}")
+    _list_origin(cfg, log)
+
+
+def _list_origin(cfg: Config, log: Log) -> None:
+    """Anchors of drives without an entry, and points left by interrupted runs."""
+    pools = engine.source_pools()
+    if "rpool" not in pools:
+        log.info("rpool is not imported here: anchors in origin not checked")
+        return
+    origin = engine.read_origin(pools)
+    registered = {info.guid for info in cfg.known_drives.values()}
+    for guid in sorted(engine.anchored_disks(origin) - registered):
+        n = len(engine.disk_anchors(origin, guid))
+        log.warn(f"  drive GUID {guid}: {n} anchor(s) in origin, no registry entry")
+        log.raw(f"      drop them: sudo zark registry forget {guid}")
+    left = engine.leftover_points(origin)
+    if left:
+        log.info(f"  {len(left)} backup point(s) left in origin by interrupted runs")
 
 
 def _forget(cfg: Config, log: Log, name: str) -> None:
+    if name.isdigit() and name not in cfg.known_drives:
+        # Pool names cannot start with a digit: a number is a pool GUID.
+        named = [n for n, info in cfg.known_drives.items() if info.guid == name]
+        if not named:
+            _forget_guid(cfg, log, name)
+            return
+        name = named[0]
     if name not in cfg.known_drives:
         log.fatal(f"'{name}' is not registered", solutions=["sudo zark registry list"])
     info = cfg.known_drives[name]
@@ -91,15 +122,76 @@ def _forget(cfg: Config, log: Log, name: str) -> None:
     if not log.ask(f"Remove '{name}' from the registry?", default=False):
         log.info("Aborted")
         return
+    # Anchors first, entry last: an interruption in between leaves the
+    # entry, so the same command can be run again.
+    pools = engine.source_pools()
+    if "rpool" in pools:
+        dropped, failed = engine.drop_disk_anchors(info.guid, pools, log)
+        log.ok(f"{dropped} anchor(s) of '{name}' dropped from origin")
+        if failed:
+            log.warn(
+                f"{len(failed)} anchor(s) could not be dropped: "
+                + f"sudo zark registry forget {info.guid}"
+            )
+    else:
+        log.info(
+            "rpool is not imported here: on the installed system run "
+            + f"sudo zark registry forget {info.guid}"
+        )
     del cfg.known_drives[name]
     cfg.save_drives()
     log.ok(f"'{name}' removed from {cfg.drives_file_path}")
+    if "rpool" in pools:
+        _leftover_points(cfg, pools, log)
+
+
+def _forget_guid(cfg: Config, log: Log, guid: str) -> None:
+    """Drop the anchors of a drive that has no registry entry (purged,
+    replaced, or never registered)."""
     pools = engine.source_pools()
     if "rpool" not in pools:
-        log.info("rpool is not imported here: run this on the installed system to drop the anchors")
+        log.fatal(
+            "rpool is not imported here",
+            solutions=[f"Run on the installed system: sudo zark registry forget {guid}"],
+        )
+    names = engine.disk_anchors(engine.read_origin(pools), guid)
+    if not names:
+        log.info(f"No anchor of drive GUID {guid} in origin and no registry entry: nothing to do")
         return
-    dropped = engine.drop_disk_anchors(info.guid, pools, log)
-    log.ok(f"{dropped} anchor(s) of '{name}' dropped from origin")
+    log.warn(f"Drive GUID {guid} has no registry entry and {len(names)} anchor(s) in origin")
+    if not log.ask(f"Drop the {len(names)} anchor(s) of drive GUID {guid}?", default=False):
+        log.info("Aborted")
+        return
+    dropped, failed = engine.drop_disk_anchors(guid, pools, log)
+    log.ok(f"{dropped} anchor(s) of drive GUID {guid} dropped from origin")
+    if failed:
+        log.warn(f"{len(failed)} anchor(s) could not be dropped (see above)")
+    _leftover_points(cfg, pools, log)
+
+
+def _leftover_points(cfg: Config, pools: list[str], log: Log) -> None:
+    """Backup points left by interrupted runs (decision M2F-5): offered for
+    removal only when no registered drive remains, since a registered one may
+    still need one as the base of its next run."""
+    left = engine.leftover_points(engine.read_origin(pools))
+    if not left:
+        return
+    log.info(f"{len(left)} backup point(s) left in origin by interrupted runs:")
+    for name in left:
+        log.raw(f"      {name}")
+    if cfg.known_drives:
+        log.info("The next complete backup or prepare of a registered drive removes them")
+        return
+    if not log.ask("No drive is registered any more. Drop them?", default=False):
+        return
+    dropped = 0
+    for name in left:
+        r = sh.run(f"zfs destroy {shlex.quote(name)}", log=log)
+        if r.ok:
+            dropped += 1
+        else:
+            log.warn(f"  could not remove {name}: {r.stderr.strip()}")
+    log.ok(f"{dropped} backup point(s) dropped from origin")
 
 
 def _fix(cfg: Config, log: Log, only: str | None) -> None:

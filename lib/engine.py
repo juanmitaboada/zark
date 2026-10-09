@@ -627,9 +627,12 @@ class Run:  # pylint: disable=too-many-instance-attributes
             if not v.drop:
                 self.log.info(f"  kept {v.target}: {v.reason}")
                 continue
-            if sh.run(f"zfs destroy {_q(v.target)}", log=self.log).ok:
+            r = sh.run(f"zfs destroy {_q(v.target)}", log=self.log)
+            if r.ok:
                 self.log.info(f"  removed {v.target}: {v.reason}")
                 dropped += 1
+            else:
+                self.log.warn(f"  could not remove {v.target}: {r.stderr.strip()}")
         return dropped
 
     def undo_point(self) -> None:
@@ -771,16 +774,49 @@ def anchored_disks(origin: dict[str, Origin]) -> set[str]:
     return disks
 
 
-def drop_disk_anchors(disk_guid: str, pools: list[str], log: Log) -> int:
-    """Remove every anchor of one disk from origin (``registry forget``)."""
-    count = 0
-    for rel, o in sorted(read_origin(pools).items()):
-        names = [f"{rel}#{b.name}" for b in o.bookmarks if anchor_disk(b.name) == disk_guid]
+def disk_anchors(origin: dict[str, Origin], disk_guid: str) -> list[str]:
+    """Every anchor of one disk in origin, as ``ds#bookmark`` / ``ds@snapshot``."""
+    names: list[str] = []
+    for rel, o in sorted(origin.items()):
+        names += [f"{rel}#{b.name}" for b in o.bookmarks if anchor_disk(b.name) == disk_guid]
         names += [f"{rel}@{s.name}" for s in o.snaps if anchor_disk(s.name) == disk_guid]
-        for name in names:
-            if sh.run(f"zfs destroy {_q(name)}", log=log).ok:
-                count += 1
-    return count
+    return names
+
+
+def drop_disk_anchors(disk_guid: str, pools: list[str], log: Log) -> tuple[int, list[str]]:
+    """Remove every anchor of one disk from origin, by exact name; return how
+    many went and the names that could not be destroyed (each one logged)."""
+    count, failed = 0, []
+    for name in disk_anchors(read_origin(pools), disk_guid):
+        r = sh.run(f"zfs destroy {_q(name)}", log=log)
+        if r.ok:
+            count += 1
+        else:
+            failed.append(name)
+            log.warn(f"  could not remove {name}: {r.stderr.strip()}")
+    return count, failed
+
+
+def drop_anchors_of(disk_guid: str, log: Log) -> str:
+    """Drop a drive's anchors here when rpool is imported (purge, prepare;
+    M2R-6). Returns what is left to do, "" when nothing."""
+    pools = source_pools()
+    retry = f"sudo zark registry forget {disk_guid}"
+    if "rpool" not in pools:
+        return f"Its anchors stay in origin: on the installed system run {retry}"
+    count, failed = drop_disk_anchors(disk_guid, pools, log)
+    if count:
+        log.ok(f"{count} anchor(s) of drive {disk_guid} dropped from origin")
+    if failed:
+        return f"{len(failed)} anchor(s) of drive {disk_guid} could not be dropped: {retry}"
+    return ""
+
+
+def leftover_points(origin: dict[str, Origin]) -> list[str]:
+    """Backup points left in origin by runs that did not end normally."""
+    return [
+        f"{rel}@{s.name}" for rel, o in sorted(origin.items()) for s in o.snaps if is_point(s.name)
+    ]
 
 
 def is_point(name: str) -> bool:

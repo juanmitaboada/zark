@@ -4767,6 +4767,50 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         data = json.loads((cfg_dir / "known_drives.json").read_text())
         assert list(data) == ["black"]
 
+    def _purge_on_fake(self, fake: FakeZfs, cfg_dir: Path, guid: str) -> str:
+        ident = _purge_ident(PoolLabel("black", guid))
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(Config, "default_config_dir", return_value=cfg_dir),
+            patch.object(purge_mod, "validate_external_block_device", return_value=ident),
+            patch.object(ZFS, "import_backup_pool", return_value=True),
+            patch("builtins.input", side_effect=["yes", "sdb", "n"]),
+            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+            redirect_stdout(out),
+        ):
+            purge_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
+        return out.getvalue()
+
+    def test_purge_drops_the_wiped_pools_anchors(self):
+        """M2R-6 (E12a): the purged drive's anchors leave origin with it."""
+        fake = _fresh_fake(("black", "blue"))
+        assert _engine_run(fake, "black", "1111", P1).ok
+        assert _engine_run(fake, "blue", "2222", P2).ok
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json",
+            {
+                "black": {"guid": "1111", "drive_id": _KINGSTON_ID},
+                "blue": {"guid": "2222", "drive_id": "usb-Micron-0:0"},
+            },
+        )
+        _ = self._purge_on_fake(fake, cfg_dir, "1111")
+        origin = {ds: d for ds, d in fake.ds.items() if ds.split("/")[0] in ("rpool", "bpool")}
+        names = [b.name for d in origin.values() for b in [*d.bookmarks, *d.snaps]]
+        assert not [n for n in names if repl.anchor_disk(n) == "1111"]
+        assert [n for n in names if repl.anchor_disk(n) == "2222"]
+
+    def test_purge_outside_the_installed_system_says_how(self):
+        """M2R-6 (M2F-4): with rpool not imported the banner gives the command."""
+        fake = _fresh_fake(("black",))
+        fake.pools.discard("rpool")
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        with patch("lib.log.Log.ask", return_value=True):
+            out = self._purge_on_fake(fake, cfg_dir, "1111")
+        assert "sudo zark registry forget 1111" in out
+
     def test_foreign_rpool_label_is_never_imported(self):
         cfg_dir = Path(tempfile.mkdtemp())
         mock = MockShell()
@@ -4852,6 +4896,38 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("777", home[0])]
         assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
         assert _marked(fake, "blue") == {home[0]}
+
+    def test_unregistered_prepare_leaves_no_anchors(self):
+        """M2R-6 (E12b): a prepare that ends DRIVE NOT REGISTERED drops the
+        anchors its datasets got."""
+        fake = _fresh_fake(())
+        fake.inject["blue/rpool/USERDATA/home"] = ("interrupt", 0)
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        assert self._prepare(fake, cfg_dir) == 1
+        names = [
+            n
+            for ds, d in fake.ds.items()
+            if ds.split("/")[0] in ("rpool", "bpool")
+            for n in [b.name for b in d.bookmarks] + fake.names(ds)
+        ]
+        assert not [n for n in names if repl.anchor_disk(n) == "777"]
+
+    def test_prepare_drops_the_replaced_entrys_anchors(self):
+        """M2R-6: the stale entry it replaces was this same disk."""
+        fake = _fresh_fake(("old",))
+        assert _engine_run(fake, "old", "1", P1).ok
+        _ = [fake.ds.pop(n) for n in [n for n in fake.ds if n == "old" or n.startswith("old/")]]
+        fake.pools.discard("old")
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json", {"blue": {"guid": "1", "drive_id": _KINGSTON_ID}}
+        )
+        assert self._prepare(fake, cfg_dir) == 0
+        assert repl.anchor_name("1", P1) not in fake.bookmarks("rpool/ROOT/be")
+        assert fake.bookmarks("rpool/ROOT/be") and all(
+            repl.anchor_disk(b) == "777" for b in fake.bookmarks("rpool/ROOT/be")
+        )
 
     def test_prepare_refuses_while_bpool_is_not_imported(self):
         """M2R-4 (E4b): a new drive would be prepared without bpool."""
@@ -4966,6 +5042,77 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
         assert fake.bookmarks("rpool/USERDATA/home") == [repl.anchor_name("2", P2)]
         assert not any(repl.anchor_disk(n) == "1" for n in fake.names("bpool/BOOT/be"))
         assert any(c.startswith("zfs destroy 'rpool/") and "#zark_1_" in c for c in fake.calls)
+
+    def _registry(self, fake: FakeZfs, d: Path, args: list[str], answer: bool = True) -> str:
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch("lib.log.Log.ask", return_value=answer),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            registry_mod.run(args)
+        return out.getvalue()
+
+    def test_list_shows_anchors_without_an_entry_and_forget_takes_a_guid(self):
+        """M2R-6 (M2F-3): a drive that left the registry another way is
+        visible, and `forget <GUID>` drops its anchors."""
+        fake = _fresh_fake(("black", "blue"))
+        assert _engine_run(fake, "black", "1", P1).ok
+        assert _engine_run(fake, "blue", "2", P2).ok
+        d = self._cfg_dir({"blue": {"guid": "2", "drive_id": "b"}})
+        out = self._registry(fake, d, ["list"])
+        assert "drive GUID 1:" in out and "sudo zark registry forget 1" in out
+        assert "drive GUID 2:" not in out
+        _ = self._registry(fake, d, ["forget", "1"])
+        assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("2", P2)]
+        assert list(json.loads((d / "known_drives.json").read_text())) == ["blue"]
+
+    def test_forget_by_the_guid_of_a_registered_drive(self):
+        """A registered drive's GUID forgets its entry like its name."""
+        fake = _fresh_fake(("black",))
+        assert _engine_run(fake, "black", "1", P1).ok
+        d = self._cfg_dir({"black": {"guid": "1", "drive_id": "a"}})
+        _ = self._registry(fake, d, ["forget", "1"])
+        assert not json.loads((d / "known_drives.json").read_text())
+        assert not fake.bookmarks("rpool/ROOT/be")
+
+    def test_forget_reports_anchors_it_could_not_drop(self):
+        """Anchors first, entry last; a failure names the command to retry."""
+        fake = _fresh_fake(("black",))
+        assert _engine_run(fake, "black", "1", P1).ok
+        fake.fail_cmds.add("rpool/ROOT/be#zark_1_")
+        d = self._cfg_dir({"black": {"guid": "1", "drive_id": "a"}})
+        destroys_before_save: list[int] = []
+        save = Config.save_drives
+
+        def recording_save(cfg: Config) -> None:
+            destroys_before_save.append(sum(c.startswith("zfs destroy") for c in fake.calls))
+            save(cfg)
+
+        with patch.object(Config, "save_drives", recording_save):
+            out = self._registry(fake, d, ["forget", "black"])
+        assert "could not remove" in out and "sudo zark registry forget 1" in out
+        assert not json.loads((d / "known_drives.json").read_text())
+        assert destroys_before_save and destroys_before_save[0] > 0
+
+    def test_forget_offers_leftover_points_when_no_drive_remains(self):
+        """M2F-5: points of an interrupted run are offered for removal once the
+        registry is empty, and only then."""
+        fake = _fresh_fake(("black", "blue"))
+        assert _engine_run(fake, "black", "1", P1).ok
+        assert _engine_run(fake, "blue", "2", P1.replace("07", "06")).ok
+        fake.inject["black/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "black", "1", P2).ok
+        assert _origin_points(fake)
+        d = self._cfg_dir(
+            {"black": {"guid": "1", "drive_id": "a"}, "blue": {"guid": "2", "drive_id": "b"}},
+        )
+        out = self._registry(fake, d, ["forget", "black"])
+        assert "next complete backup or prepare" in out and _origin_points(fake)
+        _ = self._registry(fake, d, ["forget", "blue"])
+        assert _origin_points(fake) == []
 
     def test_forget_refuses_on_malformed_registry(self):
         d = Path(tempfile.mkdtemp())
@@ -7802,8 +7949,8 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "black", "1", P1).ok
         assert _engine_run(fake, "blue", "2", P2).ok
         with patch_sh(fake), redirect_stdout(StringIO()):
-            n = engine.drop_disk_anchors("1", ["rpool", "bpool"], Log())
-        assert n > 0
+            n, failed = engine.drop_disk_anchors("1", ["rpool", "bpool"], Log())
+        assert n > 0 and not failed
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("2", P2)]
         assert repl.anchor_name("1", P1) not in fake.names("bpool/BOOT/be")
         assert repl.anchor_name("2", P2) in fake.names("bpool/BOOT/be")
@@ -7830,7 +7977,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "blue", "2", P2).ok
         assert _engine_run(fake, "black", "1", P3).ok
         with patch_sh(fake), redirect_stdout(StringIO()):
-            assert engine.drop_disk_anchors("2", ["rpool", "bpool"], Log()) > 0
+            assert engine.drop_disk_anchors("2", ["rpool", "bpool"], Log())[0] > 0
         destroys = [
             c
             for c in fake.calls

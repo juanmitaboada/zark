@@ -18,7 +18,7 @@ Destroys ZFS pool, overwrites start/end with random data,
 wipes signatures, destroys partition table.
 """
 
-from lib import sh
+from lib import engine, sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
@@ -131,6 +131,11 @@ def run(
     _ = sh.run(f"sgdisk --zap-all {target_dev}", log=log)
     log.ok("Partition table destroyed")
 
+    # The wiped pool's anchors in origin (M2R-6): nothing can use them now.
+    anchors_left = ""
+    if ident.label and ident.label.name not in SYSTEM_POOLS:
+        anchors_left = engine.drop_anchors_of(ident.label.guid, log)
+
     # Remove every registry entry that described this disk
     if matched:
         for name in matched:
@@ -151,6 +156,7 @@ def run(
         [
             f"Device: {target_dev} ({ident.model})",
             "Drive is blank and ready for reuse.",
+            *([anchors_left] if anchors_left else []),
         ],
     )
 
