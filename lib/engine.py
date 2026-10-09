@@ -902,9 +902,13 @@ def execute(run: Run, cleanup: Cleanup, decide: Decide) -> Result:
     try:
         if not run.pause_sanoid():
             return Result(aborted=True, error="sanoid is still running after the wait")
-        if not run.take_point():
-            return Result(aborted=True, error=f"could not take {run.point}")
+        # Tracked first: rpool's point is taken before bpool's, so a failure
+        # or an interrupt between the two calls leaves rpool's to undo.
         cleanup.track_action(run.undo_point)
+        if not run.take_point():
+            cleanup.untrack_action(run.undo_point)
+            run.undo_point()
+            return Result(aborted=True, error=f"could not take {run.point}")
         res = replicate(run, decide)
         cleanup.untrack_action(run.undo_point)
         if res.aborted:

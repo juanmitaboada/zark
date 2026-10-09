@@ -7541,6 +7541,15 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             assert not Path(engine.SANOID_MARKER).exists()
         assert seen == [True]
 
+    def test_no_point_left_when_bpool_snapshot_fails(self) -> None:
+        """M2R-11 (E5): rpool's point is taken, bpool's fails: nothing is left."""
+        fake = self._fresh()
+        fake.fail_cmds.add("zfs snapshot bpool")
+        res = _engine_run(fake, "backup", "111", P1)
+        assert res.aborted
+        assert _origin_points(fake) == []
+        assert fake.units["sanoid.timer"] == "active"
+
     def test_abort_drops_the_point(self) -> None:
         """A run the user aborts leaves no point in origin and nothing on the backup."""
         fake = self._fresh()
