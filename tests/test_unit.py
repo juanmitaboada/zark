@@ -7588,6 +7588,7 @@ class TestBackupDecide:
     def test_rollback_counts_the_incrementals_that_follow(self) -> None:
         """O11: after "roll back" the estimate holds each post-rollback incremental."""
         fake = self._with_rollback()
+        fake.ds["backup"].props["org.zark:format"] = engine.FORMAT
         plans, eng = self._plans(fake)
         estimated: list[tuple[repl.State, bool]] = []
         real = eng.estimate
@@ -7601,10 +7602,12 @@ class TestBackupDecide:
             patch.object(eng, "estimate", spy),
             patch.object(Log, "ask_choice", side_effect=[2]),
             patch.object(Log, "ask_text", return_value="ROLLBACK"),
-            redirect_stdout(StringIO()),
+            redirect_stdout(StringIO()) as out,
         ):
             assert _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
         assert (repl.State.ROLLBACK, False) in estimated
+        # O6: on a v2 drive the warning names both causes.
+        assert "recovered from an older point, or snapshots destroyed in origin" in out.getvalue()
 
     def test_archive_offered_only_when_it_fits(self) -> None:
         """Without room for a full resend, option 2 is the rollback."""
@@ -7743,6 +7746,26 @@ class TestBackupDecide:
         out = buf.getvalue()
         assert "NOT at the point: out of space" in out
         assert "NOT BACKED UP (zvol, not backed up)" in out
+
+    def test_table_tells_a_dataset_never_attempted(self) -> None:
+        """O5: a dataset the run never reached is not shown as if it had failed."""
+        res = engine.Result(
+            plans=[repl.DatasetPlan("rpool/var", repl.State.VIA_BOOKMARK)],
+            outcomes={},
+        )
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _show_table(res, P1, Log())
+        assert "NOT at the point: not attempted (via bookmark)" in buf.getvalue()
+
+    def test_report_keeps_dataset_names(self) -> None:
+        """O1: "Rolled back rpool/ROOT/…@zark_…Z", not "rpool/root/…z"."""
+        with patch_sh(_fresh_fake()), redirect_stdout(StringIO()) as buf:
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            eng._report(  # pylint: disable=protected-access
+                RunResult(0, "", "", "zfs rollback"), f"rolled back rpool/ROOT/be to @{P1}"
+            )
+        assert f"Rolled back rpool/ROOT/be to @{P1}" in buf.getvalue()
 
 
 class TestBackupCommand:

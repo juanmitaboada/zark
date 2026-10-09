@@ -413,7 +413,8 @@ class Run:  # pylint: disable=too-many-instance-attributes
 
     def _report(self, r: sh.RunResult, what: str) -> None:
         if r.ok:
-            self.log.ok(what.capitalize())
+            # Only the first letter: capitalize() would lowercase the dataset names.
+            self.log.ok(what[:1].upper() + what[1:])
         else:
             self.log.error(f"Failed: {what}: {r.stderr.strip()}")
 

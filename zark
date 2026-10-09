@@ -151,7 +151,9 @@ def main():
         mod = __import__(f"commands.{mod_name}", fromlist=[mod_name])
         mod.run(cmd_args)
     except KeyboardInterrupt:
-        print("\n\n  Interrupted by user.")
+        print()
+        # Through the log so zark.log records why the run stopped (I19).
+        Log().error("Interrupted by user.")
         sys.exit(130)
     except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"\n\033[0;31m[FATAL]\033[0m {e}")

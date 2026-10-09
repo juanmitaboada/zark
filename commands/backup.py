@@ -265,7 +265,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             + (
                 "still has: first run of this zark on a drive written by an older one."
                 if pre_v2
-                else "still has: was this system recovered from an older point?"
+                else "still has (recovered from an older point, or snapshots destroyed in origin)."
             ),
         )
         destroyed = 0
@@ -411,8 +411,10 @@ def _show_table(res: engine.Result, point: str, log: Log) -> None:
             mark = "only on backup" + (", kept" if p.kept else "")
         elif p.state is State.EXCLUDED:
             mark = f"NOT BACKED UP ({p.note})"
+        elif out is None:
+            mark = f"NOT at the point: not attempted ({p.state})"
         else:
-            mark = f"NOT at the point: {out.error if out and out.error else p.state}"
+            mark = f"NOT at the point: {out.error or p.state}"
         line = f"  {p.rel:<48} {mark}"
         if p.state is State.AT_POINT:
             log.info(line)
@@ -685,6 +687,11 @@ def run(
             [
                 f"{len(missing)} dataset(s) did not reach {eng.point}:",
                 *[f"  {rel}" for rel in missing[:15]],
+                *(
+                    [f"  …and {len(missing) - 15} more (see the table above)"]
+                    if len(missing) > 15
+                    else []
+                ),
                 "",
                 "The drive keeps everything it had. Run backup again;",
                 "an interrupted transfer resumes where it stopped.",
