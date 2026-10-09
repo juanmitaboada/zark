@@ -8549,6 +8549,17 @@ class TestBackupCommand:
             fake.importable.add("bpool")
         return fake
 
+    def test_completed_banner_names_what_is_not_backed_up(self) -> None:
+        """M2R-16: zvols and containers holding data are in the banner too."""
+        fake = _fresh_fake()
+        out = StringIO()
+        _cfg, rc = self._run(fake, redirect_stdout(out))
+        assert rc == 0
+        text = out.getvalue()
+        banner = text[text.index("BACKUP COMPLETED") :]
+        assert "Not backed up:  1 dataset(s), by design:" in banner
+        assert "rpool/vm (zvol, not backed up)" in banner
+
     def test_bpool_not_imported_is_refused(self) -> None:
         """M2R-4 (M2F-2): a bpool `zpool import` can see but that is not
         imported stops the backup before the drive is touched."""

@@ -759,6 +759,7 @@ def run(
         except OSError as e:
             log.warn(f"Could not persist last_backup_at for {pool_name}: {e}")
 
+    not_backed_up = [p for p in res.plans if p.state is State.EXCLUDED]
     log.banner_ok(
         "BACKUP COMPLETED",
         [
@@ -766,6 +767,12 @@ def run(
             f"Duration:       {log.W}{mins}m {secs}s{log.N}",
             f"Used on target: {log.W}{used_after.used if used_after else '?'}{log.N}",
             f"Available:      {log.W}{used_after.avail if used_after else '?'}{log.N}",
+            *(
+                [f"{log.Y}Not backed up:  {len(not_backed_up)} dataset(s), by design:{log.N}"]
+                if not_backed_up
+                else []
+            ),
+            *[f"{log.Y}  {p.rel} ({p.note}){log.N}" for p in not_backed_up],
         ],
     )
     _report_rpo(cfg, pool_name, log)
