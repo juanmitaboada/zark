@@ -7460,6 +7460,87 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "backup", "111", P2).ok
         assert fake.units["sanoid.timer"] == "inactive"
 
+    def _sanoid_ending(self, ending: str) -> FakeZfs:
+        """One run whose sanoid wait ends with ``ending``, then the cleanup."""
+        fake = self._fresh()
+        fake.units["sanoid.service"] = "activating"
+
+        def sleep(_s: float) -> None:
+            if ending == "ctrl-c":
+                raise KeyboardInterrupt
+            if ending == "exit":
+                raise SystemExit(143)
+
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            log = Log()
+            cleanup = Cleanup(log)
+            eng = engine.Run("backup", "111", log, P1, sleep=sleep)
+            try:
+                res = engine.execute(eng, cleanup, lambda _p, _r: True)
+                assert res.aborted and "sanoid" in res.error
+            except (KeyboardInterrupt, SystemExit):
+                pass
+            cleanup.run()
+            assert not Path(engine.SANOID_MARKER).exists()
+        return fake
+
+    def test_sanoid_timer_back_on_every_ending_of_the_wait(self) -> None:
+        """M2R-8 (E5): Ctrl-C, a fatal exit or the timeout while waiting for a
+        running sanoid leave the timer active and no point."""
+        for ending in ("ctrl-c", "exit", "timeout"):
+            fake = self._sanoid_ending(ending)
+            assert fake.units["sanoid.timer"] == "active", ending
+            assert _origin_points(fake) == [], ending
+
+    def test_waits_for_a_running_sanoid(self) -> None:
+        """The point is taken only once sanoid's take/prune has finished,
+        and the wait says so."""
+        fake = self._fresh()
+        fake.units["sanoid.service"] = "activating"
+        waited: list[float] = []
+
+        def sleep(s: float) -> None:
+            waited.append(s)
+            fake.units["sanoid.service"] = "inactive"
+
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P1, sleep=sleep)
+            assert engine.execute(eng, Cleanup(Log()), lambda _p, _r: True).ok
+        assert waited
+        assert "Waiting for sanoid to finish" in out.getvalue()
+
+    def test_timer_left_stopped_by_a_dead_run_is_started(self) -> None:
+        """A marker with the timer inactive: an earlier run died without its
+        cleanup; this run starts the timer at its end and says so."""
+        fake = self._fresh()
+        fake.units["sanoid.timer"] = "inactive"
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            marker = Path(engine.SANOID_MARKER)
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            _ = marker.write_text(P1 + "\n", encoding="ascii")
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            assert engine.execute(eng, Cleanup(Log()), lambda _p, _r: True).ok
+            assert not marker.exists()
+        assert fake.units["sanoid.timer"] == "active"
+        assert "left stopped by an earlier zark run" in out.getvalue()
+
+    def test_marker_present_while_the_timer_is_stopped(self) -> None:
+        """The marker exists exactly while this run holds the timer stopped."""
+        fake = self._fresh()
+        seen: list[bool] = []
+
+        def decide(_p: list[repl.DatasetPlan], _r: engine.Run) -> bool:
+            seen.append(Path(engine.SANOID_MARKER).exists())
+            return True
+
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P1, sleep=lambda _s: None)
+            assert engine.execute(eng, Cleanup(Log()), decide).ok
+            assert not Path(engine.SANOID_MARKER).exists()
+        assert seen == [True]
+
     def test_abort_drops_the_point(self) -> None:
         """A run the user aborts leaves no point in origin and nothing on the backup."""
         fake = self._fresh()

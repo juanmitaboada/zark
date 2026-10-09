@@ -77,6 +77,11 @@ from lib.restore_points import COMPLETE_PROP, Snap, legacy_complete, parse_snaps
 
 SANOID_UNITS = ("sanoid.service", "sanoid-prune.service")
 SANOID_WAIT_SECONDS = 600
+# Written just before zark stops sanoid.timer, removed once it starts it
+# again. /run is emptied at boot, when the enabled timer starts by itself,
+# so a marker found with the timer inactive means a zark run that died
+# without its cleanup left the timer stopped.
+SANOID_MARKER = "/run/zark/sanoid-paused"
 
 
 def _q(word: str) -> str:
@@ -272,10 +277,27 @@ class Run:  # pylint: disable=too-many-instance-attributes
     # ── sanoid ───────────────────────────────────────────────────────────
 
     def pause_sanoid(self) -> bool:
-        """Stop sanoid.timer and wait for a running take/prune. False on timeout."""
+        """Stop sanoid.timer and wait for a running take/prune. False on timeout.
+
+        The flag that makes :meth:`resume_sanoid` start the timer again is
+        set, and the marker written, before the timer is stopped, so any
+        ending from here on (Ctrl-C in the wait included) restores it.
+        """
         state = sh.run("systemctl is-active sanoid.timer").output.strip()
-        self._timer_was_active = state == "active"
-        if self._timer_was_active:
+        marker = Path(SANOID_MARKER)
+        left = state != "active" and marker.exists()
+        self._timer_was_active = state == "active" or left
+        if left:
+            self.log.warn(
+                "sanoid.timer was left stopped by an earlier zark run; "
+                + "this run starts it again when it ends"
+            )
+        if state == "active":
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                _ = marker.write_text(self.point + "\n", encoding="ascii")
+            except OSError as e:
+                self.log.warn(f"Could not write {marker}: {e}")
             _ = sh.run("systemctl stop sanoid.timer", log=self.log)
         waited = 0
         while any(
@@ -284,16 +306,28 @@ class Run:  # pylint: disable=too-many-instance-attributes
         ):
             if waited >= SANOID_WAIT_SECONDS:
                 return False
+            if waited == 0:
+                self.log.info(
+                    f"Waiting for sanoid to finish (up to {SANOID_WAIT_SECONDS // 60} min)..."
+                )
             self.sleep(5)
             waited += 5
         self.log.ok("sanoid paused" if self._timer_was_active else "sanoid timer not active")
         return True
 
     def resume_sanoid(self) -> None:
-        """Start sanoid.timer again if this run stopped it."""
-        if self._timer_was_active:
-            _ = sh.run("systemctl start sanoid.timer", log=self.log)
-            self._timer_was_active = False
+        """Start sanoid.timer again if this run stopped it (or found it left
+        stopped by an earlier run); the marker goes once it is running."""
+        if not self._timer_was_active:
+            return
+        self._timer_was_active = False
+        if not sh.run("systemctl start sanoid.timer", log=self.log).ok:
+            self.log.warn(f"Could not start sanoid.timer; {SANOID_MARKER} stays for the next run")
+            return
+        try:
+            Path(SANOID_MARKER).unlink(missing_ok=True)
+        except OSError as e:
+            self.log.warn(f"Could not remove {SANOID_MARKER}: {e}")
 
     # ── point ────────────────────────────────────────────────────────────
 
@@ -864,11 +898,10 @@ def execute(run: Run, cleanup: Cleanup, decide: Decide) -> Result:
     Until it returns, ``cleanup`` holds undo actions, so an interrupted run
     drops its point where no receive began and resumes sanoid.
     """
-    if not run.pause_sanoid():
-        run.resume_sanoid()
-        return Result(aborted=True, error="sanoid is still running after the wait")
     cleanup.track_action(run.resume_sanoid)
     try:
+        if not run.pause_sanoid():
+            return Result(aborted=True, error="sanoid is still running after the wait")
         if not run.take_point():
             return Result(aborted=True, error=f"could not take {run.point}")
         cleanup.track_action(run.undo_point)

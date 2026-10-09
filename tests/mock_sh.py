@@ -35,7 +35,10 @@ Usage:
     assert mock.call_count("syncoid") == 1
 """
 
+import os
 import re
+import shutil
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from unittest.mock import patch
@@ -218,12 +221,18 @@ def patch_sh(mock: MockShell):
     for target in targets:
         patches.append(patch(f"{target}.run", side_effect=mock.mock_run))
     patches.append(patch("lib.sh.run_pipe", side_effect=mock.mock_run_pipe))
+    # The engine's sanoid marker lives under /run: never touched by a test.
+    marker_dir = tempfile.mkdtemp(prefix="zark-test-run-")
+    marker = patch("lib.engine.SANOID_MARKER", os.path.join(marker_dir, "sanoid-paused"))
 
     # Stack all patches
     for p in patches:
         p.start()
+    _ = marker.start()
     try:
         yield mock
     finally:
+        marker.stop()
         for p in reversed(patches):
             p.stop()
+        shutil.rmtree(marker_dir, ignore_errors=True)
