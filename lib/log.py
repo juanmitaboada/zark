@@ -135,6 +135,10 @@ class Log:
         """Log a shell command being executed."""
         self.dbg(f"$ {command}")
 
+    def file(self, msg: str):
+        """Write to zark.log only (detail too long for the terminal)."""
+        self._to_file(msg)
+
     def raw(self, msg: str):
         """Raw output (e.g. command stdout)."""
         self._emit(msg)

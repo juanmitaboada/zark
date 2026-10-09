@@ -46,7 +46,7 @@ from lib.identity import by_id_names, preferred_by_id, whole_disk
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
-from lib.replication import TRANSFERABLE, DatasetPlan, State, point_name
+from lib.replication import TRANSFERABLE, DatasetPlan, State, is_archived, point_name
 from lib.zfs import ZFS, PoolInfo
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
@@ -247,6 +247,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             f"{p.rel} exists only on the backup ({_gib(p.used)}):",
             opts,
             {2: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it")},
+            {2: _on_drive(eng, p.rel)},
         )
         if pick == 1:
             actions.append(partial(eng.keep_orphan, p, datetime.now(UTC).strftime("%Y-%m-%d")))
@@ -271,10 +272,14 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         destroyed = 0
         for p in rollbacks:
             destroyed += len(p.newer)
-            shown = ", ".join(n.lstrip("@") for n in p.newer[:3]) + (
-                " …" if len(p.newer) > 3 else ""
+            names = [n.lstrip("@") for n in p.newer]
+            more = len(names) - 3
+            shown = ", ".join(names[:3]) + (
+                f" …and {more} more (full list in zark.log)" if more > 0 else ""
             )
             log.info(f"  {p.rel}: common {p.common.lstrip('@')}; newer on the backup: {shown}")
+            if more > 0:
+                log.file(f"  {p.rel}: every snapshot the rollback destroys: {', '.join(names)}")
         tops = _tops([p.rel for p in rollbacks])
         before = dict(sizes)
         full = sum(resend(t) for t in tops)
@@ -316,12 +321,14 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         full_size = resend(p.rel)
         below = len(_subtree(plans, p.rel)) - 1
         extra = f" (and {below} dataset(s) below)" if below else ""
+        held = _on_drive(eng, p.rel)
+        on_drive = f" (and {len(held) - 1} dataset(s) below)" if len(held) > 1 else ""
         opts = ["skip it this time (the backup will be INCOMPLETE)"]
         fits = sum(sizes.values()) <= avail
         if fits:
             opts.append(f"archive the old lineage{extra} and resend in full ({_gib(full_size)})")
         opts.append(
-            f"destroy it{extra} on the backup and resend in full ({_gib(p.used)} destroyed)"
+            f"destroy it{on_drive} on the backup and resend in full ({_gib(p.used)} destroyed)"
         )
         log.warn(f"  {p.rel}: no snapshot in common with the backup ({p.note})")
         pick = _ask_confirmed(
@@ -329,6 +336,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             f"{p.rel} has diverged:",
             opts,
             {len(opts) - 1: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it")},
+            {len(opts) - 1: held},
         )
         if pick == 0:
             sizes = before
@@ -365,6 +373,23 @@ def _subtree(plans: list[DatasetPlan], top: str) -> list[DatasetPlan]:
     ]
 
 
+def _on_drive(eng: engine.Run, top: str) -> list[str]:
+    """What `zfs destroy -r` of ``top`` takes, from the drive's own listing:
+    one line per dataset with its snapshot count, archived lineages and
+    kept orphans named as such (the plan leaves both out)."""
+    lines: list[str] = []
+    for rel, d in sorted(eng.dest.items()):
+        if rel != top and not rel.startswith(f"{top}/"):
+            continue
+        mark = ""
+        if is_archived(rel):
+            mark = "  — archived lineage"
+        elif d.orphan.startswith("kept@"):
+            mark = "  — kept, only on the backup"
+        lines.append(f"    {eng.pool}/{rel}  ({len(d.snaps)} snapshot(s)){mark}")
+    return lines
+
+
 def _under(rel: str, tops: set[str]) -> bool:
     """True when ``rel`` is one of ``tops`` or below one of them."""
     return any(rel == t or rel.startswith(f"{t}/") for t in tops)
@@ -384,16 +409,29 @@ def _typed(log: Log, word: str, what: str) -> bool:
 
 
 def _ask_confirmed(
-    log: Log, question: str, opts: list[str], confirm: dict[int, tuple[str, str]]
+    log: Log,
+    question: str,
+    opts: list[str],
+    confirm: dict[int, tuple[str, str]],
+    takes: dict[int, list[str]] | None = None,
 ) -> int:
     """Numbered choice whose destructive options need a typed word.
 
-    A word that does not match is no answer: the same question is asked
-    again, so a typo can neither destroy nor silently pick another option.
+    ``takes`` lists, per destructive option, what it destroys; it is shown
+    and logged before the word is asked. A word that does not match is no
+    answer: the same question is asked again, so a typo can neither destroy
+    nor silently pick another option.
     """
     while True:
         pick = log.ask_choice(question, opts, 0)
-        if pick not in confirm or _typed(log, *confirm[pick]):
+        if pick not in confirm:
+            return pick
+        lines = (takes or {}).get(pick, [])
+        if lines:
+            log.warn(f"{confirm[pick][0]} takes {len(lines)} dataset(s) on the backup:")
+            for line in lines:
+                log.warn(line)
+        if _typed(log, *confirm[pick]):
             return pick
         log.info(f"Not confirmed ({confirm[pick][0]} was not typed) — choose again")
 

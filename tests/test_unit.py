@@ -8007,6 +8007,85 @@ class TestBackupDecide:
         )
         return fake
 
+    def test_destroy_lists_what_it_takes(self) -> None:
+        """M2R-5 (E10): DESTROY of a diverged top counts what the drive holds
+        below it and names, before the typed word, the archived lineage and
+        the kept orphan it also takes."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        docker = fake.ds["rpool/var/lib/docker"]
+        docker.snaps.clear()
+        docker.bookmarks.clear()
+        _ = fake.snap("rpool/var/lib/docker", "autosnap_new")
+
+        def archive(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            for p in plans:
+                if p.state is repl.State.DIVERGED:
+                    assert eng.archive(p, datetime(2026, 10, 2, tzinfo=UTC))
+            return True
+
+        assert _engine_run(fake, "backup", "111", "zark_2026-10-02_10:00:00Z", archive).ok
+        fake.dataset("rpool/var/lib/old", canmount="on", mountpoint="/var/lib/old")
+        _ = fake.snap("rpool/var/lib/old", "autosnap_x")
+        assert _engine_run(fake, "backup", "111", "zark_2026-10-03_10:00:00Z").ok
+        _ = fake.ds.pop("rpool/var/lib/old")
+
+        def keep(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            for p in plans:
+                if p.state is repl.State.ORPHAN:
+                    assert eng.keep_orphan(p, "2026-10-03")
+            return True
+
+        assert _engine_run(fake, "backup", "111", "zark_2026-10-04_10:00:00Z", keep).ok
+        var = fake.ds["rpool/var"]
+        var.snaps.clear()
+        var.bookmarks.clear()
+        _ = fake.snap("rpool/var", "autosnap_recreated")
+        plans, eng = self._plans(fake)
+        shown: list[str] = []
+
+        def choice(_question: str, options: list[str], _default: int = 0) -> int:
+            shown.extend(options)
+            return 2
+
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(Log, "ask_choice", side_effect=choice),
+            patch.object(Log, "ask_text", return_value="DESTROY"),
+            redirect_stdout(out),
+        ):
+            assert _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+        assert any(o.startswith("destroy it (and 4 dataset(s) below)") for o in shown), shown
+        text = out.getvalue()
+        assert "DESTROY takes 5 dataset(s) on the backup:" in text
+        assert "backup/rpool/var/lib/docker.archived-20261002" in text
+        assert "archived lineage" in text and "kept, only on the backup" in text
+        assert not [n for n in fake.ds if n.startswith("backup/rpool/var/")]
+
+    def test_rollback_names_every_snapshot_in_the_log(self) -> None:
+        """M2R-5 (M2F-7): the terminal shows three names and a count; zark.log
+        gets every snapshot the rollback destroys."""
+        fake = self._with_rollback()
+        newer = [f"autosnap_extra_{i}" for i in range(5)]
+        be = fake.ds["backup/rpool/ROOT/be"]
+        for i, name in enumerate(newer):
+            be.snaps.append(FSnap(name, f"9{i}", 900 + i, 2_000_000_000 + i))
+        plans, eng = self._plans(fake)
+        log_path = os.path.join(tempfile.mkdtemp(), "zark.log")
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(Log, "ask_choice", return_value=0),
+            redirect_stdout(out),
+        ):
+            assert not _decide(
+                plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log(log_path)
+            )
+        assert "…and 3 more (full list in zark.log)" in out.getvalue()
+        logged = Path(log_path).read_text(encoding="utf-8")
+        assert all(name in logged for name in newer)
+
     def test_rollback_default_aborts(self) -> None:
         """The default answer changes nothing."""
         fake = self._with_rollback()
