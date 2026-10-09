@@ -4848,6 +4848,18 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("777", home[0])]
         assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
 
+    def test_prepare_records_the_machine_id(self):
+        """The drive-owner check reads what prepare wrote (2026-10-08)."""
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        mid = cfg_dir / "machine-id"
+        mid.write_text("5ca1ab1e0000000000000000000000ff\n", encoding="ascii")
+        with patch.object(engine, "MACHINE_ID_PATH", str(mid)):
+            assert self._prepare(fake, cfg_dir) == 0
+        props = fake.ds["blue"].props
+        assert props["org.zark:origin-machine-id"] == "5ca1ab1e0000000000000000000000ff"
+
     def test_prepare_does_not_register_an_incomplete_drive(self):
         """H16: a dataset that did not land means no registration and exit 1."""
         fake = _fresh_fake(())
@@ -5072,6 +5084,27 @@ class TestRestorePoints:  # pylint: disable=missing-function-docstring
         first = resolve(points[0], snaps, [f"rpool/ROOT/{_BE}/usr"])
         got = first[f"rpool/ROOT/{_BE}/usr"]
         assert got is not None and got.name.startswith("autosnap_") and got.creation < t1
+
+    def test_later_backup_points_are_not_evidence(self):
+        # A dataset whose last snapshot is the first backup point and that a
+        # later backup point lacks (destroyed afterwards) still belongs to a
+        # carried run between the two: only backup points at or before the
+        # chosen point say a lineage ended.
+        p1, p2 = "zark_2026-10-01_10:00:00Z", "zark_2026-10-08_10:00:00Z"
+        t1, th, t2 = 1_759_312_800, 1_759_600_000, 1_759_917_600
+        be = f"backup/rpool/ROOT/{_BE}"
+        lines = [
+            f"{be}@{p1}\t1\t1\t{t1}",
+            f"backup/rpool/old@{p1}\t2\t2\t{t1}",
+            f"{be}@autosnap_2026-10-04_10:00:00_daily\t3\t3\t{th}",
+            f"{be}@{p2}\t4\t4\t{t2}",
+        ]
+        snaps = parse_snapshots(lines, "backup")
+        points = restore_points(snaps, f"rpool/ROOT/{_BE}")
+        carried = next(p for p in points if p.family == "autosnap_")
+        got = resolve(carried, snaps, ["rpool/old"])["rpool/old"]
+        assert got is not None and got.name == p1
+        assert resolve(points[-1], snaps, ["rpool/old"])["rpool/old"] is None
 
     def test_choice_labels_backup_points_and_carried_runs(self):
         snaps = parse_snapshots(self._v2_lines(), "backup")
@@ -5352,6 +5385,76 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert home is not None
         assert home.name == "autosnap_2026-09-28_17:00:01_hourly"
         assert not any("keystore" in r for r in rows)  # keystore resolves on its own
+
+
+class TestRecoverPlanArchived:  # pylint: disable=missing-function-docstring
+    """Decision 19: a dataset resolved from an archived lineage is read from
+    where it is stored, and an archived lineage is never a dataset of its own."""
+
+    P1, P2 = "zark_2026-10-01_10:00:00Z", "zark_2026-10-08_10:00:00Z"
+
+    def _plan(self) -> tuple[RestorePlan, list[str], list[list[str]]]:
+        be = f"rpool/ROOT/{_BE}"
+        arch = f"{be}.archived-20261008"
+        datasets = [
+            "backup/rpool",
+            "backup/rpool/ROOT",
+            f"backup/{be}",
+            f"backup/{be}/var",
+            f"backup/{arch}",
+            f"backup/{arch}/var",
+        ]
+        t1, t2 = 1_759_312_800, 1_759_917_600
+        lines = [
+            f"backup/{arch}@{self.P1}\t1\t1\t{t1}",
+            f"backup/{arch}/var@{self.P1}\t2\t2\t{t1}",
+            f"backup/{be}@{self.P2}\t3\t3\t{t2}",
+            f"backup/{be}/var@{self.P2}\t4\t4\t{t2}",
+        ]
+        snaps = parse_snapshots(lines, "backup")
+        point = restore_points(snaps, be)[0]
+        mock = MockShell()
+        mock.on("zfs list -Hp -o name,type -r backup/rpool").succeeds(
+            "\n".join(f"{n}\tfilesystem" for n in datasets),
+        )
+        mock.on("zfs list -Hp -o name,type -r backup/bpool").fails()
+        mock.on_prefix("zfs get -Hp -s local -o name,property,value org.zark").succeeds("")
+        mock.on("zfs list -Hp -t snapshot -o name,createtxg -s createtxg backup/keystore").succeeds(
+            "backup/keystore@prepare_20261001_100000\t9",
+        )
+        probed: list[str] = []
+        sized: list[list[str]] = []
+
+        def referenced(names: list[str]) -> dict[str, int]:
+            sized.append(list(names))
+            return dict.fromkeys(names, 1000)
+
+        def empty_root(full: str) -> bool:
+            probed.append(full)
+            return False
+
+        with (
+            patch_sh(mock),
+            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
+            patch.object(recover_mod, "_referenced", side_effect=referenced),
+            patch.object(recover_mod, "_empty_root", side_effect=empty_root),
+            redirect_stdout(StringIO()),
+        ):
+            plan = _plan("backup", "/dev/sdb1", _BE, point, snaps, make_log())
+        return plan, probed, sized
+
+    def test_archived_snapshots_are_read_where_they_are_stored(self):
+        plan, probed, sized = self._plan()
+        arch = f"backup/rpool/ROOT/{_BE}.archived-20261008"
+        assert probed == [f"{arch}@{self.P1}"]
+        assert f"{arch}/var@{self.P1}" in sized[0] and f"{arch}@{self.P1}" in sized[0]
+        row = plan.row(f"rpool/ROOT/{_BE}")
+        assert row is not None and row.snap is not None and row.snap.source
+
+    def test_archived_lineages_are_not_planned(self):
+        plan, _probed, _sized = self._plan()
+        assert not [r.rel for r in plan.rows if ".archived-" in r.rel]
+        assert {r.rel for r in plan.rows} == {f"rpool/ROOT/{_BE}", f"rpool/ROOT/{_BE}/var"}
 
 
 def _sized_plan(rpool: int, bpool: int, keystore: int = 16 * 1024**2) -> RestorePlan:
@@ -6870,6 +6973,14 @@ class TestReplicationPlanner:
     ) -> "repl.Origin":
         return repl.Origin(rel, snaps=snaps, bookmarks=bms or [])
 
+    def test_keystore_never_expected(self) -> None:
+        """The keystore travels apart, whatever its kind."""
+        origin = {
+            "rpool/keystore": repl.Origin("rpool/keystore", kind="filesystem"),
+            "rpool/var": repl.Origin("rpool/var"),
+        }
+        assert repl.expected(origin) == ["rpool/var"]
+
     def test_new_dataset(self) -> None:
         """A dataset missing on the backup is sent in full."""
         o = self._o("rpool/x", [_ref(P, "9", 9)])
@@ -7091,7 +7202,7 @@ P1, P2, P3 = (
 )
 
 
-class TestEngine:
+class TestEngine:  # pylint: disable=too-many-public-methods
     """The engine end to end against FakeZfs (redesign §4, I-A…I-G)."""
 
     def _fresh(self, pools: tuple[str, ...] = ("backup",)) -> FakeZfs:
@@ -7441,6 +7552,87 @@ class TestEngine:
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("2", P2)]
         assert repl.anchor_name("1", P1) not in fake.names("bpool/BOOT/be")
         assert repl.anchor_name("2", P2) in fake.names("bpool/BOOT/be")
+
+    def test_every_receive_is_unmounted(self) -> None:
+        """I-G in the engine: every receive carries -u (new, incremental, via
+        bookmark and resume)."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-08_08:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        _prune_all_autosnaps(fake)
+        assert _engine_run(fake, "backup", "111", P3).ok
+        receives = [c.split(" | ", 1)[1] for c in fake.calls if " | zfs receive " in c]
+        assert any("-t " in c for c in fake.calls if " | " in c)  # a resume ran
+        assert receives and all(" -u " in r for r in receives), receives
+
+    def test_removals_in_origin_are_by_exact_name(self) -> None:
+        """No removal in origin is recursive: `zfs destroy -r ds@snap` would
+        also take that name on every descendant."""
+        fake = self._fresh(("black", "blue"))
+        assert _engine_run(fake, "black", "1", P1).ok
+        assert _engine_run(fake, "blue", "2", P2).ok
+        assert _engine_run(fake, "black", "1", P3).ok
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert engine.drop_disk_anchors("2", ["rpool", "bpool"], Log()) > 0
+        destroys = [
+            c
+            for c in fake.calls
+            if c.startswith("zfs destroy")
+            and c.split()[-1].strip("'").split("/")[0] in ("rpool", "bpool")
+        ]
+        assert destroys and not any(" -r " in c for c in destroys), destroys
+
+    def test_old_anchor_kept_when_the_new_one_is_not_on_the_backup(self) -> None:
+        """drop_check verifies the new anchor by guid on the backup: when the
+        drive lost the point after the transfer, the previous anchor stays."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        old = repl.anchor_name("111", P1)
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            real_anchor = eng.anchor
+
+            def anchor_then_lose(at_point: list[str]) -> list[str]:
+                failed = real_anchor(at_point)
+                d = fake.ds["backup/rpool/var"]
+                d.snaps = [s for s in d.snaps if s.name != P2]
+                return failed
+
+            eng.anchor = anchor_then_lose  # type: ignore[method-assign]
+            _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        assert old in fake.bookmarks("rpool/var")
+        assert old not in fake.bookmarks("rpool/ROOT/be")  # verified there: superseded
+
+    def test_interrupted_run_keeps_the_point_where_a_receive_began(self) -> None:
+        """Decision 13: after a Ctrl-C the point stays on every dataset whose
+        receive began (the next run resumes or continues from it) and goes
+        everywhere else."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-08_08:00:00_hourly")
+        real_pipe = fake.mock_run_pipe
+
+        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+            if "rpool/USERDATA/home" in cmd1:
+                raise KeyboardInterrupt
+            return real_pipe(cmd1, cmd2, log)
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            log = Log()
+            cleanup = Cleanup(log)
+            eng = engine.Run("backup", "111", log, P2, sleep=lambda _s: None)
+            try:
+                _ = engine.execute(eng, cleanup, lambda _p, _r: True)
+            except KeyboardInterrupt:
+                pass
+            cleanup.run()
+        left = _origin_points(fake)
+        assert f"rpool/USERDATA/home@{P2}" in left  # its receive began
+        assert f"rpool/var/lib/docker@{P2}" not in left  # never started
+        assert all(f"{rel}@{P2}" in left for rel in eng.started)
 
 
 class TestCleanupActions:
