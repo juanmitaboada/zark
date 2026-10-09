@@ -81,6 +81,7 @@ from commands.recover import (  # pylint: disable=wrong-import-position # noqa: 
     RestorePlan,
     RestoreRow,
     _abort_missing_keystore,
+    _absent_note,
     _check_sizes,
     _choose_point,
     _force_latest_signed_alternative,
@@ -5199,6 +5200,17 @@ class TestRestorePoints:  # pylint: disable=missing-function-docstring
         first = restore_points(snaps, f"rpool/ROOT/{_BE}")[0]
         early = resolve(first, snaps, ["rpool/ROOT/zt5b"])["rpool/ROOT/zt5b"]
         assert early is not None and early.name == "zark_2026-10-09_05:35:03Z"
+
+    def test_not_restored_note_tells_destroyed_from_not_yet_created(self):
+        # O8: zt5b has snapshots before the hourly; its lineage ended there.
+        snaps = self._eli_0910()
+        hourly = next(
+            p for p in restore_points(snaps, f"rpool/ROOT/{_BE}") if p.family == "autosnap_"
+        )
+        assert _absent_note("rpool/ROOT/zt5b", hourly, snaps) == (
+            "destroyed in origin before this point (last snapshot zark_2026-10-09_05:35:03Z)"
+        )
+        assert _absent_note("rpool/later", hourly, snaps) == "no snapshot at or before this point"
 
     def test_dataset_without_earlier_snapshot_is_none(self):
         snaps = [

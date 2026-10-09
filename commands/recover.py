@@ -606,6 +606,15 @@ def _choose_point(points: list[Point], log: Log) -> Point:
     return points[idx]
 
 
+def _absent_note(ds: str, point: Point, snaps: list[Snap]) -> str:
+    """Why ``resolve`` gave ``ds`` nothing for ``point``."""
+    earlier = [s for s in snaps if s.dataset == ds and s.creation <= point.end]
+    if not earlier:
+        return "no snapshot at or before this point"
+    last = max(earlier, key=lambda s: (s.creation, s.createtxg))
+    return f"destroyed in origin before this point (last snapshot {last.name})"
+
+
 def _plan(  # pylint: disable=too-many-locals,too-many-branches
     pool: str,
     device: str,
@@ -654,7 +663,7 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
         if types[ds] == "volume":
             row.note = "zvol (only the keystore zvol is restored)"
         elif snap is None:
-            row.note = "no snapshot at or before this point"
+            row.note = _absent_note(ds, point, snaps)
         elif parent not in effective:
             row.note = f"parent {parent} is not restored"
         if row.note:
@@ -1541,8 +1550,7 @@ def run(
         "  3. Reboot — enter your rpool passphrase at the prompt",
         f"  {log.Y}⚠  If it drops to emergency shell on first boot:{log.N}",
         f"     {log.W}zpool import rpool && exit{log.N}",
-        f"  4. Run: {log.W}sudo update-grub{log.N}  (regenerates grub.cfg)",
-        f"  5. Run: {log.W}sudo ./zark finish{log.N}",
+        f"  4. Run: {log.W}sudo ./zark finish{log.N}  (it also regenerates grub.cfg)",
         "",
         f"  {log.Y}If boot fails:{log.N} boot from live USB and run:",
         f"     {log.W}sudo ./zark repair-boot{log.N}",
