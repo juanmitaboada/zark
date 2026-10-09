@@ -24,8 +24,10 @@ Ordering rules (P0-8):
   * names are never used for ordering: sanoid names mix local time and UTC.
 
 A restore point is one snapshot run: snapshots of one name family
-(``autosnap_``, ``syncoid_<host>_``, ``prepare_``, ``zark_``, or a manual
-name) grouped by ``creation``. A run spans several seconds for sanoid and
+(``autosnap_``, ``syncoid_<host>_``, ``prepare_``, or a manual name)
+grouped by ``creation``; a zark backup point is one ``zfs snapshot`` call
+with a unique name, so its snapshots are grouped by that name instead (two
+backups a minute apart are two points). A run spans several seconds for sanoid and
 many minutes for a syncoid replication. A new point starts when a
 dataset reappears more than ``REPEAT_GAP`` seconds after its first
 snapshot in the current point, or — except for syncoid, which snapshots
@@ -44,6 +46,10 @@ either no longer existed (its lineage ends before the point: it is not
 restored, so a dataset destroyed in origin is not brought back) or was
 missed by a run that did not reach it (it has later snapshots: it is
 resolved like any other absent dataset, from its newest earlier snapshot).
+The same evidence applies to any chosen point, sanoid's included: a dataset
+missing from a backup point taken at or before it, with nothing after that
+backup point, was destroyed in origin and is not restored (sanoid's own runs
+prove nothing, ``rpool/ROOT`` children are outside its recursion).
 
 Archived lineages (``<dataset>.archived-YYYYMMDD[-N]``, left by a backup that
 had to resend a dataset in full) are read as earlier snapshots of the same
@@ -52,8 +58,11 @@ names where such a snapshot is actually stored.
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+from lib.replication import POINT_RE
 
 # Two snapshots of one dataset further apart than this belong to different
 # runs (sanoid takes all of a dataset's buckets within a few seconds).
@@ -137,6 +146,8 @@ def cluster(snaps: list[Snap]) -> list[Point]:
     for s in snaps:
         by_family.setdefault(s.family, []).append(s)
     for family, members in sorted(by_family.items()):
+        points += _by_name(m for m in members if POINT_RE.match(m.name))
+        members = [m for m in members if not POINT_RE.match(m.name)]
         # syncoid snapshots one dataset at a time, just before sending it, so
         # its run can have long gaps between datasets; every other family
         # (sanoid, zark's atomic points, manual -r snapshots) takes a whole
@@ -161,6 +172,15 @@ def cluster(snaps: list[Snap]) -> list[Point]:
     return points
 
 
+def _by_name(snaps: Iterable[Snap]) -> list[Point]:
+    """One point per backup point name (atomic, so time is never needed)."""
+    points: dict[str, Point] = {}
+    for s in snaps:
+        point = points.setdefault(s.name, Point(family=s.family))
+        point.members.setdefault(s.dataset, []).append(s)
+    return list(points.values())
+
+
 def restore_points(snaps: list[Snap], be_root: str) -> list[Point]:
     """Runs that include ``be_root``, oldest first, labelled by its snapshot."""
     offered: list[Point] = []
@@ -178,6 +198,12 @@ def _newest(snaps: list[Snap]) -> Snap:
 def resolve(point: Point, snaps: list[Snap], datasets: list[str]) -> dict[str, Snap | None]:
     """Snapshot of each dataset for ``point``; None when it has none at or before it."""
     end = point.end
+    # Every backup point at or before this one, as (time, datasets it holds).
+    backups = [
+        (bp.end, set(bp.members))
+        for bp in _by_name(s for s in snaps if POINT_RE.match(s.name))
+        if bp.end <= end
+    ]
     out: dict[str, Snap | None] = {}
     for ds in datasets:
         own = point.members.get(ds)
@@ -185,9 +211,18 @@ def resolve(point: Point, snaps: list[Snap], datasets: list[str]) -> dict[str, S
             out[ds] = _newest(own)
             continue
         mine = [s for s in snaps if s.dataset == ds]
-        if point.family == "zark_" and not any(s.creation > end for s in mine):
+        if ended(mine, backups):
             out[ds] = None  # its lineage ends before the point
             continue
         earlier = [s for s in mine if s.creation <= end]
         out[ds] = _newest(earlier) if earlier else None
     return out
+
+
+def ended(mine: list[Snap], backups: list[tuple[int, set[str]]]) -> bool:
+    """True when a backup point lacks the dataset and nothing of it follows."""
+    if not mine:
+        return False
+    ds = mine[0].dataset
+    last = max(s.creation for s in mine)
+    return any(t >= last and ds not in held for t, held in backups)

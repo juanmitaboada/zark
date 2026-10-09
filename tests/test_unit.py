@@ -5137,6 +5137,69 @@ class TestRestorePoints:  # pylint: disable=missing-function-docstring
         b = snaps[(f"rpool/ROOT/{_BE}", "syncoid_eli_2026-09-28:18:12:50-GMT02:00")]
         assert a.createtxg > b.createtxg and a.creation < b.creation
 
+    @staticmethod
+    def _eli_0910() -> list[Snap]:
+        """eli on 2026-10-09 (UTC): a point, an interrupted run X1 that only
+        reached rpool/var, P1 and P2 77 s apart; zt5b destroyed in origin
+        after the 05:35:03 point; a sanoid hourly at 06:00:01."""
+        base = 1_759_986_000  # 2026-10-09 05:00:00 UTC
+        be, var, zt5b = f"rpool/ROOT/{_BE}", "rpool/var", "rpool/ROOT/zt5b"
+
+        def at(hms: str) -> int:
+            h, m, s = (int(x) for x in hms.split(":"))
+            return base + (h - 5) * 3600 + m * 60 + s
+
+        rows = [
+            (be, "zark_2026-10-09_05:35:03Z", "05:35:03"),
+            (var, "zark_2026-10-09_05:35:03Z", "05:35:03"),
+            (zt5b, "zark_2026-10-09_05:35:03Z", "05:35:03"),
+            (be, "zark_2026-10-09_05:36:29Z", "05:36:29"),
+            (var, "zark_2026-10-09_05:36:29Z", "05:36:29"),
+            (be, "zark_2026-10-09_05:40:47Z", "05:40:47"),
+            (var, "zark_2026-10-09_05:40:47Z", "05:40:47"),
+            (var, "zark_2026-10-09_05:43:39Z", "05:43:39"),
+            (be, "autosnap_2026-10-09_06:00:01_hourly", "06:00:01"),
+            (be, "zark_2026-10-09_07:37:46Z", "07:37:46"),
+            (var, "zark_2026-10-09_07:37:46Z", "07:37:46"),
+            (be, "zark_2026-10-09_07:39:03Z", "07:39:04"),
+            (var, "zark_2026-10-09_07:39:03Z", "07:39:04"),
+        ]
+        return [Snap(ds, n, f"{i}", i, at(t)) for i, (ds, n, t) in enumerate(rows)]
+
+    def test_backup_points_a_minute_apart_are_two_points(self):
+        # O7: P1 and P2 77 s apart were one menu entry, so P1 could not be
+        # chosen; X1 (no BE) joined the 05:40:47 entry and leaked into it.
+        snaps = self._eli_0910()
+        zark = [p for p in restore_points(snaps, f"rpool/ROOT/{_BE}") if p.family == "zark_"]
+        names = [{s.name for v in p.members.values() for s in v} for p in zark]
+        assert names == [
+            {"zark_2026-10-09_05:35:03Z"},
+            {"zark_2026-10-09_05:36:29Z"},
+            {"zark_2026-10-09_05:40:47Z"},
+            {"zark_2026-10-09_07:37:46Z"},
+            {"zark_2026-10-09_07:39:03Z"},
+        ]
+        p1 = resolve(zark[3], snaps, ["rpool/var"])["rpool/var"]
+        assert p1 is not None and p1.name == "zark_2026-10-09_07:37:46Z"
+
+    def test_carried_point_does_not_resurrect_a_destroyed_dataset(self):
+        # O12: zt5b's lineage ends at 05:35:03 and the 05:36:29 backup point
+        # lacks it, so the 06:00:01 hourly does not bring it back; rpool/var,
+        # absent from the hourly but present in every backup point, falls
+        # back to its newest earlier snapshot (X1).
+        snaps = self._eli_0910()
+        hourly = next(
+            p for p in restore_points(snaps, f"rpool/ROOT/{_BE}") if p.family == "autosnap_"
+        )
+        got = resolve(hourly, snaps, ["rpool/ROOT/zt5b", "rpool/var"])
+        assert got["rpool/ROOT/zt5b"] is None
+        var = got["rpool/var"]
+        assert var is not None and var.name == "zark_2026-10-09_05:43:39Z"
+        # Before it was destroyed, the same dataset resolves normally.
+        first = restore_points(snaps, f"rpool/ROOT/{_BE}")[0]
+        early = resolve(first, snaps, ["rpool/ROOT/zt5b"])["rpool/ROOT/zt5b"]
+        assert early is not None and early.name == "zark_2026-10-09_05:35:03Z"
+
     def test_dataset_without_earlier_snapshot_is_none(self):
         snaps = [
             Snap("rpool/ROOT/x", "autosnap_a", "1", 1, 100),
