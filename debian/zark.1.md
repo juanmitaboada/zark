@@ -294,11 +294,12 @@ for the canonical end-to-end sequences.
     read-only by its exact device, prompts for the rpool passphrase and
     offers the restore points found on the drive, ordered by snapshot
     creation time (the newest is the default): backup points are labelled
-    as such and the **sanoid** snapshots carried between them as carried
-    points, each with how many datasets it holds. A dataset without a
-    backup point's snapshot is not restored for that point when it no
-    longer existed then; when a backup simply did not reach it, its newest
-    earlier snapshot is used and shown with its offset. Datasets archived
+    as such, one entry per backup point, and the **sanoid** snapshots
+    carried between them as carried points, each with how many datasets it
+    holds. A dataset is not restored for a point when it no longer existed
+    then (a backup point at or before it lacks the dataset and nothing of
+    it follows); when a backup simply did not reach it, its newest earlier
+    snapshot is used and shown with its offset. Datasets archived
     by **backup** serve the points older than the archive. It then shows a table with
     the snapshot every dataset will be restored from — never one newer
     than the point — and the mount properties it will get. Only after a

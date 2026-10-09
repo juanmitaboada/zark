@@ -340,7 +340,7 @@ The sanoid snapshots taken between two backups travel to the drive with the next
 
 ### Divergence and datasets only on the drive
 
-A dataset with nothing in common with the drive (recreated in the source, or its bookmark destroyed by hand) is asked about before the transfer: skip it this time, archive the drive's copy as `<name>.archived-YYYYMMDD` and send it again, or destroy it and send it again (typed `DESTROY`). A dataset that exists only on the drive can be kept (not asked again), destroyed, or renamed when the source renamed it. `recover` restores old points from archived copies too.
+A dataset with nothing in common with the drive (recreated in the source, or its bookmark destroyed by hand) is asked about before the transfer: skip it this time, archive the drive's copy as `<name>.archived-YYYYMMDD` and send it again, or destroy it and send it again (typed `DESTROY`; a word that does not match asks the question again). A dataset that exists only on the drive can be kept (not asked again until it reappears in the source), destroyed, or renamed when the source renamed it. `recover` restores old points from archived copies too.
 
 ---
 

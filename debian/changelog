@@ -20,7 +20,9 @@ zark (2.0.0~rc2-1) UNRELEASED; urgency=medium
     structural containers are created on the drive, not replicated.
   * Every removal in origin is checked against the drive first.
   * backup refuses a drive written for another system (machine-id).
-  * recover: backup points first; archived lineages restorable.
+  * recover: one entry per backup point; a dataset destroyed in origin is
+    never brought back; archived lineages restorable.
+  * A mistyped confirmation word asks the question again.
   * setup enables bookmark_v2 on rpool after a confirmation.
   * registry forget drops the drive's anchors. repair-divergent removed.
 

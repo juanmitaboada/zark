@@ -59,8 +59,11 @@ the development-tooling consolidation that preceded it.
   `<name>.archived-YYYYMMDD` and resend, or destroy and resend (typed
   `DESTROY`). Archiving or destroying acts on the top of a subtree only:
   the datasets below move or go with it, are not asked about, and are
-  resent in full. The estimated transfer (`zfs send -nvP`, including those
-  full resends) is checked against the drive's free space before any
+  resent in full. A typed word that does not match is no answer: the same
+  question is asked again. A kept orphan that is back in origin (after a
+  recover) loses its mark and is replicated again. The estimated transfer
+  (`zfs send -nvP`, including those full resends and the incrementals that
+  follow a rollback) is checked against the drive's free space before any
   choice is applied. (D17, redesign §7, M2 decisions 7, 8, 18)
 - Drive metadata on the pool's root dataset, readable without the
   passphrase: `org.zark:format` (2), `version`, `origin-host`,
@@ -114,13 +117,17 @@ the development-tooling consolidation that preceded it.
   and `mount` already read. A manual `zpool import` of a drive, or a boot
   with it attached, mounts nothing.
   (P0-11/F11/I15/D6, redesign §9, decision 1)
-- **recover.** Backup points are labelled as such and other runs as
-  carried points, each with how many datasets it holds. A dataset missing
-  from a backup point is left out when its lineage ends before the point
-  (destroyed in origin, never brought back) and otherwise, when a run
-  simply did not reach it, restored from its newest earlier snapshot.
-  Archived lineages serve the points older than them (rows marked "from
-  archive"). (redesign §4.2, decisions 14, 18, 19)
+- **recover.** Backup points are labelled as such, one entry per point
+  name however close two backups were, and other runs as carried points,
+  each with how many datasets it holds. A dataset missing from the chosen
+  point is left out when a backup point at or before it lacks the dataset
+  and nothing of the dataset follows (destroyed in origin, never brought
+  back, also for a carried point) and otherwise, when a run simply did not
+  reach it, restored from its newest earlier snapshot; the table says
+  which ("destroyed in origin before this point" or "no snapshot at or
+  before this point"). Archived lineages serve the points older than them
+  (rows marked "from archive"). The final banner's last step is `finish`,
+  which regenerates grub.cfg itself. (redesign §4.2, decisions 14, 18, 19)
 - **mount.** Read-write mounts the same origin tree as read-only,
   explicitly (`mount -t zfs -o zfsutil`); archived lineages are listed
   apart.
@@ -157,7 +164,10 @@ the development-tooling consolidation that preceded it.
   old code stay (`<pool>/rpool` at `/`, `bpool/BOOT/<be>` at `/boot`):
   `canmount=noauto` keeps the datasets from mounting, and `<pool>/rpool`,
   encrypted, cannot mount without its key. Clearing them needs a
-  `zfs set` with the drive's keystore zvol present (M4).
+  `zfs set` with the drive's keystore zvol present (M4). The same holds
+  for `canmount=on` on datasets received by zark ≤ 2.0.0-rc1, including
+  when they end up in an archived lineage: they are encrypted and mount
+  only with their key loaded and on explicit request.
 
 #### Rejected approaches
 
@@ -189,6 +199,12 @@ the development-tooling consolidation that preceded it.
   point that restored without it (an unbootable system if that was part of
   the boot environment); the lineage-end rule keeps the first property
   without the second.
+- **`canmount=noauto` on an archived lineage at archive time.** It needs a
+  `zfs set` of a mount property while the drive's keystore zvol is present
+  (chase.c:648); lineages received by zark 2 already carry `noauto`.
+- **Grouping backup points by time like sanoid runs.** Two backups a
+  minute apart became one entry and the older could not be chosen; a
+  backup point is one atomic snapshot call with a unique name.
 - **Identifying the drive's system by the rpool GUID.** recover creates
   rpool anew, so every recovered system would look foreign to its own
   drive; `/etc/machine-id` travels in the boot environment.
