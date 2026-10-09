@@ -205,14 +205,29 @@ def _newest(snaps: list[Snap]) -> Snap:
     return max(snaps, key=lambda s: (s.creation, s.createtxg))
 
 
-def resolve(point: Point, snaps: list[Snap], datasets: list[str]) -> dict[str, Snap | None]:
-    """Snapshot of each dataset for ``point``; None when it has none at or before it."""
+def point_name(point: Point) -> str:
+    """Snapshot name of a backup point (every member shares it)."""
+    return next(iter(point.members.values()))[0].name
+
+
+def resolve(
+    point: Point,
+    snaps: list[Snap],
+    datasets: list[str],
+    complete: set[str] | None = None,
+) -> dict[str, Snap | None]:
+    """Snapshot of each dataset for ``point``; None when it has none at or before it.
+
+    ``complete`` names the backup points whose run reached every dataset;
+    only those are evidence that a lineage ended (an incomplete one lacks
+    whatever its run missed). None counts every backup point.
+    """
     end = point.end
-    # Every backup point at or before this one, as (time, datasets it holds).
+    # Every complete backup point at or before this one, as (time, datasets it holds).
     backups = [
         (bp.end, set(bp.members))
         for bp in _by_name(s for s in snaps if POINT_RE.match(s.name))
-        if bp.end <= end
+        if bp.end <= end and (complete is None or point_name(bp) in complete)
     ]
     out: dict[str, Snap | None] = {}
     for ds in datasets:

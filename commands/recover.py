@@ -81,7 +81,15 @@ from lib.mount_props import (
     receive_options,
     rpool_root_mountpoint,
 )
-from lib.restore_points import Point, Snap, logical, parse_snapshots, resolve, restore_points
+from lib.restore_points import (
+    Point,
+    Snap,
+    complete_points,
+    logical,
+    point_name,
+    resolve,
+    restore_points,
+)
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 # bpool features safe for GRUB 2.12 (Ubuntu 24.04 / initramfs-tools)
@@ -526,12 +534,7 @@ class RestorePlan:  # pylint: disable=too-many-instance-attributes
 
 
 def _list_snapshots(pool: str) -> list[Snap]:
-    snaps: list[Snap] = []
-    for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        r = sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}")
-        if r.ok:
-            snaps += parse_snapshots(r.lines, pool)
-    return snaps
+    return engine.drive_snapshots(pool)
 
 
 def _referenced(snapshots: list[str]) -> dict[str, int]:
@@ -589,20 +592,41 @@ def _empty_root(full_snap: str) -> bool | None:
     return root_is_empty(full_snap, PROBE_MNT, zfsutil=False)
 
 
-def _choose_point(points: list[Point], log: Log) -> Point:
+def _incomplete(p: Point, complete: set[str] | None) -> bool:
+    """True for a backup point whose run did not reach every dataset."""
+    return p.family == "zark_" and complete is not None and point_name(p) not in complete
+
+
+def _choose_point(points: list[Point], log: Log, complete: set[str] | None = None) -> Point:
     """Backup points (``zark_``) first-class; other runs as carried intermediates,
-    each with how many datasets it holds (redesign §4.2)."""
+    each with how many datasets it holds (redesign §4.2). A backup point of an
+    incomplete run is labelled so; the default is the newest complete backup
+    point (the newest entry when there is none)."""
     total = len({ds for p in points for ds in p.members})
     options = []
+    default = len(points) - 1
+    if complete is not None:
+        good = [
+            i for i, p in enumerate(points) if p.family == "zark_" and not _incomplete(p, complete)
+        ]
+        default = good[-1] if good else default
     for p in points:
         held = f"{len(p.members)}/{total} datasets"
+        if _incomplete(p, complete):
+            options.append(f"{p.label_utc()}  backup point, INCOMPLETE  ({held})")
+            continue
         if p.family == "zark_":
             options.append(f"{p.label_utc()}  backup point  ({held})")
             continue
         kinds = sorted({s.name.split("_")[-1] for m in p.members.values() for s in m})
         detail = "/".join(kinds) if p.family == "autosnap_" else p.family.rstrip("_")
         options.append(f"{p.label_utc()}    carried: {detail}  ({held})")
-    idx = log.ask_choice("Restore point (newest is the default):", options, len(points) - 1)
+    question = (
+        "Restore point (newest is the default):"
+        if default == len(points) - 1
+        else "Restore point (newest complete backup point is the default):"
+    )
+    idx = log.ask_choice(question, options, default)
     return points[idx]
 
 
@@ -622,6 +646,7 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
     point: Point,
     snaps: list[Snap],
     log: Log,
+    complete: set[str] | None = None,
 ) -> RestorePlan:
     """Resolve every dataset for ``point`` and decide its mount properties."""
     stored = _list_datasets(pool)
@@ -641,7 +666,7 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
         for ds in sorted(types)
         if (ds.startswith("rpool/") and ds not in CREATED_CONTAINERS) or ds == f"bpool/BOOT/{be}"
     ]
-    resolved = resolve(point, [s for s in snaps if s.dataset in wanted], wanted)
+    resolved = resolve(point, [s for s in snaps if s.dataset in wanted], wanted, complete)
 
     be_row_snap = resolved.get(f"rpool/ROOT/{be}")
     cache_r, cache_b, hostid = ("", "", "")
@@ -1209,7 +1234,7 @@ def run(
     if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
-    _ = engine.log_metadata(pool_name, log)
+    meta = engine.log_metadata(pool_name, log)
     backup_disk = whole_disk(device)
 
     ks = Keystore(log)
@@ -1239,11 +1264,12 @@ def run(
     points = restore_points(snaps, f"rpool/ROOT/{ubuntu_name}")
     if not points:
         log.fatal("No restore point found on backup (no snapshot of the boot environment)")
-    point = _choose_point(points, log)
+    complete = complete_points(snaps, meta.get("last-point", ""))
+    point = _choose_point(points, log, complete)
 
     # ── 4. Restore plan: datasets, mount properties, hostid ──────────────
     log.step(4, TOTAL_STEPS, "Resolving every dataset for this point...")
-    plan = _plan(pool_name, device, ubuntu_name, point, snaps, log)
+    plan = _plan(pool_name, device, ubuntu_name, point, snaps, log, complete)
     _show_plan(plan, log)
     if plan.hostid:
         _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
@@ -1264,6 +1290,14 @@ def run(
     log.info(f"Source pool:   {pool_name}")
     if plan.skipped:
         log.warn(f"{len(plan.skipped)} dataset(s) will NOT be restored (see table above)")
+    if _incomplete(point, complete):
+        earlier = [
+            r for r in plan.rows if r.restored and r.snap and r.snap.name != point_name(point)
+        ]
+        log.warn(
+            "This backup point is from an incomplete run: "
+            + f"{len(earlier)} dataset(s) come from earlier snapshots (Δ column)"
+        )
     inferred = [r.rel for r in plan.rows if r.props and r.props.source == "inferred"]
     if inferred:
         log.warn(f"Mount properties inferred for: {', '.join(inferred)}")

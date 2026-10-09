@@ -202,6 +202,7 @@ from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa
     legacy_complete,
     logical,
     parse_snapshots,
+    point_name,
     resolve,
     restore_points,
 )
@@ -8246,6 +8247,94 @@ class TestCompletePoints:
         ]
         snaps = parse_snapshots(lines, "backup")
         assert [s.complete for s in snaps] == [True, False, False]
+
+
+class TestRecoverIncompletePoint:
+    """M2R-1: a backup point left by an incomplete run is labelled, never the
+    default, and never evidence that a dataset was destroyed in origin."""
+
+    BE, HOME, DOCKER = "rpool/ROOT/be", "rpool/USERDATA/home", "rpool/var/lib/docker"
+
+    def _e1(self) -> list[Snap]:
+        # P1 complete; P2 a week later, cut on home after its carried hourly.
+        t1, t2 = 1_760_000_000, 1_760_600_000
+        return [
+            Snap(self.BE, P1, "g1", 10, t1, complete=True),
+            Snap(self.HOME, P1, "g2", 11, t1, complete=True),
+            Snap(self.DOCKER, P1, "g3", 12, t1, complete=True),
+            Snap(self.HOME, "autosnap_2026-10-08_08:00:00_hourly", "g4", 20, t2 - 7200),
+            Snap(self.BE, P2, "g5", 21, t2),
+            Snap(self.DOCKER, P2, "g6", 22, t2),
+        ]
+
+    def test_incomplete_point_is_not_evidence(self) -> None:
+        """E1: choosing the incomplete point restores home from its earlier
+        snapshot instead of reporting it destroyed."""
+        snaps = self._e1()
+        points = restore_points(snaps, self.BE)
+        newest = points[-1]
+        complete = complete_points(snaps, "")
+        assert complete == {P1}
+        got = resolve(newest, snaps, [self.BE, self.HOME, self.DOCKER], complete)
+        home = got[self.HOME]
+        assert home is not None and home.name.startswith("autosnap_")
+        be = got[self.BE]
+        assert be is not None and be.name == P2
+
+    def test_incomplete_point_is_labelled_and_not_the_default(self) -> None:
+        """The menu marks the incomplete point and defaults to the complete one."""
+        snaps = self._e1()
+        points = restore_points(snaps, self.BE)
+        shown: dict[str, object] = {}
+
+        def choice(question: str, options: list[str], default: int = 0) -> int:
+            shown.update(question=question, options=options, default=default)
+            return default
+
+        with patch.object(Log, "ask_choice", side_effect=choice), redirect_stdout(StringIO()):
+            chosen = _choose_point(points, make_log(), complete_points(snaps, ""))
+        assert chosen is points[0]
+        options = shown["options"]
+        assert isinstance(options, list)
+        assert "INCOMPLETE" in options[-1] and "INCOMPLETE" not in options[0]
+        assert "complete backup point is the default" in str(shown["question"])
+
+    def test_drive_written_by_the_engine(self) -> None:
+        """E1b end to end: run 1 complete and marked, run 2 cut on home; then
+        recover's own listing, choice and resolution."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _record(fake, P1)
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        self._check_recover_view(fake, "")
+
+    def test_legacy_drive_reads_last_point(self) -> None:
+        """A drive written before the marks: last-point alone tells the
+        incomplete newest point apart."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        self._check_recover_view(fake, P1)
+
+    def _check_recover_view(self, fake: FakeZfs, last_point: str) -> None:
+        with patch_sh(fake):
+            snaps = recover_mod._list_snapshots("backup")  # pylint: disable=protected-access
+        complete = complete_points(snaps, last_point)
+        points = restore_points(snaps, self.BE)
+        with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
+            chosen = _choose_point(points, make_log(), complete)
+        assert point_name(chosen) == P1
+        newest = points[-1]
+        assert point_name(newest) == P2
+        wanted = sorted({s.dataset for s in snaps})
+        got = resolve(newest, snaps, wanted, complete)
+        assert all(got[ds] is not None for ds in wanted), got
+        home = got[self.HOME]
+        assert home is not None and home.creation < newest.end
 
 
 class TestMonitorLatest:
