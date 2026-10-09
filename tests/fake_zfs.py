@@ -409,7 +409,29 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
 
     # ── send / receive ───────────────────────────────────────────────────
 
+    def _resume_check(self, token: str) -> str:
+        """libzfs's checks before a resumed stream starts, dry run included
+        (lib/libzfs/libzfs_sendrecv.c:1857-1890): "" when it can resume."""
+        src_ds, snapname, frm = token.split("|")[1:]
+        d = self.ds.get(src_ds, FDataset())
+        if snapname not in self.names(src_ds):
+            return (
+                "cannot resume send: "
+                + f"'{src_ds}@{snapname}' used in the initial send no longer exists"
+            )
+        if frm.startswith("#"):
+            gone = frm[1:] not in [b.name for b in d.bookmarks]
+        else:
+            gone = bool(frm) and frm not in self.names(src_ds)
+        if gone:
+            return "cannot resume send: incremental source 0x1234 no longer exists"
+        return ""
+
     def _send_dry(self, args: list[str]) -> RunResult:
+        if "-t" in args:
+            err = self._resume_check(args[args.index("-t") + 1])
+            if err:
+                return _err(err)
         if "-nvP" in args:
             incremental = any(a in args for a in ("-i", "-I", "-t"))
             return _ok(f"size\t{4096 if incremental else 10**9}\n")
@@ -446,14 +468,14 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         dst = recv[-1]
         raw, mode, frm, to, token = self._parse_send(send)
         if mode == "t":
-            src_ds, snapname = token.split(":", 2)[1:]
             d = self.ds.get(dst)
             if d is None or not d.token:
                 return _err("no partial state")
-            have = self.ds.get(src_ds, FDataset()).snaps
-            src = next((s for s in have if s.name == snapname), None)
-            if src is None:
-                return _err(f"cannot resume send: '{src_ds}@{snapname}' does not exist")
+            err = self._resume_check(token)
+            if err:
+                return _err(err)
+            src_ds, snapname, _frm = token.split("|")[1:]
+            src = next(s for s in self.ds[src_ds].snaps if s.name == snapname)
             d.snaps.append(FSnap(src.name, src.guid, self._dtxg(), src.creation))
             d.token = ""
             return _ok()
@@ -501,7 +523,13 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             self.ds[dst] = d
         for k, s in enumerate(stream):
             if kind == "interrupt" and k == after:
-                d.token = f"tok:{src_ds}:{s.name}"
+                # The token names the stream's snapshot and its incremental
+                # source, as the kernel's does (toguid, fromguid).
+                if k:
+                    frm = stream[k - 1].name
+                else:
+                    frm = "" if mode == "full" else frm.split("@")[-1] if "@" in frm else frm
+                d.token = f"tok|{src_ds}|{s.name}|{frm}"
                 return _err("cannot receive: connection reset (stream truncated)")
             d.snaps.append(FSnap(s.name, s.guid, self._dtxg(), s.creation))
         self._apply_props(d, recv)

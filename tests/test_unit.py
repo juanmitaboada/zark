@@ -7491,20 +7491,65 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert _origin_points(fake) == []
 
     def test_stale_token_is_discarded_not_snapshots(self) -> None:
-        """A partial receive whose origin snapshot is gone is aborted; the
-        dataset is planned again and no destination snapshot is lost."""
+        """M2R-10: a partial receive whose stream snapshot is gone from
+        origin is aborted (receive -A); the dataset is planned again and no
+        destination snapshot is lost."""
         fake = self._fresh()
         assert _engine_run(fake, "backup", "111", P1).ok
         _tick(fake, "2026-10-07_12:00:00_hourly")
         fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
         assert not _engine_run(fake, "backup", "111", P2).ok
+        token = fake.ds["backup/rpool/USERDATA/home"].token
+        named = token.split("|")[2]
         before = fake.names("backup/rpool/USERDATA/home")
-        fake.ds["rpool/USERDATA/home"].snaps = [
-            s for s in fake.ds["rpool/USERDATA/home"].snaps if s.name != P2
-        ]
+        home = fake.ds["rpool/USERDATA/home"]
+        home.snaps = [s for s in home.snaps if s.name != named]
         res = _engine_run(fake, "backup", "111", P3)
         assert res.ok, res
+        assert any(c.startswith("zfs receive -A") for c in fake.calls)
         assert fake.names("backup/rpool/USERDATA/home")[: len(before)] == before
+
+    def test_partial_receive_whose_source_is_gone_is_discarded(self) -> None:
+        """M2R-10: the token's incremental source pruned in origin: the
+        partial state cannot resume and goes; no snapshot is lost."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)  # the hourly lands
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        before = fake.names("backup/rpool/USERDATA/home")
+        _prune_all_autosnaps(fake)
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P3, sleep=lambda _s: None)
+            _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        assert "partial receive discarded: cannot resume send: incremental source" in out.getvalue()
+        assert not fake.ds["backup/rpool/USERDATA/home"].token
+        assert fake.names("backup/rpool/USERDATA/home") == before
+
+    def test_partial_receive_kept_when_the_resume_fails_otherwise(self) -> None:
+        """M2R-10 (E8): an I/O error on resume keeps the partial state."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        token = fake.ds["backup/rpool/USERDATA/home"].token
+        real_pipe = fake.mock_run_pipe
+        failed: list[str] = []
+
+        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+            if " -t " in cmd1 and not failed:
+                failed.append(cmd1)
+                return RunResult(1, "", "cannot receive resume stream: I/O error\n", "")
+            return real_pipe(cmd1, cmd2, log)
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        res = _engine_run(fake, "backup", "111", P3)
+        assert not res.ok
+        assert not any(c.startswith("zfs receive -A") for c in fake.calls)
+        assert fake.ds["backup/rpool/USERDATA/home"].token == token
+        assert "partial receive kept" in res.outcomes["rpool/USERDATA/home"].error
 
     def test_enospc_destroys_nothing(self) -> None:
         """§8 test 4: per-dataset failure, nothing removed, not success."""
@@ -7967,8 +8012,11 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         _tick(fake, "2026-10-08_08:00:00_hourly")
         fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
         assert not _engine_run(fake, "backup", "111", P2).ok
-        _prune_all_autosnaps(fake)
         assert _engine_run(fake, "backup", "111", P3).ok
+        _tick(fake, "2026-10-09_12:00:00_hourly")
+        fake.ds["rpool/var"].snaps = [s for s in fake.ds["rpool/var"].snaps if s.name != P3]
+        assert _engine_run(fake, "backup", "111", "zark_2026-10-10_10:00:00Z").ok
+        assert any("-i 'rpool/var#" in c for c in fake.calls)  # via bookmark ran
         receives = [c.split(" | ", 1)[1] for c in fake.calls if " | zfs receive " in c]
         assert any("-t " in c for c in fake.calls if " | " in c)  # a resume ran
         assert receives and all(" -u " in r for r in receives), receives

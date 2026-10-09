@@ -535,6 +535,24 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 return Outcome(p.rel, False, err, enospc)
         return Outcome(p.rel, True)
 
+    def resume_impossible(self, rel: str) -> str:
+        """Why a partial receive can never be resumed, "" when it may be.
+
+        libzfs refuses a resume whose stream snapshot or incremental source
+        no longer exists before any stream starts, dry run included
+        (lib/libzfs/libzfs_sendrecv.c:1857-1890); any other failure (I/O, a
+        USB reset) leaves the partial state worth keeping.
+        """
+        d = self.dest.get(rel)
+        if d is None or not d.token:
+            return ""
+        r = sh.run(f"zfs send -nvP -t {_q(d.token)}")
+        if r.ok:
+            return ""
+        msg = last_message(r.stderr)
+        gone = ("no longer exists", "is no longer the same snapshot")
+        return msg if any(g in msg for g in gone) else ""
+
     def abort_partial(self, rel: str) -> bool:
         """``zfs receive -A``: discard partial receive state (no snapshot is touched)."""
         r = sh.run(f"zfs receive -A {_q(self._dst(rel))}", log=self.log)
@@ -942,11 +960,15 @@ def _transfer(run: Run, res: Result) -> None:
             if out.enospc:
                 res.enospc = True
                 break
-            if p.state is State.RESUME and run.abort_partial(p.rel):
-                # The partial stream's snapshot is gone from origin: only the
-                # partial state is discarded; the dataset is planned afresh.
-                run.log.warn(f"  {p.rel}: stale partial receive discarded")
-                again = True
+            if p.state is State.RESUME:
+                why = run.resume_impossible(p.rel)
+                if why and run.abort_partial(p.rel):
+                    # Only the partial state goes; the dataset is planned afresh.
+                    run.log.warn(f"  {p.rel}: partial receive discarded: {why}")
+                    again = True
+                elif not why:
+                    out.error += "; partial receive kept, run backup again"
+                    run.log.info(f"  {p.rel}: partial receive kept for the next run")
         if res.enospc or not again:
             break
 
