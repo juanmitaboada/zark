@@ -23,7 +23,9 @@ Model (redesign §4, M2 decisions):
   * The incremental base is always the destination's **newest** snapshot,
     found in origin by guid as a snapshot (``-I``) or, on rpool only, as a
     bookmark (``-i #bm`` to the first later snapshot, then ``-I``). The
-    receive never uses ``-F``: the kernel then refuses any other base.
+    receive never uses ``-F``: for a raw stream the kernel then refuses any
+    other base; a plain stream (bpool) needs only an unmodified destination,
+    and the engine always sends from the newest.
   * Anything else — an older common snapshot only (ROLLBACK), nothing in
     common (DIVERGED), a dataset that origin no longer has (ORPHAN), a
     destination written since its newest snapshot (MODIFIED) — is a user

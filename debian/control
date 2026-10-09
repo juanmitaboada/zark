@@ -28,8 +28,8 @@ Recommends: dosfstools,
 Description: ZFS bare-metal backup and recovery suite for Ubuntu
  zark provides full bare-metal backup and disaster recovery for Ubuntu
  systems running on encrypted ZFS root pools (rpool/bpool with a LUKS
- keystore zvol). Backups are written to external drives via syncoid raw
- send, preserving native ZFS encryption end-to-end.
+ keystore zvol). Backups are written to external drives with zark's own
+ raw zfs send/receive, preserving native ZFS encryption end-to-end.
  .
  The recover command performs a full system restoration from a live USB
  in approximately one minute, reconstructing rpool, bpool, the LUKS

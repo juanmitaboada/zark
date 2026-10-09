@@ -23,8 +23,8 @@ origin's mountpoint, taken from ``org.zark:*`` → origin's zfs-list.cache in
 the boot environment → the Ubuntu layout → structure (lib/mount_props). It
 never writes to the backup: the pool is imported read-only and a dataset
 whose mountpoint directory does not exist in its parent is skipped.
-Read-write mode mounts each dataset with ``zfs mount`` at its stored
-mountpoint under the altroot.
+Read-write mode imports the pool read-write and mounts the same tree
+explicitly (``mount -t zfs -o zfsutil``).
 """
 
 import os

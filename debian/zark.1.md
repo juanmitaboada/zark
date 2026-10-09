@@ -168,12 +168,23 @@ for the canonical end-to-end sequences.
     exact device with **-N** and an alternate root, so nothing it holds is
     mounted and it never enters */etc/zfs/zpool.cache*. A drive whose
     metadata names another system (**org.zark:origin-machine-id** differs
-    from */etc/machine-id*) is refused before anything is asked or
-    changed; the message names the drive's host and last date. Drives
-    written by an older **zark**, without that property, are accepted.
+    from */etc/machine-id*) is refused right after it is imported, before
+    the health check, the passphrase and any question; nothing on it is
+    changed (the import and the export stay in the pool's history), and the
+    message names the drive's host and last date. A drive whose metadata
+    cannot be read is refused the same way. Drives written by an older
+    **zark**, without that property, are accepted.
 
-    **Backup point.** **backup** pauses the **sanoid** timer (waiting for a
-    running snapshot or prune pass), takes one snapshot
+    **backup** and **prepare** refuse to run while a pool named **bpool**
+    can be imported (**zpool import** lists it) but is not, and **backup**
+    stops before any question when the drive holds a **bpool** backup and
+    the source's **bpool** is not imported: a backup without it would leave
+    the kernels out.
+
+    **Backup point.** **backup** pauses the **sanoid** timer (waiting, up
+    to 10 minutes and saying so, for a running snapshot or prune pass; a
+    timer that an earlier **zark** run stopped and could not restart is
+    started again at the end), takes one snapshot
     **zark_YYYY-MM-DD_HH:MM:SSZ** (UTC) of every replicated dataset — one
     **zfs snapshot** per pool, so all of **rpool** is captured in the same
     transaction group — and brings every dataset on the drive to it with
@@ -212,23 +223,40 @@ for the canonical end-to-end sequences.
     - datasets whose only snapshot in common with the source is older than
       the drive's newest (the first run on a drive written by an older
       **zark**, or a source recovered from an older point): one prompt
-      listing the snapshots at stake, to abort (the default), archive those
+      listing the snapshots at stake (three per dataset on the terminal,
+      every one in the log), to abort (the default), archive those
       datasets and send them again in full, or roll them back;
     - a dataset with nothing in common at all: skip it this time (the
       default), archive it and send it again in full, or destroy it and
-      send it again.
+      send it again;
+    - datasets written on the drive since their newest snapshot (a
+      read-write **mount** does this to every dataset it mounts, even with
+      nothing written): one prompt listing them, to skip them this time
+      (the default; the backup is then incomplete) or discard those
+      changes, rolling each one back to its newest snapshot without
+      destroying any (typed **DISCARD**).
 
     An archived dataset is renamed to *\<name\>.archived-YYYYMMDD* on the
     drive and keeps all its snapshots; archiving or destroying a dataset
     takes the datasets below it along, which are not asked about and are
-    sent again in full. The estimated transfer, those full sends included,
+    sent again in full. Before the typed **DESTROY**, every dataset the
+    destroy takes on the drive is listed, archived lineages and datasets
+    kept as only on the drive included. The estimated transfer, those full sends included,
     is checked against the drive's free space before any choice is applied.
 
     **Verdict.** **BACKUP COMPLETED** only when every dataset reached the
     point and the read-back is **ONLINE**; a per-dataset table is printed
-    and logged. Otherwise **BACKUP INCOMPLETE** or **BACKUP NOT VERIFIED**,
-    exit 1, and *last_backup_at* is not updated. An interrupted transfer
-    resumes at the next **backup**.
+    and logged, with the error of each dataset that failed (from both sides
+    of the transfer when both report one), and the banner lists what is not
+    backed up by design.
+    Otherwise **BACKUP INCOMPLETE** or **BACKUP NOT VERIFIED**, exit 1, and
+    *last_backup_at* is not updated. A listing of the source or the drive
+    that fails stops the run before the questions, or makes it incomplete
+    afterwards, and then nothing is anchored or removed in the source. An
+    interrupted transfer resumes at the next **backup**; its partial state
+    is discarded only when the source no longer has what it needs. When
+    every dataset reached the point, its snapshots on the drive are marked
+    **org.zark:point-complete=yes**, which **recover** reads.
 
     **Read-back verification.** After exporting, **backup** drops the
     kernel page cache and re-imports the pool read-only by its exact
@@ -269,16 +297,22 @@ for the canonical end-to-end sequences.
     specified as a positional argument, otherwise **zark** asks
     interactively. The drive is identified by the pool GUID on its ZFS
     label and by its by-id name, and every **known_drives.json** entry that
-    describes it is removed. Partitions and disks holding the running
-    system, a mounted filesystem or active swap are refused.
+    describes it is removed. On the installed system the wiped pool's
+    anchors in the source go too; elsewhere the banner gives the command to
+    run there. Partitions and disks holding the running system, a mounted
+    filesystem or active swap are refused.
 
-**registry** \[**list** | **forget** *name* | **fix** \[*name*\]\]
+**registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\]\]
 :   Inspect and repair **known_drives.json** without editing it by hand.
     **list** (the default) shows every entry, whether its disk is connected
-    and whether the pool GUID on the disk matches. **forget** removes one
-    entry and, on the installed system, that drive's anchors in the source
-    (its bookmarks on **rpool** and snapshots on **bpool**); the drive
-    itself is not touched. **fix** rewrites *drive_id* from the
+    and whether the pool GUID on the disk matches; on the installed system
+    also every drive GUID that holds anchors in the source without an
+    entry, and how many backup points interrupted runs left there.
+    **forget** removes, on the installed system, a drive's anchors in the
+    source (its bookmarks on **rpool** and snapshots on **bpool**) and then
+    its entry; the drive itself is not touched. Given a pool GUID with no
+    entry, it removes only that GUID's anchors. When no drive is left
+    registered it offers to remove the points left by interrupted runs. **fix** rewrites *drive_id* from the
     connected disk that carries the registered pool GUID and writes every
     missing key. Every write is validated and atomic; a malformed file is
     reported with its line and column and never overwritten.
@@ -293,13 +327,15 @@ for the canonical end-to-end sequences.
     The procedure scans for backup drives, imports the chosen pool
     read-only by its exact device, prompts for the rpool passphrase and
     offers the restore points found on the drive, ordered by snapshot
-    creation time (the newest is the default): backup points are labelled
-    as such, one entry per backup point, and the **sanoid** snapshots
-    carried between them as carried points, each with how many datasets it
-    holds. A dataset is not restored for a point when it no longer existed
-    then (a backup point at or before it lacks the dataset and nothing of
-    it follows); when a backup simply did not reach it, its newest earlier
-    snapshot is used and shown with its offset. Datasets archived
+    creation time: backup points are labelled as such, one entry per backup
+    point, those of a backup that did not reach every dataset as
+    **INCOMPLETE**, and the **sanoid** snapshots carried between them as
+    carried points, each with how many datasets it holds. The default is
+    the newest complete backup point. A dataset is not restored for a point
+    when it no longer existed then (a complete backup point at or before it
+    lacks the dataset and nothing of it follows); when a backup simply did
+    not reach it, its newest earlier snapshot is used and shown with its
+    offset. Datasets archived
     by **backup** serve the points older than the archive. It then shows a table with
     the snapshot every dataset will be restored from — never one newer
     than the point — and the mount properties it will get. Only after a
@@ -444,9 +480,11 @@ for the canonical end-to-end sequences.
     is written to the drive; a dataset whose mountpoint directory does not
     exist, or whose path resolves outside */mnt/zark/<poolname>/* (through
     a symbolic link or *..* inside the backup), is listed as not mounted.
-    Read-write mounts the same tree, writable. Archived datasets
-    (*\<name\>.archived-YYYYMMDD*) are not part of the tree; the banner lists
-    them with the command to browse one.
+    Read-write mounts the same tree, writable; mounting changes every
+    mounted dataset, even with nothing written, and the next **backup**
+    asks whether to skip those datasets or discard the changes. Archived
+    datasets (*\<name\>.archived-YYYYMMDD*) are not part of the tree; the
+    banner lists them with the command to browse one.
 
     With no argument, scans for connected backup drives. With the
     *target* **local** (aliases **system**, **rpool**) it instead mounts
@@ -571,8 +609,11 @@ To verify a recovery without rebooting:
 
 **130**
 :   The user pressed **Ctrl-C** (SIGINT). **zark** registers a cleanup
-    handler that exports any pools it imported and closes any keystore
-    it opened before exiting, so interrupting is safe at any point.
+    handler that exports any pools it imported, closes any keystore it
+    opened and starts the **sanoid** timer again if it stopped it. A backup
+    interrupted during its transfers keeps its point in the source on the
+    datasets whose transfer had started; the next backup resumes them and
+    removes it.
 
 # DEPENDENCIES
 
