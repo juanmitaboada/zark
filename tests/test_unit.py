@@ -589,6 +589,8 @@ class TestShRunPipe:  # pylint: disable=missing-function-docstring
         assert r.ok  # both exit 0
         assert "p1err" in r.stderr
         assert "p2err" in r.stderr
+        assert r.stderr_left.strip() == "p1err"
+        assert r.stderr_right.strip() == "p2err"
 
     def test_pipe_p2_takes_precedence_when_both_fail(self):
         # If both sides fail, the downstream (p2) returncode is what
@@ -8514,6 +8516,27 @@ class TestBackupDecide:
         res = _engine_run(fake, "backup", "111", P2)
         assert res.outcomes["rpool/var"].error.endswith(
             "has been modified since most recent snapshot"
+        )
+
+    def test_table_shows_both_sides_send_first(self) -> None:
+        """M2R-12 (P3 on eli): receive's "failed to read from stream" alone
+        hides why send stopped; both messages reach the table, send's first."""
+        send = "cannot resume send: 'rpool/var@x' used in the initial send no longer exists\n"
+        recv = "cannot receive: failed to read from stream\n"
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        real_pipe = fake.mock_run_pipe
+
+        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+            if "rpool/var" in cmd2 and "rpool/var/" not in cmd2:
+                return RunResult(1, "", send + recv, "", stderr_left=send, stderr_right=recv)
+            return real_pipe(cmd1, cmd2, log)
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        res = _engine_run(fake, "backup", "111", P2)
+        assert res.outcomes["rpool/var"].error == (
+            "cannot resume send: 'rpool/var@x' used in the initial send no longer exists; "
+            "cannot receive: failed to read from stream"
         )
 
     def test_report_keeps_dataset_names(self) -> None:

@@ -33,6 +33,10 @@ class RunResult:
     stdout: str
     stderr: str
     command: str
+    # run_pipe only: each side's stderr, so a caller can tell which side
+    # failed (``stderr`` keeps both, send's first).
+    stderr_left: str = ""
+    stderr_right: str = ""
 
     @property
     def ok(self) -> bool:
@@ -219,6 +223,8 @@ def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
         stdout=stdout.decode(errors="replace"),
         stderr=combined_stderr,
         command=f"{cmd1} | {cmd2}",
+        stderr_left=stderr_p1_s,
+        stderr_right=stderr_p2_s,
     )
 
 

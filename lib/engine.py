@@ -530,7 +530,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         for args in self._send_args(p):
             r = sh.run_pipe(f"zfs send {args}", self._recv(p.rel, resume), log=self.log)
             if not r.ok:
-                err = last_message(r.stderr) or f"rc={r.returncode}"
+                err = pipe_message(r) or f"rc={r.returncode}"
                 enospc = sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout)
                 return Outcome(p.rel, False, err, enospc)
         return Outcome(p.rel, True)
@@ -863,6 +863,18 @@ def last_message(stderr: str) -> str:
     lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
     starts = [i for i, ln in enumerate(lines) if ln.startswith("cannot ")]
     return " ".join(lines[starts[-1] :]) if starts else (lines[-1] if lines else "")
+
+
+def pipe_message(r: sh.RunResult) -> str:
+    """Both sides' messages of a failed ``zfs send | zfs receive``, send's first.
+
+    A send that stops early leaves receive with only "failed to read from
+    stream"; the reason is on the send side.
+    """
+    if not (r.stderr_left or r.stderr_right):
+        return last_message(r.stderr)
+    sides = (last_message(r.stderr_left), last_message(r.stderr_right))
+    return "; ".join(m for m in sides if m)
 
 
 def depth_order(plans: list[DatasetPlan]) -> list[DatasetPlan]:
