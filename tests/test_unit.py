@@ -218,7 +218,11 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     Readback,
     fix_grub_bpool_uuid,
 )
-from tests.fake_zfs import FakeZfs, FDataset, FSnap  # pylint: disable=wrong-import-position # noqa: E402
+from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E402
+    FakeZfs,
+    FDataset,
+    FSnap,
+)
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 
 # ═════════════════════════════════════════════════════════════════════════
