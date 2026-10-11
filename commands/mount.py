@@ -227,6 +227,15 @@ def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
     cleanup.disable()
 
 
+def _warn_read_write(log: Log) -> None:
+    """A read-write mount writes to every dataset it mounts, even with
+    nothing written (seen on eli, M2R-9), and the next backup asks."""
+    log.warn(
+        "Read-write: every mounted dataset now differs from its newest snapshot, even "
+        + "with nothing written; the next backup asks whether to skip them or discard that"
+    )
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
@@ -310,6 +319,8 @@ def run(
         log.dbg(f"Not mounted: {item.rel} — {item.reason}")
 
     log.ok(f"Mounted {mounted} datasets")
+    if not readonly:
+        _warn_read_write(log)
 
     if mounted == 0:
         log.fatal(

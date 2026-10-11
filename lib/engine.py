@@ -171,17 +171,20 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
             continue
         r = sh.run(
             "zfs list -Hp -t filesystem,volume "
-            + f"-o name,type,receive_resume_token,{_ORPHAN},used -r {root}",
+            + f"-o name,type,receive_resume_token,{_ORPHAN},used,written -r {root}",
         )
         r = _checked(r, strict)
         for line in r.lines if r.ok else []:
             f = line.split("\t")
-            if len(f) >= 5 and f[0].startswith(strip):
+            if len(f) >= 6 and f[0].startswith(strip):
                 rel = f[0][len(strip) :]
                 used = int(f[4]) if f[4].isdigit() else 0
+                written = int(f[5]) if f[5].isdigit() else 0
                 token = "" if f[2] in ("-", "") else f[2]
                 orphan = "" if f[3] in ("-", "") else f[3]
-                dest[rel] = Dest(rel, kind=f[1], token=token, orphan=orphan, used=used)
+                dest[rel] = Dest(
+                    rel, kind=f[1], token=token, orphan=orphan, used=used, written=written
+                )
         r = _checked(
             sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}"),
             strict,
@@ -390,7 +393,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
             if first != pt:
                 out.append(f"-w -I {_q(first)} {_q(pt)}")
             return out
-        if p.state in (State.INCREMENTAL, State.ROLLBACK):
+        if p.state in (State.INCREMENTAL, State.ROLLBACK, State.MODIFIED):
             return [f"{raw}-I {_q(rel + p.base)} {_q(pt)}"]
         return []
 
@@ -421,6 +424,14 @@ class Run:  # pylint: disable=too-many-instance-attributes
         """ROLLBACK option b: ``zfs rollback -r`` to the newest common snapshot."""
         r = sh.run(f"zfs rollback -r {_q(self._dst(p.rel) + p.common)}", log=self.log)
         self._report(r, f"rolled back {p.rel} to {p.common}, destroying {len(p.newer)} snapshot(s)")
+        return r.ok
+
+    def discard_changes(self, p: DatasetPlan) -> bool:
+        """MODIFIED, when chosen: ``zfs rollback`` to the newest snapshot,
+        without ``-r`` (no snapshot is destroyed; works without the keys,
+        checked on eli)."""
+        r = sh.run(f"zfs rollback {_q(self._dst(p.rel) + p.common)}", log=self.log)
+        self._report(r, f"discarded the changes to {p.rel} on the backup since {p.common}")
         return r.ok
 
     def archive(self, p: DatasetPlan, now: datetime | None = None) -> str:

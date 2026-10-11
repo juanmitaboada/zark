@@ -257,6 +257,29 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         elif pick == 3:
             actions.append(partial(eng.follow_rename, p))
 
+    # Written on the drive since the newest snapshot (M2F-8): asked once.
+    modified = [p for p in plans if p.state is State.MODIFIED]
+    if modified:
+        log.warn(
+            f"{len(modified)} dataset(s) on {pool_name} changed since their newest snapshot "
+            + "(a read-write zark mount does this, even with nothing written):",
+        )
+        for p in modified:
+            log.info(f"  {p.rel}: {_gib(p.used)} written since {p.common.lstrip('@')}")
+        pick = _ask_confirmed(
+            log,
+            "How should this backup continue?",
+            [
+                "skip them this time (the backup will be INCOMPLETE)",
+                "discard those changes on the backup (no snapshot is destroyed)",
+            ],
+            {1: ("DISCARD", f"discard the changes in {len(modified)} dataset(s) on {pool_name}")},
+        )
+        if pick == 1:
+            sizes.update({p.rel: eng.estimate(p) for p in modified})
+            actions += [partial(eng.discard_changes, p) for p in modified]
+            confirmed_any = True
+
     # Only an older common snapshot left (§7 migration; recovered older point).
     rollbacks = [p for p in plans if p.state is State.ROLLBACK]
     if rollbacks:

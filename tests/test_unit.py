@@ -7213,6 +7213,23 @@ class TestReplicationPlanner:
         empty = repl.Dest("rpool/x")
         assert repl.plan_dataset(o, empty, P).state is repl.State.DIVERGED
 
+    def test_modified_head_is_a_decision(self) -> None:
+        """M2R-9: a destination written since its newest snapshot refuses an
+        incremental; asked about, the plan keeps the base it would use."""
+        o = self._o("rpool/x", [_ref("a", "1", 1), _ref("b", "2", 2), _ref(P, "9", 9)])
+        d = repl.Dest("rpool/x", written=4096, snaps=[_ref("a", "1", 1), _ref("b", "2", 2)])
+        p = repl.plan_dataset(o, d, P)
+        assert (p.state, p.base, p.common, p.used) == (repl.State.MODIFIED, "@b", "@b", 4096)
+        assert p.state not in repl.TRANSFERABLE
+        bm = _ref(repl.anchor_name("7", "zark_2026-09-01_00:00:00Z"), "5", 5)
+        o = self._o("rpool/x", [_ref("c", "6", 6), _ref(P, "9", 9)], [bm])
+        d = repl.Dest("rpool/x", written=1, snaps=[_ref("zark_2026-09-01_00:00:00Z", "5", 5)])
+        p = repl.plan_dataset(o, d, P)
+        assert (p.state, p.base, p.first) == (repl.State.MODIFIED, f"#{bm.name}", "@c")
+        # A partial receive, a full send or a rollback already handle the head.
+        d = repl.Dest("rpool/x", token="1-abc", written=1, snaps=[_ref("a", "1", 1)])
+        assert repl.plan_dataset(o, d, P).state is repl.State.RESUME
+
     def test_resume_first(self) -> None:
         """Partial receive state is finished before anything else."""
         o = self._o("rpool/x", [_ref(P, "9", 9)])
@@ -8194,6 +8211,83 @@ class TestBackupDecide:
             redirect_stdout(StringIO()),
         ):
             return _decide(plans, eng, "backup", dst, Log()), eng
+
+    @staticmethod
+    def _mounted_read_write() -> FakeZfs:
+        """P2 on eli: a read-write `zark mount` leaves the mounted datasets
+        written since their newest snapshot, with nothing written by hand."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for ds in ("rpool/var", "rpool/ROOT/be"):
+            fake.ds[f"backup/{ds}"].written = 271 * 1024 * 1024
+        return fake
+
+    def test_modified_heads_are_skipped_by_default(self) -> None:
+        """M2R-9: one question for every modified dataset; the default sends
+        nothing to them and changes nothing on the drive (INCOMPLETE)."""
+        fake = self._mounted_read_write()
+        shown: list[str] = []
+
+        def choice(question: str, _options: list[str], _default: int = 0) -> int:
+            shown.append(question)
+            return 0
+
+        out = StringIO()
+
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            with redirect_stdout(out):  # _engine_run swallows the rest
+                return _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+
+        with patch.object(Log, "ask_choice", side_effect=choice):
+            res = _engine_run(fake, "backup", "111", P3, decide)
+        assert shown == ["How should this backup continue?"]
+        assert "2 dataset(s) on backup changed since their newest snapshot" in out.getvalue()
+        assert f"rpool/var: 271.0M written since {P1}" in out.getvalue()
+        assert not res.ok
+        states = {p.rel: p.state for p in res.plans}
+        assert states["rpool/var"] is repl.State.MODIFIED
+        assert states["rpool/var/lib"] is repl.State.AT_POINT
+        assert not [c for c in fake.calls if c.startswith("zfs rollback")]
+        sent = [c for c in fake.calls if "| zfs receive" in c]
+        assert not [c for c in sent if c.endswith("backup/rpool/var") and P3 in c]
+        assert fake.ds["backup/rpool/var"].written
+
+    def test_modified_heads_discarded_with_the_typed_word(self) -> None:
+        """M2R-9: "discard" is `zfs rollback` to the newest snapshot without
+        -r (no snapshot destroyed), behind DISCARD; then the run completes."""
+        fake = self._mounted_read_write()
+        choice = MagicMock(side_effect=[1, 0])
+        with (
+            patch.object(Log, "ask_choice", choice),
+            patch.object(Log, "ask_text", return_value="discard"),
+            redirect_stdout(StringIO()),
+        ):
+            res = _engine_run(
+                fake,
+                "backup",
+                "111",
+                P3,
+                lambda plans, eng: _decide(
+                    plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log()
+                ),
+            )
+        assert choice.call_count == 2 and not res.ok
+        assert not [c for c in fake.calls if c.startswith("zfs rollback")]
+        res = self._run_with_answers(fake, [1], typed="DISCARD", avail=10**12)
+        assert res.ok, res
+        rollbacks = sorted(c for c in fake.calls if c.startswith("zfs rollback"))
+        assert rollbacks == [
+            f"zfs rollback backup/rpool/ROOT/be@{P1}",
+            f"zfs rollback backup/rpool/var@{P1}",
+        ]
+        assert P1 in fake.names("backup/rpool/var") and P3 in fake.names("backup/rpool/var")
+
+    def test_mount_read_write_says_the_next_backup_asks(self) -> None:
+        """M2R-9: `zark mount` read-write warns what the next backup will ask."""
+        out = StringIO()
+        with redirect_stdout(out):
+            mount_mod._warn_read_write(Log())  # pylint: disable=protected-access
+        assert "the next backup asks whether to skip them or discard" in out.getvalue()
 
     def _with_rollback(self) -> FakeZfs:
         fake = _fresh_fake()

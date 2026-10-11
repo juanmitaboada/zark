@@ -25,8 +25,9 @@ Model (redesign §4, M2 decisions):
     bookmark (``-i #bm`` to the first later snapshot, then ``-I``). The
     receive never uses ``-F``: the kernel then refuses any other base.
   * Anything else — an older common snapshot only (ROLLBACK), nothing in
-    common (DIVERGED), a dataset that origin no longer has (ORPHAN) — is a
-    user decision, never an automatic destroy (invariant I-A).
+    common (DIVERGED), a dataset that origin no longer has (ORPHAN), a
+    destination written since its newest snapshot (MODIFIED) — is a user
+    decision, never an automatic destroy (invariant I-A).
   * Anchors: rpool datasets get a bookmark per disk
     ``#zark_<pool GUID>_<UTC>``; bpool never gets bookmarks (I-F) and keeps
     one snapshot per disk ``@zark_<pool GUID>_<UTC>`` instead.
@@ -130,6 +131,7 @@ class Dest:
     token: str = ""  # receive_resume_token, "" when none
     orphan: str = ""  # value of org.zark:orphan, "" when unset
     used: int = 0
+    written: int = 0  # bytes written since the newest snapshot
     snaps: list[Ref] = field(default_factory=list)  # by createtxg
 
     @property
@@ -148,6 +150,7 @@ class State(StrEnum):
     VIA_BOOKMARK = "via bookmark"  # -i #bm to F, then -I F→point
     ROLLBACK = "rollback"  # only an older common snapshot left (decision 7)
     DIVERGED = "diverged"  # nothing in common (decision 8)
+    MODIFIED = "modified on backup"  # an incremental whose destination was written (M2F-8)
     ORPHAN = "only on backup"  # destination only (decision 18)
     EXCLUDED = "excluded"  # zvols (decision 10), structural containers with data
 
@@ -166,11 +169,11 @@ class DatasetPlan:  # pylint: disable=too-many-instance-attributes
     state: State
     base: str = ""  # origin "@snap" or "#bookmark" the transfer starts (ROLLBACK: would start) from
     first: str = ""  # VIA_BOOKMARK: first origin snapshot after the bookmark
-    common: str = ""  # ROLLBACK: newest common destination snapshot ("@name")
+    common: str = ""  # ROLLBACK: newest common destination snapshot; MODIFIED: the newest ("@name")
     newer: list[str] = field(default_factory=list)  # ROLLBACK: dest snapshots it destroys
     rename_to: str = ""  # ORPHAN whose lineage continues under this origin name
     kept: bool = False  # ORPHAN already marked "kept"
-    used: int = 0  # destination bytes (ORPHAN, DIVERGED, ROLLBACK)
+    used: int = 0  # destination bytes (ORPHAN, DIVERGED, ROLLBACK; MODIFIED: written)
     note: str = ""
 
 
@@ -208,8 +211,21 @@ def excluded(origin: dict[str, Origin]) -> list[tuple[str, str]]:
     return sorted(out)
 
 
-def plan_dataset(o: Origin, d: Dest | None, point: str) -> DatasetPlan:  # pylint: disable=too-many-return-statements
-    """State of one expected dataset (see the module docstring)."""
+def plan_dataset(o: Origin, d: Dest | None, point: str) -> DatasetPlan:
+    """State of one expected dataset (see the module docstring).
+
+    An incremental onto a destination written since its newest snapshot
+    is refused by the kernel without ``-F`` ("destination has been
+    modified", module/zfs/dmu_recv.c:492), so it is MODIFIED: asked about.
+    """
+    p = _plan_dataset(o, d, point)
+    if d is not None and d.written > 0 and p.state in (State.INCREMENTAL, State.VIA_BOOKMARK):
+        p.state, p.used = State.MODIFIED, d.written
+        p.common = f"@{d.newest.name}" if d.newest else ""
+    return p
+
+
+def _plan_dataset(o: Origin, d: Dest | None, point: str) -> DatasetPlan:  # pylint: disable=too-many-return-statements
     rel = o.rel
     if d is None:
         return DatasetPlan(rel, State.NEW, base="")

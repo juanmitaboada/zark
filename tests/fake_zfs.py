@@ -23,8 +23,9 @@ rather than command strings. It keeps the kernel rules the engine relies on
   * one ``zfs snapshot`` call per pool (EXDEV otherwise);
   * ``-I`` never from a bookmark;
   * an incremental receive without ``-F`` needs its base to be the
-    destination's newest snapshot (ETXTBSY otherwise); ``-F`` is refused
-    outright here, because the engine must never pass it;
+    destination's newest snapshot and the destination unwritten since it
+    (``written``; ETXTBSY otherwise, with libzfs's two-line text); ``-F``
+    is refused outright here, because the engine must never pass it;
   * a raw incremental from a bookmark needs the IV-set GUID, stored only
     when ``feature@bookmark_v2`` was enabled at bookmark creation;
   * partial receive state (``-s``) blocks a new stream until resumed
@@ -62,6 +63,7 @@ class FDataset:
     snaps: list[FSnap] = field(default_factory=list)
     bookmarks: list[FSnap] = field(default_factory=list)
     token: str = ""
+    written: int = 0  # bytes written since the newest snapshot (a read-write mount)
 
 
 def _ok(out: str = "") -> RunResult:
@@ -276,6 +278,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 vals.append(d.token or "-")
             elif f == "used":
                 vals.append(str(1024 * (1 + len(d.snaps))))
+            elif f == "written" and s is None:
+                vals.append(str(d.written) if d.snaps else "-")
             elif s is not None and f in s.props:
                 vals.append(s.props[f])
             else:
@@ -363,6 +367,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         if later and "-r" not in args:
             return _err("more recent snapshots exist")
         self.ds[ds].snaps = self.ds[ds].snaps[: names.index(name) + 1]
+        self.ds[ds].written = 0
         return _ok()
 
     def _create(self, args: list[str]) -> RunResult:
@@ -508,6 +513,12 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 return _err("ZFS_ERR_FROM_IVSET_GUID_MISSING")
             if not d.snaps or d.snaps[-1].guid != base.guid:
                 return _err("destination has been modified since most recent snapshot (ETXTBSY)")
+            if d.written:
+                # lib/libzfs/libzfs_sendrecv.c:5159-5174, as `<action>: <aux>`.
+                return _err(
+                    f"cannot receive incremental stream: destination {dst} has been modified\n"
+                    "since most recent snapshot"
+                )
             if mode == "I":
                 stream = [s for s in origin.snaps if base.txg < s.txg <= to_snap.txg]
             else:
