@@ -146,14 +146,15 @@ def read_origin(pools: list[str], strict: bool = False) -> dict[str, Origin]:
     for pool in pools:
         r = sh.run(
             "zfs list -Hp -t filesystem,volume "
-            + f"-o name,type,canmount,mountpoint,referenced -r {pool}",
+            + f"-o name,type,canmount,mountpoint,referenced,origin -r {pool}",
         )
         r = _checked(r, strict)
         for line in r.lines if r.ok else []:
             f = line.split("\t")
-            if len(f) >= 5:
+            if len(f) >= 6:
                 ref = int(f[4]) if f[4].isdigit() else 0
-                origin[f[0]] = Origin(f[0], f[1], f[2], f[3], ref)
+                clone_of = "" if f[5] in ("-", "") else f[5]
+                origin[f[0]] = Origin(f[0], f[1], f[2], f[3], ref, clone_of=clone_of)
         r = sh.run(
             f"zfs list -Hp -t snapshot,bookmark -o name,guid,createtxg,creation -r {pool}",
         )
@@ -394,6 +395,10 @@ class Run:  # pylint: disable=too-many-instance-attributes
         raw = self._raw(rel)
         if p.state is State.RESUME:
             return [f"-t {_q(self.dest[rel].token)}"]
+        if p.state is State.NEW and p.clone_from and not full:
+            # -I from the clone's own origin, named in full (fromorigin,
+            # cmd/zfs/zfs_main.c:5101-5114).
+            return [f"{raw}-I {_q(p.base)} {_q(pt)}"]
         if full or p.state in (State.NEW, State.DIVERGED):
             return [f"{raw}{_q(pt)}"]
         if p.state is State.VIA_BOOKMARK or p.base.startswith("#"):
@@ -529,12 +534,16 @@ class Run:  # pylint: disable=too-many-instance-attributes
 
     # ── transfer ─────────────────────────────────────────────────────────
 
-    def _recv(self, rel: str, resume: bool) -> str:
+    def _recv(self, rel: str, resume: bool, clone_from: str = "") -> str:
         dst = _q(self._dst(rel))
         if resume:
             return f"zfs receive -s -u {dst}"
         o = self.origin[rel]
+        # A clone of the drive's copy of its origin; the kernel refuses an
+        # origin whose guid is not the stream's (ENODEV, dmu_recv.c:791-796).
+        clone = [f"-o origin={_q(self._dst(clone_from))}"] if clone_from else []
         props = [
+            *clone,
             "-o canmount=noauto",
             "-x mountpoint",
             f"-o org.zark:canmount={_q(o.canmount)}",
@@ -551,8 +560,9 @@ class Run:  # pylint: disable=too-many-instance-attributes
             return Outcome(p.rel, False, f"not transferable ({p.state})")
         resume = p.state is State.RESUME
         self.started.add(p.rel)
+        clone_from = p.clone_from if p.state is State.NEW else ""
         for args in self._send_args(p):
-            r = sh.run_pipe(f"zfs send {args}", self._recv(p.rel, resume), log=self.log)
+            r = sh.run_pipe(f"zfs send {args}", self._recv(p.rel, resume, clone_from), log=self.log)
             if not r.ok:
                 err = pipe_message(r) or f"rc={r.returncode}"
                 enospc = sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout)

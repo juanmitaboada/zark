@@ -104,7 +104,7 @@ class Ref:
 
 
 @dataclass
-class Origin:
+class Origin:  # pylint: disable=too-many-instance-attributes
     """An origin dataset: its kind, mount properties, snapshots and bookmarks."""
 
     rel: str
@@ -114,6 +114,7 @@ class Origin:
     referenced: int = 0
     snaps: list[Ref] = field(default_factory=list)  # by createtxg
     bookmarks: list[Ref] = field(default_factory=list)
+    clone_of: str = ""  # its `origin` property ("rpool/ds@snap") when it is a clone
 
     def snap_by_guid(self, guid: str) -> Ref | None:
         """Origin snapshot with that guid."""
@@ -174,6 +175,7 @@ class DatasetPlan:  # pylint: disable=too-many-instance-attributes
     common: str = ""  # ROLLBACK: newest common destination snapshot; MODIFIED: the newest ("@name")
     newer: list[str] = field(default_factory=list)  # ROLLBACK: dest snapshots it destroys
     rename_to: str = ""  # ORPHAN whose lineage continues under this origin name
+    clone_from: str = ""  # NEW clone: its origin snapshot on the drive ("ds@name"); base: origin's
     kept: bool = False  # ORPHAN already marked "kept"
     used: int = 0  # destination bytes (ORPHAN, DIVERGED, ROLLBACK; MODIFIED: written)
     note: str = ""
@@ -278,6 +280,9 @@ def plan(origin: dict[str, Origin], dest: dict[str, Dest], point: str) -> list[D
     live = {rel: d for rel, d in dest.items() if not is_archived(rel)}
     wanted = expected(origin)
     plans = [plan_dataset(origin[rel], live.get(rel), point) for rel in wanted]
+    for p in plans:
+        if p.state is State.NEW:
+            _clone_base(p, origin, live)
     plans += [DatasetPlan(rel, State.EXCLUDED, note=why) for rel, why in excluded(origin)]
 
     # A structural container is never offered for destruction: its absence
@@ -298,6 +303,22 @@ def plan(origin: dict[str, Origin], dest: dict[str, Dest], point: str) -> list[D
             ),
         )
     return plans
+
+
+def _clone_base(p: DatasetPlan, origin: dict[str, Origin], live: dict[str, Dest]) -> None:
+    """A NEW clone whose origin snapshot the drive holds, matched by guid, is
+    sent as an incremental from it and received as a clone of the drive's
+    copy (O3): only what the clone changed travels."""
+    o = origin[p.rel]
+    src_ds, _, src_snap = o.clone_of.partition("@")
+    parent_o, held = origin.get(src_ds), live.get(src_ds)
+    if not src_snap or parent_o is None or held is None:
+        return
+    snap = next((s for s in parent_o.snaps if s.name == src_snap), None)
+    copy = next((s for s in held.snaps if snap and s.guid == snap.guid), None)
+    if snap is not None and copy is not None:
+        p.base, p.clone_from = o.clone_of, f"{src_ds}@{copy.name}"
+        p.note = f"clone of {o.clone_of}"
 
 
 def _renames(

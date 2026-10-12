@@ -170,6 +170,8 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             log.warn(f"  {p.rel}: NOT BACKED UP ({p.note})")
         elif p.state is State.VIA_BOOKMARK:
             log.info(f"  {p.rel}: from this drive's bookmark")
+        elif p.state is State.NEW and p.clone_from:
+            log.info(f"  {p.rel}: new clone of {p.base}, sent as a delta from the drive's copy")
     avail = dst_info.avail_bytes if dst_info else 0
     actions: list[Callable[[], object]] = []
     confirmed_any = False

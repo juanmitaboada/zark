@@ -7619,6 +7619,40 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert P2 in home and P3 in home
         assert _origin_points(fake) == []
 
+    def test_new_clone_is_sent_from_its_origin_on_the_drive(self) -> None:
+        """O3: a NEW clone whose origin snapshot the drive holds is sent with
+        -I from that origin and received as a clone of the drive's copy;
+        only what the clone changed travels."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        assert _engine_run(fake, "backup", "111", P2).ok
+        src = "rpool/ROOT/be@autosnap_2026-10-07_12:00:00_hourly"
+        fake.dataset("rpool/ROOT/be2", origin=src, mountpoint="/")
+        res = _engine_run(fake, "backup", "111", P3)
+        assert res.ok, res
+        pipe = next(c for c in fake.calls if "rpool/ROOT/be2@" in c and " | " in c)
+        assert pipe.startswith(f"zfs send -w -I {src} rpool/ROOT/be2@{P3} | zfs receive")
+        assert f"-o origin=backup/{src}" in pipe and " -u " in pipe
+        assert fake.ds["backup/rpool/ROOT/be2"].props["origin"] == f"backup/{src}"
+        assert fake.names("backup/rpool/ROOT/be2") == [P3]
+        assert _engine_run(fake, "backup", "111", "zark_2026-10-10_10:00:00Z").ok
+
+    def test_new_clone_without_its_origin_on_the_drive_is_sent_in_full(self) -> None:
+        """O3: the origin snapshot never reached the drive: a full send, as before."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        src = "rpool/ROOT/be@autosnap_2026-10-07_12:00:00_hourly"
+        fake.dataset("rpool/ROOT/be2", origin=src, mountpoint="/")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            assert eng.take_point()
+            plans = {p.rel: p for p in eng.survey()}
+        assert plans["rpool/ROOT/be2"].state is repl.State.NEW
+        assert not plans["rpool/ROOT/be2"].clone_from
+        assert eng._send_args(plans["rpool/ROOT/be2"]) == [f"-w rpool/ROOT/be2@{P2}"]  # pylint: disable=protected-access
+
     def test_stale_token_is_discarded_not_snapshots(self) -> None:
         """M2R-10: a partial receive whose stream snapshot is gone from
         origin is aborted (receive -A); the dataset is planned again and no
@@ -8027,7 +8061,9 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         """M2R-4 (E6a): what origin or the drive "has" is never a shrunken
         listing; the run stops, asks nothing and leaves only the anchors."""
         self._stopped_before_the_questions("-o name,guid,createtxg,creation -r backup/rpool")
-        self._stopped_before_the_questions("-o name,type,canmount,mountpoint,referenced -r rpool")
+        self._stopped_before_the_questions(
+            "-o name,type,canmount,mountpoint,referenced,origin -r rpool"
+        )
 
     def test_a_listing_that_fails_after_the_transfers_is_not_success(self) -> None:
         """M2R-4 (E6b): the final check cannot read origin: not complete,
@@ -8044,7 +8080,9 @@ class TestEngine:  # pylint: disable=too-many-public-methods
                 o = real_transfer(p)
                 done.append(p.rel)
                 if len(done) == 6:
-                    fake.fail_cmds.add("-o name,type,canmount,mountpoint,referenced -r rpool")
+                    fake.fail_cmds.add(
+                        "-o name,type,canmount,mountpoint,referenced,origin -r rpool"
+                    )
                 return o
 
             eng.transfer = transfer  # type: ignore[method-assign]
@@ -8067,7 +8105,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         """M2V-5 (N21): take_point reads origin strictly; a failed listing of
         rpool takes no point at all (not bpool's alone)."""
         fake = self._fresh()
-        fake.fail_cmds.add("-o name,type,canmount,mountpoint,referenced -r rpool")
+        fake.fail_cmds.add("-o name,type,canmount,mountpoint,referenced,origin -r rpool")
         with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
             eng = engine.Run("backup", "111", Log(), P1, sleep=lambda _s: None)
             assert not eng.take_point()

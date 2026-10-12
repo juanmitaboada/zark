@@ -551,7 +551,15 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         d = self.ds.get(dst)
         if d is not None and d.token:
             return _err("destination contains partially-complete state (ZFS_ERR_RESUME_EXISTS)")
-        if mode == "full":
+        clone_src = frm.split("@")[0] if mode == "I" and "@" in frm else src_ds
+        if clone_src != src_ds:
+            # A clone sent from its origin (fromorigin) into a new dataset,
+            # received as a clone of `-o origin=` (dmu_recv.c:778-800).
+            got = self._clone_stream(src_ds, frm, to_snap, dst, recv)
+            if isinstance(got, RunResult):
+                return got
+            stream, d = got, self.ds[dst]
+        elif mode == "full":
             if d is not None:
                 return _err(f"destination '{dst}' exists")
             if dst.rsplit("/", 1)[0] not in self.ds:
@@ -604,6 +612,26 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             d.snaps.append(FSnap(s.name, s.guid, self._dtxg(), s.creation))
         self._apply_props(d, recv)
         return _ok()
+
+    def _clone_stream(
+        self, src_ds: str, frm: str, to_snap: FSnap, dst: str, recv: list[str]
+    ) -> list[FSnap] | RunResult:
+        if dst in self.ds:
+            return _err(f"destination '{dst}' exists")
+        if self.ds[src_ds].props.get("origin") != frm:
+            return _err("incremental source must be in same filesystem")
+        target = next((a.split("=", 1)[1] for a in recv if a.startswith("origin=")), "")
+        fds, fname = frm.split("@")
+        base = next((x for x in self.ds[fds].snaps if x.name == fname), None)
+        tds, _, tname = target.partition("@")
+        held = next((x for x in self.ds.get(tds, FDataset()).snaps if x.name == tname), None)
+        if base is None or held is None:
+            return _err(f"cannot receive: local origin for clone {dst} does not exist")
+        if held.guid != base.guid:
+            return _err("cannot receive: most recent snapshot does not match incremental source")
+        held.clones = dst
+        self.ds[dst] = FDataset(kind=self.ds[src_ds].kind, props={"origin": target})
+        return [x for x in self.ds[src_ds].snaps if x.txg <= to_snap.txg]
 
     def _apply_props(self, d: FDataset, recv: list[str]) -> None:
         for j, a in enumerate(recv):
