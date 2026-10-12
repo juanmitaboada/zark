@@ -5641,6 +5641,26 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert not any("keystore" in r for r in rows)  # keystore resolves on its own
 
 
+class TestRecoverAnchorLabel:  # pylint: disable=too-few-public-methods
+    """M2X.5: another drive's bpool anchor on this drive is named as that
+    drive's backup point, not as an anchor name."""
+
+    def test_label(self) -> None:
+        """Known GUID by its registry name, unknown by its GUID, others as they are."""
+        name = repl.anchor_name("3277814611169134880", "zark_2026-10-11_12:22:15Z")
+        label = recover_mod._snapshot_label  # pylint: disable=protected-access
+        assert label(name, {"3277814611169134880": "backup2"}) == (
+            "zark_2026-10-11_12:22:15Z (bpool anchor of drive backup2)"
+        )
+        assert label(name, {}) == (
+            "zark_2026-10-11_12:22:15Z (bpool anchor of drive 3277814611169134880)"
+        )
+        assert label("zark_2026-10-11_12:22:15Z", {}) == "zark_2026-10-11_12:22:15Z"
+        assert label("autosnap_2026-10-11_12:00:00_hourly", {}) == (
+            "autosnap_2026-10-11_12:00:00_hourly"
+        )
+
+
 class TestRecoverPlanArchived:  # pylint: disable=missing-function-docstring
     """Decision 19: a dataset resolved from an archived lineage is read from
     where it is stored, and an archived lineage is never a dataset of its own."""

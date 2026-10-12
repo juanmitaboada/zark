@@ -81,6 +81,7 @@ from lib.mount_props import (
     receive_options,
     rpool_root_mountpoint,
 )
+from lib.replication import ANCHOR_RE, POINT_PREFIX
 from lib.restore_points import (
     Point,
     Snap,
@@ -777,8 +778,21 @@ def _fmt_delta(seconds: int) -> str:
     return f"{sign}{h}h{m:02d}m" if h else f"{sign}{m}m{sec:02d}s"
 
 
-def _show_plan(plan: RestorePlan, log: Log) -> None:
-    """The restore table (hallazgo 3): what each dataset will be restored from."""
+def _snapshot_label(name: str, drives: dict[str, str]) -> str:
+    """How the table names a snapshot. Another drive's bpool anchor travels
+    to this drive in a -I stream as an ordinary snapshot (M2X.5): it holds
+    that drive's backup point, so it is shown as such."""
+    m = ANCHOR_RE.match(name)
+    if m is None:
+        return name
+    guid, stamp = m.groups()
+    return f"{POINT_PREFIX}{stamp} (bpool anchor of drive {drives.get(guid, guid)})"
+
+
+def _show_plan(plan: RestorePlan, log: Log, drives: dict[str, str] | None = None) -> None:
+    """The restore table (hallazgo 3): what each dataset will be restored from.
+    ``drives`` maps a pool GUID to its registry name."""
+    drives = drives or {}
     log.info(f"Restore point: {plan.point.label_utc()} ({plan.point.family.rstrip('_')})")
     log.raw(f"  {'DATASET':44} {'SNAPSHOT':44} {'Δ POINT':>9} {'SIZE':>7}  MOUNT")
     log.raw(
@@ -794,8 +808,9 @@ def _show_plan(plan: RestorePlan, log: Log) -> None:
         size = sh.humanize_bytes(r.referenced) if r.referenced >= 0 else "?"
         mark = log.Y if r.props.source == "inferred" else ""
         origin = " (from archive)" if r.snap.source else ""
+        label = _snapshot_label(r.snap.name, drives)
         log.raw(
-            f"  {r.rel:44} {r.snap.name:44} {delta:>9} {size:>7}  "
+            f"  {r.rel:44} {label:44} {delta:>9} {size:>7}  "
             + f"{mark}{r.props.canmount} {r.effective} [{r.props.source}]{log.N if mark else ''}"
             + origin,
         )
@@ -1270,7 +1285,7 @@ def run(
     # ── 4. Restore plan: datasets, mount properties, hostid ──────────────
     log.step(4, TOTAL_STEPS, "Resolving every dataset for this point...")
     plan = _plan(pool_name, device, ubuntu_name, point, snaps, log, complete)
-    _show_plan(plan, log)
+    _show_plan(plan, log, {i.guid: n for n, i in cfg.known_drives.items()})
     if plan.hostid:
         _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
         log.ok(f"Hostid set to: {sh.run('hostid').output}")
