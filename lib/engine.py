@@ -73,7 +73,14 @@ from lib.replication import (
     plan,
     reached,
 )
-from lib.restore_points import COMPLETE_PROP, Snap, legacy_complete, parse_snapshots
+from lib.restore_points import (
+    COMPLETE_PROP,
+    LEGACY_MARK,
+    Snap,
+    legacy_complete,
+    parse_snapshots,
+    point_marks,
+)
 
 SANOID_UNITS = ("sanoid.service", "sanoid-prune.service")
 SANOID_WAIT_SECONDS = 600
@@ -787,42 +794,74 @@ def log_metadata(pool: str, log: Log) -> dict[str, str]:
     return meta
 
 
+def snapshot_marks(root: str) -> dict[str, str]:
+    """Completion marks set on the snapshots themselves under ``root`` (M2V-3):
+    ``-s local`` leaves out what a snapshot only inherits from its filesystems
+    (module/zfs/dsl_prop.c:1224-1245)."""
+    r = sh.run(f"zfs get -H -p -r -s local -t snapshot -o name,value {COMPLETE_PROP} {_q(root)}")
+    out: dict[str, str] = {}
+    for line in r.lines if r.ok else []:
+        f = line.split("\t")
+        if len(f) == 2 and "@" in f[0]:
+            out[f[0]] = f[1]
+    return out
+
+
 def drive_snapshots(pool: str) -> list[Snap]:
     """Every snapshot under ``<pool>/rpool`` and ``<pool>/bpool``, archived
-    lineages folded into their dataset, with the completion mark."""
+    lineages folded into their dataset, with its own completion mark."""
     snaps: list[Snap] = []
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        r = sh.run(
-            f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation,{COMPLETE_PROP} -r {root}"
-        )
+        r = sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}")
         if r.ok:
-            snaps += parse_snapshots(r.lines, pool)
+            snaps += parse_snapshots(r.lines, pool, snapshot_marks(root))
     return snaps
+
+
+def _counts_for_old_marks(pool: str, point: str) -> dict[str, list[str]]:
+    """Mark value → snapshots, for the points marked before the count
+    existed (see :func:`record_complete`)."""
+    snaps = drive_snapshots(pool)
+    marked = point_marks(snaps)
+    if marked:
+        old = {n for n, members in marked.items() if all(s.mark == LEGACY_MARK for s in members)}
+    else:
+        old = legacy_complete(snaps, read_metadata(pool).get("last-point", ""))
+    out: dict[str, list[str]] = {}
+    for name in sorted(old - {point}):
+        members = [s for s in snaps if s.name == name]
+        held = str(len({s.dataset for s in members}))
+        out.setdefault(held, []).extend(f"{pool}/{s.stored}@{s.name}" for s in members)
+    return out
 
 
 def record_complete(pool: str, point: str, rels: list[str], log: Log) -> bool:
     """Mark ``point`` complete on the drive: every one of its snapshots gets
-    ``COMPLETE_PROP=yes`` (M2R-1; a user property, nothing mounts).
+    ``COMPLETE_PROP=<number of datasets>`` (M2R-1, M2V-4; a user property,
+    nothing mounts).
 
-    On a drive with no mark yet (written before marks existed) the backup
-    points :func:`legacy_complete` accepts are marked too, once, while
-    ``org.zark:last-point`` still names the previous complete run.
+    Points marked before the count existed are brought to it once: an rc2
+    mark (``yes``), or, on a drive with no mark at all, the backup points
+    :func:`legacy_complete` accepts while ``org.zark:last-point`` still names
+    the previous complete run. Each gets the number of datasets that hold it
+    now.
     """
-    targets = [f"{pool}/{rel}@{point}" for rel in rels]
-    snaps = drive_snapshots(pool)
-    if not any(s.complete for s in snaps):
-        old = legacy_complete(snaps, read_metadata(pool).get("last-point", ""))
-        targets += [f"{pool}/{s.stored}@{s.name}" for s in snaps if s.name in old]
-    if not targets:
-        return True
-    names = " ".join(_q(t) for t in dict.fromkeys(targets))
-    r = sh.run(f"zfs set {COMPLETE_PROP}=yes {names}", log=log)
-    if not r.ok:
-        log.warn(
-            f"Could not mark {point} complete on {pool}: {r.stderr.strip()} "
-            + "(recover will list it as incomplete)"
-        )
-    return r.ok
+    by_value: dict[str, list[str]] = {str(len(rels)): [f"{pool}/{rel}@{point}" for rel in rels]}
+    for value, targets in _counts_for_old_marks(pool, point).items():
+        by_value.setdefault(value, []).extend(targets)
+    ok = True
+    for value, targets in sorted(by_value.items()):
+        if not targets:
+            continue
+        names = " ".join(_q(t) for t in dict.fromkeys(targets))
+        r = sh.run(f"zfs set {COMPLETE_PROP}={value} {names}", log=log)
+        if not r.ok:
+            ok = False
+            log.warn(
+                f"Could not mark complete points on {pool}: {r.stderr.strip()} "
+                + "(recover will list them as incomplete)"
+            )
+    return ok
 
 
 def anchored_disks(origin: dict[str, Origin]) -> set[str]:

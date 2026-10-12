@@ -9092,14 +9092,9 @@ class TestDriveMetadata:
 
 
 def _marked(fake: FakeZfs, pool: str = "backup") -> set[str]:
-    """Names of the backup points marked complete on a drive."""
-    return {
-        s.name
-        for ds, d in fake.ds.items()
-        if ds.startswith(f"{pool}/")
-        for s in d.snaps
-        if s.props.get(COMPLETE_PROP) == "yes"
-    }
+    """Names of the backup points complete on a drive, as recover reads them."""
+    with patch_sh(fake):
+        return complete_points(engine.drive_snapshots(pool), "")
 
 
 def _record(fake: FakeZfs, point: str, pool: str = "backup") -> None:
@@ -9117,12 +9112,12 @@ class TestCompletePoints:
         fake = _fresh_fake()
         assert _engine_run(fake, "backup", "111", P1).ok
         _record(fake, P1)
-        marked = [
-            f"{ds}@{s.name}"
+        marked = {
+            f"{ds}@{s.name}": s.props[COMPLETE_PROP]
             for ds, d in fake.ds.items()
             for s in d.snaps
-            if s.props.get(COMPLETE_PROP) == "yes"
-        ]
+            if COMPLETE_PROP in s.props
+        }
         rels = [
             "rpool/ROOT/be",
             "rpool/USERDATA/home",
@@ -9131,7 +9126,7 @@ class TestCompletePoints:
             "rpool/var/lib/docker",
             "bpool/BOOT/be",
         ]
-        assert sorted(marked) == sorted(f"backup/{rel}@{P1}" for rel in rels)
+        assert marked == {f"backup/{rel}@{P1}": str(len(rels)) for rel in rels}
         assert not any(COMPLETE_PROP in d.props for d in fake.ds.values())  # never a filesystem
 
     def test_legacy_drive_is_marked_once_by_its_last_point(self) -> None:
@@ -9181,19 +9176,80 @@ class TestCompletePoints:
         assert legacy_complete(snaps, P3) == {P1, P3}
         assert legacy_complete(snaps, P1) == {P1}
         assert legacy_complete(snaps, "") == set()
-        marked = [*snaps[:2], Snap(be, P3, "4", 4, 300, complete=True)]
+        marked = [*snaps[:2], Snap(be, P3, "4", 4, 300, mark="1")]
         assert complete_points(marked, P1) == {P3}
         assert complete_points(snaps, P3) == {P1, P3}
 
-    def test_parse_reads_the_mark(self) -> None:
-        """The fifth column is the mark; four-column lines still parse."""
+    def test_a_point_that_lost_part_of_its_snapshots_is_not_complete(self) -> None:
+        """M2V-4: the mark records how many datasets the point had; with one
+        of them gone (a prune, a rollback, a destroy) the point is incomplete.
+        An rc2 mark has no count and is taken as it is."""
+        be, home = "rpool/ROOT/be", "rpool/USERDATA/home"
+        whole = [Snap(be, P1, "1", 1, 100, mark="2"), Snap(home, P1, "2", 2, 100, mark="2")]
+        assert complete_points(whole, "") == {P1}
+        assert complete_points(whole[:1], "") == set()
+        unmarked = [whole[0], Snap(home, P1, "2", 2, 100)]
+        assert complete_points(unmarked, "") == set()
+        assert complete_points([Snap(be, P1, "1", 1, 100, mark="yes")], "") == {P1}
+        assert complete_points([Snap(be, P1, "1", 1, 100, mark="on")], "") == set()
+
+    def test_a_point_cut_on_the_drive_is_no_longer_complete(self) -> None:
+        """M2V-4 (E15): a complete point whose snapshot on one dataset is
+        destroyed (a rollback, a prune) reads as incomplete, with nothing
+        written to the snapshots that are left."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _record(fake, P1)
+        assert _engine_run(fake, "backup", "111", P2).ok
+        _record(fake, P2)
+        home = fake.ds["backup/rpool/USERDATA/home"]
+        home.snaps = [s for s in home.snaps if s.name != P1]
+        assert _marked(fake) == {P2}
+
+    def test_parse_takes_the_mark_from_the_snapshot_itself(self) -> None:
+        """M2V-3: the mark comes from the `-s local` listing, joined by name;
+        nothing is read from the `zfs list` columns."""
         lines = [
-            f"backup/rpool/ROOT/be@{P1}\t1\t1\t100\tyes",
-            f"backup/rpool/ROOT/be@{P2}\t2\t2\t200\t-",
-            f"backup/rpool/ROOT/be@{P3}\t3\t3\t300",
+            f"backup/rpool/ROOT/be@{P1}\t1\t1\t100",
+            f"backup/rpool/ROOT/be@{P2}\t2\t2\t200\t1",
         ]
-        snaps = parse_snapshots(lines, "backup")
-        assert [s.complete for s in snaps] == [True, False, False]
+        snaps = parse_snapshots(lines, "backup", {f"backup/rpool/ROOT/be@{P1}": "1"})
+        assert [s.mark for s in snaps] == ["1", ""]
+
+    def test_a_mark_set_on_a_filesystem_is_not_read(self) -> None:
+        """M2V-3 (E16): a value set by hand on a filesystem or the pool root
+        shows on every snapshot below it in `zfs list`, but recover's view is
+        unchanged: the incomplete point stays incomplete."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _record(fake, P1)
+        _tick(fake, "2026-10-08_08:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        for ds in ("backup/rpool/ROOT/be", "backup/rpool", "backup"):
+            fake.ds[ds].props[COMPLETE_PROP] = "yes"
+            assert _marked(fake) == {P1}, ds
+
+    def test_rc2_marks_get_their_count_once(self) -> None:
+        """Marks written by 2.0.0-rc2 (`yes`) are rewritten with the number of
+        datasets that hold the point at the next complete run."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for ds, d in fake.ds.items():
+            for s in d.snaps:
+                if ds.startswith("backup/") and s.name == P1:
+                    s.props[COMPLETE_PROP] = "yes"
+        assert _engine_run(fake, "backup", "111", P2).ok
+        _record(fake, P2)
+        values = {
+            s.props.get(COMPLETE_PROP)
+            for ds, d in fake.ds.items()
+            if ds.startswith("backup/")
+            for s in d.snaps
+            if s.name in (P1, P2)
+        }
+        assert values == {"6"}
+        assert _marked(fake) == {P1, P2}
 
 
 class TestRecoverIncompletePoint:
@@ -9206,9 +9262,9 @@ class TestRecoverIncompletePoint:
         # P1 complete; P2 a week later, cut on home after its carried hourly.
         t1, t2 = 1_760_000_000, 1_760_600_000
         return [
-            Snap(self.BE, P1, "g1", 10, t1, complete=True),
-            Snap(self.HOME, P1, "g2", 11, t1, complete=True),
-            Snap(self.DOCKER, P1, "g3", 12, t1, complete=True),
+            Snap(self.BE, P1, "g1", 10, t1, mark="3"),
+            Snap(self.HOME, P1, "g2", 11, t1, mark="3"),
+            Snap(self.DOCKER, P1, "g3", 12, t1, mark="3"),
             Snap(self.HOME, "autosnap_2026-10-08_08:00:00_hourly", "g4", 20, t2 - 7200),
             Snap(self.BE, P2, "g5", 21, t2),
             Snap(self.DOCKER, P2, "g6", 22, t2),

@@ -64,10 +64,14 @@ from datetime import UTC, datetime
 
 from lib.replication import POINT_RE
 
-# Set to "yes" on every snapshot of a backup point whose run brought every
-# expected dataset to it. Only ever set on snapshots: user properties are
-# inherited, so a value on a filesystem would show on all its snapshots.
+# Set on every snapshot of a backup point whose run brought every expected
+# dataset to it; the value is how many datasets that run brought there, so a
+# point that later loses part of its snapshots (a prune, a rollback, a
+# destroy) is no longer complete. Read with `-s local` only: user properties
+# are inherited, so a value on a filesystem would show on all its snapshots.
+# Drives written by 2.0.0-rc2 carry "yes", without the count.
 COMPLETE_PROP = "org.zark:point-complete"
+LEGACY_MARK = "yes"
 
 # Two snapshots of one dataset further apart than this belong to different
 # runs (sanoid takes all of a dataset's buckets within a few seconds).
@@ -92,7 +96,7 @@ class Snap:  # pylint: disable=too-many-instance-attributes
     createtxg: int
     creation: int
     source: str = ""  # stored under this archived lineage, when not "dataset"
-    complete: bool = False  # carries COMPLETE_PROP: its backup run reached every dataset
+    mark: str = ""  # its own COMPLETE_PROP value, "" when not set on it
 
     @property
     def stored(self) -> str:
@@ -123,10 +127,15 @@ class Point:
         return datetime.fromtimestamp(self.label, UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def parse_snapshots(lines: list[str], pool: str) -> list[Snap]:
-    """Parse ``zfs list -Hp -t snapshot -o name,guid,createtxg,creation[,COMPLETE_PROP]``
-    lines."""
+def parse_snapshots(
+    lines: list[str],
+    pool: str,
+    marks: dict[str, str] | None = None,
+) -> list[Snap]:
+    """Parse ``zfs list -Hp -t snapshot -o name,guid,createtxg,creation`` lines;
+    ``marks`` maps a full snapshot name to its own (local) COMPLETE_PROP."""
     snaps: list[Snap] = []
+    marks = marks or {}
     prefix = f"{pool}/"
     for line in lines:
         fields = line.rstrip("\n").split("\t")
@@ -138,10 +147,15 @@ def parse_snapshots(lines: list[str], pool: str) -> list[Snap]:
         rel = full[len(prefix) :]
         source = rel if logical(rel) != rel else ""
         try:
-            complete = len(fields) > 4 and fields[4] == "yes"
             snaps.append(
                 Snap(
-                    logical(rel), name, fields[1], int(fields[2]), int(fields[3]), source, complete
+                    logical(rel),
+                    name,
+                    fields[1],
+                    int(fields[2]),
+                    int(fields[3]),
+                    source,
+                    marks.get(fields[0], ""),
                 ),
             )
         except ValueError:
@@ -284,8 +298,33 @@ def legacy_complete(snaps: list[Snap], last_point: str) -> set[str]:
     return out
 
 
+def point_marks(snaps: list[Snap]) -> dict[str, list[Snap]]:
+    """Backup point name → its snapshots, for the points with any mark."""
+    marked = {s.name for s in snaps if s.mark and POINT_RE.match(s.name)}
+    out: dict[str, list[Snap]] = {}
+    for s in snaps:
+        if s.name in marked:
+            out.setdefault(s.name, []).append(s)
+    return out
+
+
+def is_complete(members: list[Snap]) -> bool:
+    """True when every snapshot of a point carries its mark and as many
+    datasets as the mark records still hold the point (archived lineages
+    count as their dataset). An rc2 mark (``yes``) carries no count."""
+    marks = {s.mark for s in members}
+    if len(marks) != 1:
+        return False
+    mark = marks.pop()
+    if mark == LEGACY_MARK:
+        return True
+    return mark.isdigit() and int(mark) == len({s.dataset for s in members})
+
+
 def complete_points(snaps: list[Snap], last_point: str) -> set[str]:
-    """Names of the complete backup points on a drive: the marked ones, or,
-    on a drive with no mark yet, :func:`legacy_complete`."""
-    marked = {s.name for s in snaps if s.complete and POINT_RE.match(s.name)}
-    return marked or legacy_complete(snaps, last_point)
+    """Names of the complete backup points on a drive: by their marks, or,
+    on a drive with no mark at all, :func:`legacy_complete`."""
+    marked = point_marks(snaps)
+    if not marked:
+        return legacy_complete(snaps, last_point)
+    return {name for name, members in marked.items() if is_complete(members)}

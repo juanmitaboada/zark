@@ -208,14 +208,40 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return _ok(self.features[pool] + "\n") if prop == "feature@bookmark_v2" else _err("?")
 
     def _get(self, args: list[str]) -> RunResult:
-        """``zfs get -H [-s local] -o value|property,value <prop|all> <ds>``."""
+        """``zfs get -H [-s local] -o value|property,value <prop|all> <ds>``, and
+        ``zfs get -H -p -r -s local -t snapshot -o name,value <prop> <root>``."""
         ds, prop = args[-1], args[-2]
         if ds not in self.ds:
             return _err("does not exist")
+        if "-r" in args and "snapshot" in args:
+            return self._get_snapshots(ds, prop, local="local" in args)
         props = self.ds[ds].props
         if prop == "all":
             return _ok("".join(f"{k}\t{v}\n" for k, v in sorted(props.items()) if ":" in k))
         return _ok(props.get(prop, "-") + "\n")
+
+    def _get_snapshots(self, root: str, prop: str, local: bool) -> RunResult:
+        rows: list[str] = []
+        for n in sorted(self.ds):
+            if n != root and not n.startswith(root + "/"):
+                continue
+            for s in self.ds[n].snaps:
+                value = s.props.get(prop, "") if local else self._inherited(n, s, prop)
+                if value and value != "-":
+                    rows.append(f"{n}@{s.name}\t{value}\n")
+        return _ok("".join(rows))
+
+    def _inherited(self, name: str, s: FSnap | None, prop: str) -> str:
+        """A user property as ZFS shows it: the snapshot's own value, else its
+        filesystem's, else the nearest ancestor's (dsl_prop.c:1224-1245)."""
+        if s is not None and prop in s.props:
+            return s.props[prop]
+        parts = name.split("/")
+        for i in range(len(parts), 0, -1):
+            d = self.ds.get("/".join(parts[:i]))
+            if d is not None and prop in d.props:
+                return d.props[prop]
+        return "-"
 
     def _is_active(self, args: list[str]) -> RunResult:
         state = self.units.get(args[0], "inactive")
@@ -280,10 +306,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 vals.append(str(1024 * (1 + len(d.snaps))))
             elif f == "written" and s is None:
                 vals.append(str(d.written) if d.snaps else "-")
-            elif s is not None and f in s.props:
-                vals.append(s.props[f])
+            elif ":" in f:
+                vals.append(self._inherited(name.split("@")[0].split("#")[0], s, f))
             else:
-                # A snapshot inherits its dataset's user properties.
                 vals.append(d.props.get(f, "-"))
         return "\t".join(vals)
 
