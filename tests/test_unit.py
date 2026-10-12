@@ -455,6 +455,31 @@ class TestLog:
         assert Log().log_file == os.path.join(_TEST_LOG_DIR, "zark.log")
         assert Log().log_file not in _REAL_LOG_FILES
 
+    def test_passphrase_box_is_shown_before_the_prompt(self):
+        """getpass writes to /dev/tty; with stdout piped (`| tee`, block
+        buffered) the box came after "Passphrase:" (eli, N5)."""
+
+        class Piped(StringIO):
+            """A block-buffered pipe: only flushed text reaches the terminal."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.shown = ""
+
+            def flush(self) -> None:
+                self.shown = self.getvalue()
+
+        out = Piped()
+        seen: list[str] = []
+
+        def prompt(_text: str) -> str:
+            seen.append(out.shown)
+            return "secret"
+
+        with patch("lib.log.getpass.getpass", side_effect=prompt), redirect_stdout(out):
+            assert make_log().ask_password("Passphrase for backup") == "secret"
+        assert "Passphrase for backup" in seen[0]
+
     def test_strip_ansi(self):
         """Log strips ANSI codes for file output."""
         log = make_log()

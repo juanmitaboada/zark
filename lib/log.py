@@ -419,6 +419,8 @@ class Log:
         print(f"{self.M}  │ {self.Y}🔑{self.N} {question}")
         print(f"{self.M}  └─────────────────────────────────────────────────────┘{self.N}")
         self._to_file(f"[PROMPT]  {self._strip(question)} → (passphrase, not logged)")
+        # getpass writes to /dev/tty: piped (| tee) stdout must reach it first.
+        sys.stdout.flush()
         return getpass.getpass("    Passphrase: ")
 
     def ask_choice(self, question: str, options: list[str], default: int = 0) -> int:
