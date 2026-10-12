@@ -60,12 +60,14 @@ import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-i
 import commands.monitor as monitor_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.mount as mount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.prune as prune_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.purge as purge_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
@@ -8965,6 +8967,16 @@ class TestBackupCommand:
         _cfg, rc = self._run(fake, patch.object(backup_mod, "_apply_retention", side_effect=spy))
         assert rc == 1 and len(calls) == 1
 
+    def test_removable_residues_are_pointed_at_after_a_backup(self) -> None:
+        """11a: a backup never removes them; it says that prune can."""
+        fake = _fresh_fake()
+        fake.snap("rpool/keystore", "prepare_20260927_082338")
+        out = StringIO()
+        _cfg, rc = self._run(fake, redirect_stdout(out))
+        assert rc == 0
+        assert "1 legacy snapshot(s) in origin no registered drive needs" in out.getvalue()
+        assert fake.names("rpool/keystore") == ["prepare_20260927_082338"]
+
     def test_apply_retention_on_the_drive(self) -> None:
         """What goes after a complete run is the policy's, logged one by one."""
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
@@ -9574,6 +9586,182 @@ class TestBackupSpace:
         ok, asked, _ = self._decide(fake, 10**12, 10**12, True, ret.Policy())
         assert ok and not asked
         assert before == {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+
+
+class TestOriginInventory:  # pylint: disable=too-few-public-methods
+    """M3-9/M3-11: what `zark prune` sees in origin, by kind."""
+
+    def test_kinds_and_the_residue_rule(self) -> None:
+        """A syncoid residue goes only where every registered drive has an
+        anchor; the keystore's prepare_* always; points and bpool anchors apart."""
+        home, var = "rpool/USERDATA/home", "rpool/var"
+
+        def ref(name: str, n: int) -> repl.Ref:
+            return repl.Ref(name, str(n), n, 1000 + n)
+
+        origin = {
+            home: repl.Origin(
+                home,
+                snaps=[
+                    ref("autosnap_2026-10-01_00:00:00_daily", 1),
+                    ref("autosnap_2026-10-01_01:00:00_hourly", 2),
+                    ref("syncoid_carmen_2026-09-27:10:28:08-GMT02:00", 3),
+                    ref("zark_2026-10-02_10:00:00Z", 4),
+                ],
+                bookmarks=[
+                    ref("zark_111_2026-10-01_10:00:00Z", 5),
+                    ref("zark_222_2026-10-01_10:00:00Z", 6),
+                ],
+            ),
+            var: repl.Origin(
+                var,
+                snaps=[ref("syncoid_carmen_2026-09-27:10:28:08-GMT02:00", 7)],
+                bookmarks=[ref("zark_111_2026-10-01_10:00:00Z", 8)],
+            ),
+            "rpool/keystore": repl.Origin(
+                "rpool/keystore", "volume", snaps=[ref("prepare_20260927_082338", 9)]
+            ),
+            "bpool/BOOT/be": repl.Origin(
+                "bpool/BOOT/be", snaps=[ref("zark_222_2026-10-01_10:00:00Z", 10)]
+            ),
+            "rpool/ROOT/be": repl.Origin("rpool/ROOT/be", snaps=[ref("before-upgrade", 11)]),
+        }
+        inv = oprune.inventory(origin, {"111": "black", "222": "blue"})
+        assert sorted(inv.autosnaps) == ["daily", "hourly"]
+        assert [i.target for i in inv.residues] == [
+            f"{home}@syncoid_carmen_2026-09-27:10:28:08-GMT02:00",
+            "rpool/keystore@prepare_20260927_082338",
+        ]
+        kept = inv.residues_kept
+        assert [i.target for i in kept] == [f"{var}@syncoid_carmen_2026-09-27:10:28:08-GMT02:00"]
+        assert "blue has no anchor" in kept[0].reason
+        assert [i.target for i in inv.points] == [f"{home}@zark_2026-10-02_10:00:00Z"]
+        assert [i.target for i in inv.anchors["222"]] == [
+            "bpool/BOOT/be@zark_222_2026-10-01_10:00:00Z"
+        ]
+        names = [i.target for items in inv.autosnaps.values() for i in items]
+        assert not any("before-upgrade" in n for n in names + [i.target for i in inv.residues])
+
+
+class TestPruneCommand:
+    """`zark prune` on FakeZfs: origin and a drive."""
+
+    @staticmethod
+    def _answers(
+        choices: list[int], inputs: list[str], typed: str, yes: bool
+    ) -> list[AbstractContextManager[object]]:
+        return [
+            patch.object(Log, "ask_choice", side_effect=choices),
+            patch.object(Log, "ask_input", side_effect=inputs),
+            patch.object(Log, "ask_text", return_value=typed),
+            patch.object(Log, "ask", return_value=yes),
+            patch("builtins.input", side_effect=EOFError),
+        ]
+
+    def _origin(self, fake: FakeZfs, cfg: Config, *answers: AbstractContextManager[object]) -> str:
+        out = StringIO()
+        with ExitStack() as stack:
+            for cm in (patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()), *answers):
+                stack.enter_context(cm)
+            prune_mod._prune_origin(cfg, Log())  # pylint: disable=protected-access
+        return out.getvalue()
+
+    def test_sanoid_snapshots_by_age_and_the_next_backup_stays_incremental(self) -> None:
+        """No floor: every sanoid snapshot older than the cutoff goes, one
+        exact name per destroy; the drive's bookmarks carry the next backup."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        now = fake.clock + 10 * ret.DAY
+        before = len(fake.calls)
+        out = self._origin(
+            fake,
+            cfg,
+            *self._answers([1, 0], ["5"], "PRUNE", False),
+            patch.object(prune_mod.time, "time", return_value=float(now)),
+        )
+        assert "sanoid daily" in out
+        destroys = [
+            c for c in fake.calls[before:] if c.startswith("zfs destroy ") and "-nvp" not in c
+        ]
+        assert destroys and all("%" not in c and "," not in c and " -r" not in c for c in destroys)
+        assert not any(n.startswith("autosnap_") for n in fake.names("rpool/USERDATA/home"))
+        assert fake.bookmarks("rpool/USERDATA/home")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            assert eng.take_point()
+            plans = {p.rel: p.state for p in eng.survey()}
+        assert plans["rpool/USERDATA/home"] is repl.State.VIA_BOOKMARK
+
+    def test_mistyped_word_removes_nothing(self) -> None:
+        """A typed word that is not PRUNE removes nothing."""
+        fake = _fresh_fake()
+        before = {ds: fake.names(ds) for ds in fake.ds}
+        out = self._origin(fake, make_config(), *self._answers([1, 0], ["0"], "prune", True))
+        assert before == {ds: fake.names(ds) for ds in fake.ds}
+        assert "Not confirmed (PRUNE was not typed) — nothing removed" in out
+
+    def test_residues_need_a_yes_and_follow_the_rule(self) -> None:
+        """11a: removed after a yes; one a registered drive may need stays."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for ds in ("rpool/USERDATA/home", "rpool/var"):
+            fake.snap(ds, "syncoid_carmen_2026-09-27:10:28:08-GMT02:00")
+        fake.snap("rpool/keystore", "prepare_20260927_082338")
+        fake.ds["rpool/var"].bookmarks = []  # this drive's anchor on var is gone
+        cfg = make_config()
+        cfg.known_drives["black"] = DriveInfo("black", "111", "d")
+        out = self._origin(fake, cfg, *self._answers([2, 0], [], "", True))
+        assert "syncoid_carmen" not in " ".join(fake.names("rpool/USERDATA/home"))
+        assert not fake.names("rpool/keystore")
+        assert "syncoid_carmen_2026-09-27:10:28:08-GMT02:00" in fake.names("rpool/var")
+        assert "black has no anchor on rpool/var" in out
+
+    def test_a_drives_bpool_anchors_go_and_its_next_backup_asks(self) -> None:
+        """10b: the consequence is said first; that drive's bpool is then no
+        longer incremental."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _prune_all_autosnaps(fake)
+        cfg = make_config()
+        cfg.known_drives["blue"] = DriveInfo("blue", "111", "d")
+        out = self._origin(fake, cfg, *self._answers([1, 1, 0], [], "PRUNE", False))
+        assert "asks how to resend them" in out
+        assert not [n for n in fake.names("bpool/BOOT/be") if repl.anchor_disk(n)]
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            assert eng.take_point()
+            plans = {p.rel: p.state for p in eng.survey()}
+        assert plans["bpool/BOOT/be"] in (repl.State.ROLLBACK, repl.State.DIVERGED)
+        assert plans["rpool/ROOT/be"] is repl.State.VIA_BOOKMARK
+
+    def test_drive_policy_then_the_oldest_points(self) -> None:
+        """A drive: its policy on a yes, then the oldest monthly point on a
+        typed PRUNE; the newest complete point is never offered."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        drive = ConnectedDrive("backup", "111", "d", "/dev/sdb", True, False, False, "exported")
+        out = StringIO()
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                redirect_stdout(out),
+                redirect_stderr(StringIO()),
+                patch.object(ZFS, "import_backup_pool", return_value=True),
+                patch.object(prune_mod, "backup_device", return_value="/dev/sdb1"),
+                patch.object(prune_mod, "prompt_eject_or_attach"),
+                patch.object(Cleanup, "register", lambda _self: None),
+                patch.object(prune_mod.time, "time", return_value=float(NOW)),
+                *self._answers([], ["1"], "PRUNE", True),
+            ):
+                stack.enter_context(cm)
+            prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
+        be = fake.names("backup/rpool/ROOT/be")
+        assert P1 not in be and P2 not in be and P3 in be
+        assert "zark_2026-10-10_10:00:00Z" in be
 
 
 class TestCompletePoints:

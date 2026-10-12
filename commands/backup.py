@@ -47,6 +47,7 @@ from lib.identity import by_id_names, preferred_by_id, whole_disk
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
+from lib.origin_prune import inventory
 from lib.replication import TRANSFERABLE, DatasetPlan, State, is_archived, point_name
 from lib.retention import Policy, Prune, plan_prune, point_removals, space_candidates
 from lib.sanoid_retention import guaranteed_overlap_days
@@ -897,12 +898,19 @@ def run(
             *[f"{log.Y}  {p.rel} ({p.note}){log.N}" for p in not_backed_up],
         ],
     )
-    anchored = engine.anchored_disks(engine.read_origin(engine.source_pools()))
+    origin = engine.read_origin(engine.source_pools())
+    anchored = engine.anchored_disks(origin)
     unanchored = [
         i for n, i in cfg.known_drives.items() if n != pool_name and i.guid not in anchored
     ]
     horizon = guaranteed_overlap_days(log) if unanchored else None
     _report_rpo(cfg, pool_name, log, anchored, horizon)
+    residues = inventory(origin, {i.guid: n for n, i in cfg.known_drives.items()}).residues
+    if residues:
+        log.info(
+            f"{len(residues)} legacy snapshot(s) in origin no registered drive needs "
+            + "(zark 1.x residues): sudo zark prune removes them"
+        )
 
     prompt_eject_or_attach(
         device,

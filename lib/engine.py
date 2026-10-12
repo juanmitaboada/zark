@@ -907,29 +907,52 @@ def _under_any(rel: str, tops: list[str]) -> bool:
     return any(rel == t or rel.startswith(f"{t}/") for t in tops)
 
 
-def reclaim(pool: str, removals: list[Removal], tops: list[str] | None = None) -> int:
-    """Bytes the removals would free, measured by ZFS: one dry run per dataset
-    over the exact names (``zfs destroy -nvp ds@a,b,c``,
-    cmd/zfs/zfs_main.c:1756-1779), plus ``used`` of each subtree destroyed
-    whole. 0 for what cannot be measured."""
-    tops = tops or []
+def reclaim_names(names: list[str]) -> int:
+    """Bytes destroying these snapshots (full ``ds@snap`` names) would free,
+    measured by ZFS: one dry run per dataset over the exact names, comma
+    separated (``zfs destroy -nvp ds@a,b,c``, cmd/zfs/zfs_main.c:1756-1779;
+    only a ``%`` makes a range, lib/libzfs/libzfs_iter.c:429-460). 0 for
+    what cannot be measured."""
     by_ds: dict[str, list[str]] = {}
-    for r in removals:
-        if not _under_any(r.rel, tops):
-            by_ds.setdefault(r.rel, []).append(r.name)
+    for full in names:
+        ds, _, snap = full.partition("@")
+        by_ds.setdefault(ds, []).append(snap)
     total = 0
-    for rel, names in sorted(by_ds.items()):
-        spec = ",".join(dict.fromkeys(names))
-        out = sh.run(f"zfs destroy -nvp {_q(f'{pool}/{rel}@{spec}')}")
+    for ds, snaps in sorted(by_ds.items()):
+        spec = ",".join(dict.fromkeys(snaps))
+        out = sh.run(f"zfs destroy -nvp {_q(f'{ds}@{spec}')}")
         for line in out.lines if out.ok else []:
             f = line.split("\t")
             if len(f) == 2 and f[0] == "reclaim" and f[1].isdigit():
                 total += int(f[1])
+    return total
+
+
+def reclaim(pool: str, removals: list[Removal], tops: list[str] | None = None) -> int:
+    """Bytes the removals on drive ``pool`` would free (:func:`reclaim_names`),
+    plus ``used`` of each subtree destroyed whole."""
+    tops = tops or []
+    total = reclaim_names([f"{pool}/{r.target}" for r in removals if not _under_any(r.rel, tops)])
     for top in tops:
         used = sh.run(f"zfs list -Hp -o used {_q(f'{pool}/{top}')}")
         if used.ok and used.output.strip().isdigit():
             total += int(used.output.strip())
     return total
+
+
+def destroy_snapshots(targets: list[tuple[str, str]], log: Log) -> tuple[int, list[str]]:
+    """Destroy ``(ds@snap, reason)`` one by one, by exact name, each logged
+    with its reason; returns how many went and what could not."""
+    count, failed = 0, []
+    for target, reason in targets:
+        res = sh.run(f"zfs destroy {_q(target)}", log=log)
+        if res.ok:
+            count += 1
+            log.info(f"  removed {target}: {reason}")
+        else:
+            failed.append(target)
+            log.warn(f"  could not remove {target}: {res.stderr.strip()}")
+    return count, failed
 
 
 def apply_prune(pool: str, prune: Prune, log: Log) -> tuple[int, list[str]]:
@@ -938,18 +961,10 @@ def apply_prune(pool: str, prune: Prune, log: Log) -> tuple[int, list[str]]:
     §7); a subtree destroyed whole names every snapshot it takes first.
     Returns how many went and what could not be destroyed."""
     tops = [t for t, _ in prune.datasets]
-    count, failed = 0, []
-    for r in prune.snapshots:
-        if _under_any(r.rel, tops):
-            continue
-        target = f"{pool}/{r.target}"
-        res = sh.run(f"zfs destroy {_q(target)}", log=log)
-        if res.ok:
-            count += 1
-            log.info(f"  removed {target}: {r.reason}")
-        else:
-            failed.append(target)
-            log.warn(f"  could not remove {target}: {res.stderr.strip()}")
+    count, failed = destroy_snapshots(
+        [(f"{pool}/{r.target}", r.reason) for r in prune.snapshots if not _under_any(r.rel, tops)],
+        log,
+    )
     for top, why in prune.datasets:
         for r in prune.snapshots:
             if _under_any(r.rel, [top]):

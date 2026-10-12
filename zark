@@ -55,6 +55,7 @@ COMMANDS = {
     "clean": "Emergency cleanup: unmount everything, export all pools",
     "health": "Non-destructive risk checks on a backup drive",
     "registry": "List, forget or fix entries in known_drives.json",
+    "prune": "Reclaim space in origin or on a backup drive (interactive)",
     "fix-rpool-mountpoint": "Give a restored rpool back mountpoint=/ (live USB)",
 }
 

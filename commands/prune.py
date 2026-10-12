@@ -1,0 +1,315 @@
+# Copyright 2026 Juanmi Taboada
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""
+zark prune — reclaim space in origin or on a connected backup drive.
+
+Interactive; nothing goes without a confirmation, every snapshot is
+destroyed by its exact name (never a % range) and logged with its reason.
+
+Origin (rpool, bpool; M3 decisions 9a–11a): what each kind of snapshot
+holds and what removing it frees, then
+  * sanoid's snapshots older than N days (typed PRUNE); sanoid.conf is not
+    changed, so sanoid keeps taking and pruning by its own policy;
+  * legacy residues: syncoid_* snapshots no registered drive can depend on
+    and the keystore's prepare_* snapshots (yes/no);
+  * backup points left by interrupted runs (typed PRUNE);
+  * a drive's bpool anchors (typed PRUNE); that drive's next backup then
+    finds nothing in common on those datasets and asks how to resend them.
+There is no floor imposed by the backups: rpool's anchors are bookmarks.
+
+A drive (imported under I-G, no passphrase needed): what its retention
+policy removes now (yes/no), then, beyond the policy, the oldest monthly
+backup points and the history from before its first zark 2 backup point
+(typed PRUNE). The drive's newest complete point and every live dataset's
+newest snapshot (I-E) are never offered.
+"""
+
+import time
+from collections.abc import Callable
+from functools import partial
+
+from lib import engine, sh
+from lib.cleanup import Cleanup, prompt_eject_or_attach
+from lib.config import Config
+from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
+from lib.log import Log
+from lib.origin_prune import Inventory, Item, inventory, older_than
+from lib.replication import Dest
+from lib.retention import (
+    DAY,
+    Policy,
+    Prune,
+    Removal,
+    first_point_time,
+    is_live,
+    plan_prune,
+    point_removals,
+    point_times,
+    space_candidates,
+)
+from lib.zfs import ZFS
+
+WORD = "PRUNE"
+
+
+def _gib(n: int) -> str:
+    return sh.humanize_bytes(n)
+
+
+def _when(ts: int) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+
+
+def _typed(log: Log, what: str) -> bool:
+    answer = log.ask_text(
+        f"    Type {WORD} to {what}: ", accept=(WORD,), label=f"Type {WORD} to {what}"
+    )
+    if answer != WORD:
+        log.info(f"Not confirmed ({WORD} was not typed) — nothing removed")
+    return answer == WORD
+
+
+def _capacity(log: Log) -> None:
+    for pool in engine.source_pools():
+        r = sh.run(f"zpool list -Hp -o name,capacity,size,free {pool}")
+        f = r.output.strip().split("\t") if r.ok else []
+        if len(f) == 4 and f[2].isdigit() and f[3].isdigit():
+            log.info(f"{pool}: {f[1]}% full ({_gib(int(f[3]))} free of {_gib(int(f[2]))})")
+
+
+def _summary(inv: Inventory, drives: dict[str, str], log: Log) -> None:
+    def line(label: str, items: list[Item]) -> None:
+        if items:
+            oldest = min(i.creation for i in items)
+            freed = engine.reclaim_names([i.target for i in items])
+            log.info(
+                f"  {label:34} {len(items):5}  oldest {_when(oldest)}"
+                + f"  all of them free {_gib(freed)}"
+            )
+
+    log.info("Snapshots in origin, by kind:")
+    for kind in ("frequently", "hourly", "daily", "weekly", "monthly", "yearly"):
+        line(f"sanoid {kind}", inv.autosnaps.get(kind, []))
+    line("legacy residues (removable)", inv.residues)
+    if inv.residues_kept:
+        log.info(f"  {'legacy residues a drive may need':34} {len(inv.residues_kept):5}")
+    line("points left by interrupted runs", inv.points)
+    for guid, items in sorted(inv.anchors.items()):
+        line(f"bpool anchors of {drives.get(guid, guid)}", items)
+
+
+def _remove(items: list[Item], why: str, log: Log) -> None:
+    count, failed = engine.destroy_snapshots([(i.target, i.reason or why) for i in items], log)
+    log.ok(f"{count} snapshot(s) removed")
+    if failed:
+        log.warn(f"{len(failed)} could not be removed (see above)")
+
+
+def _by_age(inv: Inventory, log: Log) -> None:
+    raw = log.ask_input("Keep sanoid snapshots of how many days?", "30")
+    if not raw.isdigit():
+        log.warn("Not a number of days — nothing removed")
+        return
+    items = older_than(inv, int(time.time()) - int(raw) * DAY)
+    if not items:
+        log.info(f"No sanoid snapshot is older than {raw} days")
+        return
+    freed = engine.reclaim_names([i.target for i in items])
+    log.warn(
+        f"{len(items)} sanoid snapshot(s) older than {raw} days; "
+        + f"removing them frees {_gib(freed)}"
+    )
+    log.file("  " + ", ".join(i.target for i in items))
+    if _typed(log, f"remove {len(items)} sanoid snapshot(s)"):
+        _remove(items, f"sanoid snapshot older than {raw} days", log)
+
+
+def _residues(inv: Inventory, log: Log) -> None:
+    for i in inv.residues_kept:
+        log.info(f"  kept {i.target}: {i.reason}")
+    freed = engine.reclaim_names([i.target for i in inv.residues])
+    for i in inv.residues:
+        log.info(f"  {i.target}: {i.reason}")
+    if log.ask(f"Remove these {len(inv.residues)} residue(s) ({_gib(freed)})?", default=False):
+        _remove(inv.residues, "legacy residue", log)
+
+
+def _points(inv: Inventory, log: Log) -> None:
+    for i in inv.points:
+        log.info(f"  {i.target}")
+    log.warn(
+        "A drive whose interrupted transfer started from one of these discards "
+        + "it at its next backup and sends it again"
+    )
+    if _typed(log, f"remove {len(inv.points)} backup point(s)"):
+        _remove(inv.points, "backup point left by an interrupted run", log)
+
+
+def _anchors(inv: Inventory, drives: dict[str, str], log: Log) -> None:
+    guids = sorted(inv.anchors)
+    pick = log.ask_choice(
+        "Whose bpool anchors?",
+        ["none", *(f"{drives.get(g, g)} ({len(inv.anchors[g])} snapshot(s))" for g in guids)],
+    )
+    if pick == 0:
+        return
+    guid = guids[pick - 1]
+    items = inv.anchors[guid]
+    name = drives.get(guid, guid)
+    freed = engine.reclaim_names([i.target for i in items])
+    log.warn(
+        f"Without them, {name}'s next backup finds nothing in common on these bpool "
+        + "datasets and asks how to resend them (archive or destroy them on the drive, "
+        + f"then a full send of a few hundred MB). Frees {_gib(freed)}."
+    )
+    if _typed(log, f"remove {name}'s {len(items)} bpool anchor(s)"):
+        _remove(items, f"bpool anchor of drive {name}", log)
+
+
+def _prune_origin(cfg: Config, log: Log) -> None:
+    """The origin menu, until the user is done."""
+    drives = {info.guid: name for name, info in cfg.known_drives.items()}
+    while True:
+        _capacity(log)
+        try:
+            origin = engine.read_origin(engine.source_pools(), strict=True)
+        except engine.ReadError as e:
+            log.fatal(f"Cannot read origin: {e}")
+        inv = inventory(origin, drives)
+        _summary(inv, drives, log)
+        actions: list[tuple[str, Callable[[], None] | None]] = [("done", None)]
+        if inv.autosnaps:
+            actions.append(
+                ("remove sanoid snapshots older than N days", partial(_by_age, inv, log))
+            )
+        if inv.residues:
+            actions.append(("remove the legacy residues", partial(_residues, inv, log)))
+        if inv.points:
+            label = "remove backup points left by interrupted runs"
+            actions.append((label, partial(_points, inv, log)))
+        if inv.anchors:
+            actions.append(("remove a drive's bpool anchors", partial(_anchors, inv, drives, log)))
+        pick = log.ask_choice("What to remove in origin?", [label for label, _ in actions])
+        act = actions[pick][1]
+        if act is None:
+            return
+        act()
+
+
+def _legacy_history(dest: dict[str, Dest]) -> list[Removal]:
+    """Snapshots from before the drive's first backup point (1.x history),
+    every live dataset's newest kept (I-E)."""
+    start = first_point_time(point_times(dest))
+    out: list[Removal] = []
+    for rel, d in sorted(dest.items()):
+        newest = d.newest if is_live(rel, d) else None
+        for s in d.snaps:
+            if (start is None or s.creation < start) and not (newest and s.guid == newest.guid):
+                out.append(Removal(rel, s.name, "1.x history, removed by hand"))
+    return out
+
+
+def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylint: disable=too-many-locals
+    """Retention now, then beyond it, on one connected drive."""
+    pool = drive.name
+    zfs = ZFS(log)
+    cleanup = Cleanup(log)
+    cleanup.register()
+    device = backup_device(drive)
+    if not zfs.import_backup_pool(pool, device, guid=drive.guid):
+        log.fatal(f"Cannot import pool {pool}", solutions=["Reconnect the drive and run again"])
+    cleanup.track_pool(pool)
+    engine.check_drive_owner(pool, log)
+    policy = cfg.drive_policy(pool)
+    now = int(time.time())
+    try:
+        dest = engine.read_dest(pool, strict=True)
+    except engine.ReadError as e:
+        log.fatal(f"Cannot read {pool}: {e}")
+    complete, pins = engine.drive_complete(pool), engine.drive_pins(pool)
+    prune = plan_prune(dest, complete, policy, now, pinned=pins)
+    if not prune.empty:
+        freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
+        log.info(
+            f"{pool}'s retention (window {policy.window_days} days) removes "
+            + f"{len(prune.snapshots)} snapshot(s) now, freeing {_gib(freed)}"
+        )
+        if log.ask(f"Apply {pool}'s retention now?", default=False):
+            _ = engine.apply_prune(pool, prune, log)
+            dest = engine.read_dest(pool, strict=True)
+            prune = Prune()
+    else:
+        log.ok(f"{pool}'s retention removes nothing now")
+    _beyond(pool, dest, complete, pins, policy, now, prune, log)
+    cleanup.run()
+    prompt_eject_or_attach(device, pool, log, default_eject=False)
+
+
+def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    pool: str,
+    dest: dict[str, Dest],
+    complete: set[str],
+    pins: dict[str, str],
+    policy: Policy,
+    now: int,
+    prune: Prune,
+    log: Log,
+) -> None:
+    """The oldest monthly points, then the 1.x history, each on a typed PRUNE."""
+    names = space_candidates(dest, complete, policy, now, prune)
+    if names:
+        log.info(f"Beyond the policy, the oldest monthly backup points on {pool}:")
+        removals: list[Removal] = []
+        for i, name in enumerate(names, 1):
+            removals += point_removals(dest, name, pinned=pins)
+            freed = engine.reclaim(pool, removals)
+            log.info(f"  {i}) {name}  (with the ones above: {_gib(freed)})")
+        raw = log.ask_input("How many of the oldest to remove? (0: none)", "0")
+        n = min(int(raw), len(names)) if raw.isdigit() else 0
+        chosen = [r for name in names[:n] for r in point_removals(dest, name, pinned=pins)]
+        if chosen and _typed(log, f"remove the {n} oldest backup point(s) from {pool}"):
+            _ = engine.apply_prune(pool, Prune(snapshots=chosen), log)
+    legacy = [r for r in _legacy_history(dest) if r.target not in pins]
+    if legacy:
+        freed = engine.reclaim(pool, legacy)
+        log.info(
+            f"{pool} holds {len(legacy)} snapshot(s) from before its first zark 2 backup point "
+            + f"(1.x history); removing them frees {_gib(freed)}"
+        )
+        if _typed(log, f"remove the 1.x history from {pool}"):
+            _ = engine.apply_prune(pool, Prune(snapshots=legacy), log)
+
+
+def run(args: list[str]) -> None:
+    """Main entry point for 'zark prune'."""
+    _ = args
+    log = Log()
+    cfg = Config.load()
+    cfg.check_registry(log, fatal=True)
+    log.banner("PRUNE", "Reclaim space in origin or on a backup drive")
+    drives = [d for d in scan_connected_drives(cfg, log) if d.known]
+    targets: list[str] = []
+    if "rpool" in engine.source_pools():
+        targets.append("origin (rpool, bpool)")
+    targets += [f"backup drive {d.name}" for d in drives]
+    if not targets:
+        log.fatal(
+            "Nothing to prune here",
+            causes=["rpool is not imported and no registered drive is connected"],
+        )
+    pick = log.ask_choice("Prune what?", targets)
+    if targets[pick].startswith("origin"):
+        _prune_origin(cfg, log)
+    else:
+        _prune_drive(cfg, drives[pick - (len(targets) - len(drives))], log)
