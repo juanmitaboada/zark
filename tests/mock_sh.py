@@ -41,6 +41,7 @@ import shutil
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import patch
 
 from lib.sh import RunResult
@@ -224,14 +225,22 @@ def patch_sh(mock: MockShell):
     # The engine's sanoid marker lives under /run: never touched by a test.
     marker_dir = tempfile.mkdtemp(prefix="zark-test-run-")
     marker = patch("lib.engine.SANOID_MARKER", os.path.join(marker_dir, "sanoid-paused"))
+    status_files = [
+        patch("lib.status.MOTD_FILE", Path(marker_dir, "status.motd")),
+        patch("lib.status.NOTIFIED_FILE", Path(marker_dir, "notified")),
+    ]
 
     # Stack all patches
     for p in patches:
         p.start()
     _ = marker.start()
+    for sp in status_files:
+        _ = sp.start()
     try:
         yield mock
     finally:
+        for sp in reversed(status_files):
+            sp.stop()
         marker.stop()
         for p in reversed(patches):
             p.stop()

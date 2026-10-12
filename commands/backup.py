@@ -26,6 +26,7 @@ per-dataset table goes to the terminal and to zark.log.
 Refuses to run from live USB (would back up the wrong system).
 """
 
+import os
 import socket
 import time
 from collections.abc import Callable
@@ -33,7 +34,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import engine, sh
+from lib import engine, sh, status
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -905,6 +906,7 @@ def run(
     ]
     horizon = guaranteed_overlap_days(log) if unanchored else None
     _report_rpo(cfg, pool_name, log, anchored, horizon)
+    _ = status.refresh(cfg, Log(os.devnull))
     residues = inventory(origin, {i.guid: n for n, i in cfg.known_drives.items()}).residues
     if residues:
         log.info(

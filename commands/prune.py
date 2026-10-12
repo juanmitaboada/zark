@@ -35,11 +35,12 @@ backup points and the history from before its first zark 2 backup point
 newest snapshot (I-E) are never offered.
 """
 
+import os
 import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import engine, sh
+from lib import engine, sh, status
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -313,3 +314,4 @@ def run(args: list[str]) -> None:
         _prune_origin(cfg, log)
     else:
         _prune_drive(cfg, drives[pick - (len(targets) - len(drives))], log)
+    _ = status.refresh(cfg, Log(os.devnull))

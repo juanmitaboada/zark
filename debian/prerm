@@ -1,0 +1,24 @@
+#!/bin/sh
+# zark prerm — on removal, disable and remove the status alerts that
+# `zark setup` installed (MOTD script, zark-status.timer and its service).
+# Not on upgrade: the new version keeps them.
+
+set -e
+
+case "$1" in
+    remove)
+        if [ -x /usr/share/zark/zark ]; then
+            /usr/share/zark/zark alerts remove || true
+        fi
+        ;;
+    upgrade|deconfigure|failed-upgrade)
+        ;;
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

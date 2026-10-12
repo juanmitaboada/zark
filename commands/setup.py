@@ -38,7 +38,7 @@ future is automatically covered the next time setup runs.
 from pathlib import Path
 from typing import TypedDict
 
-from lib import apt_guard, sh
+from lib import alerts, apt_guard, sh
 from lib.engine import bookmark_feature
 
 # from lib.config import Config
@@ -831,6 +831,8 @@ def run(
     # system from the unattended-upgrades vector: a background kernel/GRUB
     # upgrade running while a zark backup drive is plugged in.
     apt_guard.install(target_root="", log=log)
+    # Space and backup-age alerts: MOTD and an hourly timer (M3 decision 13a).
+    alerts.install(log)
 
     log.banner_ok(
         "SETUP COMPLETE",

@@ -65,12 +65,16 @@ import commands.purge as purge_mod  # pylint: disable=wrong-import-position # no
 import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.status as status_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
+import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
     _decide,
@@ -9762,6 +9766,152 @@ class TestPruneCommand:
         be = fake.names("backup/rpool/ROOT/be")
         assert P1 not in be and P2 not in be and P3 in be
         assert "zark_2026-10-10_10:00:00Z" in be
+
+
+class TestStatus:
+    """M3 decisions 12 and 13: CAP, RPO, the MOTD and the notifications."""
+
+    def test_cap_levels(self) -> None:
+        """Warning from 80 %, critical from 90 %."""
+        assert [status_lib.cap_level(p) for p in (79, 80, 89, 90)] == [
+            "",
+            "warning",
+            "warning",
+            "critical",
+        ]
+
+    def test_motd_lines(self) -> None:
+        """CAP lines only at a level; the RPO line always, highlighted when the
+        newest backup of all is older than 7 days; H21 and residue lines."""
+        st = status_lib.Status(
+            caps={"rpool": 86, "bpool": 40},
+            ages={"black": 3, "blue": 34},
+            shared=["blue: anchored only on snapshots shared with the source: …"],
+            residues=23,
+        )
+        text = status_lib.motd_text(st)
+        assert "rpool is 86% full (warning from 80%): sudo zark prune" in text
+        assert "bpool" not in text
+        assert "zark: last backups: black 3 day(s) ago, blue 34 day(s) ago" in text
+        assert "blue: anchored only" in text and "23 legacy snapshot(s)" in text
+        stale = status_lib.motd_text(status_lib.Status(ages={"black": 9}))
+        assert "\033[1;33mzark:\033[0m last backups: black 9 day(s) ago" in stale
+        assert not status_lib.motd_text(status_lib.Status())
+
+    def test_notifications_once_a_day_per_pool_and_level(self) -> None:
+        """A pool notified today at a level is not notified again today."""
+        st = status_lib.Status(caps={"rpool": 92, "bpool": 50})
+        now = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
+        due = status_lib.due_notifications(st, set(), now)
+        assert [k for k, _ in due] == ["rpool critical 2026-10-12"]
+        assert not status_lib.due_notifications(st, {"rpool critical 2026-10-12"}, now)
+
+    def test_refresh_writes_the_motd_file(self) -> None:
+        """status --refresh: CAP from zpool, ages from the registry; the file
+        is replaced, readable by anyone."""
+        fake = _fresh_fake()
+        fake.capacity["rpool"] = 91
+        cfg = make_config()
+        cfg.known_drives["black"] = DriveInfo("black", "111", "d")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            st = status_lib.refresh(cfg, Log(os.devnull))
+            text = status_lib.MOTD_FILE.read_text(encoding="utf-8")
+            mode = status_lib.MOTD_FILE.stat().st_mode & 0o777
+        assert st.caps == {"rpool": 91, "bpool": 50}
+        assert "rpool is 91% full (critical from 90%)" in text and mode == 0o644
+        assert "black never" in text
+
+    def test_notify_reaches_active_desktop_sessions(self) -> None:
+        """loginctl's active Wayland and X11 sessions get notify-send as
+        their own user, on their own session bus."""
+        mock = MockShell()
+        mock.on("loginctl list-sessions --no-legend").succeeds(
+            "2 1000 br0th3r seat0 tty2\n3 0 root - pts/0\n"
+        )
+        mock.on("loginctl show-session 2 -p Type -p Active -p Name -p User").succeeds(
+            "Type=wayland\nActive=yes\nName=br0th3r\nUser=1000\n"
+        )
+        mock.on("loginctl show-session 3 -p Type -p Active -p Name -p User").succeeds(
+            "Type=tty\nActive=yes\nName=root\nUser=0\n"
+        )
+        mock.on_prefix("runuser").succeeds("")
+        with patch_sh(mock):
+            assert notify_mod.notify("zark: disk space", "rpool is 92% full") == 1
+        call = next(c for c in mock.calls if c.startswith("runuser"))
+        assert call.startswith(
+            "runuser -u br0th3r -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+        )
+        assert "notify-send" in call and "'rpool is 92% full'" in call
+
+    def test_status_command_notifies_once_a_day(self) -> None:
+        """The timer's `status --refresh --notify` twice: one notification."""
+        fake = _fresh_fake()
+        fake.capacity["rpool"] = 85
+        sent: list[str] = []
+
+        def notify(_title: str, body: str) -> int:
+            sent.append(body)
+            return 1
+
+        with (
+            patch_sh(fake),
+            patch.object(Config, "load", return_value=make_config()),
+            patch.object(notify_mod, "notify", side_effect=notify),
+            redirect_stdout(StringIO()),
+        ):
+            status_mod.run(["--refresh", "--notify"])
+            status_mod.run(["--refresh", "--notify"])
+        assert sent == ["rpool is 85% full — free space with: sudo zark prune"]
+
+
+class TestAlerts:
+    """M3 decision 13a: what `zark alerts install|remove` (and setup) write."""
+
+    def test_install_and_remove(self) -> None:
+        """MOTD script that only prints the status file; a service running this
+        zark by absolute path, guarded by its existence; an hourly timer;
+        idempotent; remove leaves nothing."""
+        mock = MockShell()
+        mock.on_prefix("systemctl").succeeds("")
+        with tempfile.TemporaryDirectory() as root, patch_sh(mock), redirect_stdout(StringIO()):
+            alerts_mod.install(make_log(), root, "/opt/zark/zark")
+            motd = Path(root, alerts_mod.MOTD_SCRIPT_PATH)
+            service = Path(root, alerts_mod.SERVICE_PATH).read_text(encoding="utf-8")
+            timer = Path(root, alerts_mod.TIMER_PATH).read_text(encoding="utf-8")
+            assert motd.stat().st_mode & 0o777 == 0o755
+            assert "cat /run/zark/status.motd" in motd.read_text(encoding="utf-8")
+            assert 'ExecStart="/opt/zark/zark" status --refresh --notify' in service
+            assert "ConditionPathExists=/opt/zark/zark" in service
+            assert "OnUnitActiveSec=1h" in timer and "OnBootSec=2min" in timer
+            reloads = mock.calls.count("systemctl daemon-reload")
+            alerts_mod.install(make_log(), root, "/opt/zark/zark")
+            assert mock.calls.count("systemctl daemon-reload") == reloads  # nothing changed
+            assert "systemctl enable --now zark-status.timer" in mock.calls
+            alerts_mod.remove(make_log(), root)
+            assert not any(
+                Path(root, p).exists()
+                for p in (
+                    alerts_mod.MOTD_SCRIPT_PATH,
+                    alerts_mod.SERVICE_PATH,
+                    alerts_mod.TIMER_PATH,
+                )
+            )
+            assert "systemctl disable --now zark-status.timer" in mock.calls
+
+    def test_a_path_with_spaces_and_percent(self) -> None:
+        """zark run from a stick mounted under its label: ExecStart quotes the
+        path, both settings escape systemd's % specifiers."""
+        unit = alerts_mod.service_unit('/run/media/u/Juanmi Taboada/50%/a"b/zark')
+        assert 'ExecStart="/run/media/u/Juanmi Taboada/50%%/a\\"b/zark" status' in unit
+        assert 'ConditionPathExists=/run/media/u/Juanmi Taboada/50%%/a"b/zark\n' in unit
+
+    def test_the_debian_package_removes_them(self) -> None:
+        """prerm runs `zark alerts remove` on remove, not on upgrade."""
+        prerm = (Path(__file__).resolve().parent.parent / "debian/prerm").read_text(
+            encoding="utf-8"
+        )
+        assert "remove)" in prerm and "/usr/share/zark/zark alerts remove" in prerm
+        assert "upgrade)" not in prerm.split("remove)")[0]
 
 
 class TestCompletePoints:

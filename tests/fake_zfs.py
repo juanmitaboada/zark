@@ -96,6 +96,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         self.inject: dict[str, tuple[str, int]] = {}  # dest dataset → (kind, after)
         self.fail_cmds: set[str] = set()  # a command containing one of these fails
         self.importable: set[str] = set()  # pools `zpool import` lists (exported here)
+        self.capacity: dict[str, int] = {}  # pool → `zpool list -o capacity` (50 when unset)
 
     # ── building the model ───────────────────────────────────────────────
 
@@ -200,7 +201,11 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         )
 
     def _zpool_list(self, args: list[str]) -> RunResult:
-        return _ok(args[-1] + "\n") if args[-1] in self.pools else _err("no such pool")
+        if args[-1] not in self.pools:
+            return _err("no such pool")
+        if "capacity" in args:
+            return _ok(f"{self.capacity.get(args[-1], 50)}\n")
+        return _ok(args[-1] + "\n")
 
     def _zpool_get(self, args: list[str]) -> RunResult:
         prop, pool = args[-2], args[-1]
