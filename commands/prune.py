@@ -35,7 +35,7 @@ backup points and the history from before its first zark 2 backup point
 newest snapshot (I-E) are never offered.
 """
 
-import os
+import re
 import time
 from collections.abc import Callable
 from functools import partial
@@ -58,10 +58,13 @@ from lib.retention import (
     point_removals,
     point_times,
     space_candidates,
+    whole_datasets,
 )
 from lib.zfs import ZFS
 
 WORD = "PRUNE"
+# What zark 1.x left on a drive: sanoid's snapshots and syncoid's.
+LEGACY_NAME = re.compile(r"^(autosnap|syncoid)_")
 
 
 def _gib(n: int) -> str:
@@ -208,17 +211,27 @@ def _prune_origin(cfg: Config, log: Log) -> None:
         act()
 
 
-def _legacy_history(dest: dict[str, Dest]) -> list[Removal]:
-    """Snapshots from before the drive's first backup point (1.x history),
-    every live dataset's newest kept (I-E)."""
-    start = first_point_time(point_times(dest))
+def _legacy_history(dest: dict[str, Dest], pins: dict[str, str]) -> Prune:
+    """sanoid's and syncoid's snapshots from before the drive's first backup
+    point (1.x history, decision 6c), every live dataset's newest kept (I-E)
+    and pinned ones left. Backup points are dated by their newest snapshot,
+    as the policy does, so no part of the first point is taken for history;
+    other names are left. An archived lineage or kept orphan left with
+    nothing goes whole, as with the policy (decision 7a): its head would
+    keep its data with no snapshot recover could reach."""
+    times = point_times(dest)
+    start = first_point_time(times)
     out: list[Removal] = []
     for rel, d in sorted(dest.items()):
         newest = d.newest if is_live(rel, d) else None
         for s in d.snaps:
-            if (start is None or s.creation < start) and not (newest and s.guid == newest.guid):
+            if not LEGACY_NAME.match(s.name) or (newest and s.guid == newest.guid):
+                continue
+            if f"{rel}@{s.name}" in pins:
+                continue
+            if start is None or s.creation < start:
                 out.append(Removal(rel, s.name, "1.x history, removed by hand"))
-    return out
+    return Prune(snapshots=out, datasets=whole_datasets(dest, out))
 
 
 def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylint: disable=too-many-locals
@@ -282,15 +295,18 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         chosen = [r for name in names[:n] for r in point_removals(dest, name, pinned=pins)]
         if chosen and _typed(log, f"remove the {n} oldest backup point(s) from {pool}"):
             _ = engine.apply_prune(pool, Prune(snapshots=chosen), log)
-    legacy = [r for r in _legacy_history(dest) if r.target not in pins]
-    if legacy:
-        freed = engine.reclaim(pool, legacy)
+            dest = engine.read_dest(pool, strict=True)
+    legacy = _legacy_history(dest, pins)
+    if not legacy.empty:
+        tops = [t for t, _ in legacy.datasets]
+        freed = engine.reclaim(pool, legacy.snapshots, tops)
+        whole = f", and {len(tops)} archived or kept dataset(s) left empty" if tops else ""
         log.info(
-            f"{pool} holds {len(legacy)} snapshot(s) from before its first zark 2 backup point "
-            + f"(1.x history); removing them frees {_gib(freed)}"
+            f"{pool} holds {len(legacy.snapshots)} snapshot(s) from before its first zark 2 "
+            + f"backup point (1.x history){whole}; removing them frees {_gib(freed)}"
         )
         if _typed(log, f"remove the 1.x history from {pool}"):
-            _ = engine.apply_prune(pool, Prune(snapshots=legacy), log)
+            _ = engine.apply_prune(pool, legacy, log)
 
 
 def run(args: list[str]) -> None:
@@ -315,4 +331,4 @@ def run(args: list[str]) -> None:
         _prune_origin(cfg, log)
     else:
         _prune_drive(cfg, drives[pick - (len(targets) - len(drives))], log)
-    _ = status.refresh(cfg, Log(os.devnull))
+    status.refresh_quietly(cfg)

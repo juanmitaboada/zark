@@ -193,7 +193,7 @@ def plan_prune(  # pylint: disable=too-many-arguments,too-many-locals
             reason = _outside_window(s.name, kind, monthly, complete)
             if reason:
                 out.snapshots.append(Removal(rel, s.name, reason))
-    out.datasets = _whole(dest, out.snapshots)
+    out.datasets = whole_datasets(dest, out.snapshots)
     return out
 
 
@@ -232,9 +232,9 @@ def _outside_window(name: str, kind: str, monthly: set[str], complete: set[str])
     return "older than the window, not its month's newest complete point"
 
 
-def _whole(dest: dict[str, Dest], removals: list[Removal]) -> list[tuple[str, str]]:
-    """Archived lineages and kept orphans left with no snapshot, by subtree
-    top: destroyed whole (M3 decision 7a)."""
+def whole_datasets(dest: dict[str, Dest], removals: list[Removal]) -> list[tuple[str, str]]:
+    """Archived lineages and kept orphans that ``removals`` leave with no
+    snapshot, by subtree top: destroyed whole (M3 decision 7a)."""
     going: dict[str, int] = {}
     for r in removals:
         going[r.rel] = going.get(r.rel, 0) + 1

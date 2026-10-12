@@ -9683,11 +9683,70 @@ class TestOriginInventory:  # pylint: disable=too-few-public-methods
         assert [i.target for i in kept] == [f"{var}@syncoid_carmen_2026-09-27:10:28:08-GMT02:00"]
         assert "blue has no anchor" in kept[0].reason
         assert [i.target for i in inv.points] == [f"{home}@zark_2026-10-02_10:00:00Z"]
+        on_root = repl.Origin(
+            "rpool", snaps=[ref("syncoid_carmen_2026-09-27:10:28:08-GMT02:00", 12)]
+        )
+        container = oprune.inventory({"rpool": on_root}, {"222": "blue"})
+        assert [i.target for i in container.residues] == [
+            "rpool@syncoid_carmen_2026-09-27:10:28:08-GMT02:00"
+        ]
         assert [i.target for i in inv.anchors["222"]] == [
             "bpool/BOOT/be@zark_222_2026-10-01_10:00:00Z"
         ]
         names = [i.target for items in inv.autosnaps.values() for i in items]
         assert not any("before-upgrade" in n for n in names + [i.target for i in inv.residues])
+
+
+class TestPruneLegacyHistory:  # pylint: disable=too-few-public-methods
+    """What `zark prune` offers as a drive's 1.x history."""
+
+    def test_only_sanoid_and_syncoid_snapshots_before_the_first_point(self) -> None:
+        """The first point counts from its newest snapshot (rpool's copy is
+        taken before bpool's), so none of it is history; manual names stay;
+        each live dataset keeps its newest."""
+        first = _pt("2026-03-01")
+        dest = _drive(
+            {
+                "rpool/ROOT/be": [
+                    ("autosnap_2026-02-01_00:00:00_monthly", 500),
+                    ("syncoid_carmen_2026-02-02:10:00:00-GMT01:00", 600),
+                    ("before-upgrade", 700),
+                    (first, 1000),
+                    ("autosnap_2026-03-02_00:00:00_daily", 2000),
+                ],
+                "bpool/BOOT/be": [("autosnap_2026-02-01_00:00:00_monthly", 500), (first, 1001)],
+            },
+        )
+        got = {r.target for r in prune_mod._legacy_history(dest, {}).snapshots}  # pylint: disable=protected-access
+        assert got == {
+            "rpool/ROOT/be@autosnap_2026-02-01_00:00:00_monthly",
+            "rpool/ROOT/be@syncoid_carmen_2026-02-02:10:00:00-GMT01:00",
+            "bpool/BOOT/be@autosnap_2026-02-01_00:00:00_monthly",
+        }
+
+    def test_an_archived_lineage_left_empty_goes_whole(self) -> None:
+        """An archived lineage holding only 1.x history is destroyed whole
+        (decision 7a: its head would keep its data out of recover's reach);
+        one with a pinned snapshot keeps it and stays."""
+        first = _pt("2026-03-01")
+        old = "rpool/ROOT/be.archived-20260301"
+        pinned = "rpool/ROOT/be2.archived-20260301"
+        dest = _drive(
+            {
+                "rpool/ROOT/be": [("autosnap_2026-02-01_00:00:00_monthly", 500), (first, 1000)],
+                old: [("autosnap_2026-01-01_00:00:00_monthly", 100)],
+                f"{old}/var": [("autosnap_2026-01-01_00:00:00_monthly", 100)],
+                pinned: [
+                    ("autosnap_2026-01-01_00:00:00_monthly", 100),
+                    ("autosnap_2026-01-02_00:00:00_daily", 200),
+                ],
+            },
+        )
+        pins = {f"{pinned}@autosnap_2026-01-02_00:00:00_daily": "origin of a clone"}
+        got = prune_mod._legacy_history(dest, pins)  # pylint: disable=protected-access
+        assert got.datasets == [(old, "archived lineage with nothing left that the policy keeps")]
+        assert f"{pinned}@autosnap_2026-01-01_00:00:00_monthly" in _gone(got)
+        assert not any(r.target in pins for r in got.snapshots)
 
 
 class TestPruneCommand:

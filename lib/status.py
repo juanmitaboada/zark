@@ -164,6 +164,15 @@ def due_notifications(
     return out
 
 
+def refresh_quietly(cfg: Config) -> None:
+    """:func:`refresh` at the end of a command: nothing to zark.log, and a
+    failure never turns a finished command into a failed one."""
+    try:
+        _ = refresh(cfg, Log(os.devnull))
+    except (OSError, ValueError, engine.ReadError) as e:
+        Log().warn(f"Could not refresh the status file: {e}")
+
+
 def refresh(cfg: Config, log: Log) -> Status:
     """Gather and write the MOTD file; failures are logged, never fatal."""
     st = gather(cfg, log)

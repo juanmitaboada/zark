@@ -23,8 +23,9 @@ Kinds:
   * sanoid's snapshots (``autosnap_*``), by type, removed by age;
   * legacy residues: ``syncoid_*`` snapshots left by zark 1.x, removable on
     a dataset only when every registered drive has an anchor there (one
-    without may still have it as its newest common snapshot, redesign §7),
-    and ``rpool/keystore@prepare_*``, which nothing uses as a base;
+    without may still have it as its newest common snapshot, redesign §7)
+    or on a structural container, which zark 2 does not replicate; and
+    ``rpool/keystore@prepare_*``, which nothing uses as a base;
   * backup points left by interrupted runs (``zark_<UTC>``);
   * bpool's per-drive anchor snapshots (``zark_<GUID>_<UTC>``).
 """
@@ -32,7 +33,7 @@ Kinds:
 import re
 from dataclasses import dataclass, field
 
-from lib.replication import KEYSTORE, POINT_RE, Origin, anchor_disk, is_bpool
+from lib.replication import KEYSTORE, POINT_RE, STRUCTURAL, Origin, anchor_disk, is_bpool
 
 AUTOSNAP_TYPE = re.compile(r"^autosnap_.*_(frequently|hourly|daily|weekly|monthly|yearly)$")
 SYNCOID = re.compile(r"^syncoid_")
@@ -76,6 +77,9 @@ def inventory(origin: dict[str, Origin], drives: dict[str, str]) -> Inventory:
                     inv.anchors.setdefault(guid, []).append(Item(target, s.creation))
             elif rel == KEYSTORE and KEYSTORE_PREPARE.match(s.name):
                 inv.residues.append(Item(target, s.creation, "keystore snapshot left by prepare"))
+            elif SYNCOID.match(s.name) and rel in STRUCTURAL:
+                why = "syncoid residue on a container zark 2 does not replicate"
+                inv.residues.append(Item(target, s.creation, why))
             elif SYNCOID.match(s.name):
                 missing = sorted(name for guid, name in drives.items() if guid not in anchored)
                 if missing:
