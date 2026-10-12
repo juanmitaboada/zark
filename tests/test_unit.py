@@ -8699,6 +8699,8 @@ class TestIncompleteBanner:
     """M2F-11b: BACKUP INCOMPLETE says, per dataset, what the next run does."""
 
     def test_each_dataset_says_what_the_next_backup_does(self) -> None:
+        """Resume, decisions, a failure and a dataset not attempted each get
+        their own line; datasets at the point or only on the drive get none."""
         plans = [
             repl.DatasetPlan("rpool/a", repl.State.AT_POINT),
             repl.DatasetPlan("rpool/home", repl.State.RESUME),
@@ -8725,6 +8727,7 @@ class TestIncompleteBanner:
         assert "an interrupted transfer resumes where it stopped" not in text
 
     def test_out_of_space(self) -> None:
+        """The dataset that hit ENOSPC asks for space; the rest say why they waited."""
         plans = [
             repl.DatasetPlan("rpool/be", repl.State.INCREMENTAL),
             repl.DatasetPlan("rpool/home", repl.State.INCREMENTAL),

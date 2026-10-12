@@ -491,21 +491,26 @@ _INCOMPLETE_SHOWN = 15
 
 def _next_step(p: DatasetPlan, out: engine.Outcome | None, res: engine.Result) -> str:
     """What the next backup does with a dataset that missed the point."""
-    if p.state is State.RESUME:
-        return "partial transfer kept: the next backup resumes it"
-    if p.state in (State.ROLLBACK, State.DIVERGED):
-        return f"needs a decision ({p.state}): the next backup asks"
-    if p.state is State.MODIFIED:
-        return "changed on the drive: the next backup asks again"
-    if out is not None and out.enospc:
-        return "the drive is full: free space, then run backup again"
-    if res.unverified and out is not None and out.ok:
-        return "transferred, not verified: the next backup checks it"
-    if out is not None and not out.ok:
-        return "failed (error in the table above): the next backup tries again"
-    if res.enospc:
-        return "not attempted after the drive filled up"
-    return "not attempted: the next backup sends it"
+    failed = out is not None and not out.ok
+    steps = (  # first match wins
+        (p.state is State.RESUME, "partial transfer kept: the next backup resumes it"),
+        (
+            p.state in (State.ROLLBACK, State.DIVERGED),
+            f"needs a decision ({p.state}): the next backup asks",
+        ),
+        (p.state is State.MODIFIED, "changed on the drive: the next backup asks again"),
+        (
+            out is not None and out.enospc,
+            "the drive is full: free space, then run backup again",
+        ),
+        (
+            bool(res.unverified) and out is not None and out.ok,
+            "transferred, not verified: the next backup checks it",
+        ),
+        (failed, "failed (error in the table above): the next backup tries again"),
+        (res.enospc, "not attempted after the drive filled up"),
+    )
+    return next((text for hit, text in steps if hit), "not attempted: the next backup sends it")
 
 
 def _incomplete_lines(res: engine.Result, point: str) -> tuple[list[str], int]:
