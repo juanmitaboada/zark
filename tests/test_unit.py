@@ -134,8 +134,8 @@ from lib.config import (  # pylint: disable=wrong-import-position # noqa: E402
 from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
     ConnectedDrive,
     drive_staleness_days,
-    drives_in_danger_zone,
     is_drive_stale,
+    shared_snapshot_line,
     validate_external_block_device,
 )
 from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -208,8 +208,8 @@ from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa
     restore_points,
 )
 from lib.sanoid_retention import (  # pylint: disable=wrong-import-position # noqa: E402
-    _retention_days_of_template,
-    worst_case_retention_days,
+    _guaranteed_days_of_template,
+    guaranteed_overlap_days,
 )
 from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -3388,6 +3388,25 @@ class TestBackupRpoReporting:  # pylint: disable=missing-function-docstring
         assert "green" not in out
         assert "divergence" not in out and "retention" not in out
 
+    def test_drive_without_anchors_gets_the_horizon(self):
+        """H21: only a drive with no anchor in origin is told how long it
+        stays incremental."""
+        old = (datetime.now(UTC) - timedelta(days=34)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cfg = make_config()
+        cfg.known_drives.update(
+            {
+                "blue": DriveInfo("blue", "1", "d1", last_backup_at=old),
+                "black": DriveInfo("black", "2", "d2", last_backup_at=old),
+            },
+        )
+        buf = StringIO()
+        with redirect_stdout(buf):
+            _report_rpo(cfg, "green", make_log(), anchored={"2"}, horizon=62)
+        out = buf.getvalue()
+        assert "blue: anchored only on snapshots shared with the source" in out
+        assert "at least 28 more day(s)" in out
+        assert "black: anchored" not in out
+
     def test_silent_with_no_other_drive(self):
         cfg = make_config()
         cfg.known_drives["blue"] = DriveInfo("blue", "1", "d1")
@@ -3402,15 +3421,10 @@ class TestBackupRpoReporting:  # pylint: disable=missing-function-docstring
 # ═════════════════════════════════════════════════════════════════════════
 
 
-class TestSanoidRetention:  # pylint: disable=missing-function-docstring
-    """``worst_case_retention_days`` parses sanoid.conf and returns
-    the largest retention horizon among templates actually used by
-    rpool/bpool sections. Boundary cases:
-      - file missing: WARN + None
-      - no managed sections: None silent
-      - mixed templates: returns the largest
-      - only the buckets that matter for the horizon contribute
-    """
+class TestSanoidRetention:
+    """H21: how long a drive anchored only on shared snapshots stays
+    incremental: (n - 1) buckets of the longest type, the smallest over the
+    templates in use."""
 
     @staticmethod
     def _conf(text: str) -> Path:
@@ -3419,163 +3433,74 @@ class TestSanoidRetention:  # pylint: disable=missing-function-docstring
         p.write_text(text, encoding="utf-8")
         return p
 
-    def test_per_template_horizon_is_max_of_buckets(self):
-        # ``daily=14 weekly=8 monthly=3`` → max(14, 56, 90) = 90
+    def test_one_bucket_less_than_the_count(self) -> None:
+        """sanoid prunes a type only past n periods and with more than n of
+        it, so the newest of a type is guaranteed n - 1 periods more."""
+        minimal = {"daily": "14", "weekly": "8", "monthly": "3"}
+        production = {"hourly": "24", "daily": "7", "weekly": "4", "monthly": "3"}
+        assert _guaranteed_days_of_template(minimal) == 62  # max(13, 49, 62)
+        assert _guaranteed_days_of_template(production) == 62
+        assert _guaranteed_days_of_template({"daily": "2"}) == 1
+        assert abs(_guaranteed_days_of_template({"hourly": "24"}) - 23 / 24) < 1e-9
+        assert _guaranteed_days_of_template({"yearly": "2"}) == 365.25
+        assert _guaranteed_days_of_template({"daily": "0"}) == 0
 
-        assert (
-            _retention_days_of_template(
-                {"daily": "14", "weekly": "8", "monthly": "3"},
-            )
-            == 90
-        )
-        # Old template: daily=2, no weekly, no monthly → max(2, 0, 0) = 2
-        assert (
-            _retention_days_of_template(
-                {"daily": "2", "weekly": "0", "monthly": "0"},
-            )
-            == 2
-        )
-        # Production: max(7, 28, 90) = 90
-        assert (
-            _retention_days_of_template(
-                {"daily": "7", "weekly": "4", "monthly": "3"},
-            )
-            == 90
-        )
-
-    def test_returns_largest_used_template(self):
-        """Two templates, one with retention 90 used by rpool, one
-        with retention 2 used by bpool — pick the larger (90)."""
+    def test_the_smallest_template_in_use_decides(self) -> None:
+        """A drive needs every dataset; the one with the shortest horizon
+        diverges first."""
         text = (
             "[rpool]\nuse_template = production\nrecursive = no\n"
             "[bpool]\nuse_template = minimal\nrecursive = no\n"
             "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
             "[template_minimal]\ndaily = 2\nweekly = 0\nmonthly = 0\n"
         )
-        p = self._conf(text)
-        log = make_log()
+        assert guaranteed_overlap_days(make_log(), conf_path=self._conf(text)) == 1
 
-        assert worst_case_retention_days(log, conf_path=p) == 90
-
-    def test_returns_smaller_when_only_minimal_used(self):
-        """If only the smaller-retention template is referenced, that
-        one defines the horizon."""
+    def test_carmens_templates(self) -> None:
+        """Both of zark's templates guarantee 62 days, not "3 months"."""
         text = (
-            "[rpool]\nuse_template = minimal\n"
-            "[template_minimal]\ndaily = 2\nweekly = 0\nmonthly = 0\n"
-            "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
-        )
-        p = self._conf(text)
-        log = make_log()
-
-        assert worst_case_retention_days(log, conf_path=p) == 2
-
-    def test_returns_none_when_file_missing(self):
-        """Missing sanoid.conf: WARN + None (silent under tests, but
-        the call must not raise)."""
-        log = make_log()
-
-        with redirect_stdout(StringIO()):
-            result = worst_case_retention_days(
-                log,
-                conf_path=Path("/tmp/zark-test-nonexistent.conf"),
-            )
-            assert result is None
-
-    def test_returns_none_when_no_managed_sections(self):
-        """File present but only template definitions, no [rpool*]/
-        [bpool*] sections referencing them."""
-        text = "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
-        p = self._conf(text)
-        log = make_log()
-
-        assert worst_case_retention_days(log, conf_path=p) is None
-
-    def test_ignores_zvol_sections_without_use_template(self):
-        """``autosnap=no`` zvol sections never define use_template
-        and must not contribute to the horizon."""
-        text = (
+            "[rpool/ROOT/ubuntu]\nuse_template = production\n"
+            "[rpool/var]\nuse_template = minimal\n"
             "[rpool/keystore]\nautosnap = no\nautoprune = no\n"
-            "[rpool]\nuse_template = production\n"
-            "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
+            "[template_production]\nhourly = 24\ndaily = 7\nweekly = 4\nmonthly = 3\n"
+            "[template_minimal]\ndaily = 14\nweekly = 8\nmonthly = 3\n"
+            "[template_unused]\nhourly = 1\n"
         )
-        p = self._conf(text)
-        log = make_log()
+        assert guaranteed_overlap_days(make_log(), conf_path=self._conf(text)) == 62
 
-        # Only rpool contributes (daily=7, weekly=4, monthly=3) → 90.
-        assert worst_case_retention_days(log, conf_path=p) == 90
+    def test_none_when_unknown(self) -> None:
+        """No file (with a warning) or no managed section: no horizon."""
+        with redirect_stdout(StringIO()):
+            missing = Path("/tmp/zark-test-nonexistent.conf")
+            assert guaranteed_overlap_days(make_log(), conf_path=missing) is None
+        text = "[template_production]\ndaily = 7\nweekly = 4\nmonthly = 3\n"
+        assert guaranteed_overlap_days(make_log(), conf_path=self._conf(text)) is None
 
 
-# ═════════════════════════════════════════════════════════════════════════
-#  lib/drives.py — drives_in_danger_zone
-# ═════════════════════════════════════════════════════════════════════════
+class TestSharedSnapshotLine:
+    """H21: what a drive anchored only on shared snapshots can expect."""
 
+    NOW = datetime(2026, 10, 12, 12, 0, tzinfo=UTC)
 
-class TestDrivesInDangerZone:  # pylint: disable=missing-function-docstring
-    """``drives_in_danger_zone`` returns drives whose age is at or
-    above ``retention - margin``, sorted age-desc, with the named
-    drive optionally excluded."""
+    def _info(self, days_ago: int | None) -> DriveInfo:
+        if days_ago is None:
+            return DriveInfo("blue", "1", "d")
+        when = self.NOW - timedelta(days=days_ago)
+        return DriveInfo("blue", "1", "d", last_backup_at=when.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
-    @staticmethod
-    def _drive(name: str, last: str | None) -> DriveInfo:
-        return DriveInfo(name=name, guid="g", drive_id="d", last_backup_at=last)
+    def test_within_the_horizon(self) -> None:
+        """Days left before the next backup stops being incremental."""
+        line = shared_snapshot_line(self._info(34), 62, now=self.NOW)
+        assert "at least 28 more day(s)" in line and "62 days after" in line
 
-    def test_empty_when_no_drives(self):
-        result = drives_in_danger_zone({}, retention_days=90, margin_days=30)
-        assert not result
+    def test_past_the_horizon(self) -> None:
+        """Past it, the next backup may resend datasets in full."""
+        line = shared_snapshot_line(self._info(70), 62, now=self.NOW)
+        assert "past the 62-day horizon" in line and "in full" in line
 
-    def test_skips_drives_without_last_backup_at(self):
-        drives = {"black": self._drive("black", None)}
-        assert not drives_in_danger_zone(drives, retention_days=90, margin_days=30)
-
-    def test_includes_drives_at_or_beyond_threshold(self):
-        old = (datetime.now(UTC) - timedelta(days=70)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        drives = {"black": self._drive("black", old)}
-        result = drives_in_danger_zone(drives, retention_days=90, margin_days=30)
-        assert len(result) == 1
-        assert result[0][0] == "black"
-        assert result[0][1] >= 60  # 90 - 30 = 60 threshold; 70 days qualifies
-
-    def test_excludes_drives_below_threshold(self):
-        recent = (datetime.now(UTC) - timedelta(days=10)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        drives = {"black": self._drive("black", recent)}
-        result = drives_in_danger_zone(drives, retention_days=90, margin_days=30)
-        assert not result
-
-    def test_excludes_named_drive(self):
-        old = (datetime.now(UTC) - timedelta(days=70)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        drives = {
-            "black": self._drive("black", old),
-            "blue": self._drive("blue", old),
-        }
-        result = drives_in_danger_zone(
-            drives,
-            retention_days=90,
-            margin_days=30,
-            exclude="black",
-        )
-        assert len(result) == 1
-        assert result[0][0] == "blue"
-
-    def test_sorts_age_desc(self):
-        d70 = (datetime.now(UTC) - timedelta(days=70)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        d80 = (datetime.now(UTC) - timedelta(days=80)).strftime(
-            "%Y-%m-%dT%H:%M:%SZ",
-        )
-        drives = {
-            "younger": self._drive("younger", d70),
-            "older": self._drive("older", d80),
-        }
-        result = drives_in_danger_zone(drives, retention_days=90, margin_days=30)
-        assert [name for name, _ in result] == ["older", "younger"]
+    def test_no_backup_recorded(self) -> None:
+        """Without last_backup_at nothing is promised."""
+        assert "no backup recorded" in shared_snapshot_line(self._info(None), 62, now=self.NOW)
 
 
 class TestPoolImportExactDevice:  # pylint: disable=missing-function-docstring

@@ -12,33 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Read sanoid's retention configuration to compute the worst-case overlap
-window between a backup drive and the source pool.
+Read sanoid's retention configuration to compute how long a backup drive
+anchored only on shared snapshots stays incremental after its last backup
+(hallazgo 21).
 
-It applies to drives anchored only on shared snapshots (written by zark
-<= 2.0.0-rc1): beyond the horizon the snapshot chain shared between
-source and target is gone. No command calls it (bookmark-anchored drives
-have no horizon); it is kept for the staleness report of such drives (M3).
+It applies to drives with no anchor in origin: a drive written by zark 1.x
+before its first zark 2 backup, or one whose anchors were lost. Beyond the
+horizon some dataset has no snapshot left in common with the drive, and
+its next backup needs a full resend of it. Bookmark-anchored drives have
+no horizon.
 
 Why parse sanoid.conf at runtime instead of a hardcoded constant: the
 operator can edit ``/etc/sanoid/sanoid.conf`` freely and the retention
-that actually applies depends on those values. Reading the file is the
-only authoritative answer; a hardcoded "90 days" would lie the moment
-someone tunes sanoid.
+that actually applies depends on those values.
 
-Computation: the longest snapshot retention is the longest single
-bucket among ``daily``, ``weekly``, ``monthly`` (in their own day
-units), because the buckets *layer* — sanoid keeps the oldest of each
-kind, and the longest one defines the actual horizon. Adding them
-double-counts: the monthly snapshot, taken once per month, replaces
-older daily/weekly snapshots once they age past their bucket. So
-``max(daily, weekly*7, monthly*30)`` is the right metric, not the sum.
+Computation, from sanoid's own rule (sanoid v2.3.0, ``sanoid:338-370``): a
+snapshot of type t is pruned only when it is older than ``n_t * period_t``
+and more than ``n_t`` of that type exist, with periods of 1 hour, 1 day,
+7 days, 31 days and 365.25 days (``:342-347``). The newest snapshot of a
+type is up to one period old when the drive receives it, so it is
+guaranteed to stay ``(n_t - 1) * period_t`` more (``n_t * period_t`` is
+only the most it may stay); a template guarantees the longest of those
+over its types: monthly=3 guarantees 62 days.
 
-For multi-template setups, the worst case is the *largest* horizon
-across all templates that are actually used by sections under
-``[rpool*]`` or ``[bpool*]``: divergence on any dataset blocks the
-whole backup, so the most-tolerant template defines safety. Templates
-defined but never used (orphan template_* sections) are ignored.
+The datasets of one drive may use different templates, and the drive
+needs every one of them, so the horizon is the **smallest** over the
+templates used by ``[rpool*]`` or ``[bpool*]`` sections. Templates that
+no section uses are ignored.
 """
 
 import configparser
@@ -54,19 +54,20 @@ from lib.log import Log
 SANOID_CONF_PATH = Path("/etc/sanoid/sanoid.conf")
 
 
-def _retention_days_of_template(settings: dict[str, str]) -> int:
-    """Largest bucket horizon, in days, for one template's settings.
+# sanoid's periods, in days (sanoid:342-347).
+_PERIOD_DAYS = {"hourly": 1 / 24, "daily": 1.0, "weekly": 7.0, "monthly": 31.0, "yearly": 365.25}
 
-    A missing field is treated as zero (sanoid's own default for
-    explicitly-omitted retentions). The non-day buckets (``hourly``,
-    ``frequently``) are intentionally not consulted: they never define
-    the retention horizon because their bucket is always shorter than
-    a single ``daily``.
-    """
-    daily = _safe_int(settings.get("daily", "0"))
-    weekly = _safe_int(settings.get("weekly", "0"))
-    monthly = _safe_int(settings.get("monthly", "0"))
-    return max(daily, weekly * 7, monthly * 30)
+
+def _guaranteed_days_of_template(settings: dict[str, str]) -> float:
+    """Days a snapshot this template took is guaranteed to stay after a drive
+    received it: the longest ``(n - 1) * period`` over its types; 0 when
+    the template keeps nothing."""
+    days = [
+        (n - 1) * period
+        for kind, period in _PERIOD_DAYS.items()
+        if (n := _safe_int(settings.get(kind, "0"))) >= 1
+    ]
+    return max(days, default=0.0)
 
 
 def _safe_int(s: str) -> int:
@@ -82,23 +83,17 @@ def _is_managed_section(name: str) -> bool:
     return head in ("rpool", "bpool")
 
 
-def worst_case_retention_days(
+def guaranteed_overlap_days(
     log: Log,
     *,
     conf_path: Path = SANOID_CONF_PATH,
 ) -> int | None:
-    """Return the longest retention horizon across templates that are
-    actually used by ``rpool*`` or ``bpool*`` sections.
+    """Whole days a drive anchored only on shared snapshots is guaranteed
+    to stay incremental after its last backup: the smallest horizon over
+    the templates used by ``rpool*`` or ``bpool*`` sections.
 
-    Returns ``None`` and emits a visible WARN if the config file does
-    not exist — the caller should treat staleness reporting as
-    unavailable in that case (no FATAL: backup itself does not depend
-    on this file).
-
-    Returns ``None`` silently if the file exists but contains no
-    managed sections — a freshly written but un-templated sanoid.conf
-    is a transient state during setup and not worth annoying the user
-    over.
+    Returns ``None`` and emits a visible WARN if the config file does not
+    exist; ``None`` silently when it has no managed sections.
     """
     if not conf_path.exists():
         log.warn(
@@ -114,37 +109,18 @@ def worst_case_retention_days(
         log.warn(f"Could not parse {conf_path}: {e} — staleness detection disabled")
         return None
 
-    # Map template_name → settings dict.
     templates: dict[str, dict[str, str]] = {
         section: dict(parser.items(section))
         for section in parser.sections()
         if section.startswith("template_")
     }
-    if not templates:
-        return None
-
-    # Collect templates referenced by managed sections via use_template.
-    # Sections without use_template (e.g. autosnap=no zvol stubs) don't
-    # contribute to retention because they don't take snapshots.
     used: set[str] = set()
     for section in parser.sections():
         if not _is_managed_section(section):
             continue
-        items = dict(parser.items(section))
-        tpl = items.get("use_template", "").strip()
-        if not tpl:
-            continue
-        # Sanoid's config format prefixes templates with ``template_``
-        # only in the section header; ``use_template = minimal`` refers
-        # to ``[template_minimal]``. Normalize accordingly.
-        full = tpl if tpl.startswith("template_") else f"template_{tpl}"
-        used.add(full)
-
-    if not used:
-        return None
-
-    horizons = [_retention_days_of_template(templates[t]) for t in used if t in templates]
-    horizons = [h for h in horizons if h > 0]
-    if not horizons:
-        return None
-    return max(horizons)
+        tpl = dict(parser.items(section)).get("use_template", "").strip()
+        if tpl:
+            # ``use_template = minimal`` refers to ``[template_minimal]``.
+            used.add(tpl if tpl.startswith("template_") else f"template_{tpl}")
+    horizons = [_guaranteed_days_of_template(templates[t]) for t in used if t in templates]
+    return int(min(horizons)) if horizons else None

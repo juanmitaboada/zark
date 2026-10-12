@@ -378,13 +378,10 @@ def validate_external_block_device(
 
 # ── last_backup_at staleness helpers ─────────────────────────────────────────
 #
-# Backup drives anchored only on shared snapshots (written by zark <=
-# 2.0.0-rc1) diverge once the source pool's sanoid retention purges the
-# snapshots still on the target. These helpers stay generic over that
-# threshold (lib.sanoid_retention.worst_case_retention_days computes it).
-# Bookmark-anchored drives have no such horizon: backup reports only the
-# days since each drive's last backup. No command calls
-# drives_in_danger_zone; it is kept for the legacy-drive report (M3).
+# backup reports, for every other registered drive, the days since its last
+# backup (its RPO). A drive with no anchor in origin is anchored only on the
+# snapshots it shares with the source, so it also gets the horizon of
+# lib.sanoid_retention.guaranteed_overlap_days (hallazgo 21).
 
 
 def drive_staleness_days(info: DriveInfo, *, now: datetime | None = None) -> int | None:
@@ -425,32 +422,25 @@ def is_drive_stale(
     return age > threshold_days
 
 
-def drives_in_danger_zone(
-    drives: dict[str, DriveInfo],
-    retention_days: int,
-    margin_days: int = 30,
+def shared_snapshot_line(
+    info: DriveInfo,
+    horizon_days: int,
     *,
-    exclude: str | None = None,
     now: datetime | None = None,
-) -> list[tuple[str, int]]:
-    """Return ``[(drive_name, age_days), ...]`` for drives close to expiry.
-
-    A drive is in the danger zone when its age is ``≥ (retention_days
-    - margin_days)``. Drives without ``last_backup_at`` are skipped
-    (we can't tell). The caller usually passes ``exclude=<name>`` to
-    omit the drive that just got backed up — its age is now zero and
-    listing it would be misleading. Result is sorted by age desc so
-    the most-at-risk drive shows first.
-    """
-    threshold = max(0, retention_days - margin_days)
-    out: list[tuple[str, int]] = []
-    for name, info in drives.items():
-        if exclude is not None and name == exclude:
-            continue
-        age = drive_staleness_days(info, now=now)
-        if age is None:
-            continue
-        if age >= threshold:
-            out.append((name, age))
-    out.sort(key=lambda pair: pair[1], reverse=True)
-    return out
+) -> str:
+    """What a drive anchored only on shared snapshots can expect from its
+    next backup, given the guaranteed horizon (hallazgo 21)."""
+    age = drive_staleness_days(info, now=now)
+    head = f"{info.name}: anchored only on snapshots shared with the source"
+    if age is None:
+        return f"{head}; no backup recorded"
+    left = horizon_days - age
+    if left > 0:
+        return (
+            f"{head}: its next backup stays incremental for at least {left} more day(s)"
+            + f" ({horizon_days} days after its last backup)"
+        )
+    return (
+        f"{head}, {age} days since its last backup: past the {horizon_days}-day horizon, "
+        + "its next backup may need to resend some datasets in full"
+    )

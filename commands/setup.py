@@ -174,7 +174,7 @@ def _classify(  # pylint: disable=too-many-return-statements
 
     # bpool/BOOT holds kernels, initramfs, grub config — content the user
     # may legitimately want to roll back months in time after a bad
-    # apt upgrade. production retention (~3 months) aligns this with the
+    # apt upgrade. production retention (up to ~3 months) aligns this with the
     # rest of the system; the extra hourly snapshots cost nothing because
     # /boot doesn't change between hours, so ZFS deduplicates the blocks.
     if name == "bpool/BOOT":
@@ -290,17 +290,15 @@ def _generate_sanoid_conf(
                 out.append(f"{key} = {value}")
             out.append("")
 
-    # Templates — ``template_minimal`` retention is intentionally
-    # generous (``daily=14 weekly=8 monthly=3``) so that drive rotation
-    # works without divergence. Container datasets (``rpool``,
-    # ``rpool/ROOT``, ``rpool/var``, ``bpool``) all use this template;
-    # any drive disconnected longer than the worst-case retention loses
-    # its anchor in source and starts diverging on those datasets.
-    # The current values give ~3 months of guaranteed overlap. Cost:
-    # ~25 extra snapshots per container dataset and a few KB of metadata
-    # per snapshot — negligible because container datasets carry only
-    # metadata. ``template_production`` is unchanged from upstream
-    # examples — it already had ~3 months of headroom on active leaves.
+    # Templates — ``template_minimal`` (``daily=14 weekly=8 monthly=3``)
+    # is used by the container datasets (``rpool``, ``rpool/ROOT``,
+    # ``rpool/var``, ``bpool``). Drives are anchored on bookmarks and do
+    # not depend on these values; a drive anchored only on shared
+    # snapshots (written by zark 1.x, before its first zark 2 backup) stays
+    # incremental for 62 days after its last backup with either template
+    # (lib/sanoid_retention.py). Cost: ~25 snapshots per container dataset
+    # and a few KB of metadata each, since container datasets carry only
+    # metadata. ``template_production`` is unchanged from upstream examples.
     out.extend(
         [
             "[template_production]",
