@@ -10,8 +10,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M2 (2.0.0-rc2)** on top of M1 (2.0.0-rc1) and
-the development-tooling consolidation that preceded it.
+The tree currently carries **M3 (2.0.0-rc3)** on top of M2 (2.0.0-rc2),
+M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
+
+### M3 — space (2.0.0-rc3)
+
+#### Added
+
+- **Destination retention, per drive** (`lib/retention.py`, pure; the
+  executor in `lib/engine.py`). After every complete backup: everything
+  inside the window (30 days by default) stays; outside it, only the
+  newest complete backup point of each calendar month (UTC, by
+  `creation`), with no limit in time; an optional maximum age (off by
+  default) removes anything older. Always kept: the newest complete
+  backup point, and every dataset's newest snapshot on the drive, the
+  base of its next incremental (I-E). A backup point is decided once for
+  the whole drive, so it goes or stays whole. Never touched by the
+  policy: a clone origin or a held snapshot (ZFS refuses both), names
+  neither zark nor sanoid wrote, history from before the drive's first
+  zark 2 backup point. Archived lineages and kept orphans are not covered
+  by I-E and go whole once nothing of them is kept. A point counts as
+  complete for retention when its run was (it carries a mark), even after
+  part of its snapshots went, so a dataset destroyed on the drive later
+  does not turn the older points into removable ones; a failed read of
+  the marks skips retention instead of guessing. Every snapshot is
+  destroyed by its exact name, one per command, and logged with its
+  reason; what a plan frees is measured with `zfs destroy -nvp` over the
+  exact names. No key is needed.
+- **Space check before the transfer.** When the drive would end below its
+  margin (10 % of its size by default), the policy's removals go first,
+  without a question; then the oldest monthly points, listed with what
+  each frees, on a yes (default no). The margin is a goal: the backup
+  stops only when the transfer itself does not fit.
+- **Per-drive settings** in `known_drives.json` (`retention`:
+  `window_days`, `max_age_days`, `margin_pct`), validated with the rest
+  of the entry; `prepare` asks the window and the maximum age with its
+  other questions; `zark registry retention <name> [window=N]
+  [max_age=N|off] [margin=N]` shows or changes them; `registry list`
+  shows them.
+- **`zark prune`**: interactive, in the source or on a connected drive.
+  In the source: per kind, the count, the oldest and what removing it
+  frees; sanoid's snapshots older than N days (typed PRUNE), legacy
+  residues (yes/no), points left by interrupted runs and a drive's bpool
+  anchors (typed PRUNE, after saying what the drive's next backup will
+  ask). No floor imposed by the backups: rpool's anchors are bookmarks.
+  On a drive: its retention now, then its oldest monthly points and its
+  1.x history (typed PRUNE); an archived lineage or kept orphan left
+  with nothing goes whole, as with the policy. A mistyped word removes
+  nothing and says so.
+- **Legacy residues** (`lib/origin_prune.py`): `rpool/keystore@prepare_*`
+  always removable; a `syncoid_*` snapshot only on a dataset where every
+  registered drive has an anchor, otherwise kept naming the drive that
+  may depend on it. backup says when there are removable ones.
+- **`zark status`, the MOTD and the timer.** CAP of rpool and bpool
+  (warning from 80 %, critical from 90 %), the days since every drive's
+  last backup (the RPO line, highlighted when the newest backup is older
+  than 7 days), the horizon of drives anchored only on shared snapshots,
+  the residues. `zark alerts install|remove`: an MOTD script that only
+  prints `/run/zark/status.motd`, and `zark-status.timer` (hourly and
+  after boot) running `zark status --refresh --notify`, which also sends a
+  desktop notification for a pool at a level once a day (sessions from
+  loginctl, notify-send as each session's user). `zark setup` installs
+  them; the Debian package's prerm removes them.
+- **Clone-aware sends (O3).** A dataset new in the source that is a clone
+  of a snapshot the drive holds is sent with `-I` from that origin and
+  received with `-o origin=` as a clone of the drive's copy.
+
+#### Changed
+
+- **Completion marks** record how many datasets the point had
+  (`org.zark:point-complete=<n>`) and are read from each snapshot itself
+  (`zfs get -s local`), never inherited from a filesystem (M2V-3). A
+  point that loses part of its snapshots (retention, a rollback, a
+  destroy) is no longer complete, with nothing to rewrite (M2V-4). Marks
+  `yes` written by 2.0.0-rc2 are read as complete and rewritten with
+  their count at the next complete run.
+- **Hallazgo 21.** The horizon of a drive anchored only on shared
+  snapshots is (n − 1) periods of a template's longest bucket, with
+  sanoid's periods (1 h, 1 d, 7 d, 31 d, 365.25 d), and the smallest over
+  the templates in use: 62 days with zark's templates, not 90. backup's
+  RPO lines report it for such drives.
+- **G4a.** The 1%-of-source free-space guard is gone, and so is the
+  "Target is N% full. Continue?" question; step 4 shows the root
+  dataset's used and available space only, the figures the space check
+  uses.
+- recover names another drive's bpool anchor carried to this drive as
+  that drive's backup point (M2X.5).
+- backup's out-of-space advice no longer suggests destroying snapshots by
+  hand.
+
+#### Removed
+
+- `drives_in_danger_zone()` (never called) and
+  `worst_case_retention_days()`, replaced by
+  `guaranteed_overlap_days()`.
+
+#### Known limitations
+
+- History from before a drive's first zark 2 backup point is never
+  removed by the policy; on a drive written by 1.x it stays until
+  `zark prune` removes it or the drive is prepared again.
+- The rc2 marks are rewritten with the number of datasets that hold
+  their point when the next complete run sees them; a point that had
+  already lost part of its snapshots then reads as complete.
+- Desktop notifications need `notify-send` (libnotify-bin) in the
+  session's user environment.
+- The space check before a transfer never offers a drive's 1.x history;
+  `zark prune` on the drive does.
+- A dataset received as a clone keeps its origin snapshot on the drive
+  (ZFS refuses to destroy a clone's origin): retention keeps it, and a
+  `zfs destroy -r` or `zfs rollback -r` of the origin's dataset on the
+  drive (DESTROY, ROLLBACK) fails while the clone exists; nothing is lost,
+  the run reports the failure.
+
+#### Rejected approaches
+
+- **Calendar buckets with fixed tails** (all points for 90 days, then
+  monthly for 24 months, then yearly for 10 years): history should end
+  where the drive's space ends, not at a date.
+- **Copying sanoid's template to the drive**: sanoid's counts fit a
+  regular local history; applied to backup points they would drop the
+  drive's monthly history after about 93 days.
+- **Clearing the completion mark on what is left of a point** before
+  removing part of it: every path that removes snapshots, hand destroys
+  included, would have to remember it, and an interrupted removal would
+  leave a wrong mark. The count makes the check self-contained.
+- **Removing legacy residues automatically at the end of a backup**:
+  deleting dozens of snapshots in the source is not something a backup
+  should do unasked.
+- **A fixed free-space margin that stops the backup**: a drive the size of
+  its source could never keep it.
+- **A `ZARK_NOW` override to stage old points on eli**: a test hook in
+  production code that could not spread points across months anyway;
+  eli's wall clock does.
 
 ### M2 — replication engine (2.0.0-rc2)
 

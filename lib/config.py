@@ -35,7 +35,7 @@ from lib.retention import Policy
 if TYPE_CHECKING:
     from lib.log import Log
 
-VERSION = "2.0.0-rc2"
+VERSION = "2.0.0-rc3"
 
 
 def now_utc_iso() -> str:

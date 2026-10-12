@@ -125,7 +125,8 @@ for the canonical end-to-end sequences.
     Ubuntu-on-ZFS into */etc/sanoid/*, and registers the **sanoid** systemd
     timer so snapshots are taken automatically. Also installs the apt guard
     (see **NOTES**) on the running system, so a background kernel or GRUB
-    upgrade cannot half-apply while a backup drive is connected.
+    upgrade cannot half-apply while a backup drive is connected, and the
+    space and backup-age alerts (see **alerts**).
 
     **setup** checks that **rpool** has **feature\@bookmark_v2** enabled:
     **backup** anchors each drive on a bookmark, and a raw incremental send
@@ -141,7 +142,8 @@ for the canonical end-to-end sequences.
     presents an interactive list of unprepared drives.
 
     Every question (risk factors, stale registry entries, pool name,
-    auto-eject) is asked before anything is written. **prepare** then
+    auto-eject, the drive's retention window and maximum age; see
+    **Retention** under **backup**) is asked before anything is written. **prepare** then
     creates an unencrypted ZFS pool on the drive (encryption is provided by
     the raw send from the encrypted source pool — adding a second layer
     here would just hide the failure of the inner one) on its by-id name
@@ -241,8 +243,35 @@ for the canonical end-to-end sequences.
     takes the datasets below it along, which are not asked about and are
     sent again in full. Before the typed **DESTROY**, every dataset the
     destroy takes on the drive is listed, archived lineages and datasets
-    kept as only on the drive included. The estimated transfer, those full sends included,
-    is checked against the drive's free space before any choice is applied.
+    kept as only on the drive included.
+
+    **Space.** The estimated transfer, the full sends above included, is
+    checked against the drive's available space before any choice is
+    applied. When the drive would end with less free space than its margin
+    (10 % of its size by default), what its retention removes anyway goes
+    first, without a question; if that is not enough, the oldest monthly
+    backup points are listed with what each frees and removed only on a
+    yes (the default is no). The margin is a goal: when only the transfer
+    itself fits, the backup goes on and says so; it stops only when the
+    transfer does not fit.
+
+    **Retention.** After every complete backup the drive's retention is
+    applied and each removal is listed and logged: every snapshot inside
+    the window (30 days by default) stays; outside it, only the newest
+    complete backup point of each calendar month (UTC), with no limit in
+    time; with a maximum age set (off by default), nothing older. The
+    newest complete point and every replicated dataset's newest snapshot
+    (the base of its next incremental) always stay, and so do a clone's origin, a held
+    snapshot, names neither **zark** nor **sanoid** wrote, and history from
+    before the drive's first **zark** 2 backup point (see **prune**). An
+    archived dataset or one kept as only on the drive goes whole once
+    nothing of it is kept. Each snapshot is destroyed by its exact name,
+    never by a range, and the drive's keys are not needed. **prepare** asks
+    the window and the maximum age; **registry retention** changes them.
+
+    **Clones.** A dataset new in the source that is a clone of a snapshot
+    the drive already holds is sent as an incremental from it and received
+    as a clone of the drive's copy, so only what the clone changed travels.
 
     **Verdict.** **BACKUP COMPLETED** only when every dataset reached the
     point and the read-back is **ONLINE**; a per-dataset table is printed
@@ -258,7 +287,9 @@ for the canonical end-to-end sequences.
     checked before the questions. **BACKUP INCOMPLETE** groups the datasets
     that missed the point by what the next **backup** does with them. When
     every dataset reached the point, its snapshots on the drive are marked
-    **org.zark:point-complete=yes**, which **recover** reads.
+    **org.zark:point-complete=**\<number of datasets\>, which **recover**
+    reads from each snapshot itself: a point that later loses part of its
+    snapshots (a retention removal, a rollback) is no longer complete.
 
     **Read-back verification.** After exporting, **backup** drops the
     kernel page cache and re-imports the pool read-only by its exact
@@ -282,7 +313,12 @@ for the canonical end-to-end sequences.
     them after importing the drive.
 
     After a successful backup, **backup** lists how many days have passed
-    since every other registered drive's last backup.
+    since every other registered drive's last backup. For a drive with no
+    anchor in the source (written by **zark** 1.x and not backed up by
+    **zark** 2 yet), it adds how many more days its next backup stays
+    incremental: with **sanoid**'s rule, (*n* − 1) periods of the longest
+    bucket of the shortest template in use, 62 days with **zark**'s
+    templates. It also says when **prune** can remove legacy residues.
 
     **--no-snapshot** is accepted and has no effect: the backup point is
     taken by **zark** itself.
@@ -304,7 +340,7 @@ for the canonical end-to-end sequences.
     run there. Partitions and disks holding the running system, a mounted
     filesystem or active swap are refused.
 
-**registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\]\]
+**registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\] | **retention** *name* \[**window=***N*\] \[**max_age=***N*|**off**\] \[**margin=***N*\]\]
 :   Inspect and repair **known_drives.json** without editing it by hand.
     **list** (the default) shows every entry, whether its disk is connected
     and whether the pool GUID on the disk matches; on the installed system
@@ -316,7 +352,10 @@ for the canonical end-to-end sequences.
     entry, it removes only that GUID's anchors. When no drive is left
     registered it offers to remove the points left by interrupted runs. **fix** rewrites *drive_id* from the
     connected disk that carries the registered pool GUID and writes every
-    missing key. Every write is validated and atomic; a malformed file is
+    missing key. **retention** shows or changes a drive's retention: the
+    window in days (1–3650), the maximum age in days (**off**, or more than
+    the window) and the free-space margin in percent of the drive (0–50).
+    Every write is validated and atomic; a malformed file is
     reported with its line and column and never overwritten.
 
 ## Recovery workflow
@@ -394,7 +433,43 @@ for the canonical end-to-end sequences.
     fails.
     **chroot** refuses to run when **rpool** is already imported — if that
     is the running system you are already inside it, and if it is a
-    leftover from a previous run, **clean** releases it first.
+    leftover from a previous run, **prune**
+:   Reclaim space, interactively, in the source or on a connected registered
+    drive. Nothing goes without a confirmation; every snapshot is destroyed
+    by its exact name and logged, and what each choice frees is measured
+    first. In the source: each pool's fill level and, per kind of
+    snapshot, how many there are, the oldest and what removing them frees;
+    then **sanoid**'s snapshots older than a number of days (typed
+    **PRUNE**; */etc/sanoid/sanoid.conf* is not changed), the legacy
+    residues (**syncoid_\*** snapshots left by **zark** 1.x on datasets
+    where every registered drive has an anchor, and the keystore's
+    **prepare_\*** snapshots; yes/no), the backup points interrupted runs
+    left (typed **PRUNE**) and a drive's **bpool** anchors (typed **PRUNE**;
+    that drive's next backup then asks how to send those datasets again).
+    Backups impose no floor: the drives' anchors on **rpool** are
+    bookmarks, which no snapshot removal touches. On a drive (no passphrase
+    needed): what its retention removes now (yes/no), then the oldest
+    monthly backup points and the history from before its first **zark** 2
+    backup point (typed **PRUNE**).
+
+**status**
+:   How full **rpool** and **bpool** are (a warning from 80 %, critical
+    from 90 %), the days since every registered drive's last backup, the
+    horizon of drives anchored only on shared snapshots and the legacy
+    residues **prune** can remove. **status --refresh** writes
+    */run/zark/status.motd*; with **--notify** it also sends a desktop
+    notification for a pool at a warning or critical level, at most once a
+    day per pool and level. Read-only.
+
+**alerts** **install**|**remove**
+:   Install or remove the status alerts: */etc/update-motd.d/97-zark-status*,
+    which prints */run/zark/status.motd* at login (nothing is computed
+    then), and **zark-status.timer**, which runs **status --refresh
+    --notify** every hour and two minutes after boot, with the **zark**
+    that installed it. **setup** installs them; removing the Debian package
+    removes them.
+
+**clean** releases it first.
 
 **finish**
 :   Post-recovery finalisation, intended to be run *from inside the
@@ -572,7 +647,12 @@ To verify a recovery without rebooting:
     10-second countdown and then applies the command's default
     automatically — any keypress cancels it and restores the normal
     blocking prompt. **prepare** asks whether to enable it; it can also
-    be toggled by editing the file.
+    be toggled by editing the file. An optional **retention** object holds
+    the drive's **window_days**, **max_age_days** and **margin_pct**; see
+    **registry retention**.
+
+*/run/zark/status.motd*, */etc/update-motd.d/97-zark-status*, */etc/systemd/system/zark-status.service*, */etc/systemd/system/zark-status.timer*
+:   The status alerts; see **alerts**.
 
 */var/log/zark.log*
 :   Log file for system installs. Portable installs write

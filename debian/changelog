@@ -1,3 +1,28 @@
+zark (2.0.0~rc3-1) UNRELEASED; urgency=medium
+
+  * Milestone M3 of zark 2 (space). Not for release: nothing is published
+    until the final 2.0.0.
+  * Destination retention per drive: everything inside a window (30 days
+    by default), then the newest complete backup point of each month with
+    no limit in time, an optional maximum age; applied after every
+    complete backup. The newest complete point and every dataset's newest
+    snapshot always stay.
+  * backup: when the drive would end below its free-space margin (10 %),
+    the policy's removals go first and then, after a yes, the oldest
+    monthly points; the 1%-of-source guard is gone.
+  * Completion marks record how many datasets a point had and are read
+    from the snapshots themselves.
+  * New commands: prune (origin or a drive, interactive), status, alerts
+    (MOTD and an hourly timer with desktop notifications for the source
+    pools' fill level and the drives' backup age).
+  * registry retention, and prepare asks the drive's retention.
+  * A new clone is sent as a delta from its origin on the drive.
+  * recover names another drive's bpool anchor as that drive's point.
+  * The horizon of a drive anchored only on shared snapshots is reported
+    with sanoid's real rule (62 days with zark's templates).
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Mon, 12 Oct 2026 23:30:00 +0200
+
 zark (2.0.0~rc2-1) UNRELEASED; urgency=medium
 
   * Milestone M2 of zark 2 (replication engine). Not for release: nothing

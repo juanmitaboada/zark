@@ -60,6 +60,10 @@ zark automates the entire process:
 | `monitor`          | Live progress monitor (run in a separate terminal)           |
 | `simulate`         | Boot the target disk in QEMU/KVM to verify the boot chain    |
 | `health`           | Non-destructive risk checks on a backup drive                |
+| `prune`            | Reclaim space in the source or on a backup drive (interactive) |
+| `status`           | Source pools' fill level and each drive's backup age         |
+| `alerts`           | Install or remove the status MOTD and hourly timer           |
+| `registry`         | List, forget or fix drives; set each drive's retention       |
 
 ---
 
@@ -296,6 +300,7 @@ Registered backup drives live in `known_drives.json` (under `/etc/zark/` on a sy
 | `guid`           | string  | yes      | The pool GUID (decimal). zark matches the connected drive by this. |
 | `drive_id`       | string  | yes      | The stable `/dev/disk/by-id/` identifier (model + serial), without the `-part1` suffix. zark imports the pool by this exact device. |
 | `last_backup_at` | string  | no       | ISO-8601 UTC of the last successful backup; auto-written by `zark backup`. Drives the staleness reporting. |
+| `retention`      | object  | no       | The drive's retention: `window_days` (default 30), `max_age_days` (default 0, off) and `margin_pct` (default 10). `prepare` asks the first two; `zark registry retention <name> window=N max_age=N\|off margin=N` changes them. |
 | `autoeject`      | boolean | no       | When `true`, the eject prompt for this drive shows a 10-second countdown and then applies the command's default automatically (any keypress cancels it and lets you answer by hand). Useful for unattended rotation. Absent or `false` (the default) means the prompt waits for you indefinitely, as it always has. `prepare` asks whether to enable this; you can also toggle it by editing the file. |
 
 Example:
@@ -332,11 +337,28 @@ After each backup, every `rpool` dataset gets a bookmark `#zark_<pool GUID>_<UTC
 | `template_production` | `rpool/ROOT/<ubuntu>`, `rpool/USERDATA`, `bpool/BOOT` | hourly=24, daily=7, weekly=4, monthly=3 |
 | `template_minimal` | `rpool`, `rpool/ROOT`, `rpool/var`, `bpool`, anything new | daily=14, weekly=8, monthly=3 |
 
-The sanoid snapshots taken between two backups travel to the drive with the next one, as extra restore points. Drives written by zark 1.x are anchored only on shared snapshots: the first zark 2 backup to such a drive asks once how to continue when the drive holds snapshots newer than anything the source still has (abort, archive and resend, or roll back), and from then on the drive is bookmark-anchored.
+The sanoid snapshots taken between two backups travel to the drive with the next one, as extra restore points. Drives written by zark 1.x are anchored only on shared snapshots: the first zark 2 backup to such a drive asks once how to continue when the drive holds snapshots newer than anything the source still has (abort, archive and resend, or roll back), and from then on the drive is bookmark-anchored. Until then it stays incremental for at least 62 days after its last backup with these templates: sanoid prunes a snapshot only when it is older than its bucket's count of periods and more than that count of its type exist, so the newest of a type is guaranteed one period less than the count.
+
+### Retention on the drive
+
+Each drive has its own retention, independent of sanoid's in the source. After every complete backup:
+
+- every snapshot inside the window (30 days by default) stays;
+- outside it, the newest complete backup point of each calendar month stays, with no limit in time; everything else outside the window goes;
+- with a maximum age set (off by default), nothing older stays;
+- the newest complete backup point and every replicated dataset's newest snapshot (the base of its next incremental) always stay, and so do clone origins, held snapshots, snapshots with other names and history from before the drive's first zark 2 backup point.
+
+When a backup would leave the drive with less free space than its margin (10 % of its size by default), the policy's removals go first, then zark lists the oldest monthly points with what each frees and removes them only if you say yes. If only the transfer itself fits, the backup still runs and tells you the drive is too small to keep the margin. Each snapshot is removed by its exact name and logged; a backup point that loses part of its snapshots is shown as incomplete by `recover`.
+
+### Reclaiming space and alerts
+
+`zark prune` shows, for the source or for a connected drive, what each kind of snapshot holds and what removing it would free, and removes what you choose: sanoid snapshots older than N days, the `syncoid_*` and keystore `prepare_*` snapshots zark 1.x left behind (a `syncoid_*` one stays while a registered drive may still depend on it), points left by interrupted backups, a drive's `bpool` anchors, and on a drive its oldest monthly points or its 1.x history. The backups impose no floor in the source: their anchors on `rpool` are bookmarks.
+
+`zark setup` installs a login message and an hourly timer (`zark alerts remove` takes them away): the message says when `rpool` or `bpool` is 80 % full or more (90 % is critical, and a desktop notification is sent once a day), how many days have passed since each drive's last backup, and what `zark prune` could remove. `zark status` shows the same at any time.
 
 ### Drive staleness reporting
 
-`zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host, its machine-id and the last point (`org.zark:*`). A drive whose machine-id is not this system's is refused before anything is touched. After a backup it lists how many days have passed since every other drive's last backup.
+`zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host, its machine-id and the last point (`org.zark:*`). A drive whose machine-id is not this system's is refused before anything is touched. After a backup it lists how many days have passed since every other drive's last backup, and for a drive anchored only on shared snapshots how many more days it stays incremental.
 
 ### Divergence and datasets only on the drive
 
