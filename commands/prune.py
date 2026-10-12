@@ -236,9 +236,10 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     now = int(time.time())
     try:
         dest = engine.read_dest(pool, strict=True)
+        complete = engine.drive_complete(pool)
     except engine.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
-    complete, pins = engine.drive_complete(pool), engine.drive_pins(pool)
+    pins = engine.drive_pins(pool)
     prune = plan_prune(dest, complete, policy, now, pinned=pins)
     if not prune.empty:
         freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])

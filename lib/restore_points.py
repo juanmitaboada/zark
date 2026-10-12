@@ -321,6 +321,18 @@ def is_complete(members: list[Snap]) -> bool:
     return mark.isdigit() and int(mark) == len({s.dataset for s in members})
 
 
+def run_complete_points(snaps: list[Snap], last_point: str) -> set[str]:
+    """Backup points whose run reached every dataset: any snapshot of the
+    point carries a mark, or, on a drive with no mark at all,
+    :func:`legacy_complete`. Unlike :func:`complete_points`, a point stays
+    in this set after part of its snapshots went, so retention keeps
+    judging it by its run: a dataset destroyed on the drive later (a
+    confirmed DESTROY) must not turn the older points into incomplete
+    ones the policy would then remove."""
+    marked = point_marks(snaps)
+    return set(marked) if marked else legacy_complete(snaps, last_point)
+
+
 def complete_points(snaps: list[Snap], last_point: str) -> set[str]:
     """Names of the complete backup points on a drive: by their marks, or,
     on a drive with no mark at all, :func:`legacy_complete`."""

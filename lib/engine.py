@@ -77,10 +77,10 @@ from lib.restore_points import (
     COMPLETE_PROP,
     LEGACY_MARK,
     Snap,
-    complete_points,
     legacy_complete,
     parse_snapshots,
     point_marks,
+    run_complete_points,
 )
 from lib.retention import Prune, Removal
 
@@ -806,11 +806,15 @@ def log_metadata(pool: str, log: Log) -> dict[str, str]:
     return meta
 
 
-def snapshot_marks(root: str) -> dict[str, str]:
+def snapshot_marks(root: str, strict: bool = False) -> dict[str, str]:
     """Completion marks set on the snapshots themselves under ``root`` (M2V-3):
     ``-s local`` leaves out what a snapshot only inherits from its filesystems
-    (module/zfs/dsl_prop.c:1224-1245)."""
-    r = sh.run(f"zfs get -H -p -r -s local -t snapshot -o name,value {COMPLETE_PROP} {_q(root)}")
+    (module/zfs/dsl_prop.c:1224-1245). ``strict`` raises :class:`ReadError`
+    when the listing fails."""
+    r = _checked(
+        sh.run(f"zfs get -H -p -r -s local -t snapshot -o name,value {COMPLETE_PROP} {_q(root)}"),
+        strict,
+    )
     out: dict[str, str] = {}
     for line in r.lines if r.ok else []:
         f = line.split("\t")
@@ -819,14 +823,20 @@ def snapshot_marks(root: str) -> dict[str, str]:
     return out
 
 
-def drive_snapshots(pool: str) -> list[Snap]:
+def drive_snapshots(pool: str, strict: bool = False) -> list[Snap]:
     """Every snapshot under ``<pool>/rpool`` and ``<pool>/bpool``, archived
-    lineages folded into their dataset, with its own completion mark."""
+    lineages folded into their dataset, with its own completion mark.
+    ``strict`` raises :class:`ReadError` when a listing of a root that
+    exists fails."""
     snaps: list[Snap] = []
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        r = sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}")
+        if strict and not sh.run(f"zfs list -H -o name {_q(root)}").ok:
+            continue
+        r = _checked(
+            sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}"), strict
+        )
         if r.ok:
-            snaps += parse_snapshots(r.lines, pool, snapshot_marks(root))
+            snaps += parse_snapshots(r.lines, pool, snapshot_marks(root, strict))
     return snaps
 
 
@@ -880,8 +890,12 @@ def record_complete(pool: str, point: str, rels: list[str], log: Log) -> bool:
 
 
 def drive_complete(pool: str) -> set[str]:
-    """The complete backup points on a drive, as recover reads them."""
-    return complete_points(drive_snapshots(pool), read_metadata(pool).get("last-point", ""))
+    """The backup points on a drive whose run was complete, for retention
+    (:func:`lib.restore_points.run_complete_points`). Read strictly: a mark
+    that cannot be read would make complete points look incomplete, and
+    the policy remove them, so a failed listing raises :class:`ReadError`."""
+    meta = read_metadata(pool, strict=True)
+    return run_complete_points(drive_snapshots(pool, strict=True), meta.get("last-point", ""))
 
 
 def drive_pins(pool: str) -> dict[str, str]:

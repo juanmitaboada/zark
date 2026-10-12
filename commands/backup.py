@@ -375,9 +375,15 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
     margin = dst_info.size_bytes * policy.margin_pct // 100
     if needed + margin <= avail:
         return []
-    complete, pins = engine.drive_complete(pool), engine.drive_pins(pool)
-    # A ROLLBACK's common snapshot becomes the base of this run.
+    try:
+        complete, pins = engine.drive_complete(pool), engine.drive_pins(pool)
+    except engine.ReadError as e:
+        log.warn(f"Retention skipped: {e}")
+        _check_room(pool, needed, avail, margin, policy, log)
+        return []
+    # Bases of this run: a ROLLBACK's common snapshot, a new clone's origin.
     bases = {f"{p.rel}{p.common}" for p in plans if p.state is State.ROLLBACK and p.common}
+    bases |= {p.clone_from for p in plans if p.state is State.NEW and p.clone_from}
     now = int(time.time())
     prune = plan_prune(eng.dest, complete, policy, now, pinned=pins, protected=bases)
     tops = [t for t, _ in prune.datasets]
@@ -415,6 +421,19 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
         if log.ask(f"Remove these {len(chosen)} backup point(s) from {pool}?", default=False):
             actions.append(partial(engine.apply_prune, pool, beyond, log))
             room = avail + total
+    _check_room(pool, needed, room, margin, policy, log)
+    return actions
+
+
+def _check_room(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pool: str,
+    needed: int,
+    room: int,
+    margin: int,
+    policy: Policy,
+    log: Log,
+) -> None:
+    """Stop when the transfer does not fit; warn when the margin is not kept."""
     if needed > room:
         log.fatal(
             f"Not enough space on {pool} for this backup",
@@ -427,7 +446,6 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
             + "the next one will propose removing old backup points again, "
             + "or the drive is too small for this system"
         )
-    return actions
 
 
 def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
@@ -437,16 +455,11 @@ def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
     cannot be read."""
     try:
         dest = engine.read_dest(pool, strict=True)
+        complete = engine.drive_complete(pool)
     except engine.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         return 0, 0
-    prune = plan_prune(
-        dest,
-        engine.drive_complete(pool),
-        policy,
-        int(time.time()),
-        pinned=engine.drive_pins(pool),
-    )
+    prune = plan_prune(dest, complete, policy, int(time.time()), pinned=engine.drive_pins(pool))
     for target, why in prune.kept:
         log.info(f"  kept {pool}/{target}: {why}")
     if prune.empty:

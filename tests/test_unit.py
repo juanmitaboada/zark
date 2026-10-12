@@ -9457,6 +9457,38 @@ class TestRetentionOnDrive:
         assert P1 not in _marked(fake)
         assert _engine_run(fake, "backup", "111", "zark_2026-10-11_10:00:00Z").ok
 
+    def test_a_dataset_destroyed_on_the_drive_does_not_take_the_history(self) -> None:
+        """A DESTROY the user confirmed for one dataset leaves the older points
+        short of it; retention still judges them by their run's mark and keeps
+        each month's point on the other datasets."""
+        fake = self._drive_with_history()
+        for n in [n for n in fake.ds if n.startswith("backup/rpool/var")]:
+            _ = fake.ds.pop(n)
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert _marked(fake) == set()  # recover: none of them is whole any more
+        prune = self._plan(fake)
+        gone = {r.target for r in prune.snapshots}
+        assert f"rpool/ROOT/be@{P2}" not in gone and f"rpool/ROOT/be@{P3}" not in gone
+        assert f"rpool/ROOT/be@{P1}" in gone
+
+    def test_retention_stops_when_the_marks_cannot_be_read(self) -> None:
+        """A failed read of the marks would make every point look incomplete:
+        nothing is removed instead."""
+        fake = self._drive_with_history()
+        fake.fail_cmds.add(
+            "-s local -t snapshot -o name,value org.zark:point-complete backup/bpool"
+        )
+        before = {ds: fake.names(ds) for ds in fake.ds}
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(backup_mod.time, "time", return_value=float(NOW)),
+            redirect_stdout(out),
+        ):
+            assert backup_mod._apply_retention("backup", ret.Policy(), Log()) == (0, 0)  # pylint: disable=protected-access
+        assert "Retention skipped" in out.getvalue()
+        assert before == {ds: fake.names(ds) for ds in fake.ds}
+
     def test_clone_origin_and_held_snapshot_stay(self) -> None:
         """ZFS would refuse both destroys: the policy leaves them and reports the clone origin."""
         fake = self._drive_with_history()
@@ -9582,6 +9614,17 @@ class TestBackupSpace:
         assert ok and asked
         assert "less than 10% free after this backup" in out
         assert P2 in fake.names("backup/rpool/ROOT/be")
+
+    def test_a_new_clones_origin_survives_the_space_plan(self) -> None:
+        """The snapshot a new clone will be received from is a base of this run."""
+        fake = self._history()
+        src = "rpool/ROOT/be@autosnap_2026-10-02_08:00:00_hourly"
+        assert "autosnap_2026-10-02_08:00:00_hourly" in fake.names("backup/rpool/ROOT/be")
+        fake.dataset("rpool/ROOT/be2", origin=src, mountpoint="/")
+        ok, _asked, _ = self._decide(fake, 0, 10**12, False, ret.Policy(margin_pct=0))
+        assert ok
+        assert "autosnap_2026-10-02_08:00:00_hourly" in fake.names("backup/rpool/ROOT/be")
+        assert "autosnap_2026-10-01_08:00:00_hourly" not in fake.names("backup/rpool/ROOT/be")
 
     def test_nothing_is_removed_with_room(self) -> None:
         """With room for the transfer and the margin, nothing on the drive changes."""
