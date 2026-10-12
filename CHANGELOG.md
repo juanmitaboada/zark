@@ -201,10 +201,13 @@ the development-tooling consolidation that preceded it.
 - On a drive written before the completion marks, a backup point at or
   before `last-point` is marked complete by name, unless some dataset has
   snapshots on the drive both before and after it but not the point
-  itself. A dataset whose lineage on the drive starts after the point
-  (sent again in full later, after it was destroyed or archived there)
-  shows no such gap, so a legacy point that missed it may still be marked
-  complete. Points taken from now on are marked by the run that took them.
+  itself. That rule errs both ways: a dataset that was gone from origin
+  for a while and came back on the same lineage (destroyed and restored)
+  leaves such a gap, so the points taken meanwhile stay unmarked and
+  recover calls them incomplete; and one whose lineage on the drive starts
+  after a point (sent again in full) shows none, so a legacy point that
+  missed it may be marked complete. Points taken from now on are marked
+  by the run that took them.
 - An anchor that could not be created leaves that dataset on its previous
   anchor and point (reported in the table and the log); the next backup
   continues from the point.
