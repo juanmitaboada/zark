@@ -564,6 +564,25 @@ class Run:  # pylint: disable=too-many-instance-attributes
         gone = ("no longer exists", "is no longer the same snapshot")
         return msg if any(g in msg for g in gone) else ""
 
+    def discard_stale_partials(self, plans: list[DatasetPlan]) -> list[str]:
+        """Before any question: discard the partial receives that can never
+        resume (:meth:`resume_impossible`); return their datasets.
+
+        ``receive -A`` touches no snapshot and the state is of no use, so
+        nothing is lost even when the user then aborts. Found only at
+        transfer time, the dataset's new state (often ROLLBACK) would wait
+        for another run (seen on eli after a recover, N7).
+        """
+        gone: list[str] = []
+        for p in plans:
+            if p.state is not State.RESUME:
+                continue
+            why = self.resume_impossible(p.rel)
+            if why and self.abort_partial(p.rel):
+                self.log.warn(f"  {p.rel}: partial receive discarded: {why}")
+                gone.append(p.rel)
+        return gone
+
     def abort_partial(self, rel: str) -> bool:
         """``zfs receive -A``: discard partial receive state (no snapshot is touched)."""
         r = sh.run(f"zfs receive -A {_q(self._dst(rel))}", log=self.log)
@@ -932,6 +951,9 @@ def replicate(run: Run, decide: Decide) -> Result:
     res = Result()
     try:
         plans = run.survey()
+        if run.discard_stale_partials(plans):
+            # Planned afresh, so what they now need is asked with the rest.
+            plans = run.survey()
     except ReadError as e:
         res.aborted, res.error = True, str(e)
         return res

@@ -7571,6 +7571,33 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert not fake.ds["backup/rpool/USERDATA/home"].token
         assert fake.names("backup/rpool/USERDATA/home") == before
 
+    def test_stale_partial_is_discarded_before_the_questions(self) -> None:
+        """M2F-11a (eli N7, after a recover): a partial receive that can never
+        resume goes before the questions, so the decision its dataset then
+        needs (ROLLBACK) is asked in the same run, not the next one."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)  # the hourly lands
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        named = fake.ds["backup/rpool/USERDATA/home"].token.split("|")[2]
+        home = fake.ds["rpool/USERDATA/home"]
+        # A recover of P1: origin has neither the received hourly nor the token's snapshot.
+        home.snaps = [
+            s for s in home.snaps if s.name not in (named, "autosnap_2026-10-07_12:00:00_hourly")
+        ]
+        asked: list[repl.State] = []
+
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            p = next(q for q in plans if q.rel == "rpool/USERDATA/home")
+            asked.append(p.state)
+            return p.state is not repl.State.ROLLBACK or eng.rollback(p)
+
+        res = _engine_run(fake, "backup", "111", P3, decide)
+        assert asked == [repl.State.ROLLBACK]
+        assert res.ok, res
+        assert P3 in fake.names("backup/rpool/USERDATA/home")
+
     def test_partial_receive_kept_when_the_resume_fails_otherwise(self) -> None:
         """M2R-10 (E8): an I/O error on resume keeps the partial state."""
         fake = self._fresh()
