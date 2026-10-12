@@ -67,6 +67,7 @@ import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-p
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
+import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -9102,6 +9103,203 @@ def _record(fake: FakeZfs, point: str, pool: str = "backup") -> None:
     with patch_sh(fake), redirect_stdout(StringIO()):
         rels = repl.expected(engine.read_origin(["rpool", "bpool"]))
         assert engine.record_complete(pool, point, rels, Log())
+
+
+# ── Destination retention policy (M3 decision 1) ─────────────────────────
+
+
+NOW = 1_800_000_000  # 2027-01-15 08:00 UTC
+
+
+def _days_ago(n: float) -> int:
+    return int(NOW - n * ret.DAY)
+
+
+def _pt(day: str) -> str:
+    return f"zark_{day}_10:00:00Z"
+
+
+def _drive(spec: dict[str, list[tuple[str, int]]], **orphans: str) -> dict[str, repl.Dest]:
+    """{dataset: [(snapshot, creation)]} in createtxg order → a drive listing."""
+    out: dict[str, repl.Dest] = {}
+    txg = 0
+    for rel, snaps in spec.items():
+        refs = []
+        for name, when in snaps:
+            txg += 1
+            refs.append(repl.Ref(name, f"{rel}@{name}", txg, when))
+        out[rel] = repl.Dest(rel, snaps=refs, orphan=orphans.get(rel.replace("/", "_"), ""))
+    return out
+
+
+def _gone(p: ret.Prune) -> set[str]:
+    return {r.target for r in p.snapshots}
+
+
+class TestRetentionPolicy:
+    """M3-1: window, one complete point per month, rule 3, max_age, 6c, 7a."""
+
+    BE, HOME = "rpool/ROOT/be", "rpool/USERDATA/home"
+
+    def _history(self) -> tuple[dict[str, repl.Dest], set[str]]:
+        # Three points in November, two in December, one 10 days ago; an
+        # hourly carried in November and one 2 days ago.
+        points = [
+            (_pt("2026-11-02"), _days_ago(74)),
+            (_pt("2026-11-16"), _days_ago(60)),
+            (_pt("2026-11-30"), _days_ago(46)),
+            (_pt("2026-12-07"), _days_ago(39)),
+            (_pt("2026-12-21"), _days_ago(25)),
+            (_pt("2027-01-05"), _days_ago(10)),
+        ]
+        be = [*points[:2], ("autosnap_2026-11-20_10:00:00_hourly", _days_ago(56)), *points[2:]]
+        home = [*points, ("autosnap_2027-01-13_10:00:00_hourly", _days_ago(2))]
+        return _drive({self.BE: be, self.HOME: home}), {n for n, _ in points}
+
+    def test_window_and_one_complete_point_per_month(self) -> None:
+        """Inside the window everything stays; outside, the newest complete point of each month."""
+        dest, complete = self._history()
+        p = ret.plan_prune(dest, complete, ret.Policy(window_days=30), NOW)
+        gone = _gone(p)
+        for rel in (self.BE, self.HOME):
+            assert f"{rel}@{_pt('2026-11-02')}" in gone
+            assert f"{rel}@{_pt('2026-11-16')}" in gone
+            assert f"{rel}@{_pt('2026-11-30')}" not in gone  # November's newest
+            assert f"{rel}@{_pt('2026-12-07')}" in gone
+            assert f"{rel}@{_pt('2026-12-21')}" not in gone  # inside the window
+            assert f"{rel}@{_pt('2027-01-05')}" not in gone
+        assert f"{self.BE}@autosnap_2026-11-20_10:00:00_hourly" in gone
+        assert f"{self.HOME}@autosnap_2027-01-13_10:00:00_hourly" not in gone
+        assert not p.datasets
+
+    def test_a_point_goes_or_stays_whole(self) -> None:
+        """Decided once per name: every dataset's snapshot of it shares the verdict."""
+        dest, complete = self._history()
+        gone = _gone(ret.plan_prune(dest, complete, ret.Policy(), NOW))
+        by_point: dict[str, set[bool]] = {}
+        for rel, d in dest.items():
+            for s in d.snaps:
+                if repl.POINT_RE.match(s.name):
+                    by_point.setdefault(s.name, set()).add(f"{rel}@{s.name}" in gone)
+        assert all(len(v) == 1 for v in by_point.values()), by_point
+
+    def test_incomplete_points_leave_with_the_window(self) -> None:
+        """An incomplete point outside the window goes; its month keeps the newest complete one."""
+        dest, complete = self._history()
+        complete.discard(_pt("2026-11-30"))
+        gone = _gone(ret.plan_prune(dest, complete, ret.Policy(), NOW))
+        assert f"{self.BE}@{_pt('2026-11-30')}" in gone
+        assert f"{self.BE}@{_pt('2026-11-16')}" not in gone  # now November's newest complete
+
+    def test_newest_complete_point_and_newest_snapshot_stay(self) -> None:
+        """Rule 3: even far outside the window and past max_age."""
+        dest = _drive(
+            {
+                self.BE: [(_pt("2026-06-01"), _days_ago(228)), (_pt("2026-06-02"), _days_ago(227))],
+                self.HOME: [(_pt("2026-06-01"), _days_ago(228))],
+            },
+        )
+        complete = {_pt("2026-06-01")}
+        p = ret.plan_prune(dest, complete, ret.Policy(window_days=7, max_age_days=30), NOW)
+        assert _gone(p) == set()  # 06-01: newest complete; 06-02: BE's newest (I-E)
+
+    def test_max_age_removes_monthly_points(self) -> None:
+        """max_age removes monthly points older than it, never the window."""
+        dest, complete = self._history()
+        gone = _gone(ret.plan_prune(dest, complete, ret.Policy(max_age_days=40), NOW))
+        assert f"{self.BE}@{_pt('2026-11-30')}" in gone
+        assert f"{self.BE}@{_pt('2026-12-21')}" not in gone
+
+    def test_history_before_the_first_point_is_not_touched(self) -> None:
+        """6c: a drive written by 1.x keeps its older history; one without any
+        backup point is not pruned at all."""
+        old = [
+            ("autosnap_2026-03-01_00:00:00_monthly", _days_ago(320)),
+            ("syncoid_carmen_2026-03-02:10:00:00-GMT01:00", _days_ago(319)),
+        ]
+        dest = _drive({self.BE: [*old, (_pt("2026-12-01"), _days_ago(45))]})
+        assert ret.plan_prune(dest, {_pt("2026-12-01")}, ret.Policy(), NOW).empty
+        assert ret.plan_prune(_drive({self.BE: old}), set(), ret.Policy(), NOW).empty
+
+    def test_other_names_pinned_and_protected_stay(self) -> None:
+        """Manual names, clone origins, holds and this run's bases are never removed."""
+        dest, complete = self._history()
+        dest[self.BE].snaps.insert(0, repl.Ref("manual-before-upgrade", "m", 0, _days_ago(70)))
+        clone = f"{self.BE}@{_pt('2026-11-02')}"
+        base = f"{self.HOME}@{_pt('2026-11-16')}"
+        p = ret.plan_prune(
+            dest,
+            complete,
+            ret.Policy(),
+            NOW,
+            pinned={clone: "origin of a clone on the drive"},
+            protected={base},
+        )
+        gone = _gone(p)
+        assert f"{self.BE}@manual-before-upgrade" not in gone
+        assert clone not in gone and base not in gone
+        assert (clone, "origin of a clone on the drive") in p.kept
+
+    def test_other_drives_bpool_anchors_are_intermediates(self) -> None:
+        """Another drive's bpool anchor carried by a -I stream goes like an intermediate."""
+        anchor = repl.anchor_name("222", _pt("2026-11-10"))
+        dest = _drive(
+            {
+                "bpool/BOOT/be": [
+                    (_pt("2026-11-02"), _days_ago(74)),
+                    (anchor, _days_ago(66)),
+                    (_pt("2027-01-05"), _days_ago(10)),
+                ],
+            },
+        )
+        gone = _gone(ret.plan_prune(dest, {_pt("2027-01-05")}, ret.Policy(), NOW))
+        assert f"bpool/BOOT/be@{anchor}" in gone
+
+    def test_archived_lineage_left_with_nothing_goes_whole(self) -> None:
+        """7a: no I-E for an archived lineage; with all its snapshots gone the
+        subtree is destroyed whole. A live dataset keeps its newest."""
+        arch = f"{self.BE}.archived-20261101"
+        dest, complete = self._history()
+        dest |= _drive(
+            {
+                arch: [(_pt("2026-10-05"), _days_ago(102))],
+                f"{arch}/var": [(_pt("2026-10-05"), _days_ago(102))],
+            },
+        )
+        complete.add(_pt("2026-10-05"))
+        p = ret.plan_prune(dest, complete, ret.Policy(), NOW)
+        assert f"{arch}@{_pt('2026-10-05')}" not in _gone(p)  # October's newest complete
+        p = ret.plan_prune(dest, complete, ret.Policy(max_age_days=90), NOW)
+        assert f"{arch}@{_pt('2026-10-05')}" in _gone(p)
+        assert [t for t, _ in p.datasets] == [arch]
+
+    def test_kept_orphan_goes_whole_undecided_orphan_keeps_its_newest(self) -> None:
+        """7a: a kept orphan with nothing left goes whole; one still asked about keeps it."""
+        old = [(_pt("2026-10-05"), _days_ago(102))]
+        kept, asked = "rpool/USERDATA/old", "rpool/USERDATA/tmp"
+        dest = _drive({kept: old, asked: old}, rpool_USERDATA_old="kept@2026-11-01")
+        dest |= _drive({self.BE: [*old, (_pt("2027-01-05"), _days_ago(10))]})
+        p = ret.plan_prune(
+            dest, {_pt("2026-10-05"), _pt("2027-01-05")}, ret.Policy(max_age_days=60), NOW
+        )
+        assert f"{kept}@{_pt('2026-10-05')}" in _gone(p)
+        assert f"{asked}@{_pt('2026-10-05')}" not in _gone(p)  # I-E: may become a base
+        assert [t for t, _ in p.datasets] == [kept]
+
+    def test_space_candidates_are_the_oldest_monthly_points(self) -> None:
+        """M3-4: beyond the policy, the monthly points outside the window, oldest first."""
+        dest, complete = self._history()
+        dest[self.BE].snaps.insert(0, repl.Ref(_pt("2026-10-05"), "x", 0, _days_ago(102)))
+        complete.add(_pt("2026-10-05"))
+        policy = ret.Policy()
+        p = ret.plan_prune(dest, complete, policy, NOW)
+        names = ret.space_candidates(dest, complete, policy, NOW, p)
+        assert names == [_pt("2026-10-05"), _pt("2026-11-30")]
+        removals = ret.point_removals(dest, _pt("2026-11-30"))
+        assert {r.target for r in removals} == {
+            f"{self.BE}@{_pt('2026-11-30')}",
+            f"{self.HOME}@{_pt('2026-11-30')}",
+        }
 
 
 class TestCompletePoints:
