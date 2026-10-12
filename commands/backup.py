@@ -485,6 +485,45 @@ def _show_table(res: engine.Result, point: str, log: Log) -> None:
             log.warn(line)
 
 
+# Shown in the BACKUP INCOMPLETE banner (M2F-11b).
+_INCOMPLETE_SHOWN = 15
+
+
+def _next_step(p: DatasetPlan, out: engine.Outcome | None, res: engine.Result) -> str:
+    """What the next backup does with a dataset that missed the point."""
+    if p.state is State.RESUME:
+        return "partial transfer kept: the next backup resumes it"
+    if p.state in (State.ROLLBACK, State.DIVERGED):
+        return f"needs a decision ({p.state}): the next backup asks"
+    if p.state is State.MODIFIED:
+        return "changed on the drive: the next backup asks again"
+    if out is not None and out.enospc:
+        return "the drive is full: free space, then run backup again"
+    if res.unverified and out is not None and out.ok:
+        return "transferred, not verified: the next backup checks it"
+    if out is not None and not out.ok:
+        return "failed (error in the table above): the next backup tries again"
+    if res.enospc:
+        return "not attempted after the drive filled up"
+    return "not attempted: the next backup sends it"
+
+
+def _incomplete_lines(res: engine.Result, point: str) -> tuple[list[str], int]:
+    """BACKUP INCOMPLETE banner lines, each dataset with what the next run
+    does with it, and how many datasets missed the point."""
+    missing = [
+        p for p in res.plans if p.state not in (State.AT_POINT, State.ORPHAN, State.EXCLUDED)
+    ]
+    lines = [f"The result could not be checked: {res.unverified}", ""] if res.unverified else []
+    lines.append(f"{len(missing)} dataset(s) did not reach {point}:")
+    for p in missing[:_INCOMPLETE_SHOWN]:
+        lines += [f"  {p.rel}", f"    {_next_step(p, res.outcomes.get(p.rel), res)}"]
+    if len(missing) > _INCOMPLETE_SHOWN:
+        lines.append(f"  …and {len(missing) - _INCOMPLETE_SHOWN} more (see the table above)")
+    lines += ["", "Run backup again: each dataset above says what it will do."]
+    return lines, len(missing)
+
+
 def _write_metadata(pool_name: str, source_pool: str, point: str, log: Log) -> None:
     """Decision 17a. The point and its time are recorded only for a complete run."""
     rpool_guid = sh.run(f"zpool get -H -o value guid {source_pool}").output.strip()
@@ -744,32 +783,9 @@ def run(
     log.ok(f"{pool_name} verified reimportable (ONLINE)")
 
     if not res.ok:
-        missing = [
-            p.rel
-            for p in res.plans
-            if p.state not in (State.AT_POINT, State.ORPHAN, State.EXCLUDED)
-        ]
-        log.banner_error(
-            "BACKUP INCOMPLETE",
-            [
-                *(
-                    [f"The result could not be checked: {res.unverified}", ""]
-                    if res.unverified
-                    else []
-                ),
-                f"{len(missing)} dataset(s) did not reach {eng.point}:",
-                *[f"  {rel}" for rel in missing[:15]],
-                *(
-                    [f"  …and {len(missing) - 15} more (see the table above)"]
-                    if len(missing) > 15
-                    else []
-                ),
-                "",
-                "The drive keeps everything it had. Run backup again;",
-                "an interrupted transfer resumes where it stopped.",
-            ],
-        )
-        _notify("❌ Backup incomplete", f"{len(missing)} dataset(s) not backed up")
+        lines, missing = _incomplete_lines(res, eng.point)
+        log.banner_error("BACKUP INCOMPLETE", lines)
+        _notify("❌ Backup incomplete", f"{missing} dataset(s) not backed up")
         raise SystemExit(1)
 
     # ── Persist last_backup_at (only for a complete, verified backup) ────

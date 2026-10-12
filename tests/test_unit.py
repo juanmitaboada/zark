@@ -8695,6 +8695,50 @@ class TestBackupDecide:
         assert f"Rolled back rpool/ROOT/be to @{P1}" in buf.getvalue()
 
 
+class TestIncompleteBanner:
+    """M2F-11b: BACKUP INCOMPLETE says, per dataset, what the next run does."""
+
+    def test_each_dataset_says_what_the_next_backup_does(self) -> None:
+        plans = [
+            repl.DatasetPlan("rpool/a", repl.State.AT_POINT),
+            repl.DatasetPlan("rpool/home", repl.State.RESUME),
+            repl.DatasetPlan("rpool/be", repl.State.ROLLBACK),
+            repl.DatasetPlan("rpool/var", repl.State.MODIFIED),
+            repl.DatasetPlan("rpool/docker", repl.State.INCREMENTAL),
+            repl.DatasetPlan("rpool/srv", repl.State.VIA_BOOKMARK),
+            repl.DatasetPlan("rpool/old", repl.State.ORPHAN),
+        ]
+        res = engine.Result(
+            plans=plans,
+            outcomes={"rpool/docker": engine.Outcome("rpool/docker", False, "cannot receive: I/O")},
+        )
+        lines, missing = backup_mod._incomplete_lines(res, P1)  # pylint: disable=protected-access
+        assert missing == 5
+        text = "\n".join(lines)
+        assert f"5 dataset(s) did not reach {P1}:" in text
+        assert "  rpool/home\n    partial transfer kept: the next backup resumes it" in text
+        assert "  rpool/be\n    needs a decision (rollback): the next backup asks" in text
+        assert "  rpool/var\n    changed on the drive: the next backup asks again" in text
+        assert "  rpool/docker\n    failed (error in the table above)" in text
+        assert "  rpool/srv\n    not attempted: the next backup sends it" in text
+        assert "rpool/a" not in text and "rpool/old" not in text
+        assert "an interrupted transfer resumes where it stopped" not in text
+
+    def test_out_of_space(self) -> None:
+        plans = [
+            repl.DatasetPlan("rpool/be", repl.State.INCREMENTAL),
+            repl.DatasetPlan("rpool/home", repl.State.INCREMENTAL),
+        ]
+        res = engine.Result(
+            plans=plans,
+            outcomes={"rpool/be": engine.Outcome("rpool/be", False, "out of space", enospc=True)},
+            enospc=True,
+        )
+        text = "\n".join(backup_mod._incomplete_lines(res, P1)[0])  # pylint: disable=protected-access
+        assert "  rpool/be\n    the drive is full: free space, then run backup again" in text
+        assert "  rpool/home\n    not attempted after the drive filled up" in text
+
+
 class TestBackupCommand:
     """`zark backup` end to end on FakeZfs (drive discovery and keystore stubbed)."""
 
