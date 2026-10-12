@@ -77,10 +77,12 @@ from lib.restore_points import (
     COMPLETE_PROP,
     LEGACY_MARK,
     Snap,
+    complete_points,
     legacy_complete,
     parse_snapshots,
     point_marks,
 )
+from lib.retention import Prune, Removal
 
 SANOID_UNITS = ("sanoid.service", "sanoid-prune.service")
 SANOID_WAIT_SECONDS = 600
@@ -862,6 +864,94 @@ def record_complete(pool: str, point: str, rels: list[str], log: Log) -> bool:
                 + "(recover will list them as incomplete)"
             )
     return ok
+
+
+# ── destination retention (M3) ───────────────────────────────────────────
+
+
+def drive_complete(pool: str) -> set[str]:
+    """The complete backup points on a drive, as recover reads them."""
+    return complete_points(drive_snapshots(pool), read_metadata(pool).get("last-point", ""))
+
+
+def drive_pins(pool: str) -> dict[str, str]:
+    """``rel@name`` → why ZFS would refuse to destroy that snapshot: a clone
+    origin (EEXIST) or a hold (EBUSY), module/zfs/dsl_destroy.c:79-86."""
+    out: dict[str, str] = {}
+    strip = f"{pool}/"
+    for root in (f"{pool}/rpool", f"{pool}/bpool"):
+        r = sh.run(f"zfs list -Hp -t snapshot -o name,clones,userrefs -r {_q(root)}")
+        for line in r.lines if r.ok else []:
+            f = line.split("\t")
+            if len(f) < 3 or not f[0].startswith(strip):
+                continue
+            rel = f[0][len(strip) :]
+            if f[1] not in ("", "-"):
+                out[rel] = f"origin of a clone on the drive ({f[1]})"
+            elif f[2].isdigit() and int(f[2]) > 0:
+                out[rel] = "held (zfs hold)"
+    return out
+
+
+def _under_any(rel: str, tops: list[str]) -> bool:
+    return any(rel == t or rel.startswith(f"{t}/") for t in tops)
+
+
+def reclaim(pool: str, removals: list[Removal], tops: list[str] | None = None) -> int:
+    """Bytes the removals would free, measured by ZFS: one dry run per dataset
+    over the exact names (``zfs destroy -nvp ds@a,b,c``,
+    cmd/zfs/zfs_main.c:1756-1779), plus ``used`` of each subtree destroyed
+    whole. 0 for what cannot be measured."""
+    tops = tops or []
+    by_ds: dict[str, list[str]] = {}
+    for r in removals:
+        if not _under_any(r.rel, tops):
+            by_ds.setdefault(r.rel, []).append(r.name)
+    total = 0
+    for rel, names in sorted(by_ds.items()):
+        spec = ",".join(dict.fromkeys(names))
+        out = sh.run(f"zfs destroy -nvp {_q(f'{pool}/{rel}@{spec}')}")
+        for line in out.lines if out.ok else []:
+            f = line.split("\t")
+            if len(f) == 2 and f[0] == "reclaim" and f[1].isdigit():
+                total += int(f[1])
+    for top in tops:
+        used = sh.run(f"zfs list -Hp -o used {_q(f'{pool}/{top}')}")
+        if used.ok and used.output.strip().isdigit():
+            total += int(used.output.strip())
+    return total
+
+
+def apply_prune(pool: str, prune: Prune, log: Log) -> tuple[int, list[str]]:
+    """Destroy what the plan allows, each snapshot by its exact name, one per
+    command, every one logged with its reason (never a % range, redesign
+    §7); a subtree destroyed whole names every snapshot it takes first.
+    Returns how many went and what could not be destroyed."""
+    tops = [t for t, _ in prune.datasets]
+    count, failed = 0, []
+    for r in prune.snapshots:
+        if _under_any(r.rel, tops):
+            continue
+        target = f"{pool}/{r.target}"
+        res = sh.run(f"zfs destroy {_q(target)}", log=log)
+        if res.ok:
+            count += 1
+            log.info(f"  removed {target}: {r.reason}")
+        else:
+            failed.append(target)
+            log.warn(f"  could not remove {target}: {res.stderr.strip()}")
+    for top, why in prune.datasets:
+        for r in prune.snapshots:
+            if _under_any(r.rel, [top]):
+                log.file(f"  {pool}/{r.target} goes with {pool}/{top}")
+        res = sh.run(f"zfs destroy -r {_q(f'{pool}/{top}')}", log=log)
+        if res.ok:
+            count += sum(1 for r in prune.snapshots if _under_any(r.rel, [top]))
+            log.info(f"  removed {pool}/{top} and everything below it: {why}")
+        else:
+            failed.append(f"{pool}/{top}")
+            log.warn(f"  could not remove {pool}/{top}: {res.stderr.strip()}")
+    return count, failed
 
 
 def anchored_disks(origin: dict[str, Origin]) -> set[str]:

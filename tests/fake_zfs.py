@@ -43,7 +43,7 @@ from tests.mock_sh import MockShell
 
 
 @dataclass
-class FSnap:
+class FSnap:  # pylint: disable=too-many-instance-attributes
     """A snapshot or bookmark in the model."""
 
     name: str
@@ -52,6 +52,9 @@ class FSnap:
     creation: int
     ivset: bool = True
     props: dict[str, str] = field(default_factory=dict)  # user properties set on a snapshot
+    used: int = 1 << 20  # what destroying it alone would free
+    clones: str = ""  # datasets cloned from it (destroy refused, EEXIST)
+    userrefs: int = 0  # holds (destroy refused, EBUSY)
 
 
 @dataclass
@@ -287,7 +290,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 rows += [self._row(f"{n}#{b.name}", d, b, fields) for b in d.bookmarks]
         return _ok("".join(r + "\n" for r in rows))
 
-    def _row(self, name: str, d: FDataset, s: FSnap | None, fields: list[str]) -> str:
+    def _row(  # pylint: disable=too-many-branches
+        self, name: str, d: FDataset, s: FSnap | None, fields: list[str]
+    ) -> str:
         vals: list[str] = []
         for f in fields:
             if f == "name":
@@ -302,8 +307,14 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 vals.append(str(s.creation))
             elif f == "receive_resume_token":
                 vals.append(d.token or "-")
-            elif f == "used":
+            elif f == "used" and s is None:
                 vals.append(str(1024 * (1 + len(d.snaps))))
+            elif f == "clones" and s is not None:
+                vals.append(s.clones or "")
+            elif f == "userrefs" and s is not None:
+                vals.append(str(s.userrefs))
+            elif f == "used" and s is not None:
+                vals.append(str(s.used))
             elif f == "written" and s is None:
                 vals.append(str(d.written) if d.snaps else "-")
             elif ":" in f:
@@ -344,9 +355,15 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         self.ds[ds].bookmarks.append(FSnap(bm, s.guid, s.txg, s.creation, ivset))
         return _ok()
 
-    def _destroy(self, args: list[str]) -> RunResult:
+    def _destroy(self, args: list[str]) -> RunResult:  # pylint: disable=too-many-return-statements
         recursive = "-r" in args
         target = args[-1]
+        if "%" in target:
+            return _err("fake: zark never destroys a % range")
+        if any(a.startswith("-") and "n" in a for a in args[:-1]):
+            return self._destroy_dry(target)
+        if "@" in target and "," in target:
+            return _err("fake: zark destroys snapshots one by one")
         if "@" in target or "#" in target:
             sep = "@" if "@" in target else "#"
             ds, name = target.split(sep)
@@ -356,6 +373,10 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             hit = [x for x in lst if x.name == name]
             if not hit:
                 return _err(f"could not find any snapshots to destroy: {target}")
+            if hit[0].clones:
+                return _err(f"cannot destroy '{target}': snapshot has dependent clones")
+            if hit[0].userrefs:
+                return _err(f"cannot destroy snapshot {target}: dataset is busy")
             lst.remove(hit[0])
             return _ok()
         kids = [n for n in self.ds if n.startswith(target + "/")]
@@ -364,6 +385,19 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         for n in [*kids, target]:
             self.ds.pop(n, None)
         return _ok()
+
+    def _destroy_dry(self, target: str) -> RunResult:
+        """``zfs destroy -nvp ds@a,b,…``: what it would free
+        (cmd/zfs/zfs_main.c:1756-1779), the list split on commas."""
+        ds, _, spec = target.partition("@")
+        if ds not in self.ds or not spec:
+            return _err("does not exist")
+        names = spec.split(",")
+        hit = [x for x in self.ds[ds].snaps if x.name in names]
+        if len(hit) != len(set(names)):
+            return _err("could not find any snapshots to destroy; check snapshot names.")
+        lines = [f"destroy\t{ds}@{x.name}\n" for x in hit]
+        return _ok("".join(lines) + f"reclaim\t{sum(x.used for x in hit)}\n")
 
     def _rename(self, args: list[str]) -> RunResult:
         src, dst = args[-2], args[-1]

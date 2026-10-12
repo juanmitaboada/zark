@@ -9302,6 +9302,113 @@ class TestRetentionPolicy:
         }
 
 
+class TestRetentionOnDrive:
+    """M3: the policy applied to a drive written by the engine."""
+
+    def _drive_with_history(self) -> FakeZfs:
+        """Four complete backups; their snapshots dated 70, 60, 40 and 5 days
+        before NOW (P1 and P2 in one month, P3 in the next)."""
+        fake = _fresh_fake()
+        points = (P1, P2, P3, "zark_2026-10-10_10:00:00Z")
+        for i, point in enumerate(points):
+            _tick(fake, f"2026-10-0{i + 1}_08:00:00_hourly")
+            assert _engine_run(fake, "backup", "111", point).ok
+            _record(fake, point)
+        ages = {P1: 70, P2: 66, P3: 40, points[3]: 5}
+        for ds, d in fake.ds.items():
+            for snap in d.snaps:
+                if ds.startswith("backup/"):
+                    base = next((a for p, a in ages.items() if snap.name == p), None)
+                    snap.creation = _days_ago(base if base is not None else 67)
+        return fake
+
+    def _plan(self, fake: FakeZfs, policy: ret.Policy | None = None) -> ret.Prune:
+        with patch_sh(fake):
+            dest = engine.read_dest("backup", strict=True)
+            return ret.plan_prune(
+                dest,
+                engine.drive_complete("backup"),
+                policy or ret.Policy(),
+                NOW,
+                pinned=engine.drive_pins("backup"),
+            )
+
+    def test_prune_by_exact_name_keeps_bases_and_marks_true(self) -> None:
+        """Every removal is one `zfs destroy` of one exact name; the next
+        backup is still incremental; what is left of a pruned point is not
+        complete (M2V-4)."""
+        fake = self._drive_with_history()
+        prune = self._plan(fake)
+        gone = {r.target for r in prune.snapshots}
+        assert f"rpool/ROOT/be@{P1}" in gone and f"rpool/ROOT/be@{P2}" not in gone
+        before = len(fake.calls)
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            count, failed = engine.apply_prune("backup", prune, Log())
+        destroys = [c for c in fake.calls[before:] if c.startswith("zfs destroy")]
+        assert count == len(prune.snapshots) and not failed
+        assert len(destroys) == count
+        assert all("%" not in c and "," not in c and " -r " not in c for c in destroys)
+        for rel in (
+            "rpool/ROOT/be",
+            "rpool/USERDATA/home",
+            "rpool/var",
+            "rpool/var/lib",
+            "rpool/var/lib/docker",
+            "bpool/BOOT/be",
+        ):
+            assert fake.ds[f"backup/{rel}"].snaps, rel  # I-E: every dataset keeps its newest
+        assert P1 not in _marked(fake)
+        assert _engine_run(fake, "backup", "111", "zark_2026-10-11_10:00:00Z").ok
+
+    def test_clone_origin_and_held_snapshot_stay(self) -> None:
+        """ZFS would refuse both destroys: the policy leaves them and reports the clone origin."""
+        fake = self._drive_with_history()
+        be = fake.ds["backup/rpool/ROOT/be"]
+        home = fake.ds["backup/rpool/USERDATA/home"]
+        next(x for x in be.snaps if x.name == P1).clones = "backup/rpool/ROOT/be2"
+        next(x for x in home.snaps if x.name == P1).userrefs = 1
+        prune = self._plan(fake)
+        gone = {r.target for r in prune.snapshots}
+        assert f"rpool/ROOT/be@{P1}" not in gone
+        assert f"rpool/USERDATA/home@{P1}" not in gone
+        assert (
+            f"rpool/ROOT/be@{P1}",
+            "origin of a clone on the drive (backup/rpool/ROOT/be2)",
+        ) in (prune.kept)
+
+    def test_reclaim_is_measured_by_a_dry_run_per_dataset(self) -> None:
+        """What a plan frees comes from `zfs destroy -nvp`, one call per dataset, never a range."""
+        fake = self._drive_with_history()
+        prune = self._plan(fake)
+        before = len(fake.calls)
+        with patch_sh(fake):
+            freed = engine.reclaim("backup", prune.snapshots)
+        dry = [c for c in fake.calls[before:] if c.startswith("zfs destroy -nvp")]
+        assert freed == len(prune.snapshots) * (1 << 20)
+        assert len(dry) == len({r.rel for r in prune.snapshots})
+        assert not any("%" in c for c in dry)
+
+    def test_archived_lineage_with_nothing_kept_is_destroyed_whole(self) -> None:
+        """7a: the lineage goes with one `zfs destroy -r`, after its snapshots are named."""
+        fake = self._drive_with_history()
+        arch = "backup/rpool/var.archived-20260801"
+        fake.dataset(arch)
+        old = fake.snap(arch, "zark_2026-08-01_10:00:00Z")
+        old.creation = _days_ago(200)
+        prune = self._plan(fake, ret.Policy(max_age_days=100))
+        assert prune.datasets == [
+            (
+                "rpool/var.archived-20260801",
+                "archived lineage with nothing left that the policy keeps",
+            ),
+        ]
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            _ = engine.apply_prune("backup", prune, Log())
+        assert arch not in fake.ds
+        assert f"zfs destroy -r {arch}" in fake.calls
+
+
 class TestCompletePoints:
     """M2R-1: which backup points are complete is recorded on the drive."""
 
