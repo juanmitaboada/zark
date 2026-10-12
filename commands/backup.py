@@ -514,18 +514,25 @@ def _next_step(p: DatasetPlan, out: engine.Outcome | None, res: engine.Result) -
 
 
 def _incomplete_lines(res: engine.Result, point: str) -> tuple[list[str], int]:
-    """BACKUP INCOMPLETE banner lines, each dataset with what the next run
-    does with it, and how many datasets missed the point."""
+    """BACKUP INCOMPLETE banner lines, the datasets grouped by what the next
+    run does with them, and how many datasets missed the point."""
     missing = [
         p for p in res.plans if p.state not in (State.AT_POINT, State.ORPHAN, State.EXCLUDED)
     ]
+    groups: dict[str, list[str]] = {}  # first seen first
+    for p in missing:
+        groups.setdefault(_next_step(p, res.outcomes.get(p.rel), res), []).append(p.rel)
     lines = [f"The result could not be checked: {res.unverified}", ""] if res.unverified else []
     lines.append(f"{len(missing)} dataset(s) did not reach {point}:")
-    for p in missing[:_INCOMPLETE_SHOWN]:
-        lines += [f"  {p.rel}", f"    {_next_step(p, res.outcomes.get(p.rel), res)}"]
-    if len(missing) > _INCOMPLETE_SHOWN:
-        lines.append(f"  …and {len(missing) - _INCOMPLETE_SHOWN} more (see the table above)")
-    lines += ["", "Run backup again: each dataset above says what it will do."]
+    shown = 0
+    for step, rels in groups.items():
+        lines.append(f"  {step} ({len(rels)}):")
+        names = rels[: max(_INCOMPLETE_SHOWN - shown, 0)]
+        lines += [f"    {rel}" for rel in names]
+        shown += len(names)
+        if len(names) < len(rels):
+            lines.append(f"    …and {len(rels) - len(names)} more (see the table above)")
+    lines += ["", "Run backup again: each group above says what it will do."]
     return lines, len(missing)
 
 

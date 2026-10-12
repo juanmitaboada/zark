@@ -431,7 +431,11 @@ class Run:  # pylint: disable=too-many-instance-attributes
         without ``-r`` (no snapshot is destroyed; works without the keys,
         checked on eli)."""
         r = sh.run(f"zfs rollback {_q(self._dst(p.rel) + p.common)}", log=self.log)
-        self._report(r, f"discarded the changes to {p.rel} on the backup since {p.common}")
+        self._report(
+            r,
+            f"restored {p.rel} on the backup to {p.common} "
+            + "(undid what a read-write mount changed; no snapshot destroyed)",
+        )
         return r.ok
 
     def archive(self, p: DatasetPlan, now: datetime | None = None) -> str:

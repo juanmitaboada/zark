@@ -123,9 +123,9 @@ the development-tooling consolidation that preceded it.
   table goes to the terminal and zark.log, with the whole ZFS error of a
   failed dataset, send's and receive's when both report one; zvols other
   than the keystore are listed as NOT BACKED UP, in the table and in the
-  BACKUP COMPLETED banner; BACKUP INCOMPLETE says, for each dataset that
-  missed the point, what the next backup does with it (resume, ask, try
-  again, send, or free space first). An export that fails is a failed backup
+  BACKUP COMPLETED banner; BACKUP INCOMPLETE groups the datasets that
+  missed the point by what the next backup does with them (resume, ask,
+  try again, send, or free space first). An export that fails is a failed backup
   (H17). The banner's duration covers the whole run (P0-2) and its space
   figures are read after the transfer (P0-4). After a backup it lists the
   days since each other drive's last backup instead of retention-horizon

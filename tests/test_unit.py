@@ -8334,6 +8334,20 @@ class TestBackupDecide:
         ]
         assert P1 in fake.names("backup/rpool/var") and P3 in fake.names("backup/rpool/var")
 
+    def test_discard_says_what_was_restored(self) -> None:
+        """Eli N9b: the line says the drive's copy is back at its snapshot and
+        nothing was destroyed, not that something was "discarded"."""
+        fake = self._mounted_read_write()
+        plans, eng = self._plans(fake)
+        p = next(q for q in plans if q.rel == "rpool/var")
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            assert eng.discard_changes(p)
+        assert (
+            f"Restored rpool/var on the backup to @{P1} "
+            "(undid what a read-write mount changed; no snapshot destroyed)"
+        ) in out.getvalue()
+
     def test_mount_read_write_says_the_next_backup_asks(self) -> None:
         """M2R-9: `zark mount` read-write warns what the next backup will ask."""
         out = StringIO()
@@ -8718,11 +8732,11 @@ class TestIncompleteBanner:
         assert missing == 5
         text = "\n".join(lines)
         assert f"5 dataset(s) did not reach {P1}:" in text
-        assert "  rpool/home\n    partial transfer kept: the next backup resumes it" in text
-        assert "  rpool/be\n    needs a decision (rollback): the next backup asks" in text
-        assert "  rpool/var\n    changed on the drive: the next backup asks again" in text
-        assert "  rpool/docker\n    failed (error in the table above)" in text
-        assert "  rpool/srv\n    not attempted: the next backup sends it" in text
+        assert "  partial transfer kept: the next backup resumes it (1):\n    rpool/home" in text
+        assert "  needs a decision (rollback): the next backup asks (1):\n    rpool/be" in text
+        assert "  changed on the drive: the next backup asks again (1):\n    rpool/var" in text
+        assert "the next backup tries again (1):\n    rpool/docker" in text
+        assert "  not attempted: the next backup sends it (1):\n    rpool/srv" in text
         assert "rpool/a" not in text and "rpool/old" not in text
         assert "an interrupted transfer resumes where it stopped" not in text
 
@@ -8738,8 +8752,22 @@ class TestIncompleteBanner:
             enospc=True,
         )
         text = "\n".join(backup_mod._incomplete_lines(res, P1)[0])  # pylint: disable=protected-access
-        assert "  rpool/be\n    the drive is full: free space, then run backup again" in text
-        assert "  rpool/home\n    not attempted after the drive filled up" in text
+        assert "  the drive is full: free space, then run backup again (1):\n    rpool/be" in text
+        assert "  not attempted after the drive filled up (1):\n    rpool/home" in text
+
+    def test_datasets_with_the_same_step_share_one_line(self) -> None:
+        """Eli N9a: 15 datasets changed by a read-write mount are one group,
+        not 15 copies of the same line; names past the cap are counted."""
+        plans = [repl.DatasetPlan(f"rpool/d{i:02}", repl.State.MODIFIED) for i in range(17)]
+        lines, missing = backup_mod._incomplete_lines(  # pylint: disable=protected-access
+            engine.Result(plans=plans), P1
+        )
+        text = "\n".join(lines)
+        assert missing == 17
+        assert text.count("changed on the drive") == 1
+        assert "  changed on the drive: the next backup asks again (17):" in text
+        assert "    rpool/d14" in text and "rpool/d15" not in text
+        assert "    …and 2 more (see the table above)" in text
 
 
 class TestBackupCommand:
