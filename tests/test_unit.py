@@ -5731,11 +5731,13 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         work: str,
         answer: str | None,
         preflight_fails: bool = False,
+        calls: dict[str, list[tuple[object, ...]]] | None = None,
     ) -> MockShell:
         """``answer`` None simulates a closed terminal (EOF) at the YES prompt.
 
         The system.key copy goes below ``work``; Cleanup's atexit run is
-        simulated after the command returns.
+        simulated after the command returns. ``calls``, when given, receives
+        the positional arguments of every ``_choose_point`` and ``_plan`` call.
         """
         source_key = os.path.join(work, "source.key")
         Path(source_key).write_bytes(b"k" * 32)
@@ -5749,6 +5751,14 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         def preflight(*_args: object) -> None:
             if preflight_fails:
                 make_log().fatal("preflight")
+
+        def spy(name: str, result: object) -> Callable[..., object]:
+            def record(*args: object) -> object:
+                if calls is not None:
+                    calls.setdefault(name, []).append(args)
+                return result
+
+            return record
 
         patches: list[AbstractContextManager[object]] = [
             patch_sh(mock),
@@ -5774,8 +5784,8 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(recover_mod, "whole_disk", return_value="/dev/sdb"),
             patch.object(recover_mod, "_find_be", return_value=_BE),
             patch.object(recover_mod, "_list_snapshots", return_value=snaps),
-            patch.object(recover_mod, "_choose_point", return_value=point),
-            patch.object(recover_mod, "_plan", return_value=plan),
+            patch.object(recover_mod, "_choose_point", side_effect=spy("_choose_point", point)),
+            patch.object(recover_mod, "_plan", side_effect=spy("_plan", plan)),
             patch.object(recover_mod, "_select_target", return_value="/dev/sda"),
             patch.object(recover_mod, "_preflight", side_effect=preflight),
             patch("builtins.input", side_effect=EOFError)
@@ -5820,6 +5830,22 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         mock = self._run(None)
         assert mock.was_not_called("wipefs")
         assert mock.was_not_called("sgdisk")
+
+    def test_completeness_reaches_the_menu_and_the_plan(self) -> None:
+        """M2V-5 (N12a, N12b): the complete points read from the drive are
+        what the menu and the plan see; without them an incomplete point is
+        the default and its missing datasets read as destroyed (M2R-1)."""
+        complete = {"zark_2026-10-07_10:00:00Z"}
+        calls: dict[str, list[tuple[object, ...]]] = {}
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.object(recover_mod, "complete_points", return_value=complete),
+        ):
+            _ = self._run_in(td, "NO", calls=calls)
+        (menu,) = calls["_choose_point"]
+        (plan,) = calls["_plan"]
+        assert menu[-1] is complete
+        assert plan[-1] is complete
 
 
 class TestRecoverAltrootChecks:  # pylint: disable=missing-function-docstring
@@ -7968,6 +7994,44 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert repl.anchor_name("111", P2) not in fake.bookmarks("rpool/ROOT/be")
         assert P2 in fake.names("rpool/ROOT/be")  # still a base for the next run
 
+    def test_an_unreadable_final_check_is_not_success(self) -> None:
+        """M2V-5 (N13): a result whose final check could not read either side
+        is not complete, even when the plans it holds are all at the point."""
+        plans = [
+            repl.DatasetPlan("rpool/ROOT/be", repl.State.AT_POINT),
+            repl.DatasetPlan("bpool/BOOT/be", repl.State.AT_POINT),
+        ]
+        assert engine.Result(plans=plans).ok
+        assert not engine.Result(plans=plans, unverified="could not read: zfs list").ok
+
+    def test_point_not_taken_when_origin_cannot_be_read(self) -> None:
+        """M2V-5 (N21): take_point reads origin strictly; a failed listing of
+        rpool takes no point at all (not bpool's alone)."""
+        fake = self._fresh()
+        fake.fail_cmds.add("-o name,type,canmount,mountpoint,referenced -r rpool")
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P1, sleep=lambda _s: None)
+            assert not eng.take_point()
+        assert not any(c.startswith("zfs snapshot") for c in fake.calls)
+        assert _origin_points(fake) == []
+
+    def test_partial_state_kept_when_the_dry_run_fails_otherwise(self) -> None:
+        """M2V-5 (N42): a resume whose dry run fails for a reason other than a
+        snapshot or source that is gone (an I/O error) keeps the partial state:
+        no `zfs receive -A`, and the transfer resumes."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        assert fake.ds["backup/rpool/USERDATA/home"].token
+        fake.fail_cmds.add("zfs send -nvP -t")
+        res = _engine_run(fake, "backup", "111", P3)
+        assert not any(c.startswith("zfs receive -A") for c in fake.calls)
+        assert res.ok, res
+        home = fake.names("backup/rpool/USERDATA/home")
+        assert P2 in home and P3 in home
+
     def test_a_pool_that_is_gone_is_not_an_empty_one(self) -> None:
         """M2R-3 (E3b): the backup pool exported under the run before the final
         survey: no point in origin is removed as "not on the backup"."""
@@ -9202,6 +9266,51 @@ class TestRecoverIncompletePoint:
         fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
         assert not _engine_run(fake, "backup", "111", P2).ok
         self._check_recover_view(fake, P1)
+
+    def test_plan_of_the_incomplete_point_restores_what_its_run_missed(self) -> None:
+        """M2V-5 (N12c): recover's own plan for the incomplete point takes home
+        from its earlier snapshot and never reports it destroyed in origin."""
+        be, home = f"rpool/ROOT/{_BE}", "rpool/USERDATA/home"
+        t1, t2 = 1_760_000_000, 1_760_600_000
+        lines = [
+            f"backup/{be}@{P1}\t1\t10\t{t1}",
+            f"backup/{home}@{P1}\t2\t11\t{t1}",
+            f"backup/{home}@autosnap_2026-10-08_08:00:00_hourly\t3\t20\t{t2 - 7200}",
+            f"backup/{be}@{P2}\t4\t21\t{t2}",
+        ]
+        snaps = parse_snapshots(lines, "backup")
+        newest = restore_points(snaps, be)[-1]
+        assert point_name(newest) == P2
+        mock = MockShell()
+        mock.on("zfs list -Hp -o name,type -r backup/rpool").succeeds(
+            "\n".join(
+                f"{n}\tfilesystem"
+                for n in (
+                    "backup/rpool",
+                    "backup/rpool/ROOT",
+                    f"backup/{be}",
+                    "backup/rpool/USERDATA",
+                    f"backup/{home}",
+                )
+            ),
+        )
+        mock.on("zfs list -Hp -o name,type -r backup/bpool").fails()
+        mock.on_prefix("zfs get -Hp -s local -o name,property,value org.zark").succeeds("")
+        mock.on("zfs list -Hp -t snapshot -o name,createtxg -s createtxg backup/keystore").succeeds(
+            "backup/keystore@prepare_20261001_100000\t9",
+        )
+        with (
+            patch_sh(mock),
+            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
+            patch.object(recover_mod, "_referenced", side_effect=lambda n: dict.fromkeys(n, 1)),
+            patch.object(recover_mod, "_empty_root", return_value=False),
+            redirect_stdout(StringIO()),
+        ):
+            plan = _plan("backup", "/dev/sdb1", _BE, newest, snaps, make_log(), {P1})
+        row = plan.row(home)
+        assert row is not None and row.restored, row
+        assert row.snap is not None and row.snap.name.startswith("autosnap_")
+        assert "destroyed" not in row.note
 
     def _check_recover_view(self, fake: FakeZfs, last_point: str) -> None:
         with patch_sh(fake):
