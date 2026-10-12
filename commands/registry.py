@@ -27,6 +27,11 @@ zark registry — inspect and repair known_drives.json without hand edits.
   zark registry fix [<name>]    rewrite drive_id from the connected disk that
                                 carries the registered pool GUID, and write
                                 every missing key
+  zark registry retention <name> [window=N] [max_age=N|off] [margin=N]
+                                show or change the drive's retention: days
+                                in which everything is kept, age beyond which
+                                nothing is (off by default), and the free
+                                space a backup tries to leave (% of the drive)
 
 All writes go through lib.registry (validated, atomic).
 """
@@ -34,13 +39,18 @@ All writes go through lib.registry (validated, atomic).
 import shlex
 from pathlib import Path
 
-from lib import engine, sh
+from lib import engine, registry, sh
 from lib.config import Config
 from lib.drives import drive_staleness_days, get_drive_id, scan_connected_drives
 from lib.identity import BY_ID_DIR, read_pool_label
 from lib.log import Log
 
-USAGE = "Usage: sudo zark registry list | forget <name|GUID> | fix [<name>]"
+USAGE = (
+    "Usage: sudo zark registry list | forget <name|GUID> | fix [<name>]"
+    + " | retention <name> [window=N] [max_age=N|off] [margin=N]"
+)
+# Command-line names of the retention settings (lib.registry.RETENTION_LIMITS).
+_RETENTION_ARGS = {"window": "window_days", "max_age": "max_age_days", "margin": "margin_pct"}
 
 
 def _connected_by_id_for_guid(guid: str, cfg: Config, log: Log) -> str:
@@ -84,8 +94,39 @@ def _list(cfg: Config, log: Log) -> None:
         log.raw(f"      drive_id:    {info.drive_id}")
         log.raw(f"      last backup: {last}")
         log.raw(f"      autoeject:   {'yes' if info.autoeject else 'no'}")
+        log.raw(f"      retention:   {_policy_text(cfg, name)}")
         log.raw(f"      state:       {state}")
     _list_origin(cfg, log)
+
+
+def _policy_text(cfg: Config, name: str) -> str:
+    p = cfg.drive_policy(name)
+    max_age = f"{p.max_age_days} days" if p.max_age_days else "off"
+    return f"window {p.window_days} days, max_age {max_age}, margin {p.margin_pct}%"
+
+
+def _retention(cfg: Config, log: Log, name: str, settings: list[str]) -> None:
+    """Show or change one drive's retention settings (M3 decision 2b)."""
+    if name not in cfg.known_drives:
+        log.fatal(f"'{name}' is not registered", solutions=["sudo zark registry list"])
+    info = cfg.known_drives[name]
+    if settings:
+        current = info.extra.get(registry.RETENTION_KEY, {})
+        values: dict[str, int] = dict(current) if isinstance(current, dict) else {}
+        for item in settings:
+            key, _, raw = item.partition("=")
+            if key not in _RETENTION_ARGS or not raw:
+                log.fatal(f"Unknown retention setting: {item}", solutions=[USAGE])
+            n = 0 if key == "max_age" and raw == "off" else int(raw) if raw.isdigit() else -1
+            values[_RETENTION_ARGS[key]] = n
+        try:
+            registry.check_retention(values, f"entry '{name}'")
+        except registry.RegistryError as e:
+            log.fatal(str(e), solutions=[USAGE])
+        info.extra[registry.RETENTION_KEY] = values
+        cfg.save_drives()
+        log.ok(f"{name}: retention changed")
+    log.info(f"{name}: {_policy_text(cfg, name)}")
 
 
 def _list_origin(cfg: Config, log: Log) -> None:
@@ -230,5 +271,7 @@ def run(args: list[str]) -> None:
         _forget(cfg, log, args[1])
     elif sub == "fix" and len(args) <= 2:
         _fix(cfg, log, args[1] if len(args) == 2 else None)
+    elif sub == "retention" and len(args) >= 2:
+        _retention(cfg, log, args[1], args[2:])
     else:
         log.fatal(f"Unknown registry command: {' '.join(args)}", solutions=[USAGE])

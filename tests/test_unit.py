@@ -4857,7 +4857,10 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
 class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
     """I16/I22/I23 + I-G in prepare."""
 
-    def _prepare(self, fake: FakeZfs, cfg_dir: Path) -> int:
+    def _prepare(self, fake: FakeZfs, cfg_dir: Path, **answers: str) -> int:
+        """Run prepare; ``answers`` by the first word of an input question
+        (Pool, Days); anything not given takes the default."""
+        answers = {"Pool": "blue", **answers}
         ident = _purge_ident(None)
         report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
         readback = Readback(imported=True, health="ONLINE", reexported=True)
@@ -4872,7 +4875,10 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
                 patch.object(ZFS, "verify_exported_pool_readback", return_value=readback),
                 patch.object(ZFS, "pool_guid", return_value="777"),
                 patch("lib.log.Log.ask", return_value=True),
-                patch("lib.log.Log.ask_input", return_value="blue"),
+                patch(
+                    "lib.log.Log.ask_input",
+                    side_effect=lambda q, d="", **_k: answers.get(q.split()[0], d),
+                ),
                 patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
                 patch("builtins.input", return_value=""),
                 patch.object(prepare_mod, "prompt_eject_or_attach"),
@@ -4928,6 +4934,33 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("777", home[0])]
         assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
         assert _marked(fake, "blue") == {home[0]}
+
+    def test_prepare_asks_the_drives_retention(self):
+        """M3 decision 2b: prepare asks the window and the maximum age with
+        its other questions; Enter keeps the defaults, which are not written."""
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        assert self._prepare(_fresh_fake(()), cfg_dir) == 0
+        assert "retention" not in json.loads((cfg_dir / "known_drives.json").read_text())["blue"]
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        asked: list[str] = []
+        replies = iter(["60", "400"])
+        real = prepare_mod._ask_retention  # pylint: disable=protected-access
+
+        def reply(question: str, _default: str = "", **_k: object) -> str:
+            asked.append(question)
+            return next(replies)
+
+        def ask(log: Log) -> dict[str, int]:
+            with patch.object(Log, "ask_input", side_effect=reply):
+                return real(log)
+
+        with patch.object(prepare_mod, "_ask_retention", side_effect=ask):
+            assert self._prepare(_fresh_fake(()), cfg_dir) == 0
+        data = json.loads((cfg_dir / "known_drives.json").read_text())
+        assert data["blue"]["retention"] == {"window_days": 60, "max_age_days": 400}
+        assert len(asked) == 2
 
     def test_unregistered_prepare_leaves_no_anchors(self):
         """M2R-6 (E12b): a prepare that ends DRIVE NOT REGISTERED drops the
@@ -5042,6 +5075,52 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
         data = json.loads((d / "known_drives.json").read_text())
         assert data["blue"]["drive_id"] == _KINGSTON_ID
         assert data["blue"]["autoeject"] is False
+
+    def test_retention_settings_are_validated_written_and_read(self):
+        """M3 decision 2b: per-drive retention in the registry; the rest of the
+        entry is untouched, and a bad value is refused without writing."""
+        d = self._cfg_dir({"blue": {"guid": "1", "drive_id": "a"}})
+        before = (d / "known_drives.json").read_text()
+        with (
+            patch_sh(MockShell()),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                registry_mod.run(["retention", "blue", "window=60", "max_age=30"])
+            except SystemExit:
+                pass
+            assert (d / "known_drives.json").read_text() == before
+            registry_mod.run(["retention", "blue", "window=60", "max_age=400", "margin=15"])
+            assert Config.load().drive_policy("blue") == ret.Policy(60, 400, 15)
+            registry_mod.run(["retention", "blue", "max_age=off"])
+            assert Config.load().drive_policy("blue") == ret.Policy(60, 0, 15)
+            assert Config.load().drive_policy("unknown") == ret.Policy()
+        data = json.loads((d / "known_drives.json").read_text())
+        assert data["blue"]["retention"] == {
+            "window_days": 60,
+            "max_age_days": 0,
+            "margin_pct": 15,
+        }
+        assert data["blue"]["guid"] == "1" and data["blue"]["drive_id"] == "a"
+
+    def test_retention_schema(self):
+        """Unknown keys, non-integers and out-of-range values are refused."""
+        for bad in (
+            '{"window_days": "30"}',
+            '{"window_days": 0}',
+            '{"margin_pct": 60}',
+            '{"weekly": 4}',
+            '{"window_days": true}',
+            "[]",
+        ):
+            text = '{"blue": {"guid": "1", "drive_id": "x", "retention": ' + bad + "}}"
+            try:
+                registry_parse(text, Path("/k.json"))
+            except RegistryError:
+                continue
+            raise AssertionError(f"accepted {bad}")
 
     def test_forget_removes_only_that_entry(self):
         d = self._cfg_dir(

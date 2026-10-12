@@ -32,8 +32,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from lib.retention import Policy
+
 KNOWN_KEYS = ("guid", "drive_id", "last_backup_at", "autoeject")
 UNKNOWN_DRIVE_ID = "<unknown>"
+# Optional per-drive retention settings (M3 decision 2b): key → (min, max).
+RETENTION_KEY = "retention"
+RETENTION_LIMITS = {"window_days": (1, 3650), "max_age_days": (0, 36500), "margin_pct": (0, 50)}
 
 
 class RegistryError(Exception):
@@ -57,6 +62,24 @@ def _check_entry(path: Path, name: str, entry: Any) -> None:
     last = entry.get("last_backup_at")
     if last is not None and not isinstance(last, str):
         raise RegistryError(f"{where}: 'last_backup_at' must be a string or null")
+    if RETENTION_KEY in entry:
+        check_retention(entry[RETENTION_KEY], where)
+
+
+def check_retention(value: Any, where: str) -> None:
+    """Validate a ``retention`` object; raises RegistryError."""
+    if not isinstance(value, dict):
+        raise RegistryError(f"{where}: 'retention' must be an object")
+    for key, n in value.items():
+        if key not in RETENTION_LIMITS:
+            raise RegistryError(f"{where}: unknown retention setting {key!r}")
+        lo, hi = RETENTION_LIMITS[key]
+        if not isinstance(n, int) or isinstance(n, bool) or not lo <= n <= hi:
+            raise RegistryError(f"{where}: retention {key!r} must be a whole number {lo}–{hi}")
+    window = value.get("window_days", Policy().window_days)
+    max_age = value.get("max_age_days", 0)
+    if 0 < max_age <= window:
+        raise RegistryError(f"{where}: retention 'max_age_days' must exceed 'window_days'")
 
 
 def parse(text: str, path: Path) -> dict[str, dict[str, Any]]:

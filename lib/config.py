@@ -24,12 +24,13 @@ guided to create the file.
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from lib import registry
+from lib.retention import Policy
 
 if TYPE_CHECKING:
     from lib.log import Log
@@ -223,6 +224,13 @@ class Config:
     def drives_file_path(self) -> Path:
         """Path to known_drives.json (even if it doesn't exist yet)."""
         return self.config_dir / "known_drives.json"
+
+    def drive_policy(self, pool: str) -> Policy:
+        """``pool``'s retention settings: the defaults, overridden by its
+        registry entry's ``retention`` object (M3 decision 2b)."""
+        info = self.known_drives.get(pool)
+        values = info.extra.get(registry.RETENTION_KEY, {}) if info else {}
+        return replace(Policy(), **values) if isinstance(values, dict) else Policy()
 
     def drive_autoeject(self, pool: str) -> bool:
         """Whether ``pool`` opts into the timed eject prompt.

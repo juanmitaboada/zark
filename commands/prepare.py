@@ -26,7 +26,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import engine, sh
+from lib import engine, registry, sh
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso
 from lib.drives import validate_external_block_device
@@ -34,6 +34,7 @@ from lib.health import check_device, render_report
 from lib.log import Log
 from lib.mount import warn_rpool_mountpoint_lost
 from lib.replication import DatasetPlan, State, point_name
+from lib.retention import Policy
 from lib.zfs import ZFS, backup_altroot
 
 
@@ -151,6 +152,7 @@ def run(
     autoeject = log.ask(
         "Enable auto-eject (timed eject prompt) for this drive?",
     )
+    retention = _ask_retention(log)
 
     # ── Confirmation ─────────────────────────────────────────────────────
     log.info("The pool will be created WITHOUT its own encryption.")
@@ -272,6 +274,7 @@ def run(
         drive_id=base_drive_id,
         last_backup_at=prepared_at,  # I13: prepare is a full backup
         autoeject=autoeject,
+        extra={registry.RETENTION_KEY: retention} if retention else {},
     )
     cfg.save_drives()
 
@@ -303,6 +306,34 @@ def run(
         default_eject=False,
         autoeject=autoeject,
     )
+
+
+def _ask_retention(log: Log) -> dict[str, int]:
+    """This drive's retention window and maximum age (M3 decision 2b), asked
+    with the other questions; Enter keeps the defaults, and only what differs
+    from them is recorded, so a later change of a default reaches the drive.
+    `zark registry retention` changes them afterwards."""
+    default = Policy()
+    while True:
+        window = log.ask_input(
+            "Days in which this drive keeps every backup (after that, one per month)",
+            str(default.window_days),
+        )
+        max_age = log.ask_input(
+            "Days after which this drive keeps nothing (off: monthly points never expire)",
+            "off",
+        )
+        values: dict[str, int] = {}
+        if window != str(default.window_days):
+            values["window_days"] = int(window) if window.isdigit() else -1
+        if max_age != "off":
+            values["max_age_days"] = int(max_age) if max_age.isdigit() else -1
+        try:
+            registry.check_retention(values, "retention")
+        except registry.RegistryError as e:
+            log.warn(f"{e} — asked again")
+            continue
+        return values
 
 
 def _send_keystore(new_pool: str, log: Log) -> bool:
