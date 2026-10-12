@@ -1612,35 +1612,14 @@ class TestBackupCheckTargetSpace:  # pylint: disable=missing-function-docstring
         # No raise expected
         _check_target_space(src, dst, "backup", "rpool", log)
 
-    def test_fatal_when_below_floor(self):
-        """Below the 1 GiB floor, fatal is raised even for a tiny source."""
-        # Source uses only 10 MB (1% would be 100 KB). Floor of 1 GiB
-        # dominates. Target has 500 MiB free → below floor → fatal.
-        src = self._make_pool_info("rpool", used_bytes=10 * 1024**2, avail_bytes=100 * 1024**3)
-        dst = self._make_pool_info("backup", used_bytes=10 * 1024**3, avail_bytes=500 * 1024**2)
-        log = make_log()
-        # log.fatal() raises SystemExit after an input() prompt; we patch
-        # input() to short-circuit the prompt under pytest's stdin capture.
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
-            try:
-                _check_target_space(src, dst, "backup", "rpool", log)
-            except SystemExit:
-                return
-        raise AssertionError("Expected SystemExit from log.fatal()")
-
-    def test_fatal_when_below_one_pct_of_source(self):
-        """1% of a 1 TiB source dominates the 1 GiB floor → 10 GiB margin."""
-        # Source uses ~1 TiB; 1% threshold = ~10.24 GiB.
-        # Target has 5 GiB free → below threshold → fatal.
+    def test_low_space_is_left_to_the_estimate(self):
+        """G4a: the old 1%-of-source guard is gone; whether a backup fits is
+        decided after the questions, by its estimate and the drive's
+        retention (M3 decision 4)."""
         src = self._make_pool_info("rpool", used_bytes=1024**4, avail_bytes=200 * 1024**3)
-        dst = self._make_pool_info("backup", used_bytes=900 * 1024**3, avail_bytes=5 * 1024**3)
-        log = make_log()
-        with redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
-            try:
-                _check_target_space(src, dst, "backup", "rpool", log)
-            except SystemExit:
-                return
-        raise AssertionError("Expected SystemExit from log.fatal()")
+        dst = self._make_pool_info("backup", used_bytes=900 * 1024**3, avail_bytes=500 * 1024**2)
+        with redirect_stdout(StringIO()):
+            _check_target_space(src, dst, "backup", "rpool", make_log())
 
     def test_passes_just_above_threshold(self):
         """Boundary: 1% of 1 TiB source ≈ 10.24 GiB; 11 GiB free passes."""
@@ -8979,6 +8958,46 @@ class TestBackupCommand:
         assert fake.units["sanoid.timer"] == "active"
         assert not any(c.startswith("syncoid") or "sanoid --take" in c for c in fake.calls)
 
+    def test_retention_runs_after_a_complete_backup_only(self) -> None:
+        """M3 decision 3a: the drive's policy is applied after a complete
+        run, with that drive's settings, and not after an incomplete one."""
+        calls: list[tuple[str, ret.Policy]] = []
+
+        def spy(pool: str, policy: ret.Policy, _log: Log) -> tuple[int, int]:
+            calls.append((pool, policy))
+            return 3, 5 * 1024**2
+
+        fake = _fresh_fake()
+        out = StringIO()
+        _cfg, rc = self._run(
+            fake,
+            patch.object(backup_mod, "_apply_retention", side_effect=spy),
+            patch.object(Config, "drive_policy", return_value=ret.Policy(60)),
+            redirect_stdout(out),
+        )
+        assert rc == 0 and calls == [("backup", ret.Policy(60))]
+        assert "3 old snapshot(s) removed, 5.0M freed" in out.getvalue()
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        _tick(fake, "2026-10-09_08:00:00_hourly")
+        _cfg, rc = self._run(fake, patch.object(backup_mod, "_apply_retention", side_effect=spy))
+        assert rc == 1 and len(calls) == 1
+
+    def test_apply_retention_on_the_drive(self) -> None:
+        """What goes after a complete run is the policy's, logged one by one."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(backup_mod.time, "time", return_value=float(NOW)),
+            redirect_stdout(out),
+        ):
+            count, freed = backup_mod._apply_retention(  # pylint: disable=protected-access
+                "backup", ret.Policy(), Log()
+            )
+        assert count > 0 and freed == count * (1 << 20)
+        assert P1 not in fake.names("backup/rpool/ROOT/be")
+        assert f"removed backup/rpool/ROOT/be@{P1}" in out.getvalue()
+
     @staticmethod
     def _without_bpool(importable: bool) -> FakeZfs:
         fake = _fresh_fake()
@@ -9486,6 +9505,92 @@ class TestRetentionOnDrive:
             _ = engine.apply_prune("backup", prune, Log())
         assert arch not in fake.ds
         assert f"zfs destroy -r {arch}" in fake.calls
+
+
+class TestBackupSpace:
+    """M3 decisions 1 and 4: the space check before the transfer."""
+
+    NEXT = "zark_2026-10-11_10:00:00Z"
+
+    def _decide(
+        self,
+        fake: FakeZfs,
+        avail: int,
+        size: int,
+        answer: bool,
+        policy: ret.Policy,
+        point: str = NEXT,
+    ) -> tuple[bool | None, list[str], str]:
+        """Run backup's questions on the history drive; returns the result
+        (None for a fatal), the yes/no questions asked and the output."""
+        asked: list[str] = []
+
+        def ask(question: str, default: bool = False) -> bool:
+            _ = default
+            asked.append(question)
+            return answer
+
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), point, sleep=lambda _s: None)
+            assert eng.take_point()
+            plans = eng.survey()
+            dst = PoolInfo("backup", avail_bytes=avail, size_bytes=size)
+            with (
+                patch.object(Log, "ask", side_effect=ask),
+                patch.object(backup_mod.time, "time", return_value=float(NOW)),
+                patch("builtins.input", side_effect=EOFError),
+            ):
+                try:
+                    ok: bool | None = _decide(plans, eng, "backup", dst, Log(), policy)
+                except SystemExit:
+                    ok = None
+        return ok, asked, out.getvalue()
+
+    @staticmethod
+    def _history() -> FakeZfs:
+        return TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+
+    def test_policy_removals_are_applied_without_a_question(self) -> None:
+        """Short of space: what the policy removes anyway goes first, asked nothing."""
+        fake = self._history()
+        ok, asked, _ = self._decide(fake, 0, 10**12, True, ret.Policy(margin_pct=0))
+        assert ok and not asked
+        assert P1 not in fake.names("backup/rpool/ROOT/be")
+        assert P2 in fake.names("backup/rpool/ROOT/be")
+
+    def test_beyond_the_policy_the_oldest_points_go_only_on_a_yes(self) -> None:
+        """The plan lists the oldest monthly points; no (the default) with a
+        transfer that does not fit stops the backup; yes removes them."""
+        fake = self._history()
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            dest = engine.read_dest("backup", strict=True)
+            prune = ret.plan_prune(dest, engine.drive_complete("backup"), ret.Policy(), NOW)
+            _ = engine.apply_prune("backup", prune, Log())
+        policy = ret.Policy(margin_pct=0)
+        ok, asked, out = self._decide(fake, 0, 10**12, False, policy)
+        assert ok is None and asked == ["Remove these 1 backup point(s) from backup?"]
+        assert P2 in out and P2 in fake.names("backup/rpool/ROOT/be")
+        ok, asked, _ = self._decide(fake, 0, 10**12, True, policy, "zark_2026-10-12_10:00:00Z")
+        assert ok and P2 not in fake.names("backup/rpool/ROOT/be")
+        assert P3 in fake.names("backup/rpool/ROOT/be")
+
+    def test_margin_is_a_goal_not_a_requirement(self) -> None:
+        """The transfer fits but the margin cannot be reached: the backup goes
+        on with a warning, even when the plan is declined."""
+        fake = self._history()
+        ok, asked, out = self._decide(fake, 10**9, 10**15, False, ret.Policy())
+        assert ok and asked
+        assert "less than 10% free after this backup" in out
+        assert P2 in fake.names("backup/rpool/ROOT/be")
+
+    def test_nothing_is_removed_with_room(self) -> None:
+        """With room for the transfer and the margin, nothing on the drive changes."""
+        fake = self._history()
+        before = {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+        ok, asked, _ = self._decide(fake, 10**12, 10**12, True, ret.Policy())
+        assert ok and not asked
+        assert before == {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
 
 
 class TestCompletePoints:

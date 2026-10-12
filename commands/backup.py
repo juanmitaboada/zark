@@ -47,14 +47,14 @@ from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
 from lib.replication import TRANSFERABLE, DatasetPlan, State, is_archived, point_name
+from lib.retention import Policy, Prune, plan_prune, point_removals, space_candidates
 from lib.zfs import ZFS, PoolInfo
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
 # so it is never the answer to "out of space" (hallazgo 8).
 _FREE_SPACE_HINT = (
-    "Free space on the drive: destroy old destination snapshots by exact name, "
-    "keeping each dataset's newest one (never a % range) — "
-    "zfs list -t snapshot -o name,used -s creation -r <pool>"
+    "Free space on the drive: its retention removes old backup points (see "
+    "`sudo zark registry retention <pool>`); never destroy snapshots by a % range"
 )
 
 
@@ -100,14 +100,6 @@ def _report_rpo(cfg: Config, pool_name: str, log: Log) -> None:
 
 TOTAL_STEPS = 8
 
-# Free-space margin: 1% of the source's used data, with a 1 GiB floor.
-# Lax by design — only fires when the target is essentially full, where
-# any incremental will fail. The reactive ENOSPC handler in run() catches
-# in-flight exhaustion. This guard avoids starting a long transfer
-# that is mathematically guaranteed to fail.
-_ENOSPC_GUARD_FLOOR_BYTES = 1024**3  # 1 GiB
-_ENOSPC_GUARD_PCT_OF_SOURCE = 100  # divisor: used_bytes // 100 == 1%
-
 
 def _check_target_space(
     src_info: PoolInfo | None,
@@ -116,62 +108,16 @@ def _check_target_space(
     source_pool: str,
     log: Log,
 ) -> None:
-    """Coherence + preventive ENOSPC checks before starting a backup.
-
-    Two distinct checks:
-
-    1. Coherence (warn only): the backup invariant is that the destination
-       drive is at least as large as the source pool. A smaller target
-       will eventually run out of space even with a perfect retention
-       policy. Warn — the operator may know what they're doing (testing
-       on a small loop, compression headroom, etc.).
-
-    2. Preventive ENOSPC (fatal): if the target's free space is below
-       1% of the source's used data (with a 1 GiB floor), refuse to
-       start. This prevents kicking off a long transfer that is
-       guaranteed to ENOSPC mid-stream.
-
-    Either check is silently skipped when the corresponding PoolInfo
-    is None or carries zero-valued bytes (transient zpool list failure,
-    or a pool we couldn't measure for any reason). The reactive ENOSPC
-    handler still catches in-flight exhaustion in those cases.
-    """
+    """Coherence check before a backup (warn only): the destination drive
+    should be at least as large as the source pool, or it will run out of
+    space whatever its retention. Whether this backup fits is decided by
+    the estimate, after the questions (M3 decision 4)."""
     if src_info is None or dst_info is None:
         return
-
-    # Check 1 — coherence warn
-    if (
-        dst_info.size_bytes > 0
-        and src_info.size_bytes > 0
-        and dst_info.size_bytes < src_info.size_bytes
-    ):
+    if 0 < dst_info.size_bytes < src_info.size_bytes:
         log.warn(
             f"Target {pool_name} ({dst_info.size}) is smaller than source "
             f"{source_pool} ({src_info.size}) — backup may eventually fail",
-        )
-
-    # Check 2 — preventive ENOSPC fatal
-    if src_info.used_bytes <= 0:
-        return  # cannot compute threshold, defer to reactive handler
-
-    threshold = max(
-        src_info.used_bytes // _ENOSPC_GUARD_PCT_OF_SOURCE,
-        _ENOSPC_GUARD_FLOOR_BYTES,
-    )
-    if dst_info.avail_bytes < threshold:
-        log.fatal(
-            f"Insufficient free space on {pool_name}",
-            causes=[
-                f"Source {source_pool}: used={src_info.used} "
-                f"({sh.humanize_bytes(src_info.used_bytes)})",
-                f"Target {pool_name}: avail={dst_info.avail} "
-                f"({sh.humanize_bytes(dst_info.avail_bytes)})",
-                f"Required margin: ≥ {sh.humanize_bytes(threshold)} (1% of source, min 1 GiB)",
-            ],
-            solutions=[
-                _FREE_SPACE_HINT,
-                "Source has grown — consider a larger backup drive",
-            ],
         )
 
 
@@ -196,12 +142,20 @@ def _gib(n: int) -> str:
     return sh.humanize_bytes(n)
 
 
-def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+def _space(info: PoolInfo | None) -> str:
+    """``used=… (N%)  available=…`` from the pool root's byte counts."""
+    if info is None or info.size_bytes <= 0:
+        return "used=?  available=?"
+    return f"used={_gib(info.used_bytes)} ({info.pct_used}%)  available={_gib(info.avail_bytes)}"
+
+
+def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
     plans: list[DatasetPlan],
     eng: engine.Run,
     pool_name: str,
     dst_info: PoolInfo | None,
     log: Log,
+    policy: Policy | None = None,
 ) -> bool:
     """Show the plan, ask every question before the first byte is sent,
     check space, then apply the user's choices. False aborts the run."""
@@ -209,6 +163,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
     counts: dict[str, int] = {}
     for p in plans:
         counts[str(p.state)] = counts.get(str(p.state), 0) + 1
+    policy = policy or Policy()
     log.info("Plan: " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())))
     for p in plans:
         if p.state is State.EXCLUDED:
@@ -373,17 +328,122 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
 
     needed = sum(sizes.values())
     log.info(f"Estimated transfer: {_gib(needed)}; available on {pool_name}: {_gib(avail)}")
-    if dst_info and needed > avail:
-        log.fatal(
-            f"Not enough space on {pool_name} for this backup",
-            causes=[f"Needs about {_gib(needed)}, {_gib(avail)} available"],
-            solutions=[_FREE_SPACE_HINT, "Connect a larger backup drive"],
-        )
+    if dst_info:
+        actions = [*_make_room(plans, eng, needed, dst_info, policy, log), *actions]
     if confirmed_any:
         log.ok("Applying the confirmed changes on the backup")
     for act in actions:
         _ = act()
     return True
+
+
+def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    plans: list[DatasetPlan],
+    eng: engine.Run,
+    needed: int,
+    dst_info: PoolInfo,
+    policy: Policy,
+    log: Log,
+) -> list[Callable[[], object]]:
+    """Free space before the transfer when the drive would end below its
+    margin (M3 decision 4, as settled in decision 1).
+
+    First what the retention policy removes anyway, without a question;
+    then, if that is not enough, a plan of the oldest monthly points, each
+    with what it frees, applied only on a yes (default no). The margin is a
+    goal: when only the transfer itself fits, the backup goes on with a
+    warning; it stops only when the transfer does not fit. Returns the
+    removals to apply before the other confirmed changes.
+    """
+    pool, avail = eng.pool, dst_info.avail_bytes
+    margin = dst_info.size_bytes * policy.margin_pct // 100
+    if needed + margin <= avail:
+        return []
+    complete, pins = engine.drive_complete(pool), engine.drive_pins(pool)
+    # A ROLLBACK's common snapshot becomes the base of this run.
+    bases = {f"{p.rel}{p.common}" for p in plans if p.state is State.ROLLBACK and p.common}
+    now = int(time.time())
+    prune = plan_prune(eng.dest, complete, policy, now, pinned=pins, protected=bases)
+    tops = [t for t, _ in prune.datasets]
+    freed = engine.reclaim(pool, prune.snapshots, tops) if not prune.empty else 0
+    actions: list[Callable[[], object]] = []
+    if not prune.empty:
+        log.info(
+            f"Retention policy: {len(prune.snapshots)} snapshot(s) on {pool} go now "
+            + f"(frees {_gib(freed)})"
+        )
+        actions.append(partial(engine.apply_prune, pool, prune, log))
+    chosen: list[tuple[str, int]] = []
+    beyond = Prune()
+    total = freed
+    for name in space_candidates(eng.dest, complete, policy, now, prune):
+        if needed + margin <= avail + total:
+            break
+        more = point_removals(eng.dest, name, pinned=pins, protected=bases)
+        if not more:
+            continue
+        new_total = engine.reclaim(pool, [*prune.snapshots, *beyond.snapshots, *more], tops)
+        chosen.append((name, new_total - total))
+        beyond.snapshots += more
+        total = new_total
+    room = avail + freed
+    if chosen:
+        short = (
+            f"would be left with less than {policy.margin_pct}% free ({_gib(margin)})" + " after"
+            if margin
+            else "does not have room for"
+        )
+        log.warn(f"{pool} {short} this backup; the oldest monthly backup points can go:")
+        for name, frees in chosen:
+            log.info(f"  {name}  (frees {_gib(frees)})")
+        if log.ask(f"Remove these {len(chosen)} backup point(s) from {pool}?", default=False):
+            actions.append(partial(engine.apply_prune, pool, beyond, log))
+            room = avail + total
+    if needed > room:
+        log.fatal(
+            f"Not enough space on {pool} for this backup",
+            causes=[f"Needs about {_gib(needed)}, {_gib(room)} available"],
+            solutions=[_FREE_SPACE_HINT, "Connect a larger backup drive"],
+        )
+    if needed + margin > room:
+        log.warn(
+            f"{pool} will have less than {policy.margin_pct}% free after this backup: "
+            + "the next one will propose removing old backup points again, "
+            + "or the drive is too small for this system"
+        )
+    return actions
+
+
+def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
+    """The drive's retention policy after a complete run (M3 decision 3a):
+    every removal listed and logged. Returns how many snapshots went and
+    what ZFS measured they free; (0, 0) when nothing goes or the drive
+    cannot be read."""
+    try:
+        dest = engine.read_dest(pool, strict=True)
+    except engine.ReadError as e:
+        log.warn(f"Retention skipped: {e}")
+        return 0, 0
+    prune = plan_prune(
+        dest,
+        engine.drive_complete(pool),
+        policy,
+        int(time.time()),
+        pinned=engine.drive_pins(pool),
+    )
+    for target, why in prune.kept:
+        log.info(f"  kept {pool}/{target}: {why}")
+    if prune.empty:
+        return 0, 0
+    freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
+    log.info(
+        f"Retention on {pool} (window {policy.window_days} days): "
+        + f"{len(prune.snapshots)} snapshot(s) go, freeing {_gib(freed)}"
+    )
+    count, failed = engine.apply_prune(pool, prune, log)
+    if failed:
+        log.warn(f"{len(failed)} snapshot(s) could not be removed (see above); kept for next time")
+    return count, freed
 
 
 def _subtree(plans: list[DatasetPlan], top: str) -> list[DatasetPlan]:
@@ -696,22 +756,10 @@ def run(
 
     _check_target_space(src_info, dst_info, pool_name, cfg.source_pool, log)
 
-    if dst_info and dst_info.pct_used >= 90:
-        log.warn(f"Target is {dst_info.pct_used}% full — consider pruning snapshots")
-        if not log.ask(f"Target is {dst_info.pct_used}% full. Continue?"):
-            log.fatal("Aborted — disk too full")
-    elif dst_info and dst_info.pct_used >= 80:
-        log.warn(f"Target is {dst_info.pct_used}% full — consider pruning soon")
-
-    log.info(
-        f"Source: {cfg.source_pool}  used={src_info.used if src_info else '?'}  "
-        + f"avail={src_info.avail if src_info else '?'}",
-    )
-    log.info(
-        f"Target: {pool_name}  used={dst_info.used if dst_info else '?'}  "
-        + f"({dst_info.pct_used if dst_info else '?'}%)  "
-        + f"avail={dst_info.avail if dst_info else '?'}",
-    )
+    # One set of figures, the pool root's `used` and `available` (which
+    # account for reservations), as the space check after the questions uses.
+    log.info(f"Source: {cfg.source_pool}  {_space(src_info)}")
+    log.info(f"Target: {pool_name}  {_space(dst_info)}")
 
     # ── Load encryption key ──────────────────────────────────────────────
     log.step(5, TOTAL_STEPS, "Loading encryption key...")
@@ -753,8 +801,10 @@ def run(
     _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
     log.info("Tip: run 'sudo ./zark monitor' in another terminal for progress")
 
+    policy = cfg.drive_policy(pool_name)
+
     def decide(plans: list[DatasetPlan], run_: engine.Run) -> bool:
-        return _decide(plans, run_, pool_name, dst_info, log)
+        return _decide(plans, run_, pool_name, dst_info, log, policy)
 
     log.step(7, TOTAL_STEPS, "Replicating (this may take a while)...")
     res = engine.execute(eng, cleanup, decide)
@@ -763,9 +813,11 @@ def run(
 
     _show_table(res, eng.point, log)
     used_after = zfs.pool_info(pool_name)  # P0-4: after the transfer
+    pruned = (0, 0)
     if res.ok:
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
         _ = engine.record_complete(pool_name, eng.point, at_point, log)
+        pruned = _apply_retention(pool_name, policy, log)
     _write_metadata(pool_name, cfg.source_pool, eng.point if res.ok else "", log)
 
     # ── Export and read back ─────────────────────────────────────────────
@@ -818,6 +870,11 @@ def run(
             f"Duration:       {log.W}{mins}m {secs}s{log.N}",
             f"Used on target: {log.W}{used_after.used if used_after else '?'}{log.N}",
             f"Available:      {log.W}{used_after.avail if used_after else '?'}{log.N}",
+            *(
+                [f"Retention:      {pruned[0]} old snapshot(s) removed, {_gib(pruned[1])} freed"]
+                if pruned[0]
+                else []
+            ),
             *(
                 [f"{log.Y}Not backed up:  {len(not_backed_up)} dataset(s), by design:{log.N}"]
                 if not_backed_up
