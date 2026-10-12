@@ -254,7 +254,9 @@ for the canonical end-to-end sequences.
     that fails stops the run before the questions, or makes it incomplete
     afterwards, and then nothing is anchored or removed in the source. An
     interrupted transfer resumes at the next **backup**; its partial state
-    is discarded only when the source no longer has what it needs. When
+    is discarded only when the source no longer has what it needs, which is
+    checked before the questions. **BACKUP INCOMPLETE** says, for each
+    dataset that missed the point, what the next **backup** does with it. When
     every dataset reached the point, its snapshots on the drive are marked
     **org.zark:point-complete=yes**, which **recover** reads.
 

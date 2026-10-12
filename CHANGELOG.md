@@ -35,8 +35,9 @@ the development-tooling consolidation that preceded it.
   partial receive is resumed first (`send -t`). Its state is discarded
   with `receive -A`, which touches no snapshot, only when
   `zfs send -nvP -t` says the resume can never work (its snapshot or
-  incremental source no longer exists in origin); after any other
-  failure it is kept for the next run.
+  incremental source no longer exists in origin), checked before the
+  questions so that what the dataset then needs is asked in the same run;
+  after any other failure it is kept for the next run.
   After the transfers every dataset that holds the point is anchored —
   a bookmark `#zark_<pool GUID>_<UTC>` on rpool; on bpool, which never
   gets bookmarks, the point renamed to `@zark_<pool GUID>_<UTC>`. Every
@@ -121,7 +122,10 @@ the development-tooling consolidation that preceded it.
   VERIFIED, exit 1, and `last_backup_at` is not written. A per-dataset
   table goes to the terminal and zark.log, with the whole ZFS error of a
   failed dataset, send's and receive's when both report one; zvols other
-  than the keystore are listed as NOT BACKED UP, in the table and in the BACKUP COMPLETED banner. An export that fails is a failed backup
+  than the keystore are listed as NOT BACKED UP, in the table and in the
+  BACKUP COMPLETED banner; BACKUP INCOMPLETE says, for each dataset that
+  missed the point, what the next backup does with it (resume, ask, try
+  again, send, or free space first). An export that fails is a failed backup
   (H17). The banner's duration covers the whole run (P0-2) and its space
   figures are read after the transfer (P0-4). After a backup it lists the
   days since each other drive's last backup instead of retention-horizon
