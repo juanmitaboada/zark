@@ -39,19 +39,26 @@ from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
     backup_device,
     drive_staleness_days,
+    no_anchor_lines,
     record_backup,
     scan_connected_drives,
     select_drive,
-    shared_snapshot_line,
 )
 from lib.identity import by_id_names, preferred_by_id, whole_disk
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
 from lib.origin_prune import inventory
-from lib.replication import TRANSFERABLE, DatasetPlan, Ref, State, is_archived, point_name
+from lib.replication import (
+    TRANSFERABLE,
+    DatasetPlan,
+    Origin,
+    Ref,
+    State,
+    is_archived,
+    point_name,
+)
 from lib.retention import Policy, Prune, plan_prune, point_removals, space_candidates
-from lib.sanoid_retention import guaranteed_overlap_days
 from lib.zfs import ZFS, PoolInfo
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
@@ -90,26 +97,28 @@ def _report_rpo(
     pool_name: str,
     log: Log,
     anchored: set[str] | None = None,
-    horizon: int | None = None,
+    origin: dict[str, Origin] | None = None,
 ) -> None:
     """Days since every other registered drive's last backup (decision 15).
 
     A bookmark-anchored drive never loses its anchor through origin
     retention, so for it there is only how old its newest point is. A drive
     with no anchor in origin (``anchored`` names the GUIDs that have some)
-    depends on the snapshots it shares with the source, and gets the
-    guaranteed ``horizon`` in days as well (hallazgo 21).
+    depends on the snapshots it shares with the source: what it can expect
+    is checked against ``origin`` (M3 decision 5e; hallazgo 21 without a
+    record).
     """
-    for name, info in sorted(cfg.known_drives.items()):
-        if name == pool_name:
-            continue
+    others = [i for n, i in sorted(cfg.known_drives.items()) if n != pool_name]
+    lost = [i for i in others if anchored is not None and i.guid not in anchored]
+    lines = dict(zip((i.name for i in lost), no_anchor_lines(lost, origin or {}, log), strict=True))
+    for info in others:
         age = drive_staleness_days(info)
         if age is None:
-            log.info(f"  {name}: no backup recorded")
+            log.info(f"  {info.name}: no backup recorded")
         else:
-            log.info(f"  {name}: {age} day(s) since its last backup")
-        if anchored is not None and horizon is not None and info.guid not in anchored:
-            log.warn(f"  {shared_snapshot_line(info, horizon)}")
+            log.info(f"  {info.name}: {age} day(s) since its last backup")
+        if info.name in lines:
+            log.warn(f"  {lines[info.name]}")
 
 
 TOTAL_STEPS = 8
@@ -920,11 +929,7 @@ def run(
     )
     origin = engine.read_origin(engine.source_pools())
     anchored = engine.anchored_disks(origin)
-    unanchored = [
-        i for n, i in cfg.known_drives.items() if n != pool_name and i.guid not in anchored
-    ]
-    horizon = guaranteed_overlap_days(log) if unanchored else None
-    _report_rpo(cfg, pool_name, log, anchored, horizon)
+    _report_rpo(cfg, pool_name, log, anchored, origin)
     status.refresh_quietly(cfg)
     residues = inventory(origin, {i.guid: n for n, i in cfg.known_drives.items()}).residues
     if residues:

@@ -69,6 +69,7 @@ import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-p
 import commands.status as status_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
@@ -217,6 +218,7 @@ from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa
 )
 from lib.sanoid_retention import (  # pylint: disable=wrong-import-position # noqa: E402
     _guaranteed_days_of_template,
+    guaranteed_lives,
     guaranteed_overlap_days,
 )
 from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
@@ -3408,12 +3410,15 @@ class TestBackupRpoReporting:  # pylint: disable=missing-function-docstring
             },
         )
         buf = StringIO()
-        with redirect_stdout(buf):
-            _report_rpo(cfg, "green", make_log(), anchored={"2"}, horizon=62)
+        with (
+            redirect_stdout(buf),
+            patch.object(drives_lib, "guaranteed_overlap_days", return_value=62),
+        ):
+            _report_rpo(cfg, "green", make_log(), anchored={"2"}, origin={})
         out = buf.getvalue()
-        assert "blue: anchored only on snapshots shared with the source" in out
-        assert "at least 28 more day(s)" in out
-        assert "black: anchored" not in out
+        assert "blue: no anchor in origin: if it still shares snapshots with the source" in out
+        assert "at least 28 more day(s)" in out and "otherwise it resends in full" in out
+        assert "black: no anchor" not in out
 
     def test_silent_with_no_other_drive(self):
         cfg = make_config()
@@ -3509,6 +3514,138 @@ class TestSharedSnapshotLine:
     def test_no_backup_recorded(self) -> None:
         """Without last_backup_at nothing is promised."""
         assert "no backup recorded" in shared_snapshot_line(self._info(None), 62, now=self.NOW)
+
+
+class TestNoAnchorLine:
+    """M3 decision 5e: a drive with no anchor is judged by what it was
+    recorded to share with origin at its last complete backup."""
+
+    T = 1_790_000_000  # 2026-09-21
+    DAY = 86400
+    LIVES = {"hourly": 24 * 3600.0, "daily": 7 * 86400.0, "monthly": 93 * 86400.0}
+
+    def _info(self, record: dict[str, list[list[object]]]) -> DriveInfo:
+        return DriveInfo("blue", "1", "d", extra={"shared": record})
+
+    def _origin(self, **snaps: list["repl.Ref"]) -> dict[str, "repl.Origin"]:
+        return {
+            rel.replace("_", "/"): repl.Origin(rel.replace("_", "/"), snaps=s)
+            for rel, s in snaps.items()
+        }
+
+    def _record(self) -> dict[str, list[list[object]]]:
+        return {
+            "rpool/a": [
+                ["autosnap_2026-09-21_00:00:00_daily", "11", self.T],
+                ["autosnap_2026-09-01_00:00:00_monthly", "12", self.T - 20 * self.DAY],
+            ],
+            "rpool/b": [["autosnap_2026-09-21_10:00:00_hourly", "21", self.T]],
+        }
+
+    def test_every_dataset_still_shares_the_earliest_end_is_given(self) -> None:
+        """Per dataset its longest-lived kept snapshot; the drive's date is
+        the earliest of those, named with the snapshot that sets it."""
+        origin = self._origin(
+            rpool_a=[_ref("autosnap_2026-09-21_00:00:00_daily", "11", 5)],
+            rpool_b=[_ref("autosnap_2026-09-21_10:00:00_hourly", "21", 6)],
+        )
+        line = shared_snapshot_line(
+            self._info(self._record()), None, origin=origin, lives=self.LIVES
+        )
+        day = datetime.fromtimestamp(self.T + 24 * 3600, UTC).strftime("%Y-%m-%d")
+        assert line == (
+            f"blue: no anchor in origin; it still shares snapshots with it until about {day} "
+            + "(rpool/b@autosnap_2026-09-21_10:00:00_hourly)"
+        )
+        origin["rpool/a"].snaps.append(_ref("autosnap_2026-09-01_00:00:00_monthly", "12", 4))
+        origin["rpool/b"].snaps.append(_ref("autosnap_2026-09-01_00:00:00_monthly", "22", 4))
+        record = self._record()
+        record["rpool/b"].append(["autosnap_2026-09-01_00:00:00_monthly", "22", self.T])
+        line = shared_snapshot_line(self._info(record), None, origin=origin, lives=self.LIVES)
+        day = datetime.fromtimestamp(self.T - 20 * self.DAY + 93 * self.DAY, UTC).strftime(
+            "%Y-%m-%d"
+        )
+        assert f"until about {day} (rpool/a@autosnap_2026-09-01_00:00:00_monthly)" in line
+
+    def test_after_a_recover_nothing_is_shared(self) -> None:
+        """eli R8.9: origin restored from a point holds none of the recorded
+        snapshots: the next backup resends every dataset in full."""
+        origin = self._origin(
+            rpool_a=[_ref("zark_2026-10-13_08:13:40Z", "91", 1)],
+            rpool_b=[_ref("zark_2026-10-13_08:13:40Z", "92", 1)],
+        )
+        line = shared_snapshot_line(self._info(self._record()), 62, origin=origin, lives=self.LIVES)
+        assert line == (
+            "blue: no anchor in origin; 2 dataset(s) share no snapshot with it: "
+            + "its next backup resends them in full"
+        )
+
+    def test_one_dataset_lost_and_one_gone_from_origin(self) -> None:
+        """A dataset origin no longer has is not counted; one whose shared
+        snapshots all went is."""
+        origin = self._origin(rpool_a=[_ref("autosnap_2026-09-22_00:00:00_daily", "13", 7)])
+        line = shared_snapshot_line(
+            self._info(self._record()), None, origin=origin, lives=self.LIVES
+        )
+        assert "; 1 dataset(s) share no snapshot with it" in line
+
+    def test_prepared_drive_shares_nothing(self) -> None:
+        """prepare records empty lists: losing the anchors means a full resend."""
+        origin = self._origin(rpool_a=[_ref("autosnap_2026-09-22_00:00:00_daily", "13", 7)])
+        line = shared_snapshot_line(
+            self._info({"rpool/a": []}), None, origin=origin, lives=self.LIVES
+        )
+        assert "1 dataset(s) share no snapshot" in line
+
+    def test_residues_and_unknown_lives(self) -> None:
+        """A syncoid residue has no date (zark prune keeps it while needed,
+        M3F-3); without sanoid.conf the line gives no date."""
+        record: dict[str, list[list[object]]] = {
+            "rpool/a": [["syncoid_eli_2026-09-27:01:00:00-GMT02:00", "31", self.T]]
+        }
+        origin = self._origin(rpool_a=[_ref("syncoid_eli_2026-09-27:01:00:00-GMT02:00", "31", 3)])
+        line = shared_snapshot_line(self._info(record), None, origin=origin, lives=self.LIVES)
+        assert line.endswith("until they are removed with zark prune")
+        origin = self._origin(
+            rpool_a=[_ref("autosnap_2026-09-21_00:00:00_daily", "11", 5)],
+            rpool_b=[_ref("autosnap_2026-09-21_10:00:00_hourly", "21", 6)],
+        )
+        line = shared_snapshot_line(self._info(self._record()), None, origin=origin, lives=None)
+        assert line == "blue: no anchor in origin; it still shares snapshots with it"
+
+    def test_without_a_record_the_horizon_is_a_condition(self) -> None:
+        """An entry no complete backup has written since 5e: H21's horizon,
+        worded as a condition (after a recover origin may share nothing)."""
+        when = (datetime.now(UTC) - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        info = DriveInfo("blue", "1", "d", last_backup_at=when)
+        line = shared_snapshot_line(info, 62, origin={}, lives=self.LIVES)
+        assert line == (
+            "blue: no anchor in origin: if it still shares snapshots with the source, its next "
+            + "backup stays incremental for at least 52 more day(s) (62 days after its last "
+            + "backup); otherwise it resends in full"
+        )
+
+    def test_lives_from_the_templates_in_use(self) -> None:
+        """n * period per type, the smallest n >= 1 over the templates in use;
+        frequently by frequent_period (15 min unless set); unkept types left out."""
+        with tempfile.NamedTemporaryFile("w", suffix=".conf", delete=False) as f:
+            f.write(
+                "[rpool]\nuse_template = production\n"
+                "[bpool]\nuse_template = minimal\n"
+                "[template_production]\nfrequently = 4\nhourly = 24\ndaily = 7\nmonthly = 3\n"
+                "[template_minimal]\nfrequent_period = 5\nfrequently = 2\ndaily = 14\n"
+                "monthly = 3\nyearly = 1\nhourly = 0\n"
+                "[template_unused]\ndaily = 1\n"
+            )
+        lives = guaranteed_lives(conf_path=Path(f.name))
+        assert lives == {
+            "frequently": 2 * 5 * 60.0,
+            "hourly": 24 * 3600.0,
+            "daily": 7 * 86400.0,
+            "monthly": 3 * 31 * 86400.0,
+            "yearly": 365.25 * 86400,
+        }
+        assert guaranteed_lives(conf_path=Path("/tmp/zark-test-nonexistent.conf")) is None
 
 
 class TestPoolImportExactDevice:  # pylint: disable=missing-function-docstring
@@ -10047,14 +10184,14 @@ class TestStatus:
         st = status_lib.Status(
             caps={"rpool": 86, "bpool": 40},
             ages={"black": 3, "blue": 34},
-            shared=["blue: anchored only on snapshots shared with the source: …"],
+            shared=["blue: no anchor in origin; 1 dataset(s) share no snapshot with it: …"],
             residues=23,
         )
         text = status_lib.motd_text(st)
         assert "rpool is 86% full (warning from 80%): sudo zark prune" in text
         assert "bpool" not in text
         assert "zark: last backups: black 3 day(s) ago, blue 34 day(s) ago" in text
-        assert "blue: anchored only" in text and "23 legacy snapshot(s)" in text
+        assert "blue: no anchor in origin" in text and "23 legacy snapshot(s)" in text
         stale = status_lib.motd_text(status_lib.Status(ages={"black": 9}))
         assert "\033[1;33mzark:\033[0m last backups: black 9 day(s) ago" in stale
         assert not status_lib.motd_text(status_lib.Status())
@@ -10081,6 +10218,35 @@ class TestStatus:
         assert st.caps == {"rpool": 91, "bpool": 50}
         assert "rpool is 91% full (critical from 90%)" in text and mode == 0o644
         assert "black never" in text
+
+    def test_status_checks_what_an_unanchored_drive_shared(self) -> None:
+        """M3 decision 5e on the real reading of origin: a drive with no
+        anchor is told until when it shares snapshots, then, once origin
+        lost them (a recover, a prune), that it resends in full."""
+        fake = _fresh_fake()
+        home = next(s for s in fake.ds["rpool/USERDATA/home"].snaps if "daily" in s.name)
+        cfg = make_config()
+        cfg.known_drives["blue"] = DriveInfo(
+            "blue",
+            "999",
+            "d",
+            extra={"shared": {"rpool/USERDATA/home": [[home.name, home.guid, home.creation]]}},
+        )
+        lives = {"daily": 7 * 86400.0}
+        with patch_sh(fake), patch.object(drives_lib, "guaranteed_lives", return_value=lives):
+            st = status_lib.gather(cfg, Log(os.devnull))
+        day = datetime.fromtimestamp(home.creation + 7 * 86400, UTC).strftime("%Y-%m-%d")
+        assert st.shared == [
+            f"blue: no anchor in origin; it still shares snapshots with it until about {day} "
+            + f"(rpool/USERDATA/home@{home.name})"
+        ]
+        fake.ds["rpool/USERDATA/home"].snaps.remove(home)
+        with patch_sh(fake), patch.object(drives_lib, "guaranteed_lives", return_value=lives):
+            st = status_lib.gather(cfg, Log(os.devnull))
+        assert st.shared == [
+            "blue: no anchor in origin; 1 dataset(s) share no snapshot with it: "
+            + "its next backup resends them in full"
+        ]
 
     def test_notify_reaches_active_desktop_sessions(self) -> None:
         """loginctl's active Wayland and X11 sessions get notify-send as

@@ -18,6 +18,7 @@ Finds connected drives, matches them against known_drives.json,
 and provides helpful output for unknown drives.
 """
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,7 +35,8 @@ from lib.identity import (
 )
 from lib.log import Log
 from lib.registry import SHARED_KEY
-from lib.replication import Ref
+from lib.replication import Origin, Ref, shared_kind
+from lib.sanoid_retention import guaranteed_lives, guaranteed_overlap_days
 from lib.sh import run
 
 
@@ -381,9 +383,10 @@ def validate_external_block_device(
 # ── last_backup_at staleness helpers ─────────────────────────────────────────
 #
 # backup reports, for every other registered drive, the days since its last
-# backup (its RPO). A drive with no anchor in origin is anchored only on the
-# snapshots it shares with the source, so it also gets the horizon of
-# lib.sanoid_retention.guaranteed_overlap_days (hallazgo 21).
+# backup (its RPO). A drive with no anchor in origin depends on the snapshots
+# it shares with the source: shared_snapshot_line checks the ones recorded
+# at its last complete backup (M3 decision 5e), or falls back to the horizon
+# of lib.sanoid_retention.guaranteed_overlap_days (hallazgo 21).
 
 
 def drive_staleness_days(info: DriveInfo, *, now: datetime | None = None) -> int | None:
@@ -426,26 +429,116 @@ def is_drive_stale(
 
 def shared_snapshot_line(
     info: DriveInfo,
-    horizon_days: int,
+    horizon_days: int | None,
     *,
+    origin: dict[str, Origin] | None = None,
+    lives: dict[str, float] | None = None,
     now: datetime | None = None,
 ) -> str:
-    """What a drive anchored only on shared snapshots can expect from its
-    next backup, given the guaranteed horizon (hallazgo 21)."""
+    """What a drive with no anchor in origin can expect from its next backup.
+
+    With a record of what it shared at its last complete backup (M3
+    decision 5e) the line comes from checking those snapshots against
+    ``origin`` now; without one (an entry no complete backup has written
+    since), from the guaranteed horizon of hallazgo 21, worded as a
+    condition: after a recover origin may share nothing at all.
+    """
+    head = f"{info.name}: no anchor in origin"
+    record = info.extra.get(SHARED_KEY)
+    if isinstance(record, dict) and origin is not None:
+        return _from_record(head, record, origin, lives)
     age = drive_staleness_days(info, now=now)
-    head = f"{info.name}: anchored only on snapshots shared with the source"
     if age is None:
         return f"{head}; no backup recorded"
+    if horizon_days is None:
+        return (
+            f"{head}: if it still shares snapshots with the source, its next backup stays "
+            + "incremental; otherwise it resends in full"
+        )
     left = horizon_days - age
     if left > 0:
         return (
-            f"{head}: its next backup stays incremental for at least {left} more day(s)"
-            + f" ({horizon_days} days after its last backup)"
+            f"{head}: if it still shares snapshots with the source, its next backup stays "
+            + f"incremental for at least {left} more day(s) ({horizon_days} days after its "
+            + "last backup); otherwise it resends in full"
         )
     return (
         f"{head}, {age} days since its last backup: past the {horizon_days}-day horizon, "
         + "its next backup may need to resend some datasets in full"
     )
+
+
+def no_anchor_lines(drives: list[DriveInfo], origin: dict[str, Origin], log: Log) -> list[str]:
+    """``shared_snapshot_line`` for each drive with no anchor in origin,
+    reading sanoid.conf once; H21's horizon only when a drive has no record."""
+    if not drives:
+        return []
+    lives = guaranteed_lives()
+    legacy = any(not isinstance(i.extra.get(SHARED_KEY), dict) for i in drives)
+    horizon = guaranteed_overlap_days(log) if legacy else None
+    return [shared_snapshot_line(i, horizon, origin=origin, lives=lives) for i in drives]
+
+
+def _from_record(
+    head: str,
+    record: dict[str, list[list[object]]],
+    origin: dict[str, Origin],
+    lives: dict[str, float] | None,
+) -> str:
+    """The 5e line: every recorded dataset still in origin must keep one of
+    the snapshots it shared; the date is when the first of them may go."""
+    lost: list[str] = []
+    best: list[tuple[float, str]] = []  # (until, snapshot) per dataset
+    for rel, snaps in sorted(record.items()):
+        o = origin.get(rel)
+        if o is None:
+            continue  # gone from origin: nothing of it is sent any more
+        end = _dataset_end(rel, snaps, o, lives)
+        if end is None:
+            lost.append(rel)
+        else:
+            best.append(end)
+    if lost:
+        return (
+            f"{head}; {len(lost)} dataset(s) share no snapshot with it: "
+            + "its next backup resends them in full"
+        )
+    if not best:
+        return f"{head}; nothing it holds is still in origin"
+    if any(math.isnan(b[0]) for b in best):
+        return f"{head}; it still shares snapshots with it"
+    until, name = min(best)
+    if math.isinf(until):
+        return f"{head}; it still shares snapshots with it until they are removed with zark prune"
+    day = datetime.fromtimestamp(until, UTC).strftime("%Y-%m-%d")
+    return f"{head}; it still shares snapshots with it until about {day} ({name})"
+
+
+def _dataset_end(
+    rel: str,
+    snaps: list[list[object]],
+    o: Origin,
+    lives: dict[str, float] | None,
+) -> tuple[float, str] | None:
+    """A dataset's longest-lived shared snapshot origin still holds, as
+    (until, "rel@name"); NaN when kept but undated; None when none is kept."""
+    ends: list[tuple[float, str]] = []
+    for entry in snaps:
+        name, guid, creation = str(entry[0]), str(entry[1]), entry[2]
+        if o.snap_by_guid(guid) is None or not isinstance(creation, int):
+            continue
+        kind = shared_kind(name)
+        if kind == "syncoid":
+            end = math.inf  # zark prune keeps a residue a drive may need (M3F-3)
+        elif lives is not None and kind in lives:
+            end = creation + lives[kind]
+        else:
+            end = math.nan  # kept, but no date can be given
+        ends.append((end, f"{rel}@{name}"))
+    if not ends:
+        return None
+    dated = [e for e in ends if not math.isnan(e[0])]
+    return max(dated) if dated else (math.nan, ends[-1][1])
 
 
 # ── What a drive shares with origin, and its versions (M3 decision 5e) ──────

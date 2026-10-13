@@ -36,10 +36,9 @@ from pathlib import Path
 
 from lib import engine, sh
 from lib.config import Config
-from lib.drives import drive_staleness_days, shared_snapshot_line
+from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
 from lib.origin_prune import inventory
-from lib.sanoid_retention import guaranteed_overlap_days
 
 CAP_WARNING = 80
 CAP_CRITICAL = 90
@@ -82,9 +81,7 @@ def gather(cfg: Config, log: Log) -> Status:
     origin = engine.read_origin(pools)
     anchored = engine.anchored_disks(origin)
     unanchored = [info for info in cfg.known_drives.values() if info.guid not in anchored]
-    horizon = guaranteed_overlap_days(log) if unanchored else None
-    if horizon is not None:
-        st.shared = [shared_snapshot_line(info, horizon) for info in unanchored]
+    st.shared = no_anchor_lines(unanchored, origin, log)
     drives = {info.guid: name for name, info in cfg.known_drives.items()}
     st.residues = len(inventory(origin, drives).residues)
     return st

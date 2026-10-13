@@ -20,7 +20,9 @@ It applies to drives with no anchor in origin: a drive written by zark 1.x
 before its first zark 2 backup, or one whose anchors were lost. Beyond the
 horizon some dataset has no snapshot left in common with the drive, and
 its next backup needs a full resend of it. Bookmark-anchored drives have
-no horizon.
+no horizon. Since M3 decision 5e the registry records what a drive shares
+at each complete backup, and ``guaranteed_lives`` dates those snapshots;
+the horizon remains for entries without that record.
 
 Why parse sanoid.conf at runtime instead of a hardcoded constant: the
 operator can edit ``/etc/sanoid/sanoid.conf`` freely and the retention
@@ -83,30 +85,23 @@ def _is_managed_section(name: str) -> bool:
     return head in ("rpool", "bpool")
 
 
-def guaranteed_overlap_days(
-    log: Log,
-    *,
-    conf_path: Path = SANOID_CONF_PATH,
-) -> int | None:
-    """Whole days a drive anchored only on shared snapshots is guaranteed
-    to stay incremental after its last backup: the smallest horizon over
-    the templates used by ``rpool*`` or ``bpool*`` sections.
-
-    Returns ``None`` and emits a visible WARN if the config file does not
-    exist; ``None`` silently when it has no managed sections.
-    """
+def _templates_in_use(log: Log | None, conf_path: Path) -> list[dict[str, str]] | None:
+    """The templates ``rpool*``/``bpool*`` sections use; None when the file is
+    missing or unreadable (a warning on ``log`` when given)."""
     if not conf_path.exists():
-        log.warn(
-            f"sanoid.conf missing at {conf_path} — staleness detection disabled. "
-            "Run 'sudo ./zark setup' to generate it.",
-        )
+        if log is not None:
+            log.warn(
+                f"sanoid.conf missing at {conf_path} — staleness detection disabled. "
+                "Run 'sudo ./zark setup' to generate it.",
+            )
         return None
 
     parser = configparser.ConfigParser(interpolation=None)
     try:
         parser.read(conf_path, encoding="utf-8")
     except (configparser.Error, OSError) as e:
-        log.warn(f"Could not parse {conf_path}: {e} — staleness detection disabled")
+        if log is not None:
+            log.warn(f"Could not parse {conf_path}: {e} — staleness detection disabled")
         return None
 
     templates: dict[str, dict[str, str]] = {
@@ -122,5 +117,52 @@ def guaranteed_overlap_days(
         if tpl:
             # ``use_template = minimal`` refers to ``[template_minimal]``.
             used.add(tpl if tpl.startswith("template_") else f"template_{tpl}")
-    horizons = [_guaranteed_days_of_template(templates[t]) for t in used if t in templates]
+    return [templates[t] for t in sorted(used) if t in templates]
+
+
+def guaranteed_overlap_days(
+    log: Log,
+    *,
+    conf_path: Path = SANOID_CONF_PATH,
+) -> int | None:
+    """Whole days a drive anchored only on shared snapshots is guaranteed
+    to stay incremental after its last backup: the smallest horizon over
+    the templates used by ``rpool*`` or ``bpool*`` sections.
+
+    Returns ``None`` and emits a visible WARN if the config file does not
+    exist; ``None`` silently when it has no managed sections.
+    """
+    used = _templates_in_use(log, conf_path)
+    horizons = [_guaranteed_days_of_template(tpl) for tpl in used or []]
     return int(min(horizons)) if horizons else None
+
+
+# sanoid's default when a template leaves it out (sanoid.defaults.conf:41).
+_FREQUENT_PERIOD_MINUTES = 15
+
+
+def guaranteed_lives(*, conf_path: Path = SANOID_CONF_PATH) -> dict[str, float] | None:
+    """Seconds a sanoid snapshot of each type is guaranteed to stay after it
+    was taken (M3 decision 5e, M3F-2 2a).
+
+    sanoid prunes a snapshot of type t only once it is older than
+    ``n_t * period_t`` (and more than ``n_t`` exist), so it stays at least
+    that long. The datasets may use different templates; the smallest
+    ``n_t >= 1`` over the templates in use is taken, so a date never
+    promises more than any dataset gets. A type no template keeps is left
+    out. None when sanoid.conf cannot be read (silently: the caller words
+    the line without a date).
+    """
+    used = _templates_in_use(None, conf_path)
+    if used is None:
+        return None
+    lives: dict[str, float] = {}
+    for tpl in used:
+        frequent = _safe_int(tpl.get("frequent_period", "")) or _FREQUENT_PERIOD_MINUTES
+        periods = {**{k: d * 86400 for k, d in _PERIOD_DAYS.items()}, "frequently": frequent * 60.0}
+        for kind, period in periods.items():
+            n = _safe_int(tpl.get(kind, "0"))
+            if n >= 1:
+                life = n * period
+                lives[kind] = min(lives.get(kind, life), life)
+    return lives
