@@ -33,6 +33,8 @@ from lib.identity import (
     whole_disk,
 )
 from lib.log import Log
+from lib.registry import SHARED_KEY
+from lib.replication import Ref
 from lib.sh import run
 
 
@@ -444,3 +446,27 @@ def shared_snapshot_line(
         f"{head}, {age} days since its last backup: past the {horizon_days}-day horizon, "
         + "its next backup may need to resend some datasets in full"
     )
+
+
+# ── What a drive shares with origin, and its versions (M3 decision 5e) ──────
+
+
+def record_backup(
+    info: DriveInfo,
+    version: str,
+    shared: dict[str, list[Ref]] | None,
+    meta: dict[str, str],
+) -> None:
+    """Record a complete backup's version and what the drive now shares
+    with origin (``None``: unknown, the previous record stays). Entries
+    written before 5e get the preparation fields from the drive's own
+    ``org.zark:prepared-at`` / ``prepared-version`` when it has them."""
+    info.extra["last_backup_version"] = version
+    for key, prop in (("prepared_at", "prepared-at"), ("prepared_version", "prepared-version")):
+        if key not in info.extra and meta.get(prop):
+            info.extra[key] = meta[prop]
+    if shared is not None:
+        info.extra[SHARED_KEY] = {
+            rel: [[r.name, r.guid, r.creation] for r in refs]
+            for rel, refs in sorted(shared.items())
+        }

@@ -39,6 +39,7 @@ from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
     backup_device,
     drive_staleness_days,
+    record_backup,
     scan_connected_drives,
     select_drive,
     shared_snapshot_line,
@@ -48,7 +49,7 @@ from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
 from lib.origin_prune import inventory
-from lib.replication import TRANSFERABLE, DatasetPlan, State, is_archived, point_name
+from lib.replication import TRANSFERABLE, DatasetPlan, Ref, State, is_archived, point_name
 from lib.retention import Policy, Prune, plan_prune, point_removals, space_candidates
 from lib.sanoid_retention import guaranteed_overlap_days
 from lib.zfs import ZFS, PoolInfo
@@ -842,10 +843,15 @@ def run(
     _show_table(res, eng.point, log)
     used_after = zfs.pool_info(pool_name)  # P0-4: after the transfer
     pruned = (0, 0)
+    shared: dict[str, list[Ref]] | None = None
+    meta: dict[str, str] = {}
     if res.ok:
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
         _ = engine.record_complete(pool_name, eng.point, at_point, log)
         pruned = _apply_retention(pool_name, policy, log)
+        # After retention, which may remove shared intermediates (decision 5e).
+        shared = eng.shared_with_origin()
+        meta = engine.read_metadata(pool_name)
     _write_metadata(pool_name, cfg.source_pool, eng.point if res.ok else "", log)
 
     # ── Export and read back ─────────────────────────────────────────────
@@ -884,6 +890,7 @@ def run(
     info = cfg.known_drives.get(pool_name)
     if info is not None:
         info.last_backup_at = now_utc_iso()
+        record_backup(info, VERSION, shared, meta)
         try:
             cfg.save_drives()
             log.dbg(f"Recorded last_backup_at={info.last_backup_at} for {pool_name}")

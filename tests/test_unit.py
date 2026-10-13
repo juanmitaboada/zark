@@ -133,6 +133,7 @@ from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
     prompt_eject_or_attach,
 )
 from lib.config import (  # pylint: disable=wrong-import-position # noqa: E402
+    VERSION,
     Config,
     DriveInfo,
     now_utc_iso,
@@ -4880,6 +4881,21 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
         assert _marked(fake, "blue") == {home[0]}
 
+    def test_prepare_records_versions_and_that_it_shares_nothing(self):
+        """M3 decision 5e: prepare's full send carries only the point, so the
+        drive shares nothing with origin yet; the versions are recorded in
+        the registry and the preparing one on the drive."""
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        fake = _fresh_fake(())
+        _tick(fake, "2026-10-07_09:00:00_hourly")
+        assert self._prepare(fake, cfg_dir) == 0
+        entry = json.loads((cfg_dir / "known_drives.json").read_text())["blue"]
+        assert entry["shared"] and all(v == [] for v in entry["shared"].values())
+        assert entry["prepared_version"] == VERSION == entry["last_backup_version"]
+        assert entry["prepared_at"] == entry["last_backup_at"]
+        assert fake.ds["blue"].props["org.zark:prepared-version"] == VERSION
+
     def test_prepare_asks_the_drives_retention(self):
         """M3 decision 2b: prepare asks the window and the maximum age with
         its other questions; Enter keeps the defaults, which are not written."""
@@ -9040,6 +9056,55 @@ class TestBackupCommand:
         assert _origin_points(fake) == []
         assert fake.units["sanoid.timer"] == "active"
         assert not any(c.startswith("syncoid") or "sanoid --take" in c for c in fake.calls)
+
+    def test_complete_backup_records_what_the_drive_shares(self) -> None:
+        """M3 decision 5e: after a complete run the registry holds, per
+        dataset, the sanoid snapshots the drive shares with origin (the
+        intermediates the send carried) and the version that wrote it; the
+        preparation fields come from the drive when the entry lacks them."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.ds["backup"].props["org.zark:prepared-at"] = "2026-10-01T10:00:00Z"
+        fake.ds["backup"].props["org.zark:prepared-version"] = "2.0.0-rc2"
+        # The fake's clock is in 2023: retention would remove the intermediates.
+        cfg, rc = self._run(fake, patch.object(backup_mod, "_apply_retention", return_value=(0, 0)))
+        assert rc == 0
+        extra = cfg.known_drives["backup"].extra
+        home = extra["shared"]["rpool/USERDATA/home"]
+        assert [s[0] for s in home] == ["autosnap_2026-10-07_12:00:00_hourly"]
+        guid = next(s.guid for s in fake.ds["rpool/USERDATA/home"].snaps if s.name == home[0][0])
+        assert home[0][1] == guid and isinstance(home[0][2], int)
+        with patch_sh(fake):
+            replicated = repl.expected(engine.read_origin(["rpool", "bpool"]))
+        assert set(extra["shared"]) == set(replicated)
+        assert extra["last_backup_version"] == VERSION
+        assert extra["prepared_at"] == "2026-10-01T10:00:00Z"
+        assert extra["prepared_version"] == "2.0.0-rc2"
+        saved = json.loads((cfg.config_dir / "known_drives.json").read_text())["backup"]
+        assert saved["shared"] == extra["shared"]
+
+    def test_shared_record_is_kept_when_unknown_and_not_written_when_incomplete(self) -> None:
+        """M3 decision 5e: an incomplete run records nothing; a run that
+        cannot read both sides afterwards keeps the previous record."""
+        old = {"rpool/var": [["autosnap_2026-10-01_00:00:00_daily", "9", 1]]}
+        fake = _fresh_fake()
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "usb-X-0:0", extra={"shared": old})
+        _cfg, rc = self._run(fake, patch.object(Config, "load", return_value=cfg))
+        assert rc == 1 and cfg.known_drives["backup"].extra == {"shared": old}
+        fake = _fresh_fake()
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "usb-X-0:0", extra={"shared": old})
+        _cfg, rc = self._run(
+            fake,
+            patch.object(Config, "load", return_value=cfg),
+            patch.object(engine.Run, "shared_with_origin", return_value=None),
+        )
+        assert rc == 0
+        assert cfg.known_drives["backup"].extra["shared"] == old
+        assert cfg.known_drives["backup"].extra["last_backup_version"] == VERSION
 
     def test_retention_runs_after_a_complete_backup_only(self) -> None:
         """M3 decision 3a: the drive's policy is applied after a complete

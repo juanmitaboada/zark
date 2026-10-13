@@ -29,11 +29,11 @@ from pathlib import Path
 from lib import engine, registry, sh
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso
-from lib.drives import validate_external_block_device
+from lib.drives import record_backup, validate_external_block_device
 from lib.health import check_device, render_report
 from lib.log import Log
 from lib.mount import warn_rpool_mountpoint_lost
-from lib.replication import DatasetPlan, State, point_name
+from lib.replication import DatasetPlan, Ref, State, point_name
 from lib.retention import Policy
 from lib.zfs import ZFS, backup_altroot
 
@@ -202,15 +202,18 @@ def run(
             out = res.outcomes.get(p.rel)
             log.warn(f"  {p.rel}: {p.note or (out.error if out else p.state)}")
 
+    shared: dict[str, list[Ref]] | None = None
     if res.ok:
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
         _ = engine.record_complete(new_pool, eng.point, at_point, log)
+        shared = eng.shared_with_origin()  # a full send carries only the point: empty lists
     prepared_at = now_utc_iso()
     rpool_guid = sh.run("zpool get -H -o value guid rpool").output.strip()
     fields = {
         "format": engine.FORMAT,
         "version": VERSION,
         "prepared-at": prepared_at,
+        "prepared-version": VERSION,  # org.zark:version is rewritten by every backup
         "origin-host": socket.gethostname(),
         "origin-machine-id": engine.machine_id(),
         "origin-rpool-guid": rpool_guid,
@@ -275,6 +278,12 @@ def run(
         last_backup_at=prepared_at,  # I13: prepare is a full backup
         autoeject=autoeject,
         extra={registry.RETENTION_KEY: retention} if retention else {},
+    )
+    record_backup(
+        cfg.known_drives[new_pool],
+        VERSION,
+        shared,
+        {"prepared-at": prepared_at, "prepared-version": VERSION},
     )
     cfg.save_drives()
 

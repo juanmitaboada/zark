@@ -72,6 +72,7 @@ from lib.replication import (
     parent,
     plan,
     reached,
+    shared_snapshots,
 )
 from lib.restore_points import (
     COMPLETE_PROP,
@@ -631,6 +632,17 @@ class Run:  # pylint: disable=too-many-instance-attributes
             if not sh.run(cmd, log=self.log).ok:
                 failed.append(rel)
         return failed
+
+    def shared_with_origin(self) -> dict[str, list[Ref]] | None:
+        """What the drive shares with origin now, besides its anchors (M3
+        decision 5e); None when either side cannot be read."""
+        try:
+            origin = read_origin(self.pools, strict=True)
+            dest = read_dest(self.pool, strict=True)
+        except ReadError as e:
+            self.log.warn(f"Could not read what {self.pool} shares with origin: {e}")
+            return None
+        return shared_snapshots(origin, dest)
 
     def drop_check(self) -> list[Verdict]:  # pylint: disable=too-many-locals,too-many-branches
         """Decide, against a fresh read of both sides, what may go from origin.
