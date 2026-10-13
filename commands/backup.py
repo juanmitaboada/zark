@@ -393,7 +393,7 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
     if needed + margin <= avail:
         return []
     try:
-        complete, pins = engine.drive_complete(pool), engine.drive_pins(pool)
+        complete, pins = engine.drive_complete(pool), engine.drive_pins(pool, strict=True)
     except engine.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         _check_room(pool, needed, avail, margin, policy, log)
@@ -486,16 +486,12 @@ def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
     try:
         dest = engine.read_dest(pool, strict=True)
         complete = engine.drive_complete(pool)
+        pins = engine.drive_pins(pool, strict=True)
     except engine.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         return 0, 0
     prune = plan_prune(
-        dest,
-        complete.run,
-        policy,
-        int(time.time()),
-        whole=complete.whole,
-        pinned=engine.drive_pins(pool),
+        dest, complete.run, policy, int(time.time()), whole=complete.whole, pinned=pins
     )
     for target, why in prune.kept:
         log.info(f"  kept {pool}/{target}: {why}")

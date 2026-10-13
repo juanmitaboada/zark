@@ -238,6 +238,15 @@ def _legacy_history(dest: dict[str, Dest], pins: dict[str, str]) -> Prune:
     return Prune(snapshots=out, datasets=whole_datasets(dest, out))
 
 
+def _reread(pool: str, log: Log) -> dict[str, Dest]:
+    """The drive's listing after a removal; fatal when it cannot be read, as
+    every read that decides a removal here is (M3R-8)."""
+    try:
+        return engine.read_dest(pool, strict=True)
+    except engine.ReadError as e:
+        log.fatal(f"Cannot read {pool}: {e}")
+
+
 def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylint: disable=too-many-locals
     """Retention now, then beyond it, on one connected drive."""
     pool = drive.name
@@ -254,9 +263,9 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     try:
         dest = engine.read_dest(pool, strict=True)
         complete = engine.drive_complete(pool)
+        pins = engine.drive_pins(pool, strict=True)
     except engine.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
-    pins = engine.drive_pins(pool)
     prune = plan_prune(dest, complete.run, policy, now, whole=complete.whole, pinned=pins)
     if not prune.empty:
         freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
@@ -266,7 +275,7 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
         )
         if log.ask(f"Apply {pool}'s retention now?", default=False):
             _ = engine.apply_prune(pool, prune, log)
-            dest = engine.read_dest(pool, strict=True)
+            dest = _reread(pool, log)
             prune = Prune()
     else:
         log.ok(f"{pool}'s retention removes nothing now")
@@ -311,7 +320,7 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
             log.info(f"  {pool}/{top} and everything below it go too (nothing of it would be left)")
         if chosen and _typed(log, f"remove the {n} oldest backup point(s) from {pool}"):
             _ = engine.apply_prune(pool, plan, log)
-            dest = engine.read_dest(pool, strict=True)
+            dest = _reread(pool, log)
     legacy = _legacy_history(dest, pins)
     if not legacy.empty:
         tops = [t for t, _ in legacy.datasets]

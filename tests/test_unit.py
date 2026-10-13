@@ -10001,6 +10001,45 @@ class TestRetentionOnDrive:
         assert "Retention skipped" in out.getvalue()
         assert before == {ds: fake.names(ds) for ds in fake.ds}
 
+    def test_retention_stops_when_the_pins_cannot_be_read(self) -> None:
+        """M3R-8: without the pins the plan would include clone origins and
+        held snapshots ZFS refuses one by one; nothing is removed instead."""
+        fake = self._drive_with_history()
+        fake.fail_cmds.add("-o name,clones,userrefs -r backup/rpool")
+        before = {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(backup_mod.time, "time", return_value=float(NOW)),
+            redirect_stdout(out),
+        ):
+            assert backup_mod._apply_retention("backup", ret.Policy(), Log()) == (0, 0)  # pylint: disable=protected-access
+        assert "Retention skipped" in out.getvalue()
+        assert before == {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run(
+                "backup", "111", Log(), "zark_2026-10-11_10:00:00Z", sleep=lambda _s: None
+            )
+            assert eng.take_point()
+            plans = eng.survey()
+            with (
+                patch.object(backup_mod.time, "time", return_value=float(NOW)),
+                patch("builtins.input", side_effect=EOFError),
+                redirect_stdout(out),
+            ):
+                try:
+                    _decide(
+                        plans,
+                        eng,
+                        "backup",
+                        PoolInfo("backup", avail_bytes=0, size_bytes=10**12),
+                        Log(),
+                        ret.Policy(),
+                    )
+                except SystemExit:
+                    pass
+        assert before == {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+
     def test_clone_origin_and_held_snapshot_stay(self) -> None:
         """ZFS would refuse both destroys: the policy leaves them and reports the clone origin."""
         fake = self._drive_with_history()
@@ -10628,6 +10667,36 @@ class TestPruneCommand:
         assert P2 not in fake.names("backup/rpool/ROOT/be")
         assert P2 in fake.names("backup/rpool/USERDATA/home")
         assert "could not remove" not in out.getvalue()
+
+    def test_prune_is_fatal_when_the_pins_cannot_be_read(self) -> None:
+        """M3R-8: zark prune on a drive stops before any removal."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        fake.fail_cmds.add("-o name,clones,userrefs -r backup/rpool")
+        before = {ds: fake.names(ds) for ds in fake.ds}
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        drive = ConnectedDrive("backup", "111", "d", "/dev/sdb", True, False, False, "exported")
+        out = StringIO()
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                redirect_stdout(out),
+                redirect_stderr(StringIO()),
+                patch.object(ZFS, "import_backup_pool", return_value=True),
+                patch.object(prune_mod, "backup_device", return_value="/dev/sdb1"),
+                patch.object(prune_mod, "prompt_eject_or_attach"),
+                patch.object(Cleanup, "register", lambda _self: None),
+                patch.object(prune_mod.time, "time", return_value=float(NOW)),
+                *self._answers([], ["1"], "PRUNE", True),
+            ):
+                stack.enter_context(cm)
+            try:
+                prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
+                raise AssertionError("prune went on without the pins")
+            except SystemExit:
+                pass
+        assert "Cannot read backup" in out.getvalue()
+        assert before == {ds: fake.names(ds) for ds in fake.ds}
 
     def test_an_archived_lineage_a_beyond_policy_point_empties_goes_whole(self) -> None:
         """7a beyond the policy (M3R-3): the lineage is named before the

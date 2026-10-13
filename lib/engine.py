@@ -932,13 +932,20 @@ def drive_complete(pool: str) -> Complete:
     return retention_points(drive_snapshots(pool, strict=True), meta.get("last-point", ""))
 
 
-def drive_pins(pool: str) -> dict[str, str]:
+def drive_pins(pool: str, strict: bool = False) -> dict[str, str]:
     """``rel@name`` → why ZFS would refuse to destroy that snapshot: a clone
-    origin (EEXIST) or a hold (EBUSY), module/zfs/dsl_destroy.c:79-86."""
+    origin (EEXIST) or a hold (EBUSY), module/zfs/dsl_destroy.c:79-86.
+    ``strict`` raises :class:`ReadError` when a listing of a root that
+    exists fails (M3R-8): a plan made without the pins would be refused
+    snapshot by snapshot and misreport what it kept."""
     out: dict[str, str] = {}
     strip = f"{pool}/"
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        r = sh.run(f"zfs list -Hp -t snapshot -o name,clones,userrefs -r {_q(root)}")
+        if strict and not sh.run(f"zfs list -H -o name {_q(root)}").ok:
+            continue
+        r = _checked(
+            sh.run(f"zfs list -Hp -t snapshot -o name,clones,userrefs -r {_q(root)}"), strict
+        )
         for line in r.lines if r.ok else []:
             f = line.split("\t")
             if len(f) < 3 or not f[0].startswith(strip):
