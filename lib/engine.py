@@ -409,7 +409,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 out.append(f"-w -I {_q(first)} {_q(pt)}")
             return out
         if p.state in (State.INCREMENTAL, State.ROLLBACK, State.MODIFIED):
-            return [f"{raw}-I {_q(rel + p.base)} {_q(pt)}"]
+            return [f"{raw}-I {_q(rel + p.base)} {_q(pt)}"] if p.base else []
         return []
 
     def _after_bookmark(self, rel: str, bookmark: str) -> str:
@@ -454,7 +454,17 @@ class Run:  # pylint: disable=too-many-instance-attributes
     def discard_changes(self, p: DatasetPlan) -> bool:
         """MODIFIED, when chosen: ``zfs rollback`` to the newest snapshot,
         without ``-r`` (no snapshot is destroyed; works without the keys,
-        checked on eli)."""
+        checked on eli). A dataset that also holds partial receive state
+        (M2V-1) loses it first with ``zfs receive -A``, which destroys only
+        ``<ds>/%recv`` (cmd/zfs/zfs_main.c:5262-5301), so the rollback never
+        meets that clone."""
+        if p.partial:
+            if not self.abort_partial(p.rel):
+                self.log.error(
+                    f"  {p.rel}: could not discard the partial transfer; nothing changed"
+                )
+                return False
+            self.log.ok(f"Discarded the partial transfer of {p.rel} on the backup")
         r = sh.run(f"zfs rollback {_q(self._dst(p.rel) + p.common)}", log=self.log)
         self._report(
             r,

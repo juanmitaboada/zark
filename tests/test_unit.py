@@ -7475,8 +7475,17 @@ class TestReplicationPlanner:
         d = repl.Dest("rpool/x", written=1, snaps=[_ref("zark_2026-09-01_00:00:00Z", "5", 5)])
         p = repl.plan_dataset(o, d, P)
         assert (p.state, p.base, p.first) == (repl.State.MODIFIED, f"#{bm.name}", "@c")
-        # A partial receive, a full send or a rollback already handle the head.
+        # M2V-1 (eli R10): a partial receive onto a written head is refused at
+        # its end, so it is asked about too, planned as what it needs without
+        # its partial state; nothing to estimate when that is no incremental.
         d = repl.Dest("rpool/x", token="1-abc", written=1, snaps=[_ref("a", "1", 1)])
+        p = repl.plan_dataset(o, d, P)
+        assert (p.state, p.partial, p.base, p.common) == (repl.State.MODIFIED, True, "", "@a")
+        o = self._o("rpool/x", [_ref("a", "1", 1), _ref(P, "9", 9)])
+        p = repl.plan_dataset(o, d, P)
+        assert (p.state, p.partial, p.base, p.used) == (repl.State.MODIFIED, True, "@a", 1)
+        # A partial full receive has no snapshot, so no `written`: still RESUME.
+        d = repl.Dest("rpool/x", token="1-abc", written=0, snaps=[])
         assert repl.plan_dataset(o, d, P).state is repl.State.RESUME
 
     def test_resume_first(self) -> None:
@@ -9284,6 +9293,61 @@ class TestBackupCommand:
         assert rc == 0
         assert cfg.known_drives["backup"].extra["shared"] == old
         assert cfg.known_drives["backup"].extra["last_backup_version"] == VERSION
+
+    def _interrupted_then_written(self) -> FakeZfs:
+        """eli R10: a run cut while sending home, then a read-write mount."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        fake.inject.clear()
+        home = fake.ds["backup/rpool/USERDATA/home"]
+        assert home.token
+        home.written = 12 << 20
+        return fake
+
+    def test_partial_transfer_on_a_written_dataset_is_asked_and_discarded(self) -> None:
+        """M2V-1: listed with the written datasets; DISCARD aborts the partial
+        receive, rolls the head back and sends it in the same run."""
+        fake = self._interrupted_then_written()
+        before = len(fake.calls)
+        out = StringIO()
+        with patch.object(Log, "ask_text", return_value="DISCARD"):
+            _cfg, rc = self._run(
+                fake, patch.object(Log, "ask_choice", return_value=1), redirect_stdout(out)
+            )
+        text = " ".join(out.getvalue().split())
+        assert "rpool/USERDATA/home: 12.0M written since" in text
+        assert "(a partial transfer is discarded too)" in text
+        calls = fake.calls[before:]
+        abort = calls.index("zfs receive -A backup/rpool/USERDATA/home")
+        rollback = next(
+            i
+            for i, c in enumerate(calls)
+            if c.startswith("zfs rollback backup/rpool/USERDATA/home@")
+        )
+        assert abort < rollback and " -r " not in calls[rollback]
+        assert rc == 0, text
+        home = fake.ds["backup/rpool/USERDATA/home"]
+        assert not home.token and not home.written
+        assert repl.POINT_RE.match(home.snaps[-1].name)
+
+    def test_partial_transfer_on_a_written_dataset_skipped_asks_again(self) -> None:
+        """M2V-1: skipping (the default) keeps everything and says the next
+        backup asks again, not that it resumes."""
+        fake = self._interrupted_then_written()
+        out = StringIO()
+        _cfg, rc = self._run(
+            fake, patch.object(Log, "ask_choice", return_value=0), redirect_stdout(out)
+        )
+        text = " ".join(out.getvalue().split())
+        assert rc == 1
+        assert "changed on the drive: the next backup asks again" in text
+        assert "the next backup resumes it" not in text
+        home = fake.ds["backup/rpool/USERDATA/home"]
+        assert home.token and home.written
+        assert not any(c.startswith("zfs send -t") for c in fake.calls[-200:])
 
     def test_retention_runs_after_a_complete_backup_only(self) -> None:
         """M3 decision 3a: the drive's policy is applied after a complete

@@ -44,7 +44,7 @@ Dataset names here are relative to the pool root on both sides: origin
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -181,6 +181,7 @@ class DatasetPlan:  # pylint: disable=too-many-instance-attributes
     rename_to: str = ""  # ORPHAN whose lineage continues under this origin name
     clone_from: str = ""  # NEW clone: its origin snapshot on the drive ("ds@name"); base: origin's
     kept: bool = False  # ORPHAN already marked "kept"
+    partial: bool = False  # MODIFIED that also holds partial receive state (M2V-1)
     used: int = 0  # destination bytes (ORPHAN, DIVERGED, ROLLBACK; MODIFIED: written)
     note: str = ""
 
@@ -227,9 +228,22 @@ def plan_dataset(o: Origin, d: Dest | None, point: str) -> DatasetPlan:
     modified", module/zfs/dmu_recv.c:492), so it is MODIFIED: asked about.
     """
     p = _plan_dataset(o, d, point)
+    if d is not None and d.written > 0 and p.state is State.RESUME and d.newest is not None:
+        # M2V-1 (eli R10): a resumed stream onto a written head is refused at
+        # its end and the state kept (module/zfs/dmu_recv.c:3632,
+        # dsl_dataset.c:4101-4104), so resuming would fail on every run.
+        # Planned as what the dataset needs without its partial state, and
+        # asked about with the other written datasets.
+        p = _plan_dataset(o, replace(d, token=""), point)
+        p.partial = True
+        if p.state not in (State.INCREMENTAL, State.VIA_BOOKMARK):
+            p.base = ""  # nothing to estimate: the next survey decides
     if d is not None and d.written > 0 and p.state in (State.INCREMENTAL, State.VIA_BOOKMARK):
         p.state, p.used = State.MODIFIED, d.written
         p.common = f"@{d.newest.name}" if d.newest else ""
+    elif p.partial:
+        p.state, p.used = State.MODIFIED, d.written if d else 0
+        p.common = f"@{d.newest.name}" if d and d.newest else ""
     return p
 
 

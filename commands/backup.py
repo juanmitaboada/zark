@@ -245,7 +245,8 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             + "(a read-write zark mount does this, even with nothing written):",
         )
         for p in modified:
-            log.info(f"  {p.rel}: {_gib(p.used)} written since {p.common.lstrip('@')}")
+            extra = " (a partial transfer is discarded too)" if p.partial else ""
+            log.info(f"  {p.rel}: {_gib(p.used)} written since {p.common.lstrip('@')}{extra}")
         pick = _ask_confirmed(
             log,
             "How should this backup continue?",
