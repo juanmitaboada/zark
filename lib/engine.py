@@ -421,8 +421,18 @@ class Run:  # pylint: disable=too-many-instance-attributes
 
     def estimate(self, p: DatasetPlan, full: bool = False) -> int:
         """Bytes a transfer would send (``zfs send -nvP``); 0 when unknown."""
+        args_list = self._send_args(p, full)
+        if p.state is State.NEW and p.clone_from and not full:
+            # M3 decision 7a: `-nvP -I <origin> <clone>@<point>` reports the
+            # clone's full size: with no previous snapshot zfs_send_space gets
+            # no `from` and fromorigin is ignored (OpenZFS 2.4.1,
+            # lib/libzfs/libzfs_sendrecv.c:1237-1255), while the real send
+            # passes it (dump_ioctl, :1282). `-i` goes through zfs_send_one,
+            # which estimates from the origin (cmd/zfs/zfs_main.c:5026-5063).
+            # The send itself stays `-I` (_send_args).
+            args_list = [f"{self._raw(p.rel)}-i {_q(p.base)} {_q(f'{p.rel}@{self.point}')}"]
         total = 0
-        for args in self._send_args(p, full):
+        for args in args_list:
             r = sh.run(f"zfs send -nvP {args}")
             for line in (r.stdout + "\n" + r.stderr).splitlines():
                 fields = line.split("\t")

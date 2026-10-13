@@ -7836,6 +7836,27 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert fake.names("backup/rpool/ROOT/be2") == [P3]
         assert _engine_run(fake, "backup", "111", "zark_2026-10-10_10:00:00Z").ok
 
+    def test_new_clone_estimate_is_its_delta(self) -> None:
+        """M3 decision 7a (eli R7): the estimate of a clone sent from its
+        origin uses -i, which OpenZFS sizes as a delta; -nvP -I would report
+        the whole clone. The send stays -I."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        assert _engine_run(fake, "backup", "111", P2).ok
+        src = "rpool/ROOT/be@autosnap_2026-10-07_12:00:00_hourly"
+        fake.dataset("rpool/ROOT/be2", origin=src, mountpoint="/")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P3, sleep=lambda _s: None)
+            assert eng.take_point()
+            clone = next(p for p in eng.survey() if p.rel == "rpool/ROOT/be2")
+            assert clone.clone_from
+            before = len(fake.calls)
+            assert eng.estimate(clone) == 4096
+            assert eng.estimate(clone, full=True) == 10**9
+        assert fake.calls[before] == f"zfs send -nvP -w -i {src} rpool/ROOT/be2@{P3}"
+        assert eng._send_args(clone) == [f"-w -I {src} rpool/ROOT/be2@{P3}"]  # pylint: disable=protected-access
+
     def test_new_clone_without_its_origin_on_the_drive_is_sent_in_full(self) -> None:
         """O3: the origin snapshot never reached the drive: a full send, as before."""
         fake = self._fresh()

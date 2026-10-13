@@ -503,6 +503,10 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 return _err(err)
         if "-nvP" in args:
             incremental = any(a in args for a in ("-i", "-I", "-t"))
+            if "-I" in args and args[args.index("-I") + 1].split("@")[0] != args[-1].split("@")[0]:
+                # OpenZFS 2.4.1 estimates a clone sent with -I from its origin
+                # as a full stream (libzfs_sendrecv.c:1237-1255).
+                incremental = False
             return _ok(f"size\t{4096 if incremental else 10**9}\n")
         return _err("fake: send outside a pipe")
 
