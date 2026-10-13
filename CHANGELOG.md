@@ -149,6 +149,16 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
   snapshots longer than the date says.
 - An interrupted run anchors nothing: removing its point in the source
   costs the drives that received part of it a rollback of those datasets.
+- The registry keeps, per dataset, only the newest shared snapshot of
+  each sanoid type (decision 11a). sanoid prunes oldest first, so that
+  one is the longest-lived; but if it is destroyed by hand while older
+  ones of its type remain, a drive without anchors is reported as
+  resending that dataset in full where a rollback to an older shared
+  snapshot is still possible. The report errs towards the larger cost.
+- A dataset whose sanoid template keeps no hourly snapshots shares at
+  most a daily one with the source: when a drive loses its anchors, the
+  rollback of that dataset also removes the drive's backup points of
+  that day on it (eli S1.5: 10 points on `rpool/var`).
 - The space check before a transfer never offers a drive's 1.x history;
   `zark prune` on the drive does.
 - A dataset received as a clone keeps its origin snapshot on the drive
