@@ -37,7 +37,9 @@ What the policy never touches:
 A backup point is decided once, for the whole drive, from its newest
 snapshot's ``creation``, so it goes whole or stays whole; only I-E can keep
 one dataset's snapshot of a point that goes, and the point then reads as
-incomplete (its mark records how many datasets it had, M2V-4).
+incomplete (its mark records how many datasets it had, M2V-4). A point is
+judged by its run's mark, and a month prefers a point no dataset skipped
+since (M3F-5 5b): see :func:`lib.restore_points.retention_points`.
 
 Archived lineages and kept orphans are not live (M3 decision 7a): no I-E,
 and a subtree left with nothing is destroyed whole.
@@ -123,20 +125,30 @@ def point_times(dest: dict[str, Dest]) -> dict[str, int]:
     return out
 
 
-def monthly_points(times: dict[str, int], complete: set[str]) -> set[str]:
-    """The newest complete backup point of each calendar month (UTC)."""
-    best: dict[str, tuple[int, str]] = {}
+def monthly_points(
+    times: dict[str, int], complete: set[str], whole: set[str] | None = None
+) -> set[str]:
+    """The newest complete backup point of each calendar month (UTC): the
+    newest whole one when the month has any, else its newest run-complete
+    one (M3F-5 5b), so a rollback or a hand destroy that leaves a point
+    partial never empties a month."""
+    whole = complete if whole is None else whole
+    best: dict[str, tuple[bool, int, str]] = {}
     for name, ts in times.items():
         if name in complete:
             month = _month(ts)
-            best[month] = max(best.get(month, (0, "")), (ts, name))
-    return {name for _ts, name in best.values()}
+            best[month] = max(best.get(month, (False, 0, "")), (name in whole, ts, name))
+    return {name for _w, _ts, name in best.values()}
 
 
-def newest_complete(times: dict[str, int], complete: set[str]) -> str:
-    """The newest complete backup point, "" when there is none."""
-    done = [(ts, name) for name, ts in times.items() if name in complete]
-    return max(done)[1] if done else ""
+def newest_complete(
+    times: dict[str, int], complete: set[str], whole: set[str] | None = None
+) -> str:
+    """The newest complete backup point (recover's default: the newest whole
+    one, else the newest run-complete one), "" when there is none."""
+    whole = complete if whole is None else whole
+    done = [(name in whole, ts, name) for name, ts in times.items() if name in complete]
+    return max(done)[2] if done else ""
 
 
 def first_point_time(times: dict[str, int]) -> int | None:
@@ -150,13 +162,15 @@ def plan_prune(  # pylint: disable=too-many-arguments,too-many-locals
     policy: Policy,
     now: int,
     *,
+    whole: set[str] | None = None,
     pinned: dict[str, str] | None = None,
     protected: set[str] | None = None,
 ) -> Prune:
     """What the policy removes (see the module docstring).
 
     ``dest`` is the drive's listing by dataset relative to the pool;
-    ``complete`` the complete backup points (lib.restore_points);
+    ``complete`` the run-complete backup points and ``whole`` those of them
+    no dataset skipped (lib.restore_points; None: all of them);
     ``pinned`` maps ``rel@name`` to why ZFS would refuse to destroy it;
     ``protected`` names ``rel@name`` that must stay for this run.
     """
@@ -167,8 +181,8 @@ def plan_prune(  # pylint: disable=too-many-arguments,too-many-locals
     out = Prune()
     if start is None:
         return out  # nothing written by zark 2 yet: 1.x history only
-    monthly = monthly_points(times, complete)
-    keep_point = newest_complete(times, complete)
+    monthly = monthly_points(times, complete, whole)
+    keep_point = newest_complete(times, complete, whole)
     window = now - policy.window_days * DAY
     too_old = now - policy.max_age_days * DAY if policy.max_age_days else None
 
@@ -254,23 +268,24 @@ def whole_datasets(dest: dict[str, Dest], removals: list[Removal]) -> list[tuple
     return out
 
 
-def space_candidates(
+def space_candidates(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     dest: dict[str, Dest],
     complete: set[str],
     policy: Policy,
     now: int,
     prune: Prune,
+    whole: set[str] | None = None,
 ) -> list[str]:
     """Backup points a space plan may remove beyond the policy, oldest first:
     the monthly points outside the window, never the newest complete one.
     History from before the first backup point is never offered here."""
     times = point_times(dest)
     window = now - policy.window_days * DAY
-    keep_point = newest_complete(times, complete)
+    keep_point = newest_complete(times, complete, whole)
     gone = {r.name for r in prune.snapshots}
     names = [
         name
-        for name in monthly_points(times, complete)
+        for name in monthly_points(times, complete, whole)
         if times[name] < window and name != keep_point and name not in gone
     ]
     return sorted(names, key=lambda n: times[n])

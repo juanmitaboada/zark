@@ -279,9 +279,20 @@ def legacy_complete(snaps: list[Snap], last_point: str) -> set[str]:
     """
     if not last_point:
         return set()
+    points = {s.name for s in snaps if POINT_RE.match(s.name) and s.name <= last_point}
+    return points - skipped_points(snaps)
+
+
+def skipped_points(snaps: list[Snap]) -> set[str]:
+    """Backup points some dataset skipped: that dataset has a snapshot on the
+    drive before and after the point's time but none of the point, so the
+    run that took it did not reach the dataset, or the dataset's snapshot of
+    it was removed later (a rollback, a hand destroy) while the dataset
+    stayed. A dataset destroyed whole has no snapshot at all and skips
+    nothing. Archived lineages count as their dataset."""
     points: dict[str, list[Snap]] = {}
     for s in snaps:
-        if POINT_RE.match(s.name) and s.name <= last_point:
+        if POINT_RE.match(s.name):
             points.setdefault(s.name, []).append(s)
     by_ds: dict[str, list[int]] = {}
     for s in snaps:
@@ -290,10 +301,7 @@ def legacy_complete(snaps: list[Snap], last_point: str) -> set[str]:
     for name, members in points.items():
         held = {m.dataset for m in members}
         when = max(m.creation for m in members)
-        missed = any(
-            ds not in held and min(times) < when < max(times) for ds, times in by_ds.items()
-        )
-        if not missed:
+        if any(ds not in held and min(times) < when < max(times) for ds, times in by_ds.items()):
             out.add(name)
     return out
 
@@ -331,6 +339,24 @@ def run_complete_points(snaps: list[Snap], last_point: str) -> set[str]:
     ones the policy would then remove."""
     marked = point_marks(snaps)
     return set(marked) if marked else legacy_complete(snaps, last_point)
+
+
+@dataclass(frozen=True)
+class Complete:
+    """What retention knows about a drive's backup points (M3F-5 5b):
+    ``run`` are the points whose run was complete, ``whole`` those of them
+    no dataset skipped since (:func:`skipped_points`). The policy prefers a
+    whole point as a month's point, and falls back to a run-complete one."""
+
+    run: set[str]
+    whole: set[str]
+
+
+def retention_points(snaps: list[Snap], last_point: str) -> Complete:
+    """:class:`Complete` for retention: the run-complete points, and those
+    of them still whole."""
+    run = run_complete_points(snaps, last_point)
+    return Complete(run, run - skipped_points(snaps))
 
 
 def complete_points(snaps: list[Snap], last_point: str) -> set[str]:

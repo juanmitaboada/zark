@@ -215,6 +215,7 @@ from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa
     point_name,
     resolve,
     restore_points,
+    retention_points,
 )
 from lib.sanoid_retention import (  # pylint: disable=wrong-import-position # noqa: E402
     _guaranteed_days_of_template,
@@ -9866,6 +9867,23 @@ class TestRetentionPolicy:
         assert p.datasets == []
         assert ret.whole_datasets(dest, p.snapshots) == []
 
+    def test_a_month_with_no_whole_point_keeps_its_newest_run_complete_one(self) -> None:
+        """M3F-5 5b: the month's point is its newest whole point; with none
+        left, its newest run-complete point stays instead of the month
+        losing every point."""
+        dest, complete = self._history()
+        whole = complete - {_pt("2026-11-16"), _pt("2026-11-30")}
+        gone = _gone(ret.plan_prune(dest, complete, ret.Policy(), NOW, whole=whole))
+        assert f"{self.BE}@{_pt('2026-11-30')}" in gone  # not whole: November's is 11-02 now
+        assert f"{self.BE}@{_pt('2026-11-16')}" in gone
+        assert f"{self.BE}@{_pt('2026-11-02')}" not in gone
+        whole -= {_pt("2026-11-02")}
+        gone = _gone(ret.plan_prune(dest, complete, ret.Policy(), NOW, whole=whole))
+        assert f"{self.BE}@{_pt('2026-11-30')}" not in gone  # the newest run-complete one
+        assert f"{self.BE}@{_pt('2026-11-16')}" in gone and f"{self.BE}@{_pt('2026-11-02')}" in gone
+        candidates = ret.space_candidates(dest, complete, ret.Policy(), NOW, ret.Prune(), whole)
+        assert _pt("2026-11-30") in candidates and _pt("2026-11-16") not in candidates
+
 
 class TestRetentionOnDrive:
     """M3: the policy applied to a drive written by the engine."""
@@ -9890,11 +9908,13 @@ class TestRetentionOnDrive:
     def _plan(self, fake: FakeZfs, policy: ret.Policy | None = None) -> ret.Prune:
         with patch_sh(fake):
             dest = engine.read_dest("backup", strict=True)
+            complete = engine.drive_complete("backup")
             return ret.plan_prune(
                 dest,
-                engine.drive_complete("backup"),
+                complete.run,
                 policy or ret.Policy(),
                 NOW,
+                whole=complete.whole,
                 pinned=engine.drive_pins("backup"),
             )
 
@@ -9938,6 +9958,30 @@ class TestRetentionOnDrive:
         gone = {r.target for r in prune.snapshots}
         assert f"rpool/ROOT/be@{P2}" not in gone and f"rpool/ROOT/be@{P3}" not in gone
         assert f"rpool/ROOT/be@{P1}" in gone
+
+    def test_a_point_rolled_back_on_one_dataset_yields_to_the_whole_one(self) -> None:
+        """M3R-4: P2 lost its bpool snapshot (a rollback or a hand destroy)
+        while bpool stayed: retention keeps the whole P1 as the month's point
+        and removes what is left of P2; recover labels P2 incomplete."""
+        fake = self._drive_with_history()
+        boot = fake.ds["backup/bpool/BOOT/be"]
+        boot.snaps = [s for s in boot.snaps if s.name != P2]
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert P2 not in _marked(fake) and P1 in _marked(fake)
+        prune = self._plan(fake)
+        gone = {r.target for r in prune.snapshots}
+        assert f"rpool/ROOT/be@{P2}" in gone and f"rpool/ROOT/be@{P1}" not in gone
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(backup_mod.time, "time", return_value=float(NOW)),
+            redirect_stdout(out),
+        ):
+            count, _freed = backup_mod._apply_retention("backup", ret.Policy(), Log())  # pylint: disable=protected-access
+        assert count == len(prune.snapshots)
+        assert P1 in fake.names("backup/rpool/ROOT/be") and P2 not in fake.names(
+            "backup/rpool/ROOT/be"
+        )
 
     def test_retention_stops_when_the_marks_cannot_be_read(self) -> None:
         """A failed read of the marks would make every point look incomplete:
@@ -10064,7 +10108,7 @@ class TestBackupSpace:
         fake = self._history()
         with patch_sh(fake), redirect_stdout(StringIO()):
             dest = engine.read_dest("backup", strict=True)
-            prune = ret.plan_prune(dest, engine.drive_complete("backup"), ret.Policy(), NOW)
+            prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
             _ = engine.apply_prune("backup", prune, Log())
         policy = ret.Policy(margin_pct=0)
         ok, asked, out = self._decide(fake, 0, 10**12, False, policy)
@@ -10425,8 +10469,10 @@ class TestPruneCommand:
         assert "zark_2026-10-10_10:00:00Z" in be
 
     def test_beyond_the_policy_lists_only_points_with_something_to_remove(self) -> None:
-        """M3 decision 6a (eli R5): a monthly point held only by an orphan's
-        newest snapshot (I-E) frees nothing and is not offered."""
+        """M3 decision 6a (eli R5): a point held only by an orphan's newest
+        snapshot (I-E) frees nothing and is not offered. Since M3F-5 5b the
+        other datasets, which hold a point before and after it, make it not
+        whole, so its month's point is the whole one before it (M3R-4)."""
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
         for ds in [d for d in fake.ds if d.startswith("backup/")]:
             fake.ds[ds].snaps = [s for s in fake.ds[ds].snaps if s.name != P2]
@@ -10454,8 +10500,9 @@ class TestPruneCommand:
             prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
         listed = [line for line in out.getvalue().splitlines() if "(with the ones above:" in line]
         assert listed and P2 not in "".join(listed)
-        assert f"1) {P3}" in listed[0]
+        assert f"1) {P1}" in listed[0] and f"2) {P3}" in listed[1]
         assert P2 in fake.names("backup/rpool/zt9")
+        assert P1 in fake.names("backup/rpool/ROOT/be")  # its month's newest whole point now
 
     def test_legacy_history_boundaries(self) -> None:
         """6c: only names from before the first point go; a legacy snapshot
@@ -10540,7 +10587,7 @@ class TestPruneCommand:
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
         with patch_sh(fake), redirect_stdout(StringIO()):
             dest = engine.read_dest("backup", strict=True)
-            prune = ret.plan_prune(dest, engine.drive_complete("backup"), ret.Policy(), NOW)
+            prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
             _ = engine.apply_prune("backup", prune, Log())
         home = fake.ds["backup/rpool/USERDATA/home"]
         next(x for x in home.snaps if x.name == P2).clones = "backup/rpool/USERDATA/home2"
@@ -10784,6 +10831,34 @@ class TestCompletePoints:
         ]
         assert marked == {f"backup/{rel}@{P1}": str(len(rels)) for rel in rels}
         assert not any(COMPLETE_PROP in d.props for d in fake.ds.values())  # never a filesystem
+
+    def test_a_point_a_dataset_skipped_is_not_whole(self) -> None:
+        """M3R-4 (E5): a marked point that lost one dataset's snapshot while
+        the dataset stayed is run-complete but not whole, so its month keeps
+        the whole point before it and the policy removes the partial one."""
+        be, boot = "rpool/ROOT/be", "bpool/BOOT/be"
+        pa, pb, pc = _pt("2026-11-02"), _pt("2026-11-16"), _pt("2027-01-10")
+        snaps = [
+            Snap(be, pa, "g1", 1, _days_ago(74), mark="2"),
+            Snap(boot, pa, "g2", 2, _days_ago(74), mark="2"),
+            Snap(be, pb, "g3", 3, _days_ago(60), mark="2"),  # boot's copy of pb is gone
+            Snap(be, pc, "g5", 5, _days_ago(5), mark="2"),
+            Snap(boot, pc, "g6", 6, _days_ago(5), mark="2"),
+        ]
+        complete = retention_points(snaps, pc)
+        assert complete.run == {pa, pb, pc}
+        assert complete.whole == {pa, pc}
+        assert complete_points(snaps, pc) == {pa, pc}  # recover agrees
+        dest = _drive(
+            {
+                be: [(pa, _days_ago(74)), (pb, _days_ago(60)), (pc, _days_ago(5))],
+                boot: [(pa, _days_ago(74)), (pc, _days_ago(5))],
+            },
+        )
+        p = ret.plan_prune(dest, complete.run, ret.Policy(), NOW, whole=complete.whole)
+        assert _gone(p) == {f"{be}@{pb}"}
+        # A dataset destroyed whole skips nothing (commit 12's case).
+        assert retention_points([s for s in snaps if s.dataset == be], pc).whole == {pa, pb, pc}
 
     def test_legacy_drive_is_marked_once_by_its_last_point(self) -> None:
         """A drive written before marks existed: points up to org.zark:last-point

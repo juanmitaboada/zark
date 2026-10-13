@@ -47,6 +47,7 @@ from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
 from lib.log import Log
 from lib.origin_prune import Inventory, Item, inventory, older_than
 from lib.replication import Dest
+from lib.restore_points import Complete
 from lib.retention import (
     DAY,
     Policy,
@@ -256,7 +257,7 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     except engine.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
     pins = engine.drive_pins(pool)
-    prune = plan_prune(dest, complete, policy, now, pinned=pins)
+    prune = plan_prune(dest, complete.run, policy, now, whole=complete.whole, pinned=pins)
     if not prune.empty:
         freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
         log.info(
@@ -277,7 +278,7 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
 def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     pool: str,
     dest: dict[str, Dest],
-    complete: set[str],
+    complete: Complete,
     pins: dict[str, str],
     policy: Policy,
     now: int,
@@ -289,7 +290,7 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     # offered, as backup's space plan already skips it (M3 decision 6a).
     names = [
         name
-        for name in space_candidates(dest, complete, policy, now, prune)
+        for name in space_candidates(dest, complete.run, policy, now, prune, complete.whole)
         if point_removals(dest, name, pinned=pins)
     ]
     if names:

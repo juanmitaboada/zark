@@ -395,7 +395,9 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
     bases = {f"{p.rel}{p.common}" for p in plans if p.state is State.ROLLBACK and p.common}
     bases |= {p.clone_from for p in plans if p.state is State.NEW and p.clone_from}
     now = int(time.time())
-    prune = plan_prune(eng.dest, complete, policy, now, pinned=pins, protected=bases)
+    prune = plan_prune(
+        eng.dest, complete.run, policy, now, whole=complete.whole, pinned=pins, protected=bases
+    )
     tops = [t for t, _ in prune.datasets]
     freed = engine.reclaim(pool, prune.snapshots, tops) if not prune.empty else 0
     actions: list[Callable[[], object]] = []
@@ -408,7 +410,7 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
     chosen: list[tuple[str, int]] = []
     beyond = Prune()
     total = freed
-    for name in space_candidates(eng.dest, complete, policy, now, prune):
+    for name in space_candidates(eng.dest, complete.run, policy, now, prune, complete.whole):
         if needed + margin <= avail + total:
             break
         more = point_removals(eng.dest, name, pinned=pins, protected=bases)
@@ -469,7 +471,14 @@ def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
     except engine.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         return 0, 0
-    prune = plan_prune(dest, complete, policy, int(time.time()), pinned=engine.drive_pins(pool))
+    prune = plan_prune(
+        dest,
+        complete.run,
+        policy,
+        int(time.time()),
+        whole=complete.whole,
+        pinned=engine.drive_pins(pool),
+    )
     for target, why in prune.kept:
         log.info(f"  kept {pool}/{target}: {why}")
     if prune.empty:

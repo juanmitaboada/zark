@@ -77,11 +77,12 @@ from lib.replication import (
 from lib.restore_points import (
     COMPLETE_PROP,
     LEGACY_MARK,
+    Complete,
     Snap,
     legacy_complete,
     parse_snapshots,
     point_marks,
-    run_complete_points,
+    retention_points,
 )
 from lib.retention import Prune, Removal
 
@@ -921,13 +922,14 @@ def record_complete(pool: str, point: str, rels: list[str], log: Log) -> bool:
 # ── destination retention (M3) ───────────────────────────────────────────
 
 
-def drive_complete(pool: str) -> set[str]:
-    """The backup points on a drive whose run was complete, for retention
-    (:func:`lib.restore_points.run_complete_points`). Read strictly: a mark
-    that cannot be read would make complete points look incomplete, and
-    the policy remove them, so a failed listing raises :class:`ReadError`."""
+def drive_complete(pool: str) -> Complete:
+    """The backup points on a drive whose run was complete, and those still
+    whole, for retention (:func:`lib.restore_points.retention_points`).
+    Read strictly: a mark that cannot be read would make complete points
+    look incomplete, and the policy remove them, so a failed listing raises
+    :class:`ReadError`."""
     meta = read_metadata(pool, strict=True)
-    return run_complete_points(drive_snapshots(pool, strict=True), meta.get("last-point", ""))
+    return retention_points(drive_snapshots(pool, strict=True), meta.get("last-point", ""))
 
 
 def drive_pins(pool: str) -> dict[str, str]:
