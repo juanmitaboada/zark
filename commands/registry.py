@@ -214,7 +214,7 @@ def _forget_guid(cfg: Config, log: Log, guid: str) -> None:
 
 
 def _leftover_points(cfg: Config, pools: list[str], log: Log) -> None:
-    """Backup points left by interrupted runs (decision M2F-5): offered for
+    """Backup points left in origin (decision M2F-5; M3R-5): offered for
     removal only when no registered drive remains, since a registered one may
     still need one as the base of its next run."""
     left = engine.leftover_points(engine.read_origin(pools))

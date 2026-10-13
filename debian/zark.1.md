@@ -264,12 +264,16 @@ for the canonical end-to-end sequences.
     the window (30 days by default) stays; outside it, only the newest
     complete backup point of each calendar month (UTC), with no limit in
     time; with a maximum age set (off by default), nothing older. The
-    newest complete point and every replicated dataset's newest snapshot
-    (the base of its next incremental) always stay, and so do a clone's origin, a held
+    newest complete point and the newest snapshot of every dataset other
+    than an archived lineage or one kept as only on the drive (the base of
+    its next incremental) always stay, and so do a clone's origin, a held
     snapshot, names neither **zark** nor **sanoid** wrote, and history from
-    before the drive's first **zark** 2 backup point (see **prune**). An
+    before the drive's first **zark** 2 backup point (see **prune**). A
+    month's point is the newest one no dataset skipped since; with none
+    left, its newest point whose run was complete. An
     archived dataset or one kept as only on the drive goes whole once
-    nothing of it is kept. Each snapshot is destroyed by its exact name,
+    nothing of it is kept, also when the space check or **prune** empties
+    it. Each snapshot is destroyed by its exact name,
     never by a range, and the drive's keys are not needed. **prepare** asks
     the window and the maximum age; **registry retention** changes them.
 
@@ -325,11 +329,18 @@ for the canonical end-to-end sequences.
     that record against the source: until about when the source keeps
     those snapshots (**sanoid** prunes one only once it is older than *n*
     periods of its type; *n* is the smallest count over the templates in use),
-    or how many datasets share nothing and are resent in full. Without a
+    or how many datasets share nothing and are resent in full. A **zark** 2
+    drive's newest snapshot is its backup point, which the source keeps
+    only as an anchor, so continuing from a shared snapshot means a
+    rollback: the next backup asks to roll each dataset back to the newest
+    shared snapshot (the drive's backup points after it go) or to resend it
+    in full. Without a
     record it gives the guaranteed horizon as a condition: (*n* − 1)
     periods of the longest bucket of the shortest template in use, 62 days
     with **zark**'s templates, if the drive still shares snapshots with the
-    source. It also says when **prune** can remove legacy residues.
+    source (incrementally on a **zark** 1.x drive, after a rollback on a
+    **zark** 2 one). When the source cannot be read it says so in one line
+    instead. It also says when **prune** can remove legacy residues.
 
     **--no-snapshot** is accepted and has no effect: the backup point is
     taken by **zark** itself.
@@ -356,12 +367,13 @@ for the canonical end-to-end sequences.
     **list** (the default) shows every entry, whether its disk is connected
     and whether the pool GUID on the disk matches; on the installed system
     also every drive GUID that holds anchors in the source without an
-    entry, and how many backup points interrupted runs left there.
+    entry, and how many backup points were left there by interrupted runs
+    or by a run whose anchor failed.
     **forget** removes, on the installed system, a drive's anchors in the
     source (its bookmarks on **rpool** and snapshots on **bpool**) and then
     its entry; the drive itself is not touched. Given a pool GUID with no
     entry, it removes only that GUID's anchors. When no drive is left
-    registered it offers to remove the points left by interrupted runs. **fix** rewrites *drive_id* from the
+    registered it offers to remove the backup points left in the source. **fix** rewrites *drive_id* from the
     connected disk that carries the registered pool GUID and writes every
     missing key. **retention** shows or changes a drive's retention: the
     window in days (1–3650), the maximum age in days (**off**, or more than
@@ -454,11 +466,15 @@ for the canonical end-to-end sequences.
     **PRUNE**; */etc/sanoid/sanoid.conf* is not changed), the legacy
     residues (**syncoid_\*** snapshots left by **zark** 1.x on datasets
     where every registered drive has an anchor, and the keystore's
-    **prepare_\*** snapshots; yes/no), the backup points interrupted runs
-    left (typed **PRUNE**; a drive that received part of such a point rolls
-    those datasets back at its next backup, after asking, and one whose
-    transfer was interrupted sends it again) and a drive's **bpool** anchors (typed **PRUNE**;
-    that drive's next backup then asks how to send those datasets again).
+    **prepare_\*** snapshots; yes/no), the backup points left in the source
+    by interrupted runs or by a run whose anchor failed (typed **PRUNE**; a
+    drive that received part of such a point rolls those datasets back at
+    its next backup, after asking, one whose transfer was interrupted sends
+    it again, and one whose run completed but could not be anchored on a
+    dataset rolls that dataset back too) and a drive's **bpool** anchors
+    (typed **PRUNE**; that drive's next backup then asks to roll those
+    datasets back to a shared **sanoid** snapshot, which removes its newest
+    backup point on them, or to archive them and resend them in full).
     Backups impose no floor: the drives' anchors on **rpool** are
     bookmarks, which no snapshot removal touches. On a drive (no passphrase
     needed): what its retention removes now (yes/no), then the oldest

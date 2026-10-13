@@ -30,8 +30,16 @@ zark (2.0.0~rc3-1) UNRELEASED; urgency=medium
   * A dataset with an interrupted transfer that was written on the drive
     since (a read-write mount) is asked about instead of failing to
     resume on every run.
+  * The review's fix round: the lines about a drive without anchors say
+    its next backup rolls the drive back or resends in full; status and
+    backup say when the source could not be read instead of calling every
+    drive unanchored; the space check and prune destroy whole a lineage
+    they empty; a month keeps a whole point over a partial one; the pins
+    and recover's marks are read strictly; alerts remove takes the
+    notified marker and install refuses a path systemd refuses; a subtree
+    destroy names every dataset it takes.
 
- -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Mon, 12 Oct 2026 23:30:00 +0200
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Wed, 14 Oct 2026 00:30:00 +0200
 
 zark (2.0.0~rc2-1) UNRELEASED; urgency=medium
 

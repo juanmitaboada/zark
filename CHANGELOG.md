@@ -134,6 +134,44 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
   that drive's backup point (M2X.5).
 - backup's out-of-space advice no longer suggests destroying snapshots by
   hand.
+- **The review's fix round (M3R-1 ... M3R-14).**
+  - The "no anchor" lines, the H21 fallback and `zark prune`'s warning
+    before removing a drive's bpool anchors describe what the next backup
+    asks: a zark 2 drive's newest snapshot is its backup point, so it never
+    stays incremental on a shared sanoid snapshot; it rolls the drive back
+    to the newest shared one (the drive's backup points after it go) or
+    resends in full. Without a record the line covers a 1.x drive
+    (incremental) and a 2.x one (rollback) in one text (M3R-1, M3F-4 4a).
+  - `zark status`, the MOTD and backup's final report read the source
+    strictly; when it cannot be read they say so in one line instead of
+    calling every registered drive unanchored (M3R-2).
+  - The space check before a transfer and `zark prune`'s beyond-policy
+    points destroy whole an archived lineage or kept orphan they leave
+    empty, as the policy does (7a), name it before the question and count
+    its space in what the plan frees (M3R-3).
+  - Retention prefers, as a month's point, one no dataset skipped since
+    (a snapshot before and after it, none of it: a rollback or a hand
+    destroy left it partial); a month with no whole point left keeps its
+    newest run-complete one, so nothing empties a month (M3R-4, M3F-5 5b).
+  - `zark prune`'s "backup points left in origin" also covers the point a
+    complete run kept because its anchor failed; removing it costs that
+    drive a rollback of a complete point, and the warning says so (M3R-5).
+  - The pins (clone origins, holds) are read strictly: retention is
+    skipped and `zark prune` stops when they cannot be read (M3R-8).
+    recover reads the marks strictly and stops when it cannot (M3R-9).
+  - `zark alerts remove` also removes `/run/zark/notified` (M3R-10,
+    M3F-7 7a). `zark alerts install` refuses a zark path with a quote, a
+    backslash or a control character, which systemd refuses in `ExecStart`
+    (M3R-14, M3F-9 9a). The timer stays `OnUnitActiveSec=1h`: systemd
+    counts it from the timer's last trigger, condition or not (M3F-6 6a).
+  - A subtree destroyed whole names, from the drive's own listing, every
+    dataset it takes, those with no snapshot and partial receives included,
+    and is left alone when that listing fails (M3R-11, M3F-8 8a).
+  - Tests pin the window rule, the descendant check of a subtree destroy,
+    the space plan's newest complete point, the 1.x history guards, the
+    `[y/N]` defaults, the clone origin's guid match, the active-session
+    filter, prepare's retention answers and prune's pins (M3R-6, M3R-7,
+    M3R-12, M3R-13).
 
 #### Removed
 
@@ -157,16 +195,24 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
   snapshots longer than the date says.
 - An interrupted run anchors nothing: removing its point in the source
   costs the drives that received part of it a rollback of those datasets.
+  A complete run whose anchor could not be created keeps its point in the
+  source as that drive's base too, and `zark prune` lists it with them
+  (M3R-5); the anchoring retry is M4's.
 - The registry keeps, per dataset, only the newest shared snapshot of
   each sanoid type (decision 11a). sanoid prunes oldest first, so that
   one is the longest-lived; but if it is destroyed by hand while older
   ones of its type remain, a drive without anchors is reported as
   resending that dataset in full where a rollback to an older shared
   snapshot is still possible. The report errs towards the larger cost.
-- A dataset whose sanoid template keeps no hourly snapshots shares at
-  most a daily one with the source: when a drive loses its anchors, the
-  rollback of that dataset also removes the drive's backup points of
-  that day on it (eli S1.5: 10 points on `rpool/var`).
+- A zark 2 drive that loses its anchors in the source (a recover does
+  not restore bookmarks; `zark prune` can remove bpool's) continues at
+  its next backup only after a rollback: on every dataset the drive's
+  newest backup point goes, since the base is the newest shared sanoid
+  snapshot, which is older than the point. A dataset whose sanoid
+  template keeps no hourly snapshots shares at most a daily one, so that
+  rollback also removes the drive's backup points of that day on it (eli
+  S1.5: 10 points on `rpool/var`). An engine that could continue from an
+  older base without destroying the newer destination snapshots is M4's.
 - The space check before a transfer never offers a drive's 1.x history;
   `zark prune` on the drive does.
 - A dataset received as a clone keeps its origin snapshot on the drive
