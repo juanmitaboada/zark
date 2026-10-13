@@ -5060,6 +5060,19 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert data["blue"]["retention"] == {"window_days": 60, "max_age_days": 400}
         assert len(asked) == 2
 
+    def test_a_retention_answer_that_is_not_a_number_is_asked_again(self):
+        """M3R-13 (X7): the questions are repeated until the values pass the
+        registry's validation, so no refused entry reaches save_drives."""
+        replies = iter(["abc", "off", "30", "400"])
+        out = StringIO()
+        with (
+            patch.object(Log, "ask_input", side_effect=lambda *_a, **_k: next(replies)),
+            redirect_stdout(out),
+        ):
+            values = prepare_mod._ask_retention(Log())  # pylint: disable=protected-access
+        assert values == {"max_age_days": 400}
+        assert "asked again" in out.getvalue()
+
     def test_unregistered_prepare_leaves_no_anchors(self):
         """M2R-6 (E12b): a prepare that ends DRIVE NOT REGISTERED drops the
         anchors its datasets got."""
@@ -7881,6 +7894,25 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert not plans["rpool/ROOT/be2"].clone_from
         assert eng._send_args(plans["rpool/ROOT/be2"]) == [f"-w rpool/ROOT/be2@{P2}"]  # pylint: disable=protected-access
 
+    def test_a_clone_origin_is_matched_by_guid_not_by_name(self) -> None:
+        """O3 (M3R-12): a drive snapshot that only shares the origin's name is
+        not a base; the clone is sent in full."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        assert _engine_run(fake, "backup", "111", P2).ok
+        src = "rpool/ROOT/be@autosnap_2026-10-07_12:00:00_hourly"
+        copy = next(s for s in fake.ds["backup/rpool/ROOT/be"].snaps if s.name == src.split("@")[1])
+        copy.guid = "not-the-origins-guid"
+        fake.dataset("rpool/ROOT/be2", origin=src, mountpoint="/")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P3, sleep=lambda _s: None)
+            assert eng.take_point()
+            plans = {p.rel: p for p in eng.survey()}
+        assert plans["rpool/ROOT/be2"].state is repl.State.NEW
+        assert not plans["rpool/ROOT/be2"].clone_from
+        assert eng._send_args(plans["rpool/ROOT/be2"]) == [f"-w rpool/ROOT/be2@{P3}"]  # pylint: disable=protected-access
+
     def test_fake_refuses_a_resume_onto_a_written_destination(self) -> None:
         """eli R10 (M2V-1): ZFS receives a resumed stream onto a head written
         since its newest snapshot, refuses it at the end and keeps the
@@ -10502,6 +10534,38 @@ class TestPruneCommand:
             assert "[y/N]" in asked.call_args_list[0].args[0]
             assert P1 in fake.names("backup/rpool/ROOT/be")
 
+    def test_beyond_policy_removals_keep_pins(self) -> None:
+        """A clone origin in the oldest monthly point is left out of what the
+        typed PRUNE removes, so nothing is refused (M3R-13, P7)."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            dest = engine.read_dest("backup", strict=True)
+            prune = ret.plan_prune(dest, engine.drive_complete("backup"), ret.Policy(), NOW)
+            _ = engine.apply_prune("backup", prune, Log())
+        home = fake.ds["backup/rpool/USERDATA/home"]
+        next(x for x in home.snaps if x.name == P2).clones = "backup/rpool/USERDATA/home2"
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        drive = ConnectedDrive("backup", "111", "d", "/dev/sdb", True, False, False, "exported")
+        out = StringIO()
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                redirect_stdout(out),
+                redirect_stderr(StringIO()),
+                patch.object(ZFS, "import_backup_pool", return_value=True),
+                patch.object(prune_mod, "backup_device", return_value="/dev/sdb1"),
+                patch.object(prune_mod, "prompt_eject_or_attach"),
+                patch.object(Cleanup, "register", lambda _self: None),
+                patch.object(prune_mod.time, "time", return_value=float(NOW)),
+                *self._answers([], ["1"], "PRUNE", False),
+            ):
+                stack.enter_context(cm)
+            prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
+        assert P2 not in fake.names("backup/rpool/ROOT/be")
+        assert P2 in fake.names("backup/rpool/USERDATA/home")
+        assert "could not remove" not in out.getvalue()
+
 
 class TestStatus:
     """M3 decisions 12 and 13: CAP, RPO, the MOTD and the notifications."""
@@ -10606,6 +10670,24 @@ class TestStatus:
             "runuser -u br0th3r -- env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
         )
         assert "notify-send" in call and "'rpool is 92% full'" in call
+
+    def test_inactive_sessions_are_not_notified(self) -> None:
+        """A locked seat or a greeter (Active=no) gets nothing (M3R-13, A5)."""
+        mock = MockShell()
+        mock.on("loginctl list-sessions --no-legend").succeeds(
+            "2 1000 br0th3r seat0 tty2\n4 1001 guest seat0 tty3\n"
+        )
+        mock.on("loginctl show-session 2 -p Type -p Active -p Name -p User").succeeds(
+            "Type=wayland\nActive=yes\nName=br0th3r\nUser=1000\n"
+        )
+        mock.on("loginctl show-session 4 -p Type -p Active -p Name -p User").succeeds(
+            "Type=wayland\nActive=no\nName=guest\nUser=1001\n"
+        )
+        mock.on_prefix("runuser").succeeds("")
+        with patch_sh(mock):
+            assert notify_mod.notify("zark: disk space", "rpool is 92% full") == 1
+        calls = [c for c in mock.calls if c.startswith("runuser")]
+        assert len(calls) == 1 and "-u br0th3r " in calls[0]
 
     def test_status_command_notifies_once_a_day(self) -> None:
         """The timer's `status --refresh --notify` twice: one notification."""
