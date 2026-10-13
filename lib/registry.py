@@ -39,6 +39,11 @@ UNKNOWN_DRIVE_ID = "<unknown>"
 # Optional per-drive retention settings (M3 decision 2b): key → (min, max).
 RETENTION_KEY = "retention"
 RETENTION_LIMITS = {"window_days": (1, 3650), "max_age_days": (0, 36500), "margin_pct": (0, 50)}
+# What the drive shared with origin at its last complete backup (M3 decision 5e):
+# {"<dataset>": [["<snapshot>", "<guid>", <creation>], ...]}.
+SHARED_KEY = "shared"
+# Information only (M3 decision 5e): strings, absent when unknown.
+TEXT_KEYS = ("prepared_at", "prepared_version", "last_backup_version")
 
 
 class RegistryError(Exception):
@@ -64,6 +69,34 @@ def _check_entry(path: Path, name: str, entry: Any) -> None:
         raise RegistryError(f"{where}: 'last_backup_at' must be a string or null")
     if RETENTION_KEY in entry:
         check_retention(entry[RETENTION_KEY], where)
+    for key in TEXT_KEYS:
+        if key in entry and not isinstance(entry[key], str):
+            raise RegistryError(f"{where}: {key!r} must be a string")
+    if SHARED_KEY in entry:
+        check_shared(entry[SHARED_KEY], where)
+
+
+def check_shared(value: Any, where: str) -> None:
+    """Validate a ``shared`` object; raises RegistryError."""
+    if not isinstance(value, dict):
+        raise RegistryError(f"{where}: 'shared' must be an object of datasets")
+    for rel, snaps in value.items():
+        if not isinstance(snaps, list):
+            raise RegistryError(f"{where}: 'shared' of {rel!r} must be a list")
+        for snap in snaps:
+            ok = (
+                isinstance(snap, list)
+                and len(snap) == 3
+                and isinstance(snap[0], str)
+                and isinstance(snap[1], str)
+                and snap[1].isdigit()
+                and isinstance(snap[2], int)
+                and not isinstance(snap[2], bool)
+            )
+            if not ok:
+                raise RegistryError(
+                    f"{where}: 'shared' of {rel!r}: each entry must be [name, guid, creation]"
+                )
 
 
 def check_retention(value: Any, where: str) -> None:

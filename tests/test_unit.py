@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -4502,6 +4503,40 @@ class TestRegistry:  # pylint: disable=missing-function-docstring
             "future": {"a": 1},
         }
 
+    def test_shared_and_version_keys_are_validated(self):
+        """M3 decision 5e: the shapes written by backup and prepare pass; any
+        other shape is refused before the file is touched."""
+        good = {
+            "guid": "7",
+            "drive_id": "usb-X",
+            "prepared_at": "2026-10-13T08:00:00Z",
+            "prepared_version": "2.0.0-rc3",
+            "last_backup_version": "2.0.0-rc3",
+            "shared": {
+                "rpool/var": [["autosnap_2026-10-02_00:00:00_daily", "5", 1700000005]],
+                "bpool/BOOT/be": [],
+            },
+        }
+        data = json.loads(registry_serialize({"blue": good}, Path("/k.json")))
+        assert data["blue"]["shared"] == good["shared"]
+        assert data["blue"]["prepared_version"] == "2.0.0-rc3"
+        bad: list[dict[str, Any]] = [
+            {"prepared_version": 3},
+            {"shared": []},
+            {"shared": {"rpool/var": "x"}},
+            {"shared": {"rpool/var": [["n", "g", 1]]}},
+            {"shared": {"rpool/var": [["n", "5"]]}},
+            {"shared": {"rpool/var": [["n", "5", True]]}},
+        ]
+        for extra in bad:
+            try:
+                registry_parse(
+                    json.dumps({"blue": {"guid": "7", "drive_id": "x", **extra}}), Path("/k.json")
+                )
+            except RegistryError:
+                continue
+            raise AssertionError(f"accepted {extra}")
+
     def test_write_atomic_leaves_no_temp_files(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "known_drives.json"
@@ -7461,6 +7496,65 @@ P1, P2, P3 = (
     "zark_2026-10-08_10:00:00Z",
     "zark_2026-10-09_10:00:00Z",
 )
+
+
+class TestSharedSnapshots:
+    """M3 decision 5e: what a drive shares with origin besides its anchors."""
+
+    def test_newest_of_each_type_and_the_newest_residue(self) -> None:
+        """Per dataset: the newest shared snapshot of each sanoid type and
+        of the syncoid residues, oldest first; points, anchors, bookmarks,
+        hand-made snapshots and snapshots only one side holds are left out."""
+        snaps = [
+            _ref("syncoid_eli_2026-09-01:10:00:00-GMT02:00", "1", 1),
+            _ref("autosnap_2026-09-02_00:00:00_monthly", "2", 2),
+            _ref("syncoid_eli_2026-09-03:10:00:00-GMT02:00", "3", 3),
+            _ref("autosnap_2026-10-01_00:00:00_daily", "4", 4),
+            _ref("autosnap_2026-10-02_00:00:00_daily", "5", 5),
+            _ref("zark_2026-10-02_12:00:00Z", "6", 6),
+            _ref("zark_111_2026-10-02_12:00:00Z", "7", 7),
+            _ref("manual", "8", 8),
+            _ref("autosnap_2026-10-03_00:00:00_hourly", "9", 9),
+        ]
+        origin = {
+            "rpool/var": repl.Origin("rpool/var", snaps=snaps, bookmarks=[_ref("x", "6", 6)]),
+            "rpool/keystore": repl.Origin("rpool/keystore", kind="volume", snaps=snaps[:2]),
+        }
+        on_drive = [s for s in snaps if s.guid != "9"]  # the hourly never reached it
+        dest = {
+            "rpool/var": repl.Dest("rpool/var", snaps=on_drive),
+            "rpool/keystore": repl.Dest("rpool/keystore", snaps=snaps[:2]),
+        }
+        shared = repl.shared_snapshots(origin, dest)
+        assert list(shared) == ["rpool/var"]
+        assert [r.name for r in shared["rpool/var"]] == [
+            "autosnap_2026-09-02_00:00:00_monthly",
+            "syncoid_eli_2026-09-03:10:00:00-GMT02:00",
+            "autosnap_2026-10-02_00:00:00_daily",
+        ]
+
+    def test_a_dataset_the_drive_lacks_or_holds_only_points_of(self) -> None:
+        """A full send carries only the point: nothing is shared."""
+        origin = {
+            "rpool/var": repl.Origin(
+                "rpool/var", snaps=[_ref("zark_2026-10-02_12:00:00Z", "6", 6)]
+            ),
+            "rpool/zt": repl.Origin(
+                "rpool/zt", snaps=[_ref("autosnap_2026-10-02_00:00:00_daily", "5", 5)]
+            ),
+        }
+        dest = {
+            "rpool/var": repl.Dest("rpool/var", snaps=[_ref("zark_2026-10-02_12:00:00Z", "6", 6)])
+        }
+        assert repl.shared_snapshots(origin, dest) == {"rpool/var": [], "rpool/zt": []}
+
+    def test_kind(self) -> None:
+        """sanoid's types by name suffix, syncoid residues by prefix."""
+        assert repl.shared_kind("autosnap_2026-10-02_00:00:00_frequently") == "frequently"
+        assert repl.shared_kind("autosnap_2026-10-02_00:00:00_yearly") == "yearly"
+        assert repl.shared_kind("syncoid_carmen_2026-09-27:01:00:00-GMT02:00") == "syncoid"
+        assert repl.shared_kind("autosnap_2026-10-02_00:00:00_bogus") == ""
+        assert repl.shared_kind("zark_2026-10-02_12:00:00Z") == ""
 
 
 class TestEngine:  # pylint: disable=too-many-public-methods

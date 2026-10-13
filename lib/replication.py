@@ -52,6 +52,10 @@ POINT_PREFIX = "zark_"
 _STAMP = r"\d{4}-\d\d-\d\d_\d\d:\d\d:\d\dZ"
 POINT_RE = re.compile(rf"^zark_{_STAMP}$")
 ANCHOR_RE = re.compile(rf"^zark_(\d+)_({_STAMP})$")
+# sanoid's snapshot names (sanoid v2.3.0: autosnap_<date>_<time>_<type>).
+SANOID_TYPES = ("frequently", "hourly", "daily", "weekly", "monthly", "yearly")
+SANOID_RE = re.compile(rf"^autosnap_.+_({'|'.join(SANOID_TYPES)})$")
+SYNCOID_PREFIX = "syncoid_"
 ARCHIVE_MARK = ".archived-"
 ORPHAN_PROP = "org.zark:orphan"
 KEYSTORE = "rpool/keystore"
@@ -369,3 +373,34 @@ def archive_name(rel: str, taken: set[str], now: datetime) -> str:
         n += 1
         name = f"{base}-{n}"
     return name
+
+
+def shared_kind(name: str) -> str:
+    """The sanoid type of a snapshot name, "syncoid" for a zark 1.x residue,
+    or "" for anything else (points, anchors, hand-made snapshots)."""
+    m = SANOID_RE.match(name)
+    if m:
+        return m.group(1)
+    return "syncoid" if name.startswith(SYNCOID_PREFIX) else ""
+
+
+def shared_snapshots(origin: dict[str, Origin], dest: dict[str, Dest]) -> dict[str, list[Ref]]:
+    """What the drive shares with origin besides its anchors (M3 decision 5e).
+
+    For every replicated dataset, origin's snapshots the drive also holds
+    (matched by guid): the newest of each sanoid type and the newest
+    ``syncoid_*`` residue, oldest first. If the drive's anchors are lost,
+    these are the bases its next backup could still start from; an empty
+    list means that dataset would be resent in full.
+    """
+    out: dict[str, list[Ref]] = {}
+    for rel in expected(origin):
+        d = dest.get(rel)
+        held = {s.guid for s in d.snaps} if d else set()
+        newest: dict[str, Ref] = {}
+        for s in origin[rel].snaps:  # by createtxg: a later one replaces the earlier
+            kind = shared_kind(s.name)
+            if kind and s.guid in held:
+                newest[kind] = s
+        out[rel] = sorted(newest.values(), key=lambda r: r.createtxg)
+    return out
