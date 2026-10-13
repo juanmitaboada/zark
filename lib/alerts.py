@@ -55,14 +55,23 @@ WantedBy=timers.target
 """
 
 
+def unsafe_char(path: str) -> str:
+    """The first character of ``path`` systemd refuses in an executable path
+    (a quote, a backslash or a control character: ``string_is_safe``,
+    src/basic/string-util.c:1078-1093, and config_parse_exec,
+    src/core/load-fragment.c:989-994, v258), or ""."""
+    return next((c for c in path if c in "\"'\\" or ord(c) < 0x20 or ord(c) == 0x7F), "")
+
+
 def service_unit(zark: str) -> str:
     """The service, running ``zark`` (an absolute path, spaces allowed: a
-    stick mounted under /run/media/<user>/<label>)."""
+    stick mounted under /run/media/<user>/<label>; see :func:`unsafe_char`
+    for what systemd refuses)."""
     # systemd expands % specifiers in both settings; ExecStart also splits
     # on spaces and unquotes C-style (src/core/load-fragment.c, v258:
     # config_parse_exec, config_parse_unit_condition_path).
     path = zark.replace("%", "%%")
-    quoted = '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    quoted = f'"{path}"'
     return f"""\
 [Unit]
 Description=zark: space and backup-age status (MOTD, desktop notifications)
@@ -93,10 +102,18 @@ def _write(path: Path, text: str, mode: int) -> bool:
 
 
 def install(log: Log, root: str = "/", zark: str = "") -> None:
-    """Install the MOTD script and the timer, and enable the timer."""
+    """Install the MOTD script and the timer, and enable the timer. A zark
+    path systemd would refuse in ExecStart installs nothing (M3F-9 9a)."""
+    zark = zark or zark_path()
+    if bad := unsafe_char(zark):
+        log.warn(
+            f"zark's path contains {bad!r}, which systemd refuses in ExecStart: {zark}; "
+            + "the space and backup-age alerts were not installed"
+        )
+        return
     base = Path(root)
     changed = _write(base / MOTD_SCRIPT_PATH, MOTD_SCRIPT, 0o755)
-    changed = _write(base / SERVICE_PATH, service_unit(zark or zark_path()), 0o644) or changed
+    changed = _write(base / SERVICE_PATH, service_unit(zark), 0o644) or changed
     changed = _write(base / TIMER_PATH, TIMER_UNIT, 0o644) or changed
     if changed:
         _ = sh.run("systemctl daemon-reload", log=log)
@@ -107,7 +124,9 @@ def install(log: Log, root: str = "/", zark: str = "") -> None:
 
 
 def remove(log: Log, root: str = "/") -> None:
-    """Disable the timer and remove what :func:`install` wrote."""
+    """Disable the timer and remove what :func:`install` wrote, and what the
+    timer wrote under /run/zark (the directory stays: other markers live
+    there, and it is tmpfs; M3F-7 7a)."""
     base = Path(root)
     _ = sh.run(f"systemctl disable --now {TIMER}", log=log)
     removed = 0
@@ -116,6 +135,7 @@ def remove(log: Log, root: str = "/") -> None:
         if p.exists():
             p.unlink()
             removed += 1
-    status.MOTD_FILE.unlink(missing_ok=True)
+    for written in (status.MOTD_FILE, status.NOTIFIED_FILE):
+        written.unlink(missing_ok=True)
     _ = sh.run("systemctl daemon-reload", log=log)
     log.ok(f"Space and backup-age alerts removed ({removed} file(s))")

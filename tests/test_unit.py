@@ -11026,9 +11026,47 @@ class TestAlerts:
     def test_a_path_with_spaces_and_percent(self) -> None:
         """zark run from a stick mounted under its label: ExecStart quotes the
         path, both settings escape systemd's % specifiers."""
-        unit = alerts_mod.service_unit('/run/media/u/Juanmi Taboada/50%/a"b/zark')
-        assert 'ExecStart="/run/media/u/Juanmi Taboada/50%%/a\\"b/zark" status' in unit
-        assert 'ConditionPathExists=/run/media/u/Juanmi Taboada/50%%/a"b/zark\n' in unit
+        unit = alerts_mod.service_unit("/run/media/u/Juanmi Taboada/50%/zark")
+        assert 'ExecStart="/run/media/u/Juanmi Taboada/50%%/zark" status' in unit
+        assert "ConditionPathExists=/run/media/u/Juanmi Taboada/50%%/zark\n" in unit
+
+    def test_a_path_systemd_refuses_installs_nothing(self) -> None:
+        """M3R-14 (M3F-9 9a): a quote, a backslash or a control character in
+        the path makes systemd refuse the unit, so install warns and writes
+        nothing instead of a unit that never loads."""
+        for path in ('/run/media/u/a"b/zark', "/run/media/u/it's/zark", "/x\\y/zark", "/x\ty/zark"):
+            mock = MockShell()
+            mock.on_prefix("systemctl").succeeds("")
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as root, patch_sh(mock), redirect_stdout(out):
+                alerts_mod.install(make_log(), root, path)
+                assert not Path(root, alerts_mod.SERVICE_PATH).exists()
+                assert not Path(root, alerts_mod.TIMER_PATH).exists()
+            assert "systemd refuses in ExecStart" in out.getvalue(), path
+            assert not mock.calls
+        assert alerts_mod.unsafe_char("/run/media/u/Juanmi Taboada/50%/zark") == ""
+
+    def test_remove_takes_the_files_the_timer_wrote(self) -> None:
+        """M3R-10 (M3F-7 7a): the MOTD file and the notified marker go; the
+        directory stays."""
+        mock = MockShell()
+        mock.on_prefix("systemctl").succeeds("")
+        with tempfile.TemporaryDirectory() as root, patch_sh(mock), redirect_stdout(StringIO()):
+            run_dir = Path(root, "run/zark")
+            run_dir.mkdir(parents=True)
+            motd, notified, other = (
+                run_dir / n for n in ("status.motd", "notified", "sanoid-paused")
+            )
+            for f in (motd, notified, other):
+                f.write_text("x", encoding="utf-8")
+            with (
+                patch.object(status_lib, "MOTD_FILE", motd),
+                patch.object(status_lib, "NOTIFIED_FILE", notified),
+            ):
+                alerts_mod.install(make_log(), root, "/opt/zark/zark")
+                alerts_mod.remove(make_log(), root)
+            assert not motd.exists() and not notified.exists()
+            assert other.exists() and run_dir.is_dir()
 
     def test_the_debian_package_removes_them(self) -> None:
         """prerm runs `zark alerts remove` on remove, not on upgrade."""
