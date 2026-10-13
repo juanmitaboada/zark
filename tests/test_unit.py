@@ -7872,6 +7872,27 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert not plans["rpool/ROOT/be2"].clone_from
         assert eng._send_args(plans["rpool/ROOT/be2"]) == [f"-w rpool/ROOT/be2@{P2}"]  # pylint: disable=protected-access
 
+    def test_fake_refuses_a_resume_onto_a_written_destination(self) -> None:
+        """eli R10 (M2V-1): ZFS receives a resumed stream onto a head written
+        since its newest snapshot, refuses it at the end and keeps the
+        state; the fake does the same, with libzfs's two-line text."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        home = fake.ds["backup/rpool/USERDATA/home"]
+        token = home.token
+        home.written = 12 << 20  # what a read-write mount leaves
+        with patch_sh(fake):
+            r = _sh.run_pipe(f"zfs send -t {token}", "zfs receive -s -u backup/rpool/USERDATA/home")
+        assert (
+            not r.ok
+            and "has been modified" in r.stderr
+            and "since most recent snapshot" in r.stderr
+        )
+        assert home.token == token
+
     def test_stale_token_is_discarded_not_snapshots(self) -> None:
         """M2R-10: a partial receive whose stream snapshot is gone from
         origin is aborted (receive -A); the dataset is planned again and no

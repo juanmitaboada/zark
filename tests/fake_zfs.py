@@ -29,7 +29,9 @@ rather than command strings. It keeps the kernel rules the engine relies on
   * a raw incremental from a bookmark needs the IV-set GUID, stored only
     when ``feature@bookmark_v2`` was enabled at bookmark creation;
   * partial receive state (``-s``) blocks a new stream until resumed
-    (``send -t``) or aborted (``receive -A``).
+    (``send -t``) or aborted (``receive -A``); a resume onto a destination
+    written since its newest snapshot is refused at its end and the state
+    kept (eli R10, M2V-1).
 
 Failures can be injected per destination dataset: ``interrupt`` (after N
 snapshots, leaving a resume token) or ``enospc``.
@@ -535,7 +537,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return raw, "i", args[j + 1], args[j + 2], ""
         return raw, "full", "", args[-1], ""
 
-    def _pipe(self, send: list[str], recv: list[str]) -> RunResult:  # noqa: C901 # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
+    def _pipe(self, send: list[str], recv: list[str]) -> RunResult:  # noqa: C901 # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals,too-many-statements
         if "-F" in recv:
             raise AssertionError("the engine must never receive with -F")
         dst = recv[-1]
@@ -547,6 +549,14 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             err = self._resume_check(token)
             if err:
                 return _err(err)
+            if d.written:
+                # The resumed stream is received in full, then refused at its
+                # end and the state kept (module/zfs/dmu_recv.c:3632,
+                # dsl_dataset.c:4101-4104; dmu_recv.c:2762-2765).
+                return _err(
+                    f"cannot receive resume stream: destination {dst} has been modified\n"
+                    "since most recent snapshot"
+                )
             src_ds, snapname, _frm = token.split("|")[1:]
             src = next(s for s in self.ds[src_ds].snaps if s.name == snapname)
             d.snaps.append(FSnap(src.name, src.guid, self._dtxg(), src.creation))
