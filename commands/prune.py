@@ -152,9 +152,12 @@ def _residues(inv: Inventory, log: Log) -> None:
 def _points(inv: Inventory, log: Log) -> None:
     for i in inv.points:
         log.info(f"  {i.target}")
+    # An interrupted run anchors nothing, so a drive that completed some
+    # datasets shares only this point with origin on them (eli R8.7, 8a).
     log.warn(
-        "A drive whose interrupted transfer started from one of these discards "
-        + "it at its next backup and sends it again"
+        "A drive that received part of one of these rolls those datasets back at its next "
+        + "backup (it asks first; only snapshots of that incomplete point go), and a drive "
+        + "whose transfer was interrupted discards it and sends it again"
     )
     if _typed(log, f"remove {len(inv.points)} backup point(s)"):
         _remove(inv.points, "backup point left by an interrupted run", log)

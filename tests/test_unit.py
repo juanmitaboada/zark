@@ -10126,6 +10126,41 @@ class TestPruneCommand:
         assert before == {ds: fake.names(ds) for ds in fake.ds}
         assert "Not confirmed (PRUNE was not typed) — nothing removed" in out
 
+    def test_interrupted_points_warn_of_both_effects(self) -> None:
+        """M3 decision 8a (eli R8.7): removing an interrupted run's point
+        costs a rollback on a drive that received part of it, and a resend
+        on one whose transfer it started; the warning names both."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        assert _origin_points(fake)
+
+        picked: list[str] = []
+
+        def pick(_q: str, options: list[str], _d: int = 0) -> int:
+            wanted = "remove backup points left by interrupted runs"
+            if wanted in options and not picked:
+                picked.append(wanted)
+                return options.index(wanted)
+            return 0
+
+        out = self._origin(
+            fake,
+            make_config(),
+            patch.object(Log, "ask_choice", side_effect=pick),
+            patch.object(Log, "ask_text", return_value="prune"),
+            patch("builtins.input", side_effect=EOFError),
+        )
+        text = " ".join(out.split())
+        assert (
+            "A drive that received part of one of these rolls those datasets back at its next "
+            + "backup (it asks first; only snapshots of that incomplete point go), and a drive "
+            + "whose transfer was interrupted discards it and sends it again"
+        ) in text
+        assert _origin_points(fake)
+
     def test_residues_need_a_yes_and_follow_the_rule(self) -> None:
         """11a: removed after a yes; one a registered drive may need stays."""
         fake = _fresh_fake()
