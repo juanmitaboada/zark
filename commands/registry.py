@@ -18,7 +18,7 @@ zark registry — inspect and repair known_drives.json without hand edits.
                                 and whether the pool GUID on that disk matches;
                                 on the installed system also the drives that
                                 hold anchors in origin without an entry, and
-                                the backup points left by interrupted runs
+                                the backup points left in origin
   zark registry forget <name>   remove an entry (e.g. a lost or retired disk)
                                 and that disk's anchors in origin (rpool
                                 bookmarks, bpool snapshots)
@@ -130,7 +130,7 @@ def _retention(cfg: Config, log: Log, name: str, settings: list[str]) -> None:
 
 
 def _list_origin(cfg: Config, log: Log) -> None:
-    """Anchors of drives without an entry, and points left by interrupted runs."""
+    """Anchors of drives without an entry, and backup points left in origin."""
     pools = engine.source_pools()
     if "rpool" not in pools:
         log.info("rpool is not imported here: anchors in origin not checked")
@@ -143,7 +143,10 @@ def _list_origin(cfg: Config, log: Log) -> None:
         log.raw(f"      drop them: sudo zark registry forget {guid}")
     left = engine.leftover_points(origin)
     if left:
-        log.info(f"  {len(left)} backup point(s) left in origin by interrupted runs")
+        log.info(
+            f"  {len(left)} backup point(s) left in origin (interrupted runs, or a run whose "
+            + "anchor failed)"
+        )
 
 
 def _forget(cfg: Config, log: Log, name: str) -> None:
@@ -217,7 +220,10 @@ def _leftover_points(cfg: Config, pools: list[str], log: Log) -> None:
     left = engine.leftover_points(engine.read_origin(pools))
     if not left:
         return
-    log.info(f"{len(left)} backup point(s) left in origin by interrupted runs:")
+    log.info(
+        f"{len(left)} backup point(s) left in origin (interrupted runs, or a run whose anchor "
+        + "failed):"
+    )
     for name in left:
         log.raw(f"      {name}")
     if cfg.known_drives:

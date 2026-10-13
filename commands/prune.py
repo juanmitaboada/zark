@@ -23,9 +23,11 @@ holds and what removing it frees, then
     changed, so sanoid keeps taking and pruning by its own policy;
   * legacy residues: syncoid_* snapshots no registered drive can depend on
     and the keystore's prepare_* snapshots (yes/no);
-  * backup points left by interrupted runs (typed PRUNE);
+  * backup points left in origin by an interrupted run, or by a complete
+    run whose anchor failed (typed PRUNE);
   * a drive's bpool anchors (typed PRUNE); that drive's next backup then
-    finds nothing in common on those datasets and asks how to resend them.
+    asks to roll those datasets back to a shared sanoid snapshot (its newest
+    backup point goes on them) or to archive them and resend them in full.
 There is no floor imposed by the backups: rpool's anchors are bookmarks.
 
 A drive (imported under I-G, no passphrase needed): what its retention
@@ -109,7 +111,7 @@ def _summary(inv: Inventory, drives: dict[str, str], log: Log) -> None:
     line("legacy residues (removable)", inv.residues)
     if inv.residues_kept:
         log.info(f"  {'legacy residues a drive may need':34} {len(inv.residues_kept):5}")
-    line("points left by interrupted runs", inv.points)
+    line("backup points left in origin", inv.points)
     for guid, items in sorted(inv.anchors.items()):
         line(f"bpool anchors of {drives.get(guid, guid)}", items)
 
@@ -154,14 +156,17 @@ def _points(inv: Inventory, log: Log) -> None:
     for i in inv.points:
         log.info(f"  {i.target}")
     # An interrupted run anchors nothing, so a drive that completed some
-    # datasets shares only this point with origin on them (eli R8.7, 8a).
+    # datasets shares only this point with origin on them (eli R8.7, 8a); a
+    # complete run whose anchor failed kept its point as that base too (M3R-5).
     log.warn(
         "A drive that received part of one of these rolls those datasets back at its next "
-        + "backup (it asks first; only snapshots of that incomplete point go), and a drive "
-        + "whose transfer was interrupted discards it and sends it again"
+        + "backup (it asks first; only snapshots of that incomplete point go), a drive "
+        + "whose transfer was interrupted discards it and sends it again, and a drive whose "
+        + "backup completed but could not be anchored on a dataset rolls that dataset back "
+        + "too (its newest backup point goes on it)"
     )
     if _typed(log, f"remove {len(inv.points)} backup point(s)"):
-        _remove(inv.points, "backup point left by an interrupted run", log)
+        _remove(inv.points, "backup point left in origin", log)
 
 
 def _anchors(inv: Inventory, drives: dict[str, str], log: Log) -> None:
@@ -176,10 +181,13 @@ def _anchors(inv: Inventory, drives: dict[str, str], log: Log) -> None:
     items = inv.anchors[guid]
     name = drives.get(guid, guid)
     freed = engine.reclaim_names([i.target for i in items])
+    # The drive's newest snapshot on bpool is its backup point, so the only
+    # common snapshots left are sanoid's: a rollback, never incremental (M3R-1).
     log.warn(
-        f"Without them, {name}'s next backup finds nothing in common on these bpool "
-        + "datasets and asks how to resend them (archive or destroy them on the drive, "
-        + f"then a full send of a few hundred MB). Frees {_gib(freed)}."
+        f"Without them, {name}'s next backup finds only sanoid's snapshots in common on "
+        + "these bpool datasets, or nothing: it asks to roll them back (the drive's newest "
+        + "backup point goes on them) or to archive them and resend in full (a few hundred "
+        + f"MB). Frees {_gib(freed)}."
     )
     if _typed(log, f"remove {name}'s {len(items)} bpool anchor(s)"):
         _remove(items, f"bpool anchor of drive {name}", log)
@@ -204,7 +212,10 @@ def _prune_origin(cfg: Config, log: Log) -> None:
         if inv.residues:
             actions.append(("remove the legacy residues", partial(_residues, inv, log)))
         if inv.points:
-            label = "remove backup points left by interrupted runs"
+            label = (
+                "remove backup points left in origin (interrupted runs, or a run whose anchor "
+                + "failed)"
+            )
             actions.append((label, partial(_points, inv, log)))
         if inv.anchors:
             actions.append(("remove a drive's bpool anchors", partial(_anchors, inv, drives, log)))

@@ -3556,7 +3556,8 @@ class TestNoAnchorLine:
         day = datetime.fromtimestamp(self.T + 24 * 3600, UTC).strftime("%Y-%m-%d")
         assert line == (
             f"blue: no anchor in origin; it still shares snapshots with it until about {day} "
-            + "(rpool/b@autosnap_2026-09-21_10:00:00_hourly)"
+            + "(rpool/b@autosnap_2026-09-21_10:00:00_hourly): its next backup asks to roll the "
+            + "drive back to them (its backup points after them go) or to resend in full"
         )
         origin["rpool/a"].snaps.append(_ref("autosnap_2026-09-01_00:00:00_monthly", "12", 4))
         origin["rpool/b"].snaps.append(_ref("autosnap_2026-09-01_00:00:00_monthly", "22", 4))
@@ -3606,13 +3607,17 @@ class TestNoAnchorLine:
         }
         origin = self._origin(rpool_a=[_ref("syncoid_eli_2026-09-27:01:00:00-GMT02:00", "31", 3)])
         line = shared_snapshot_line(self._info(record), None, origin=origin, lives=self.LIVES)
-        assert line.endswith("until they are removed with zark prune")
+        assert "until they are removed with zark prune: its next backup asks to roll" in line
         origin = self._origin(
             rpool_a=[_ref("autosnap_2026-09-21_00:00:00_daily", "11", 5)],
             rpool_b=[_ref("autosnap_2026-09-21_10:00:00_hourly", "21", 6)],
         )
         line = shared_snapshot_line(self._info(self._record()), None, origin=origin, lives=None)
-        assert line == "blue: no anchor in origin; it still shares snapshots with it"
+        assert line == (
+            "blue: no anchor in origin; it still shares snapshots with it: its next backup asks "
+            + "to roll the drive back to them (its backup points after them go) or to resend in "
+            + "full"
+        )
 
     def test_without_a_record_the_horizon_is_a_condition(self) -> None:
         """An entry no complete backup has written since 5e: H21's horizon,
@@ -3622,9 +3627,13 @@ class TestNoAnchorLine:
         line = shared_snapshot_line(info, 62, origin={}, lives=self.LIVES)
         assert line == (
             "blue: no anchor in origin: if it still shares snapshots with the source, its next "
-            + "backup stays incremental for at least 52 more day(s) (62 days after its last "
-            + "backup); otherwise it resends in full"
+            + "backup continues from the newest of them, asking first to roll the drive back "
+            + "where its own newest snapshot is not shared (its backup points after it go), for "
+            + "at least 52 more day(s) (62 days after its last backup); otherwise it resends in "
+            + "full"
         )
+        line = shared_snapshot_line(info, None, origin={}, lives=self.LIVES)
+        assert "stays incremental" not in line and "asking first to roll the drive back" in line
 
     def test_lives_from_the_templates_in_use(self) -> None:
         """n * period per type, the smallest n >= 1 over the templates in use;
@@ -10533,7 +10542,10 @@ class TestPruneCommand:
         picked: list[str] = []
 
         def pick(_q: str, options: list[str], _d: int = 0) -> int:
-            wanted = "remove backup points left by interrupted runs"
+            wanted = (
+                "remove backup points left in origin (interrupted runs, or a run whose anchor "
+                + "failed)"
+            )
             if wanted in options and not picked:
                 picked.append(wanted)
                 return options.index(wanted)
@@ -10549,8 +10561,10 @@ class TestPruneCommand:
         text = " ".join(out.split())
         assert (
             "A drive that received part of one of these rolls those datasets back at its next "
-            + "backup (it asks first; only snapshots of that incomplete point go), and a drive "
-            + "whose transfer was interrupted discards it and sends it again"
+            + "backup (it asks first; only snapshots of that incomplete point go), a drive "
+            + "whose transfer was interrupted discards it and sends it again, and a drive whose "
+            + "backup completed but could not be anchored on a dataset rolls that dataset back "
+            + "too (its newest backup point goes on it)"
         ) in text
         assert _origin_points(fake)
 
@@ -10579,7 +10593,7 @@ class TestPruneCommand:
         cfg = make_config()
         cfg.known_drives["blue"] = DriveInfo("blue", "111", "d")
         out = self._origin(fake, cfg, *self._answers([1, 1, 0], [], "PRUNE", False))
-        assert "asks how to resend them" in out
+        assert "asks to roll them back (the drive's newest backup point goes on them)" in out
         assert not [n for n in fake.names("bpool/BOOT/be") if repl.anchor_disk(n)]
         with patch_sh(fake), redirect_stdout(StringIO()):
             eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
@@ -10918,7 +10932,7 @@ class TestStatus:
         day = datetime.fromtimestamp(home.creation + 7 * 86400, UTC).strftime("%Y-%m-%d")
         assert st.shared == [
             f"blue: no anchor in origin; it still shares snapshots with it until about {day} "
-            + f"(rpool/USERDATA/home@{home.name})"
+            + f"(rpool/USERDATA/home@{home.name}){drives_lib.ROLLBACK_NOTE}"
         ]
         fake.ds["rpool/USERDATA/home"].snaps.remove(home)
         with patch_sh(fake), patch.object(drives_lib, "guaranteed_lives", return_value=lives):

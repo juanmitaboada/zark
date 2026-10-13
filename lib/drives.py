@@ -386,7 +386,15 @@ def validate_external_block_device(
 # backup (its RPO). A drive with no anchor in origin depends on the snapshots
 # it shares with the source: shared_snapshot_line checks the ones recorded
 # at its last complete backup (M3 decision 5e), or falls back to the horizon
-# of lib.sanoid_retention.guaranteed_overlap_days (hallazgo 21).
+# of lib.sanoid_retention.guaranteed_overlap_days (hallazgo 21). What the
+# next backup does with a shared snapshot depends on the drive's newest one
+# (lib.replication): the base of an incremental is the drive's newest
+# snapshot, and on a zark 2 drive that is the backup point, which origin
+# keeps only as an anchor. So a zark 2 drive without anchors never stays
+# incremental: its next backup asks to roll each dataset back to the newest
+# shared snapshot (the drive's backup points after it go) or to resend it in
+# full (M3R-1). Only a drive written by zark 1.x, whose newest snapshot is a
+# syncoid_* residue origin still holds, continues incrementally.
 
 
 def drive_staleness_days(info: DriveInfo, *, now: datetime | None = None) -> int | None:
@@ -450,17 +458,23 @@ def shared_snapshot_line(
     age = drive_staleness_days(info, now=now)
     if age is None:
         return f"{head}; no backup recorded"
+    # Without a record the drive may be a 1.x one (incremental) or a 2.x one
+    # (rollback), so the line covers both (M3F-4 4a).
+    continues = (
+        "its next backup continues from the newest of them, asking first to roll the drive "
+        + "back where its own newest snapshot is not shared (its backup points after it go)"
+    )
     if horizon_days is None:
         return (
-            f"{head}: if it still shares snapshots with the source, its next backup stays "
-            + "incremental; otherwise it resends in full"
+            f"{head}: if it still shares snapshots with the source, {continues}; "
+            + "otherwise it resends in full"
         )
     left = horizon_days - age
     if left > 0:
         return (
-            f"{head}: if it still shares snapshots with the source, its next backup stays "
-            + f"incremental for at least {left} more day(s) ({horizon_days} days after its "
-            + "last backup); otherwise it resends in full"
+            f"{head}: if it still shares snapshots with the source, {continues}, for at "
+            + f"least {left} more day(s) ({horizon_days} days after its last backup); "
+            + "otherwise it resends in full"
         )
     return (
         f"{head}, {age} days since its last backup: past the {horizon_days}-day horizon, "
@@ -477,6 +491,14 @@ def no_anchor_lines(drives: list[DriveInfo], origin: dict[str, Origin], log: Log
     legacy = any(not isinstance(i.extra.get(SHARED_KEY), dict) for i in drives)
     horizon = guaranteed_overlap_days(log) if legacy else None
     return [shared_snapshot_line(i, horizon, origin=origin, lives=lives) for i in drives]
+
+
+# A record exists only after a zark 2 backup, whose point is the drive's
+# newest snapshot: continuing from a shared snapshot costs a rollback (M3R-1).
+ROLLBACK_NOTE = (
+    ": its next backup asks to roll the drive back to them (its backup points after them go) "
+    + "or to resend in full"
+)
 
 
 def _from_record(
@@ -506,12 +528,15 @@ def _from_record(
     if not best:
         return f"{head}; nothing it holds is still in origin"
     if any(math.isnan(b[0]) for b in best):
-        return f"{head}; it still shares snapshots with it"
+        return f"{head}; it still shares snapshots with it{ROLLBACK_NOTE}"
     until, name = min(best)
     if math.isinf(until):
-        return f"{head}; it still shares snapshots with it until they are removed with zark prune"
+        return (
+            f"{head}; it still shares snapshots with it until they are removed with zark prune"
+            + ROLLBACK_NOTE
+        )
     day = datetime.fromtimestamp(until, UTC).strftime("%Y-%m-%d")
-    return f"{head}; it still shares snapshots with it until about {day} ({name})"
+    return f"{head}; it still shares snapshots with it until about {day} ({name}){ROLLBACK_NOTE}"
 
 
 def _dataset_end(

@@ -13,16 +13,20 @@
 # limitations under the License.
 """
 Read sanoid's retention configuration to compute how long a backup drive
-anchored only on shared snapshots stays incremental after its last backup
-(hallazgo 21).
+anchored only on shared snapshots can still continue from them after its
+last backup (hallazgo 21).
 
 It applies to drives with no anchor in origin: a drive written by zark 1.x
 before its first zark 2 backup, or one whose anchors were lost. Beyond the
 horizon some dataset has no snapshot left in common with the drive, and
-its next backup needs a full resend of it. Bookmark-anchored drives have
-no horizon. Since M3 decision 5e the registry records what a drive shares
-at each complete backup, and ``guaranteed_lives`` dates those snapshots;
-the horizon remains for entries without that record.
+its next backup needs a full resend of it. Within it the next backup
+continues from the newest shared snapshot: incrementally on a 1.x drive,
+whose newest snapshot is a syncoid_* residue origin still holds; after a
+rollback on a zark 2 drive, whose newest snapshot is its backup point
+(M3R-1). Bookmark-anchored drives have no horizon. Since M3 decision 5e the
+registry records what a drive shares at each complete backup, and
+``guaranteed_lives`` dates those snapshots; the horizon remains for entries
+without that record.
 
 Why parse sanoid.conf at runtime instead of a hardcoded constant: the
 operator can edit ``/etc/sanoid/sanoid.conf`` freely and the retention
@@ -126,7 +130,7 @@ def guaranteed_overlap_days(
     conf_path: Path = SANOID_CONF_PATH,
 ) -> int | None:
     """Whole days a drive anchored only on shared snapshots is guaranteed
-    to stay incremental after its last backup: the smallest horizon over
+    to keep some of them after its last backup: the smallest horizon over
     the templates used by ``rpool*`` or ``bpool*`` sections.
 
     Returns ``None`` and emits a visible WARN if the config file does not

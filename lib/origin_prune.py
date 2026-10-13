@@ -26,7 +26,9 @@ Kinds:
     without may still have it as its newest common snapshot, redesign §7)
     or on a structural container, which zark 2 does not replicate; and
     ``rpool/keystore@prepare_*``, which nothing uses as a base;
-  * backup points left by interrupted runs (``zark_<UTC>``);
+  * backup points left in origin (``zark_<UTC>``): by an interrupted run,
+    or by a complete run whose anchor could not be created, which kept its
+    point as that drive's base on the dataset (M3R-5);
   * bpool's per-drive anchor snapshots (``zark_<GUID>_<UTC>``).
 """
 
@@ -56,7 +58,7 @@ class Inventory:
     autosnaps: dict[str, list[Item]] = field(default_factory=dict)  # type → items
     residues: list[Item] = field(default_factory=list)  # removable legacy residues
     residues_kept: list[Item] = field(default_factory=list)  # a drive may depend on them
-    points: list[Item] = field(default_factory=list)  # left by interrupted runs
+    points: list[Item] = field(default_factory=list)  # left in origin (see the module docstring)
     anchors: dict[str, list[Item]] = field(default_factory=dict)  # drive GUID → bpool anchors
 
 
@@ -71,7 +73,8 @@ def inventory(origin: dict[str, Origin], drives: dict[str, str]) -> Inventory:
             if m := AUTOSNAP_TYPE.match(s.name):
                 inv.autosnaps.setdefault(m.group(1), []).append(Item(target, s.creation))
             elif POINT_RE.match(s.name):
-                inv.points.append(Item(target, s.creation, "left by an interrupted run"))
+                why = "left in origin by an interrupted run, or by a run whose anchor failed"
+                inv.points.append(Item(target, s.creation, why))
             elif guid := anchor_disk(s.name):
                 if is_bpool(rel):
                     inv.anchors.setdefault(guid, []).append(Item(target, s.creation))
