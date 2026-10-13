@@ -20,8 +20,9 @@ What `zark status` reports, the MOTD shows and the timer notifies
     level);
   * RPO, in the MOTD only: days since every registered drive's last
     backup, highlighted when the newest backup of all is older than 7 days;
-  * for a drive with no anchor in origin, how long it stays incremental
-    (hallazgo 21);
+  * for a drive with no anchor in origin, what it still shares with the
+    source and what its next backup does (M3 decision 5e, hallazgo 21), or
+    one line saying the source pools could not be read;
   * legacy residues in origin that `zark prune` can remove.
 
 The timer writes the MOTD text to :data:`MOTD_FILE`; the MOTD script only
@@ -65,6 +66,7 @@ class Status:
     ages: dict[str, int | None] = field(default_factory=dict)  # drive → days since its backup
     shared: list[str] = field(default_factory=list)  # hallazgo 21 lines
     residues: int = 0
+    read_error: str = ""  # origin could not be read: nothing is said about anchors (M3R-2)
 
 
 def gather(cfg: Config, log: Log) -> Status:
@@ -78,7 +80,13 @@ def gather(cfg: Config, log: Log) -> Status:
     st.ages = {name: drive_staleness_days(info) for name, info in sorted(cfg.known_drives.items())}
     if "rpool" not in pools:
         return st
-    origin = engine.read_origin(pools)
+    try:
+        origin = engine.read_origin(pools, strict=True)
+    except engine.ReadError as e:
+        # A failed listing is not an empty origin: every drive would read as
+        # unanchored and the MOTD would promise full resends (M3R-2).
+        st.read_error = f"could not read the source pools: {e}"
+        return st
     anchored = engine.anchored_disks(origin)
     unanchored = [info for info in cfg.known_drives.values() if info.guid not in anchored]
     st.shared = no_anchor_lines(unanchored, origin, log)
@@ -121,6 +129,8 @@ def motd_text(st: Status) -> str:
     if rpo:
         lines.append(f"{yellow}zark:{plain} {rpo}" if stale else f"zark: {rpo}")
     lines += [f"{yellow}zark:{plain} {line}" for line in st.shared]
+    if st.read_error:
+        lines.append(f"{yellow}zark:{plain} {st.read_error}")
     if st.residues:
         lines.append(
             f"zark: {st.residues} legacy snapshot(s) in origin no drive needs: sudo zark prune"

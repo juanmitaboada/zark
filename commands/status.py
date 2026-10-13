@@ -46,6 +46,8 @@ def _report(st: status.Status, log: Log) -> None:
         log.info("No backup drive registered")
     for line in st.shared:
         log.warn(line)
+    if st.read_error:
+        log.warn(st.read_error)
     if st.residues:
         log.info(f"{st.residues} legacy snapshot(s) in origin no drive needs: sudo zark prune")
 

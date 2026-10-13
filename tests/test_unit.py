@@ -9432,6 +9432,44 @@ class TestBackupCommand:
         assert "1 legacy snapshot(s) in origin no registered drive needs" in out.getvalue()
         assert fake.names("rpool/keystore") == ["prepare_20260927_082338"]
 
+    def test_a_failed_read_of_origin_after_the_transfer_says_so(self) -> None:
+        """M3R-2: the final report does not call every other drive unanchored
+        when origin cannot be listed; one line says so, the backup stays
+        COMPLETED."""
+        fake = _fresh_fake()
+        fake.snap("rpool/keystore", "prepare_20260927_082338")
+
+        def retention(_pool: str, _policy: ret.Policy, _log: Log) -> tuple[int, int]:
+            fake.fail_cmds.add("zfs list -Hp -t snapshot,bookmark")  # from here on
+            return 0, 0
+
+        out = StringIO()
+        _cfg, rc = self._run(
+            fake,
+            patch.object(backup_mod, "_apply_retention", side_effect=retention),
+            patch.object(engine.Run, "shared_with_origin", return_value=None),
+            patch.object(
+                backup_mod.Config,
+                "load",
+                return_value=self._cfg_with_another_drive(),
+            ),
+            redirect_stdout(out),
+        )
+        text = out.getvalue()
+        assert rc == 0 and "BACKUP COMPLETED" in text, text
+        assert "Could not read the source pools" in text
+        assert "no anchor" not in text and "legacy snapshot(s)" not in text
+        assert "blue: " in text and "day(s) since its last backup" in text
+
+    @staticmethod
+    def _cfg_with_another_drive() -> Config:
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "usb-X-0:0", autoeject=False)
+        cfg.known_drives["blue"] = DriveInfo(
+            "blue", "222", "d", last_backup_at="2026-10-01T10:00:00Z"
+        )
+        return cfg
+
     def test_apply_retention_on_the_drive(self) -> None:
         """What goes after a complete run is the policy's, logged one by one."""
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
@@ -10773,6 +10811,30 @@ class TestStatus:
         assert "bpool" not in text
         assert "zark: last backups: black 3 day(s) ago, blue 34 day(s) ago" in text
         assert "blue: no anchor in origin" in text and "23 legacy snapshot(s)" in text
+
+    def test_a_failed_read_of_origin_says_so(self) -> None:
+        """M3R-2 (E3): with the snapshot listing failing, no drive is called
+        unanchored; one line says the source pools could not be read."""
+        fake = _fresh_fake()
+        _tick(fake, "2026-10-06_12:00:00_hourly")
+        assert _engine_run(fake, "backup", "111", P1).ok
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo(
+            "backup", "111", "d", last_backup_at="2026-10-08T10:00:00Z"
+        )
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            good = status_lib.gather(cfg, Log())
+            fake.fail_cmds.add("zfs list -Hp -t snapshot,bookmark")
+            bad = status_lib.gather(cfg, Log())
+        assert good.shared == [] and not good.read_error
+        assert bad.shared == [] and bad.read_error.startswith("could not read the source pools")
+        assert bad.ages == good.ages and bad.residues == 0
+        text = status_lib.motd_text(bad)
+        assert "could not read the source pools" in text and "no anchor" not in text
+        out = StringIO()
+        with redirect_stdout(out):
+            status_mod._report(bad, Log())  # pylint: disable=protected-access
+        assert "could not read the source pools" in out.getvalue()
         stale = status_lib.motd_text(status_lib.Status(ages={"black": 9}))
         assert "\033[1;33mzark:\033[0m last backups: black 9 day(s) ago" in stale
         assert not status_lib.motd_text(status_lib.Status())

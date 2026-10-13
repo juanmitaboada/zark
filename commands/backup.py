@@ -951,8 +951,17 @@ def run(
             *[f"{log.Y}  {p.rel} ({p.note}){log.N}" for p in not_backed_up],
         ],
     )
-    origin = engine.read_origin(engine.source_pools())
-    anchored = engine.anchored_disks(origin)
+    origin: dict[str, Origin] = {}
+    try:
+        origin = engine.read_origin(engine.source_pools(), strict=True)
+        anchored: set[str] | None = engine.anchored_disks(origin)
+    except engine.ReadError as e:
+        # Not an empty origin: the report would call every other drive
+        # unanchored and promise full resends (M3R-2). Ages only.
+        log.warn(
+            f"Could not read the source pools: {e}; what the other drives share was not checked"
+        )
+        anchored = None
     _report_rpo(cfg, pool_name, log, anchored, origin)
     status.refresh_quietly(cfg)
     residues = inventory(origin, {i.guid: n for n, i in cfg.known_drives.items()}).residues
