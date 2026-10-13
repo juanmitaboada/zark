@@ -10122,6 +10122,43 @@ class TestRetentionOnDrive:
         assert len(dry) == len({r.rel for r in prune.snapshots})
         assert not any("%" in c for c in dry)
 
+    def test_a_subtree_destroy_names_every_dataset_it_takes(self) -> None:
+        """M3R-11: a dataset below the top with no snapshot, and one with a
+        partial receive, are logged before the -r; with the listing failing
+        the subtree stays and is reported."""
+        fake = self._drive_with_history()
+        arch = "backup/rpool/var.archived-20260801"
+        fake.dataset(arch)
+        fake.snap(arch, "zark_2026-08-01_10:00:00Z").creation = _days_ago(200)
+        fake.dataset(f"{arch}/empty")
+        fake.dataset(f"{arch}/partial")
+        fake.ds[f"{arch}/partial"].token = "1-abc"
+        prune = self._plan(fake, ret.Policy(max_age_days=100))
+        assert [t for t, _ in prune.datasets] == ["rpool/var.archived-20260801"]
+        with tempfile.TemporaryDirectory() as td:
+            logf = os.path.join(td, "zark.log")
+            with patch_sh(fake), redirect_stdout(StringIO()):
+                count, failed = engine.apply_prune("backup", prune, Log(logf))
+            logged = Path(logf).read_text(encoding="utf-8")
+        assert not failed and count == len(prune.snapshots)
+        assert f"{arch}@zark_2026-08-01_10:00:00Z goes with {arch}" in logged
+        assert f"{arch}/empty (no snapshot) goes with {arch}" in logged
+        assert f"{arch}/partial and its partial receive go with {arch}" in logged
+        assert logged.index("(no snapshot) goes with") < logged.index("and everything below it:")
+        assert arch not in fake.ds
+        # The listing fails: nothing of the subtree is destroyed.
+        fake = self._drive_with_history()
+        fake.dataset(arch)
+        fake.snap(arch, "zark_2026-08-01_10:00:00Z").creation = _days_ago(200)
+        prune = self._plan(fake, ret.Policy(max_age_days=100))
+        fake.fail_cmds.add(f"-t filesystem,volume -r {arch}")
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            _count, failed = engine.apply_prune("backup", prune, Log())
+        assert failed == [arch] and arch in fake.ds
+        assert "its datasets could not be listed" in out.getvalue()
+        assert not any(c.startswith("zfs destroy -r") for c in fake.calls)
+
     def test_archived_lineage_with_nothing_kept_is_destroyed_whole(self) -> None:
         """7a: the lineage goes with one `zfs destroy -r`, after its snapshots are named."""
         fake = self._drive_with_history()

@@ -1010,20 +1010,48 @@ def destroy_snapshots(targets: list[tuple[str, str]], log: Log) -> tuple[int, li
     return count, failed
 
 
+def subtree_datasets(top: str) -> list[tuple[str, bool]] | None:
+    """The datasets at and below ``top`` from the drive's own listing, each
+    with whether it holds a partial receive (its ``%recv`` child never lists:
+    module/zcommon/zfs_comutil.c:232-244); None when the listing fails."""
+    r = sh.run(f"zfs list -H -o name,receive_resume_token -t filesystem,volume -r {_q(top)}")
+    if not r.ok:
+        return None
+    out: list[tuple[str, bool]] = []
+    for line in r.lines:
+        f = line.split("\t")
+        if len(f) == 2:
+            out.append((f[0], f[1] not in ("", "-")))
+    return out
+
+
 def apply_prune(pool: str, prune: Prune, log: Log) -> tuple[int, list[str]]:
     """Destroy what the plan allows, each snapshot by its exact name, one per
     command, every one logged with its reason (never a % range, redesign
-    §7); a subtree destroyed whole names every snapshot it takes first.
-    Returns how many went and what could not be destroyed."""
+    §7); a subtree destroyed whole names every snapshot and every dataset
+    it takes first, from the drive's own listing, and is left alone when
+    that listing fails (M3R-11, M3F-8 8a). Returns how many went and what
+    could not be destroyed."""
     tops = [t for t, _ in prune.datasets]
     count, failed = destroy_snapshots(
         [(f"{pool}/{r.target}", r.reason) for r in prune.snapshots if not _under_any(r.rel, tops)],
         log,
     )
     for top, why in prune.datasets:
+        below = subtree_datasets(f"{pool}/{top}")
+        if below is None:
+            failed.append(f"{pool}/{top}")
+            log.warn(f"  could not remove {pool}/{top}: its datasets could not be listed")
+            continue
+        planned = {f"{pool}/{r.rel}" for r in prune.snapshots if _under_any(r.rel, [top])}
         for r in prune.snapshots:
             if _under_any(r.rel, [top]):
                 log.file(f"  {pool}/{r.target} goes with {pool}/{top}")
+        for ds, partial in below:
+            if ds not in planned:
+                log.file(f"  {ds} (no snapshot) goes with {pool}/{top}")
+            if partial:
+                log.file(f"  {ds} and its partial receive go with {pool}/{top}")
         res = sh.run(f"zfs destroy -r {_q(f'{pool}/{top}')}", log=log)
         if res.ok:
             count += sum(1 for r in prune.snapshots if _under_any(r.rel, [top]))
