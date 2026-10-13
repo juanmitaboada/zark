@@ -10198,6 +10198,22 @@ class TestBackupSpace:
                 "backup/rpool/ROOT/be"
             )
 
+    def test_an_archived_lineage_the_space_plan_empties_goes_whole(self) -> None:
+        """7a in the space plan (M3R-3, E4): an archived lineage whose only
+        snapshot is the monthly point removed is destroyed whole, named in
+        the question, and its `used` counts in what the plan frees."""
+        fake = self._history()
+        arch = "backup/rpool/var.archived-20260801"
+        fake.dataset(arch)
+        fake.snap(arch, P2).creation = _days_ago(66)
+        with patch.object(engine.Run, "estimate", return_value=5 << 20):  # P2 alone frees it
+            ok, asked, out = self._decide(fake, 0, 10**12, True, ret.Policy(margin_pct=0))
+        assert ok and asked == ["Remove these 1 backup point(s) from backup?"]
+        assert f"{arch} and everything below it go too" in out
+        assert arch not in fake.ds
+        assert f"zfs destroy -r {arch}" in fake.calls
+        assert P2 not in fake.names("backup/rpool/ROOT/be")
+
 
 class TestOriginInventory:  # pylint: disable=too-few-public-methods
     """M3-9/M3-11: what `zark prune` sees in origin, by kind."""
@@ -10612,6 +10628,38 @@ class TestPruneCommand:
         assert P2 not in fake.names("backup/rpool/ROOT/be")
         assert P2 in fake.names("backup/rpool/USERDATA/home")
         assert "could not remove" not in out.getvalue()
+
+    def test_an_archived_lineage_a_beyond_policy_point_empties_goes_whole(self) -> None:
+        """7a beyond the policy (M3R-3): the lineage is named before the
+        typed PRUNE and destroyed whole with the point."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        arch = "backup/rpool/var.archived-20260801"
+        fake.dataset(arch)
+        fake.snap(arch, P2).creation = _days_ago(66)
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        drive = ConnectedDrive("backup", "111", "d", "/dev/sdb", True, False, False, "exported")
+        out = StringIO()
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                redirect_stdout(out),
+                redirect_stderr(StringIO()),
+                patch.object(ZFS, "import_backup_pool", return_value=True),
+                patch.object(prune_mod, "backup_device", return_value="/dev/sdb1"),
+                patch.object(prune_mod, "prompt_eject_or_attach"),
+                patch.object(Cleanup, "register", lambda _self: None),
+                patch.object(prune_mod.time, "time", return_value=float(NOW)),
+                *self._answers([], ["1"], "PRUNE", False),
+            ):
+                stack.enter_context(cm)
+            prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
+        text = out.getvalue()
+        assert f"{arch} and everything below it go too" in text
+        assert arch not in fake.ds and f"zfs destroy -r {arch}" in fake.calls
+        assert P2 not in fake.names("backup/rpool/ROOT/be") and P1 in fake.names(
+            "backup/rpool/ROOT/be"
+        )
 
 
 class TestStatus:

@@ -58,7 +58,14 @@ from lib.replication import (
     is_archived,
     point_name,
 )
-from lib.retention import Policy, Prune, plan_prune, point_removals, space_candidates
+from lib.retention import (
+    Policy,
+    Prune,
+    plan_prune,
+    point_removals,
+    space_candidates,
+    whole_datasets,
+)
 from lib.zfs import ZFS, PoolInfo
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
@@ -416,9 +423,18 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
         more = point_removals(eng.dest, name, pinned=pins, protected=bases)
         if not more:
             continue
-        new_total = engine.reclaim(pool, [*prune.snapshots, *beyond.snapshots, *more], tops)
-        chosen.append((name, new_total - total))
         beyond.snapshots += more
+        # 7a holds here too (M3R-3): an archived lineage or kept orphan these
+        # removals (with the policy's, applied first) leave empty goes whole.
+        beyond.datasets = [
+            d
+            for d in whole_datasets(eng.dest, [*prune.snapshots, *beyond.snapshots])
+            if d not in prune.datasets
+        ]
+        new_total = engine.reclaim(
+            pool, [*prune.snapshots, *beyond.snapshots], [*tops, *(t for t, _ in beyond.datasets)]
+        )
+        chosen.append((name, new_total - total))
         total = new_total
     room = avail + freed
     if chosen:
@@ -430,6 +446,8 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
         log.warn(f"{pool} {short} this backup; the oldest monthly backup points can go:")
         for name, frees in chosen:
             log.info(f"  {name}  (frees {_gib(frees)})")
+        for top, _why in beyond.datasets:
+            log.info(f"  {pool}/{top} and everything below it go too (nothing of it would be left)")
         if log.ask(f"Remove these {len(chosen)} backup point(s) from {pool}?", default=False):
             actions.append(partial(engine.apply_prune, pool, beyond, log))
             room = avail + total

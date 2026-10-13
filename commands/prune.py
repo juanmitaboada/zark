@@ -298,13 +298,19 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         removals: list[Removal] = []
         for i, name in enumerate(names, 1):
             removals += point_removals(dest, name, pinned=pins)
-            freed = engine.reclaim(pool, removals)
+            # 7a (M3R-3): a lineage these removals leave empty goes whole, and
+            # its `used` counts in what the removal frees.
+            tops = [t for t, _ in whole_datasets(dest, removals)]
+            freed = engine.reclaim(pool, removals, tops)
             log.info(f"  {i}) {name}  (with the ones above: {_gib(freed)})")
         raw = log.ask_input("How many of the oldest to remove? (0: none)", "0")
         n = min(int(raw), len(names)) if raw.isdigit() else 0
         chosen = [r for name in names[:n] for r in point_removals(dest, name, pinned=pins)]
+        plan = Prune(snapshots=chosen, datasets=whole_datasets(dest, chosen))
+        for top, _why in plan.datasets:
+            log.info(f"  {pool}/{top} and everything below it go too (nothing of it would be left)")
         if chosen and _typed(log, f"remove the {n} oldest backup point(s) from {pool}"):
-            _ = engine.apply_prune(pool, Prune(snapshots=chosen), log)
+            _ = engine.apply_prune(pool, plan, log)
             dest = engine.read_dest(pool, strict=True)
     legacy = _legacy_history(dest, pins)
     if not legacy.empty:
