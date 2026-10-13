@@ -10165,6 +10165,39 @@ class TestPruneCommand:
         assert P1 not in be and P2 not in be and P3 in be
         assert "zark_2026-10-10_10:00:00Z" in be
 
+    def test_beyond_the_policy_lists_only_points_with_something_to_remove(self) -> None:
+        """M3 decision 6a (eli R5): a monthly point held only by an orphan's
+        newest snapshot (I-E) frees nothing and is not offered."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        for ds in [d for d in fake.ds if d.startswith("backup/")]:
+            fake.ds[ds].snaps = [s for s in fake.ds[ds].snaps if s.name != P2]
+        fake.dataset("backup/rpool/zt9")
+        held = fake.snap("backup/rpool/zt9", P2)
+        held.creation = _days_ago(66)
+        held.props[COMPLETE_PROP] = "7"  # still its month's newest complete point
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        drive = ConnectedDrive("backup", "111", "d", "/dev/sdb", True, False, False, "exported")
+        out = StringIO()
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                redirect_stdout(out),
+                redirect_stderr(StringIO()),
+                patch.object(ZFS, "import_backup_pool", return_value=True),
+                patch.object(prune_mod, "backup_device", return_value="/dev/sdb1"),
+                patch.object(prune_mod, "prompt_eject_or_attach"),
+                patch.object(Cleanup, "register", lambda _self: None),
+                patch.object(prune_mod.time, "time", return_value=float(NOW)),
+                *self._answers([], ["0"], "", False),
+            ):
+                stack.enter_context(cm)
+            prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
+        listed = [line for line in out.getvalue().splitlines() if "(with the ones above:" in line]
+        assert listed and P2 not in "".join(listed)
+        assert f"1) {P3}" in listed[0]
+        assert P2 in fake.names("backup/rpool/zt9")
+
 
 class TestStatus:
     """M3 decisions 12 and 13: CAP, RPO, the MOTD and the notifications."""

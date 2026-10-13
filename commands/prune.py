@@ -282,7 +282,13 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     log: Log,
 ) -> None:
     """The oldest monthly points, then the 1.x history, each on a typed PRUNE."""
-    names = space_candidates(dest, complete, policy, now, prune)
+    # A point none of whose snapshots can go (I-E, pins) frees nothing: not
+    # offered, as backup's space plan already skips it (M3 decision 6a).
+    names = [
+        name
+        for name in space_candidates(dest, complete, policy, now, prune)
+        if point_removals(dest, name, pinned=pins)
+    ]
     if names:
         log.info(f"Beyond the policy, the oldest monthly backup points on {pool}:")
         removals: list[Removal] = []
