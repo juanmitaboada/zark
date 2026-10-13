@@ -5944,12 +5944,15 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         answer: str | None,
         preflight_fails: bool = False,
         calls: dict[str, list[tuple[object, ...]]] | None = None,
+        snaps_fail: bool = False,
     ) -> MockShell:
         """``answer`` None simulates a closed terminal (EOF) at the YES prompt.
 
         The system.key copy goes below ``work``; Cleanup's atexit run is
         simulated after the command returns. ``calls``, when given, receives
         the positional arguments of every ``_choose_point`` and ``_plan`` call.
+        ``snaps_fail`` leaves the real ``_list_snapshots`` in place with the
+        engine's listing of the drive failing.
         """
         source_key = os.path.join(work, "source.key")
         Path(source_key).write_bytes(b"k" * 32)
@@ -5995,7 +5998,11 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(Keystore, "load_pool_keys", return_value=1),
             patch.object(recover_mod, "whole_disk", return_value="/dev/sdb"),
             patch.object(recover_mod, "_find_be", return_value=_BE),
-            patch.object(recover_mod, "_list_snapshots", return_value=snaps),
+            patch.object(
+                engine, "drive_snapshots", side_effect=engine.ReadError("could not read: zfs get")
+            )
+            if snaps_fail
+            else patch.object(recover_mod, "_list_snapshots", return_value=snaps),
             patch.object(recover_mod, "_choose_point", side_effect=spy("_choose_point", point)),
             patch.object(recover_mod, "_plan", side_effect=spy("_plan", plan)),
             patch.object(recover_mod, "_select_target", return_value="/dev/sda"),
@@ -6042,6 +6049,15 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         mock = self._run(None)
         assert mock.was_not_called("wipefs")
         assert mock.was_not_called("sgdisk")
+
+    def test_a_failed_read_of_the_marks_stops_before_the_menu(self) -> None:
+        """M3R-9: the drive's snapshots and marks are read strictly; a failed
+        listing is fatal instead of turning the drive into a legacy one."""
+        calls: dict[str, list[tuple[object, ...]]] = {}
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_in(td, "YES", calls=calls, snaps_fail=True)
+        assert "_choose_point" not in calls and "_plan" not in calls
+        assert mock.was_not_called("wipefs") and mock.was_not_called("sgdisk")
 
     def test_completeness_reaches_the_menu_and_the_plan(self) -> None:
         """M2V-5 (N12a, N12b): the complete points read from the drive are
@@ -11218,7 +11234,7 @@ class TestRecoverIncompletePoint:
 
     def _check_recover_view(self, fake: FakeZfs, last_point: str) -> None:
         with patch_sh(fake):
-            snaps = recover_mod._list_snapshots("backup")  # pylint: disable=protected-access
+            snaps = recover_mod._list_snapshots("backup", Log())  # pylint: disable=protected-access
         complete = complete_points(snaps, last_point)
         points = restore_points(snaps, self.BE)
         with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):

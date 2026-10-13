@@ -534,8 +534,18 @@ class RestorePlan:  # pylint: disable=too-many-instance-attributes
         return sum(r.referenced for r in self.rows if r.rel.startswith("bpool/") and r.restored)
 
 
-def _list_snapshots(pool: str) -> list[Snap]:
-    return engine.drive_snapshots(pool)
+def _list_snapshots(pool: str, log: Log) -> list[Snap]:
+    """Every snapshot on the drive with its completion mark, read strictly
+    (M3R-9): a failed read of the marks would turn the drive into a legacy
+    one and pick the default point from org.zark:last-point alone."""
+    try:
+        return engine.drive_snapshots(pool, strict=True)
+    except engine.ReadError as e:
+        log.fatal(
+            f"Cannot read the snapshots of {pool}: {e}",
+            causes=["The drive did not answer a zfs listing; nothing was written"],
+            solutions=[f"Check the drive: zpool status {pool}", "Run recover again"],
+        )
 
 
 def _referenced(snapshots: list[str]) -> dict[str, int]:
@@ -1275,7 +1285,7 @@ def run(
     if not ubuntu_name:
         log.fatal("Cannot find root dataset in backup")
     log.ok(f"Root dataset: {ubuntu_name}")
-    snaps = [s for s in _list_snapshots(pool_name) if s.dataset != "keystore"]
+    snaps = [s for s in _list_snapshots(pool_name, log) if s.dataset != "keystore"]
     points = restore_points(snaps, f"rpool/ROOT/{ubuntu_name}")
     if not points:
         log.fatal("No restore point found on backup (no snapshot of the boot environment)")
