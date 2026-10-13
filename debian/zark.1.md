@@ -313,12 +313,19 @@ for the canonical end-to-end sequences.
     them after importing the drive.
 
     After a successful backup, **backup** lists how many days have passed
-    since every other registered drive's last backup. For a drive with no
-    anchor in the source (written by **zark** 1.x and not backed up by
-    **zark** 2 yet), it adds how many more days its next backup stays
-    incremental: with **sanoid**'s rule, (*n* − 1) periods of the longest
-    bucket of the shortest template in use, 62 days with **zark**'s
-    templates. It also says when **prune** can remove legacy residues.
+    since every other registered drive's last backup, and records in the
+    registry which **sanoid** snapshots (and **syncoid_\*** residues) this
+    drive shares with the source, with the version that wrote it. For a
+    drive with no anchor in the source (written by **zark** 1.x and not
+    backed up by **zark** 2 yet, or any drive after a **recover**) it checks
+    that record against the source: until about when the source keeps
+    those snapshots (**sanoid** prunes one only once it is older than *n*
+    periods of its type; *n* is the smallest count over the templates in use),
+    or how many datasets share nothing and are resent in full. Without a
+    record it gives the guaranteed horizon as a condition: (*n* − 1)
+    periods of the longest bucket of the shortest template in use, 62 days
+    with **zark**'s templates, if the drive still shares snapshots with the
+    source. It also says when **prune** can remove legacy residues.
 
     **--no-snapshot** is accepted and has no effect: the backup point is
     taken by **zark** itself.
@@ -444,19 +451,21 @@ for the canonical end-to-end sequences.
     residues (**syncoid_\*** snapshots left by **zark** 1.x on datasets
     where every registered drive has an anchor, and the keystore's
     **prepare_\*** snapshots; yes/no), the backup points interrupted runs
-    left (typed **PRUNE**) and a drive's **bpool** anchors (typed **PRUNE**;
+    left (typed **PRUNE**; a drive that received part of such a point rolls
+    those datasets back at its next backup, after asking, and one whose
+    transfer was interrupted sends it again) and a drive's **bpool** anchors (typed **PRUNE**;
     that drive's next backup then asks how to send those datasets again).
     Backups impose no floor: the drives' anchors on **rpool** are
     bookmarks, which no snapshot removal touches. On a drive (no passphrase
     needed): what its retention removes now (yes/no), then the oldest
-    monthly backup points and the history from before its first **zark** 2
-    backup point (typed **PRUNE**).
+    monthly backup points that still have something to remove and the
+    history from before its first **zark** 2 backup point (typed **PRUNE**).
 
 **status**
 :   How full **rpool** and **bpool** are (a warning from 80 %, critical
-    from 90 %), the days since every registered drive's last backup, the
-    horizon of drives anchored only on shared snapshots and the legacy
-    residues **prune** can remove. **status --refresh** writes
+    from 90 %), the days since every registered drive's last backup, what
+    a drive with no anchor in the source still shares with it (see
+    **backup**) and the legacy residues **prune** can remove. **status --refresh** writes
     */run/zark/status.motd*; with **--notify** it also sends a desktop
     notification for a pool at a warning or critical level, at most once a
     day per pool and level. Read-only.
@@ -636,7 +645,10 @@ To verify a recovery without rebooting:
     registry is looked up next to the entry-point script first and falls
     back to */etc/zark/known_drives.json* only if no local copy exists.
     A documented example is shipped at
-    */etc/zark/known_drives.json.example*.
+    */etc/zark/known_drives.json.example*. Besides the keys an operator
+    sets, **zark** keeps per drive *prepared_at*, *prepared_version*,
+    *last_backup_version* and *shared* (the snapshots the drive shared with
+    the source at its last complete backup).
 
     Each top-level key is a pool name with these fields: **guid** (pool
     GUID, decimal; required), **drive_id** (stable */dev/disk/by-id/*

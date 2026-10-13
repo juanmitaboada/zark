@@ -18,8 +18,15 @@ zark (2.0.0~rc3-1) UNRELEASED; urgency=medium
   * registry retention, and prepare asks the drive's retention.
   * A new clone is sent as a delta from its origin on the drive.
   * recover names another drive's bpool anchor as that drive's point.
-  * The horizon of a drive anchored only on shared snapshots is reported
-    with sanoid's real rule (62 days with zark's templates).
+  * A drive with no anchor in the source is reported from the snapshots it
+    was recorded to share at its last complete backup, checked against the
+    source; without a record, sanoid's guaranteed horizon (62 days with
+    zark's templates) as a condition. The registry also keeps the versions
+    that prepared and last wrote each drive.
+  * prune lists only beyond-policy points with something to remove, and
+    warns that removing an interrupted run's point makes the drives that
+    received part of it roll those datasets back.
+  * The estimate of a new clone sent from its origin is its delta.
 
  -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Mon, 12 Oct 2026 23:30:00 +0200
 

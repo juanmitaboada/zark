@@ -75,6 +75,15 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
 - **Clone-aware sends (O3).** A dataset new in the source that is a clone
   of a snapshot the drive holds is sent with `-I` from that origin and
   received with `-o origin=` as a clone of the drive's copy.
+- **What a drive shares with the source** (decision 5e, from eli's
+  validation). Every complete backup, and `prepare`, records in the
+  registry per dataset the snapshots the drive shares with the source
+  besides its anchors (the newest of each sanoid type and the newest
+  `syncoid_*` residue: `shared`), and the versions that prepared and last
+  wrote it (`prepared_at`, `prepared_version`, `last_backup_version`;
+  `org.zark:prepared-version` on the drive). Entries written before
+  pick up the preparation fields from the drive at its next complete
+  backup.
 
 #### Changed
 
@@ -85,11 +94,30 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
   destroy) is no longer complete, with nothing to rewrite (M2V-4). Marks
   `yes` written by 2.0.0-rc2 are read as complete and rewritten with
   their count at the next complete run.
-- **Hallazgo 21.** The horizon of a drive anchored only on shared
-  snapshots is (n − 1) periods of a template's longest bucket, with
-  sanoid's periods (1 h, 1 d, 7 d, 31 d, 365.25 d), and the smallest over
-  the templates in use: 62 days with zark's templates, not 90. backup's
-  RPO lines report it for such drives.
+- **Hallazgo 21.** A drive with no anchor in the source is judged by the
+  snapshots it was recorded to share, checked against the source now
+  (decision 5e): "no anchor in origin; it still shares snapshots with it
+  until about <date> (<dataset>@<snapshot>)", or "N dataset(s) share no
+  snapshot with it: its next backup resends them in full", which is what
+  a recover leaves (the source keeps only the restored point). sanoid
+  prunes a snapshot only once it is older than its type's count of
+  periods (1 h, 1 d, 7 d, 31 d, 365.25 d; `frequent_period` minutes), and
+  the date takes the smallest count over the templates in use. Without a
+  record the horizon stays as a condition: (n − 1) periods of a
+  template's longest bucket, the smallest over the templates in use, 62
+  days with zark's templates (not 90), if the drive still shares
+  snapshots with the source. `zark status`, the MOTD and backup's RPO
+  lines report it.
+- `zark prune` on a drive lists beyond the policy only monthly points
+  with something it can remove, as backup's space plan does (decision 6a).
+- backup estimates a new clone sent from its origin with `-i`: OpenZFS
+  2.4.1 sizes `zfs send -nvP -I <origin> <clone>@<point>` as the whole
+  clone (`libzfs_sendrecv.c:1237-1255`); the send itself stays `-I`
+  (decision 7a).
+- `zark prune`'s warning for points left by interrupted runs says both
+  costs: a drive that received part of the point rolls those datasets
+  back at its next backup, after asking, and a drive whose transfer was
+  interrupted sends it again (decision 8a).
 - **G4a.** The 1%-of-source free-space guard is gone, and so is the
   "Target is N% full. Continue?" question; step 4 shows the root
   dataset's used and available space only, the figures the space check
@@ -115,6 +143,12 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
   already lost part of its snapshots then reads as complete.
 - Desktop notifications need `notify-send` (libnotify-bin) in the
   session's user environment.
+- The date a drive without anchors keeps sharing snapshots until is
+  conservative: it takes the smallest count of each sanoid type over the
+  templates in use, so a dataset with a longer template may keep its
+  snapshots longer than the date says.
+- An interrupted run anchors nothing: removing its point in the source
+  costs the drives that received part of it a rollback of those datasets.
 - The space check before a transfer never offers a drive's 1.x history;
   `zark prune` on the drive does.
 - A dataset received as a clone keeps its origin snapshot on the drive
@@ -143,6 +177,13 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
 - **A `ZARK_NOW` override to stage old points on eli**: a test hook in
   production code that could not spread points across months anyway;
   eli's wall clock does.
+- **Deciding a drive's horizon by the version that wrote it** (a zark 2
+  drive "keeps only points"): wrong, since sends via a bookmark carry
+  sanoid's intermediates; what matters is what the drive and the source
+  still share, which the recorded snapshots tell.
+- **Mapping each dataset to its own sanoid template** for the date:
+  copying sanoid's section resolution for a date that is approximate
+  anyway.
 
 ### M2 — replication engine (2.0.0-rc2)
 
