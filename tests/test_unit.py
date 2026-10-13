@@ -5940,6 +5940,18 @@ class TestRecoverTargetDisks:  # pylint: disable=missing-function-docstring,too-
         assert "50026B7784FC3319" in cands[0][1]
 
 
+def _marks_unreadable(snaps: list[Snap]) -> Callable[..., list[Snap]]:
+    """drive_snapshots on a drive whose marks listing fails: a strict read
+    raises, a non-strict one silently returns the snapshots without marks."""
+
+    def read(_pool: str, strict: bool = False) -> list[Snap]:
+        if strict:
+            raise engine.ReadError("could not read: zfs get")
+        return snaps
+
+    return read
+
+
 class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
     """Hallazgo 15: nothing touches the internal disk before pre-flight + YES."""
 
@@ -6007,9 +6019,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(Keystore, "load_pool_keys", return_value=1),
             patch.object(recover_mod, "whole_disk", return_value="/dev/sdb"),
             patch.object(recover_mod, "_find_be", return_value=_BE),
-            patch.object(
-                engine, "drive_snapshots", side_effect=engine.ReadError("could not read: zfs get")
-            )
+            patch.object(engine, "drive_snapshots", side_effect=_marks_unreadable(snaps))
             if snaps_fail
             else patch.object(recover_mod, "_list_snapshots", return_value=snaps),
             patch.object(recover_mod, "_choose_point", side_effect=spy("_choose_point", point)),
@@ -9895,6 +9905,20 @@ class TestRetentionPolicy:
             f"{self.BE}@{_pt('2026-11-30')}",
             f"{self.HOME}@{_pt('2026-11-30')}",
         }
+
+    def test_the_space_plan_keeps_a_live_datasets_newest_snapshot(self) -> None:
+        """I-E in the space plan: point_removals leaves a dataset whose newest
+        snapshot is the point, and takes the archived copy (R14)."""
+        arch = f"{self.HOME}.archived-20261101"
+        dest = _drive(
+            {
+                self.BE: [(_pt("2026-11-02"), _days_ago(74)), (_pt("2027-01-05"), _days_ago(10))],
+                self.HOME: [(_pt("2026-11-02"), _days_ago(74))],
+                arch: [(_pt("2026-11-02"), _days_ago(74))],
+            },
+        )
+        removals = {r.target for r in ret.point_removals(dest, _pt("2026-11-02"))}
+        assert removals == {f"{self.BE}@{_pt('2026-11-02')}", f"{arch}@{_pt('2026-11-02')}"}
 
     def test_inside_the_window_everything_stays(self) -> None:
         """Rule 1: an intermediate that is not its dataset's newest and two
