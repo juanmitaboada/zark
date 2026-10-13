@@ -27,6 +27,9 @@ zark (2.0.0~rc3-1) UNRELEASED; urgency=medium
     warns that removing an interrupted run's point makes the drives that
     received part of it roll those datasets back.
   * The estimate of a new clone sent from its origin is its delta.
+  * A dataset with an interrupted transfer that was written on the drive
+    since (a read-write mount) is asked about instead of failing to
+    resume on every run.
 
  -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Mon, 12 Oct 2026 23:30:00 +0200
 

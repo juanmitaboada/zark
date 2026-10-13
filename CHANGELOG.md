@@ -94,6 +94,14 @@ M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
   destroy) is no longer complete, with nothing to rewrite (M2V-4). Marks
   `yes` written by 2.0.0-rc2 are read as complete and rewritten with
   their count at the next complete run.
+- **M2V-1** (decision 12a, confirmed on eli): a dataset with an
+  interrupted transfer whose copy on the drive was written since its
+  newest snapshot (a read-write `zark mount` in between) was resumed on
+  every run; ZFS refuses the resumed stream at its end and keeps the
+  state, so every backup ended INCOMPLETE saying the next one would
+  resume it. It is now listed with the other written datasets; DISCARD
+  drops the partial transfer (`zfs receive -A`), rolls the dataset back to
+  its newest snapshot and sends it again in the same run.
 - **Hallazgo 21.** A drive with no anchor in the source is judged by the
   snapshots it was recorded to share, checked against the source now
   (decision 5e): "no anchor in origin; it still shares snapshots with it

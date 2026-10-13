@@ -236,7 +236,11 @@ for the canonical end-to-end sequences.
       nothing written): one prompt listing them, to skip them this time
       (the default; the backup is then incomplete) or discard those
       changes, rolling each one back to its newest snapshot without
-      destroying any (typed **DISCARD**).
+      destroying any (typed **DISCARD**). A dataset that also holds an
+      interrupted transfer is listed there too: it could never resume onto
+      a written dataset, so discarding also drops that partial transfer
+      (**zfs receive -A**) before the rollback, and the dataset is sent
+      again in the same run.
 
     An archived dataset is renamed to *\<name\>.archived-YYYYMMDD* on the
     drive and keeps all its snapshots; archiving or destroying a dataset
