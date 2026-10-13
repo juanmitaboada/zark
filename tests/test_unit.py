@@ -9800,6 +9800,40 @@ class TestRetentionPolicy:
             f"{self.HOME}@{_pt('2026-11-30')}",
         }
 
+    def test_inside_the_window_everything_stays(self) -> None:
+        """Rule 1: an intermediate that is not its dataset's newest and two
+        points of one month stay while inside the window (M3R-6, R10)."""
+        dest, complete = self._history()
+        dest[self.BE].snaps.append(
+            repl.Ref("autosnap_2026-12-26_10:00:00_hourly", "h", 99, _days_ago(20))
+        )
+        for day, age in ((_pt("2027-01-01"), 14), (_pt("2027-01-05"), 10)):
+            dest[self.BE].snaps.append(repl.Ref(day, f"j{age}", 100 + age, _days_ago(age)))
+        dest[self.BE].snaps = sorted(dest[self.BE].snaps, key=lambda s: s.creation)
+        complete.add(_pt("2027-01-01"))
+        gone = _gone(ret.plan_prune(dest, complete, ret.Policy(window_days=30), NOW))
+        assert f"{self.BE}@autosnap_2026-12-26_10:00:00_hourly" not in gone
+        assert f"{self.BE}@{_pt('2027-01-01')}" not in gone  # not January's newest, but inside
+        assert f"{self.BE}@{_pt('2027-01-05')}" not in gone
+
+    def test_a_child_that_keeps_a_point_blocks_the_whole_destroy(self) -> None:
+        """7a: an archived top whose own snapshots all go is not destroyed
+        with -r while a child keeps its month's newest complete point (M3R-6, R8)."""
+        top = f"{self.BE}.archived-20261001"
+        child = f"{top}/var"
+        dest = _drive(
+            {
+                self.BE: [(_pt("2026-11-16"), _days_ago(60)), (_pt("2027-01-10"), _days_ago(5))],
+                top: [(_pt("2026-11-02"), _days_ago(74))],
+                child: [(_pt("2026-11-02"), _days_ago(74)), (_pt("2026-11-16"), _days_ago(60))],
+            },
+        )
+        complete = {_pt("2026-11-02"), _pt("2026-11-16"), _pt("2027-01-10")}
+        p = ret.plan_prune(dest, complete, ret.Policy(window_days=30), NOW)
+        assert _gone(p) == {f"{top}@{_pt('2026-11-02')}", f"{child}@{_pt('2026-11-02')}"}
+        assert p.datasets == []
+        assert ret.whole_datasets(dest, p.snapshots) == []
+
 
 class TestRetentionOnDrive:
     """M3: the policy applied to a drive written by the engine."""
@@ -10035,6 +10069,58 @@ class TestBackupSpace:
         ok, asked, _ = self._decide(fake, 10**12, 10**12, True, ret.Policy())
         assert ok and not asked
         assert before == {ds: fake.names(ds) for ds in fake.ds if ds.startswith("backup/")}
+
+    def test_the_newest_complete_point_is_never_offered(self) -> None:
+        """Even outside the window, with a newer incomplete point on some
+        datasets making it removable there (M3R-6, R12)."""
+        fake = self._history()
+        p4, p5 = "zark_2026-10-10_10:00:00Z", "zark_2026-10-14_10:00:00Z"
+        _tick(fake, "2026-10-14_08:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", p5).ok
+        fake.inject.clear()
+        assert p5 in fake.names("backup/rpool/ROOT/be") and p5 not in fake.names(
+            "backup/rpool/USERDATA/home"
+        )
+        with patch.object(engine.Run, "estimate", return_value=10**15):
+            ok, asked, out = self._decide(
+                fake, 0, 10**12, True, ret.Policy(window_days=1, margin_pct=0)
+            )
+        assert ok is None and asked  # nothing fits: fatal after the plan
+        assert p4 not in out
+        for rel in ("rpool/ROOT/be", "rpool/USERDATA/home", "rpool/var", "bpool/BOOT/be"):
+            assert p4 in fake.names(f"backup/{rel}"), rel
+
+    def test_the_space_plan_defaults_to_no(self) -> None:
+        """Enter and EOF at "Remove these N backup point(s)?" remove nothing (M3R-7, B2)."""
+        for answer in (["", EOFError], EOFError):  # the fatal's "Press Enter" prompt follows
+            fake = self._history()
+            out = StringIO()
+            with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+                eng = engine.Run("backup", "111", Log(), self.NEXT, sleep=lambda _s: None)
+                assert eng.take_point()
+                plans = eng.survey()
+                with (
+                    patch.object(backup_mod.time, "time", return_value=float(NOW)),
+                    patch("builtins.input", side_effect=answer) as asked,
+                    patch.object(engine.Run, "estimate", return_value=10**15),
+                ):
+                    try:
+                        _decide(
+                            plans,
+                            eng,
+                            "backup",
+                            PoolInfo("backup", avail_bytes=0, size_bytes=10**12),
+                            Log(),
+                            ret.Policy(margin_pct=0),
+                        )
+                    except SystemExit:
+                        pass
+            assert "Remove these" in out.getvalue()
+            assert "[y/N]" in asked.call_args_list[0].args[0]
+            assert P2 in fake.names("backup/rpool/ROOT/be") and P3 in fake.names(
+                "backup/rpool/ROOT/be"
+            )
 
 
 class TestOriginInventory:  # pylint: disable=too-few-public-methods
@@ -10338,6 +10424,83 @@ class TestPruneCommand:
         assert listed and P2 not in "".join(listed)
         assert f"1) {P3}" in listed[0]
         assert P2 in fake.names("backup/rpool/zt9")
+
+    def test_legacy_history_boundaries(self) -> None:
+        """6c: only names from before the first point go; a legacy snapshot
+        after it stays, and on a drive with no point every live dataset
+        keeps its newest while the older legacy names go (M3R-6, P3, P4)."""
+        be, home = "rpool/ROOT/be", "rpool/USERDATA/home"
+        dest = _drive(
+            {
+                be: [
+                    ("autosnap_2026-10-01_00:00:00_daily", _days_ago(100)),
+                    (_pt("2026-12-01"), _days_ago(45)),
+                    ("autosnap_2026-12-06_00:00:00_daily", _days_ago(40)),
+                    (_pt("2027-01-05"), _days_ago(10)),
+                ],
+            },
+        )
+        legacy = prune_mod._legacy_history(dest, {})  # pylint: disable=protected-access
+        assert {r.target for r in legacy.snapshots} == {f"{be}@autosnap_2026-10-01_00:00:00_daily"}
+        dest = _drive(
+            {
+                be: [
+                    ("autosnap_2026-10-01_00:00:00_daily", _days_ago(100)),
+                    ("syncoid_carmen_2026-10-11:10:00:00-GMT02:00", _days_ago(90)),
+                ],
+                home: [
+                    ("autosnap_2026-10-01_00:00:00_daily", _days_ago(100)),
+                    ("autosnap_2026-11-20_00:00:00_daily", _days_ago(50)),
+                ],
+            },
+        )
+        legacy = prune_mod._legacy_history(dest, {})  # pylint: disable=protected-access
+        assert {r.target for r in legacy.snapshots} == {
+            f"{be}@autosnap_2026-10-01_00:00:00_daily",
+            f"{home}@autosnap_2026-10-01_00:00:00_daily",
+        }
+        assert legacy.datasets == []
+
+    def test_the_residue_question_defaults_to_no(self) -> None:
+        """Enter and EOF at "Remove these N residue(s)?" remove nothing (M3R-7, P5)."""
+        for answer in ([""], EOFError):
+            fake = _fresh_fake()
+            assert _engine_run(fake, "backup", "111", P1).ok
+            fake.snap("rpool/keystore", "prepare_20260927_082338")
+            with patch("builtins.input", side_effect=answer) as asked:
+                out = self._origin(
+                    fake, make_config(), patch.object(Log, "ask_choice", side_effect=[2, 0])
+                )
+            assert "Remove these 1 residue(s)" in out
+            assert "[y/N]" in asked.call_args_list[0].args[0]
+            assert fake.names("rpool/keystore") == ["prepare_20260927_082338"]
+
+    def test_the_drive_policy_question_defaults_to_no(self) -> None:
+        """Enter and EOF at "Apply <pool>'s retention now?" remove nothing (M3R-7, P6)."""
+        for answer in ([""], EOFError):
+            fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+            cfg = make_config()
+            cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+            drive = ConnectedDrive("backup", "111", "d", "/dev/sdb", True, False, False, "exported")
+            out = StringIO()
+            with ExitStack() as stack:
+                for cm in (
+                    patch_sh(fake),
+                    redirect_stdout(out),
+                    redirect_stderr(StringIO()),
+                    patch.object(ZFS, "import_backup_pool", return_value=True),
+                    patch.object(prune_mod, "backup_device", return_value="/dev/sdb1"),
+                    patch.object(prune_mod, "prompt_eject_or_attach"),
+                    patch.object(Cleanup, "register", lambda _self: None),
+                    patch.object(prune_mod.time, "time", return_value=float(NOW)),
+                    patch.object(Log, "ask_input", return_value="0"),
+                ):
+                    stack.enter_context(cm)
+                asked = stack.enter_context(patch("builtins.input", side_effect=answer))
+                prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
+            assert "Apply backup's retention now?" in out.getvalue()
+            assert "[y/N]" in asked.call_args_list[0].args[0]
+            assert P1 in fake.names("backup/rpool/ROOT/be")
 
 
 class TestStatus:
