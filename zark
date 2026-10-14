@@ -52,7 +52,7 @@ COMMANDS = {
     "chroot": "Open an interactive chroot into the installed ZFS system (live USB)",
     "explore": "Scan for ZFS pools, show known/unknown status",
     "monitor": "Live progress monitor (run in separate terminal)",
-    "clean": "Emergency cleanup: unmount everything, export all pools",
+    "clean": "Release what an interrupted zark run left mounted or imported",
     "health": "Non-destructive risk checks on a backup drive",
     "registry": "List, forget or fix entries in known_drives.json",
     "prune": "Reclaim space in origin or on a backup drive (interactive)",

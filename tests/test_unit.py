@@ -28,7 +28,6 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 # line limit.
 
 import atexit
-import inspect
 import json
 import os
 import re
@@ -2161,17 +2160,231 @@ class TestSimulateGLDetection:  # pylint: disable=missing-function-docstring
 # ═════════════════════════════════════════════════════════════════════════
 
 
-class TestClean:  # pylint: disable=missing-function-docstring,too-few-public-methods
-    """Tests for mount patterns used in clean command."""
+class TestClean:  # pylint: disable=missing-function-docstring
+    """H6: clean acts only on what zark mounted, imported or opened."""
 
-    def test_cleanup_patterns(self):
-        """Clean targets the right mount patterns."""
-        # Verify the patterns used in clean.py match expectations
-        source = inspect.getsource(clean_mod.run)
-        assert "/mnt/recover" in source
-        assert "/mnt/zark" in source
-        assert "/mnt/grub_" in source
-        assert "zark_ks_" in source
+    @staticmethod
+    def _env(td: str) -> tuple[str, str, ExitStack]:
+        root = os.path.join(td, "mnt", "zark")
+        altroot = os.path.join(td, "run", "zark", "altroot")
+        stack = ExitStack()
+        _ = stack.enter_context(patch.object(clean_mod, "ROOTS", (root, altroot), create=True))
+        _ = stack.enter_context(
+            patch.object(clean_mod, "MAPPER_DIR", os.path.join(td, "mapper"), create=True)
+        )
+        _ = stack.enter_context(
+            patch.object(
+                clean_mod, "ZVOL_INHIBIT", os.path.join(td, "zvol_inhibit_dev"), create=True
+            )
+        )
+        return root, altroot, stack
+
+    @staticmethod
+    def _run(
+        mock: MockShell,
+        stack: ExitStack,
+        answer: str = "y",
+        marker: bool = False,
+    ) -> int:
+        with (
+            stack,
+            patch_sh(mock),
+            patch("builtins.input", return_value=answer),
+            redirect_stdout(StringIO()),
+        ):
+            if marker:  # where patch_sh put the engine's marker
+                Path(clean_mod.engine.SANOID_MARKER).write_text("x\n", encoding="ascii")
+            try:
+                clean_mod.run([])
+            except SystemExit as e:
+                return int(e.code) if isinstance(e.code, int) else 1
+        return 0
+
+    def test_running_system_pools_are_never_touched(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(
+                f"rpool\t-\nbpool\t-\nbackup\t{altroot}/backup"
+            )
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds(
+                f"/ rpool/ROOT/be\n/boot bpool/BOOT/be\n{altroot}/backup/var backup/rpool/var"
+            )
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on_prefix("zpool export").succeeds()
+            rc = self._run(mock, stack)
+        assert mock.was_not_called("zfs unmount -a"), mock.calls
+        assert mock.was_not_called("zpool export rpool"), mock.calls
+        assert mock.was_not_called("zpool export bpool"), mock.calls
+        assert mock.was_not_called("export -f"), mock.calls
+        assert mock.was_called("zpool export backup"), mock.calls
+        assert mock.was_not_called("rm "), mock.calls
+        assert rc == 1  # the mocked table still shows the mount: not complete
+
+    def test_a_pool_imported_by_hand_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, stack = self._env(td)
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-\ntank\t-\nother\t/srv/x")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            rc = self._run(mock, stack)
+        assert mock.was_not_called("zpool export"), mock.calls
+        assert rc == 0
+
+    def test_the_systems_keystore_mount_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, stack = self._env(td)
+            os.makedirs(os.path.join(td, "mapper", "zark_ks_backup"))
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds(
+                "/run/keystore/rpool /dev/mapper/keystore-rpool"
+            )
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on_prefix("cryptsetup close").succeeds()
+            _ = self._run(mock, stack)
+        assert mock.was_not_called("umount /run/keystore/rpool"), mock.calls
+        assert mock.was_called("cryptsetup close zark_ks_backup"), mock.calls
+
+    def test_zarks_keystore_on_top_is_unmounted(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, stack = self._env(td)
+            os.makedirs(os.path.join(td, "mapper", "zark_ks_backup"))
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds(
+                "/run/keystore/rpool /dev/mapper/keystore-rpool\n"
+                "/run/keystore/rpool /dev/mapper/zark_ks_backup"
+            )
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on_prefix("umount").succeeds()
+            mock.on_prefix("cryptsetup close").succeeds()
+            _ = self._run(mock, stack)
+        assert mock.call_count("umount /run/keystore/rpool") == 1, mock.calls
+
+    def test_nothing_is_removed_below_a_mount_that_stays(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, _, stack = self._env(td)
+            home = os.path.join(root, "backup", "home")
+            os.makedirs(home)
+            Path(home, "file").write_text("precious\n", encoding="ascii")
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds(f"{home} /srv/data")
+            mock.on("findmnt -rn -o TARGET,FSTYPE").succeeds(f"{home} ext4")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on_prefix("umount").fails("target is busy")
+            mock.on_prefix("mount --make-rprivate").succeeds()
+            rc = self._run(mock, stack)
+            assert Path(home, "file").exists()
+        assert rc == 1
+        assert mock.was_not_called("rm "), mock.calls
+
+    def test_only_empty_directories_are_removed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, _, stack = self._env(td)
+            os.makedirs(os.path.join(root, "backup", "rpool", "var"))
+            os.makedirs(os.path.join(root, "chroot"))
+            Path(root, "chroot", "note").write_text("x\n", encoding="ascii")
+            Path(root, "chroot", "sub").mkdir()
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            rc = self._run(mock, stack)
+            assert not Path(root, "backup").exists()
+            assert not Path(root, "chroot", "sub").exists()
+            assert Path(root, "chroot", "note").exists()
+        assert rc == 0
+
+    def test_a_timer_left_stopped_is_started(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, _, stack = self._env(td)
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            state = mock.on("systemctl is-active sanoid.timer").succeeds("inactive")
+            start = mock.on("systemctl start sanoid.timer").succeeds()
+            real = mock.mock_run
+
+            def spy(cmd: str, **kw: Any) -> RunResult:
+                r = real(cmd, **kw)
+                if r.command == "systemctl start sanoid.timer":
+                    state.succeeds("active")
+                return r
+
+            with patch.object(mock, "mock_run", side_effect=spy):
+                rc = self._run(mock, stack, marker=True)
+        assert start.call_count == 1, mock.calls
+        assert rc == 0
+
+    def test_declining_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(f"backup\t{altroot}/backup")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            rc = self._run(mock, stack, answer="n")
+        assert mock.was_not_called("zpool export"), mock.calls
+        assert mock.was_not_called("umount"), mock.calls
+        assert rc == 0
+
+    def test_zvol_inhibit_restored_after_the_export(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            param = Path(td, "zvol_inhibit_dev")
+            param.write_text("1\n", encoding="ascii")
+            mock = MockShell()
+            listing = mock.on("zpool list -H -o name,altroot").succeeds(f"rpool\t{altroot}/rpool")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ overlay")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+
+            mock.on("zpool export rpool").succeeds()
+            real = mock.mock_run
+
+            def spy(cmd: str, **kw: Any) -> RunResult:
+                r = real(cmd, **kw)
+                if cmd == "zpool export rpool":
+                    _ = listing.returns(0, "")
+                return r
+
+            with patch.object(mock, "mock_run", side_effect=spy):
+                rc = self._run(mock, stack)
+            value = param.read_text(encoding="ascii").strip()
+        assert value == "0", mock.calls
+        assert rc == 0
+
+
+class TestCleanOnRealMounts:  # pylint: disable=missing-function-docstring
+    """H6 on real mounts: tests/clean_harness.py runs the real clean in its own
+    mount namespace. Needs root and mount namespaces; skipped otherwise."""
+
+    def _run(self, case: str) -> dict[str, Any]:
+        TestUmountPropagation._skip_unless_possible()  # pylint: disable=protected-access
+        harness = Path(__file__).parent / "clean_harness.py"
+        with tempfile.TemporaryDirectory() as td:
+            r = subprocess.run(
+                [sys.executable, str(harness), td, case],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+        assert r.returncode == 0, (case, r.returncode, r.stderr[-2000:])
+        result: dict[str, Any] = json.loads(r.stdout.strip().splitlines()[-1])
+        return result
+
+    def test_a_busy_mount_keeps_its_files(self):
+        # 1.0.12 ran rm -rf after a failed umount -R and deleted through the mount.
+        r = self._run("busy")
+        assert r == {"rc": 1, "file": True, "mounted": True, "root": True}, r
+
+    def test_an_idle_tree_is_released_and_its_empty_directories_go(self):
+        r = self._run("idle")
+        assert r == {"rc": 0, "file": True, "mounted": False, "root": False}, r
 
 
 # ═════════════════════════════════════════════════════════════════════════

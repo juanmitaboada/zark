@@ -12,70 +12,236 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark clean — Emergency cleanup.
+zark clean: undo what a zark run that did not end left behind.
 
-Unmounts everything, exports all pools. Use when a previous
-operation left things in a dirty state.
+Works from an inventory of what zark itself owns, shows it, asks, and acts
+only on that:
+
+  * mounts below zark's mount roots (``/mnt/zark``, ``/mnt/recover``,
+    ``/mnt/repair``, ``/run/zark/altroot``, ``/run/zark/probe``);
+  * pools imported with an altroot at or below one of those roots. A pool
+    without an altroot is never touched: on an installed system it is the
+    running rpool/bpool, on a live session a pool imported by hand;
+  * keystore mappings ``/dev/mapper/zark_ks_*``; ``/run/keystore/rpool`` is
+    unmounted only while the mount on top of it comes from one of them;
+  * ``sanoid.timer`` left stopped by an interrupted backup (its marker in
+    ``/run/zark``) and ``zvol_inhibit_dev=1`` left by fix-rpool-mountpoint.
+
+The same rules apply on an installed system and on a live session: the
+altroot tells zark's imports apart, not the environment. Pools are exported
+without ``-f``. Only directories left empty are removed, after the mounts
+below them are gone; anything else is listed, never deleted.
 """
 
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from lib import sh
+from commands.umount import _unmount_tree
+from lib import engine, sh
+from lib.keystore import KEYSTORE_MOUNT
 from lib.log import Log
+from lib.zfs import BACKUP_ALTROOT_BASE
+
+ROOTS: tuple[str, ...] = (
+    "/mnt/zark",
+    "/mnt/recover",
+    "/mnt/repair",
+    BACKUP_ALTROOT_BASE,
+    "/run/zark/probe",
+)
+MAPPER_DIR = "/dev/mapper"
+KEYSTORE_PREFIX = "zark_ks_"
+ZVOL_INHIBIT = "/sys/module/zfs/parameters/zvol_inhibit_dev"
 
 
-def run(args: list[str]):  # pylint: disable=too-many-branches
-    """Run the cleanup."""
+@dataclass
+class Inventory:
+    """What zark owns right now, and what it found and leaves alone."""
+
+    mounts: list[str] = field(default_factory=list)  # under ROOTS, parents first
+    pools: list[str] = field(default_factory=list)  # imported under ROOTS
+    foreign: list[str] = field(default_factory=list)  # imported, not zark's (shown only)
+    keystores: list[str] = field(default_factory=list)  # zark_ks_* mapper names
+    keystore_mounted: bool = False  # top mount at KEYSTORE_MOUNT is a zark mapper
+    sanoid_left: bool = False  # marker present and sanoid.timer not active
+    zvol_inhibited: bool = False
+
+    @property
+    def empty(self) -> bool:
+        """True when there is nothing for clean to act on."""
+        return not (
+            self.mounts
+            or self.pools
+            or self.keystores
+            or self.keystore_mounted
+            or self.sanoid_left
+            or self.zvol_inhibited
+        )
+
+
+def _under_roots(path: str) -> bool:
+    real = os.path.realpath(path)
+    return any(real == r or real.startswith(f"{r}/") for r in ROOTS)
+
+
+def _mount_table() -> list[tuple[str, str]]:
+    """(target, source) of every mount, in mountinfo order (stacked: last on top)."""
+    r = sh.run("findmnt -rn -o TARGET,SOURCE")
+    out: list[tuple[str, str]] = []
+    for line in r.lines if r.ok else []:
+        target, _, source = line.partition(" ")
+        if target:
+            out.append((target, source.strip()))
+    return out
+
+
+def inventory() -> Inventory:
+    """Read what zark owns; read-only."""
+    inv = Inventory()
+    table = _mount_table()
+    under = [t for t, _ in table if any(t == r or t.startswith(f"{r}/") for r in ROOTS)]
+    inv.mounts = sorted(dict.fromkeys(under), key=lambda t: Path(t).parts)
+
+    r = sh.run("zpool list -H -o name,altroot")
+    for line in r.lines if r.ok else []:
+        name, _, altroot = line.partition("\t")
+        name, altroot = name.strip(), altroot.strip()
+        if not name:
+            continue
+        if altroot.startswith("/") and _under_roots(altroot):
+            inv.pools.append(name)
+        elif name not in ("rpool", "bpool") or altroot.startswith("/"):
+            inv.foreign.append(f"{name} (altroot {altroot or '-'})")
+    # bpool sits under rpool's tree (/boot): export it first.
+    inv.pools.sort(key=lambda p: (p != "bpool", p))
+
+    mapper = Path(MAPPER_DIR)
+    if mapper.is_dir():
+        inv.keystores = sorted(
+            p.name for p in mapper.iterdir() if p.name.startswith(KEYSTORE_PREFIX)
+        )
+    tops = [s for t, s in table if t == KEYSTORE_MOUNT]
+    inv.keystore_mounted = bool(tops) and Path(tops[-1]).name.startswith(KEYSTORE_PREFIX)
+
+    timer = sh.run("systemctl is-active sanoid.timer").output.strip()
+    inv.sanoid_left = Path(engine.SANOID_MARKER).exists() and timer != "active"
+    try:
+        inv.zvol_inhibited = Path(ZVOL_INHIBIT).read_text(encoding="ascii").strip() == "1"
+    except OSError:
+        inv.zvol_inhibited = False
+    return inv
+
+
+def _show(inv: Inventory, log: Log) -> None:
+    for t in inv.mounts:
+        log.info(f"  mount:    {t}")
+    for p in inv.pools:
+        log.info(f"  pool:     {p} (export, without -f)")
+    for k in inv.keystores:
+        log.info(f"  keystore: /dev/mapper/{k} (close)")
+    if inv.keystore_mounted:
+        log.info(f"  keystore: {KEYSTORE_MOUNT} (unmount zark's mount on top)")
+    if inv.sanoid_left:
+        log.info("  sanoid.timer left stopped by an interrupted backup (start it)")
+    if inv.zvol_inhibited:
+        log.info("  zvol_inhibit_dev=1 left by fix-rpool-mountpoint (restore 0)")
+    for f in inv.foreign:
+        log.info(f"  left alone, not imported by zark: {f}")
+
+
+def _tops(mounts: list[str]) -> list[str]:
+    """Mounts with no other listed mount above them."""
+    return [m for m in mounts if not any(m.startswith(f"{o}/") for o in mounts if o != m)]
+
+
+def _remove_empty_dirs(log: Log) -> list[str]:
+    """rmdir every empty directory under ROOTS, deepest first, on one filesystem.
+
+    Called only when no mount is left under ROOTS. Returns what stays (files,
+    or directories that could not be removed), never deleting a file.
+    """
+    left: list[str] = []
+    for root in ROOTS:
+        base = Path(root)
+        if not base.is_dir() or base.is_symlink():
+            continue
+        dev = base.stat().st_dev
+        for dirpath, _, filenames in os.walk(root, topdown=False):
+            here = Path(dirpath)
+            if here.stat().st_dev != dev:  # another filesystem: never walk into it
+                left.append(dirpath)
+                continue
+            left += [str(here / f) for f in filenames]
+            try:
+                here.rmdir()
+                log.dbg(f"Removed empty directory {dirpath}")
+            except OSError:
+                if not filenames:
+                    left.append(dirpath)
+    return [p for p in left if not any(p.startswith(f"{q}/") for q in left if q != p)]
+
+
+def run(args: list[str]) -> None:
+    """Show what zark left behind, ask, and undo only that."""
     del args  # Unused
     log = Log()
+    log.banner("CLEANUP", "Undo what an interrupted zark run left")
 
-    log.banner("EMERGENCY CLEANUP", "Unmount everything, export all pools")
+    inv = inventory()
+    if inv.empty:
+        _show(inv, log)
+        for p in _remove_empty_dirs(log):
+            log.info(f"  kept (not empty): {p}")
+        log.ok("Nothing of zark's is mounted, imported or open")
+        return
+    _show(inv, log)
+    if not log.ask("Unmount, close and export the items above?"):
+        log.info("Aborted: nothing changed")
+        return
 
-    # Unmount /mnt/recover, /mnt/zark, /mnt/grub_*
-    for pattern in ("/mnt/recover", "/mnt/zark", "/mnt/grub_*"):
-        for d in Path("/mnt").glob(pattern.replace("/mnt/", "")):
-            if d.is_dir():
-                log.info(f"Unmounting {d}...")
-                _ = sh.run(f"umount -R {d}")
-                _ = sh.run(f"rm -rf {d}")
-
-    # Unmount any temp mounts
-    for pattern in ("/tmp/bpool_*", "/tmp/grub_*", "/tmp/hostid_*", "/tmp/rpool_*"):
-        for d in Path("/tmp").glob(pattern.replace("/tmp/", "")):
-            _ = sh.run(f"umount {d}")
-            _ = sh.run(f"rmdir {d}")
-
-    # Unmount all ZFS
-    log.info("Unmounting all ZFS datasets...")
-    _ = sh.run("zfs unmount -a")
-
-    # Close any zark keystores
-    r = sh.run("ls /dev/mapper/zark_ks_* 2>/dev/null")
-    for line in r.lines:
-        name = Path(line.strip()).name
-        _ = sh.run("umount /run/keystore/rpool")
-        _ = sh.run(f"cryptsetup close {name}")
-        log.dbg(f"Closed keystore: {name}")
-
-    # Export all non-system pools
-    log.info("Exporting pools...")
-    r = sh.run("zpool list -H -o name")
-    for pool in r.lines:
-        pool = pool.strip()
-        if pool in ("rpool", "bpool"):
-            continue
-        r2 = sh.run(f"zpool export -f {pool}")
-        if r2.ok:
+    for top in _tops(inv.mounts):
+        log.info(f"Unmounting {top}...")
+        _unmount_tree(top)
+    if inv.keystore_mounted:
+        _ = sh.run(f"umount {KEYSTORE_MOUNT}", log=log)
+    for name in inv.keystores:
+        _ = sh.run(f"cryptsetup close {name}", log=log)
+    for pool in inv.pools:
+        if sh.run(f"zpool export {pool}", log=log).ok:
             log.ok(f"Exported {pool}")
+    if inv.zvol_inhibited and not inventory().pools:
+        try:
+            _ = Path(ZVOL_INHIBIT).write_text("0\n", encoding="ascii")
+            log.ok("zvol_inhibit_dev restored to 0")
+        except OSError as e:
+            log.warn(f"Could not restore zvol_inhibit_dev: {e}")
+    if inv.sanoid_left and sh.run("systemctl start sanoid.timer", log=log).ok:
+        Path(engine.SANOID_MARKER).unlink(missing_ok=True)
+        log.ok("sanoid.timer started")
 
-    # Also try system pools if on live USB
-    if not sh.run("zpool list rpool").ok:
-        log.dbg("No rpool — likely on live USB, nothing more to export")
-    else:
-        for pool in ("bpool", "rpool"):
-            r2 = sh.run(f"zpool export -f {pool}")
-            if r2.ok:
-                log.ok(f"Exported {pool}")
-
-    log.ok("Cleanup complete")
-    log.blank()
+    after = inventory()
+    leftovers = _remove_empty_dirs(log) if not after.mounts else []
+    remaining = [
+        *(f"✗ still mounted: {t}" for t in after.mounts),
+        *(f"✗ still imported: {p}" for p in after.pools),
+        *(f"✗ still open: /dev/mapper/{k}" for k in after.keystores),
+        *([f"✗ still mounted: {KEYSTORE_MOUNT} (zark keystore)"] if after.keystore_mounted else []),
+        *(["✗ sanoid.timer still stopped"] if after.sanoid_left else []),
+        *(["✗ zvol_inhibit_dev still 1"] if after.zvol_inhibited else []),
+    ]
+    kept = [f"  kept (not empty): {p}" for p in leftovers]
+    if remaining:
+        log.banner_error(
+            "CLEANUP INCOMPLETE",
+            [
+                *remaining,
+                *kept,
+                "",
+                "Nothing below a mount that is still there was removed.",
+                "A process may be using it (fuser -vm <path>), or a copy may",
+                "be held in another mount namespace: reboot to release it.",
+            ],
+        )
+        raise SystemExit(1)
+    log.banner_ok("CLEANUP COMPLETE", ["Everything zark had left is released ✓", *kept])
