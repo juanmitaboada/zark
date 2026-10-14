@@ -2212,12 +2212,13 @@ class TestClean:  # pylint: disable=missing-function-docstring
         stack: ExitStack,
         answer: str = "y",
         marker: bool = False,
+        out: StringIO | None = None,
     ) -> int:
         with (
             stack,
             patch_sh(mock),
             patch("builtins.input", return_value=answer),
-            redirect_stdout(StringIO()),
+            redirect_stdout(out if out is not None else StringIO()),
         ):
             if marker:  # where patch_sh put the engine's marker
                 Path(clean_mod.engine.SANOID_MARKER).write_text("x\n", encoding="ascii")
@@ -2383,6 +2384,71 @@ class TestClean:  # pylint: disable=missing-function-docstring
         assert value == "0", mock.calls
         assert rc == 0
 
+    def test_no_directory_is_removed_while_a_mount_stays(self):
+        # M4a review mutation C4: rmdir cannot go through a mount, so only
+        # the call itself shows it.
+        with tempfile.TemporaryDirectory() as td:
+            root, _, stack = self._env(td)
+            home = os.path.join(root, "backup", "home")
+            os.makedirs(home)
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds(f"{home} /srv/data")
+            mock.on("findmnt -rn -o TARGET,FSTYPE").succeeds(f"{home} ext4")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on_prefix("umount").fails("target is busy")
+            mock.on_prefix("mount --make-rprivate").succeeds()
+            with patch.object(clean_mod, "_remove_empty_dirs", return_value=[]) as removal:
+                rc = self._run(mock, stack)
+        assert rc == 1
+        removal.assert_not_called()
+
+    def test_zvol_inhibit_stays_while_the_pool_stays_imported(self):
+        # Mutation C6: the parameter is restored only once the pool is gone.
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            param = Path(td, "zvol_inhibit_dev")
+            param.write_text("1\n", encoding="ascii")
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(f"rpool\t{altroot}/rpool")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ overlay")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on("zpool export rpool").fails("pool is busy")
+            rc = self._run(mock, stack)
+            value = param.read_text(encoding="ascii").strip()
+        assert value == "1", mock.calls
+        assert rc == 1
+
+    def test_bpool_is_exported_before_rpool(self):
+        # Mutation C7: bpool's /boot sits in rpool's tree; rpool first fails busy.
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(
+                f"rpool\t{altroot}/system\nbpool\t{altroot}/system"
+            )
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ overlay")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on_prefix("zpool export").succeeds()
+            _ = self._run(mock, stack)
+        calls = mock.calls
+        assert calls.index("zpool export bpool") < calls.index("zpool export rpool"), calls
+
+    def test_a_failed_export_is_incomplete(self):
+        # Mutation C11: a pool still imported is named, and the run fails.
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(f"backup\t{altroot}/backup")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on("zpool export backup").fails("pool is busy")
+            out = StringIO()
+            rc = self._run(mock, stack, out=out)
+        assert rc == 1
+        assert "CLEANUP INCOMPLETE" in out.getvalue()
+        assert "✗ still imported: backup" in out.getvalue()
+
 
 class TestLock:  # pylint: disable=missing-function-docstring,protected-access
     """M2R-16 / M3P.3 (M4a-5): one kernel lock for every command that changes state."""
@@ -2435,6 +2501,59 @@ class TestLock:  # pylint: disable=missing-function-docstring,protected-access
                 lock_mod.guard("prune", [])
                 os.close(lock_mod._STATE["fd"])
             assert Path(path).read_text(encoding="utf-8").startswith("zark prune (pid ")
+
+    def test_two_zark_runs_exclude_each_other(self):
+        # Mutation L2: the holder takes the lock through lib.lock itself, so a
+        # shared lock there would let both runs in.
+        hold = (
+            "import sys, time\n"
+            "sys.path.insert(0, sys.argv[2])\n"
+            "import lib.lock as lock\n"
+            "lock.LOCK_PATH = sys.argv[1]\n"
+            "lock.acquire('backup')\n"
+            "print('held', flush=True); time.sleep(60)\n"
+        )
+        repo = str(Path(__file__).resolve().parent.parent)
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.lock")
+            holder = subprocess.Popen(  # pylint: disable=consider-using-with
+                [sys.executable, "-c", hold, path, repo],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+                with (
+                    patch.object(lock_mod, "LOCK_PATH", path),
+                    patch.dict(lock_mod._STATE, clear=True),
+                    redirect_stdout(StringIO()),
+                ):
+                    try:
+                        lock_mod.guard("prune", [])
+                    except SystemExit as e:
+                        assert e.code == lock_mod.EX_TEMPFAIL
+                    else:
+                        os.close(lock_mod._STATE["fd"])
+                        raise AssertionError("a second run was not refused")
+            finally:
+                holder.kill()
+                _ = holder.wait()
+
+    def test_the_lock_file_is_private(self):
+        # Mutation L6: mode 0600 whatever the umask.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.lock")
+            old = os.umask(0)
+            try:
+                with (
+                    patch.object(lock_mod, "LOCK_PATH", path),
+                    patch.dict(lock_mod._STATE, clear=True),
+                ):
+                    lock_mod.acquire("backup")
+                    os.close(lock_mod._STATE["fd"])
+            finally:
+                _ = os.umask(old)
+            assert os.stat(path).st_mode & 0o777 == 0o600
 
     def test_a_killed_holder_leaves_no_stale_lock(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2505,6 +2624,11 @@ class TestCleanOnRealMounts:  # pylint: disable=missing-function-docstring
     def test_an_idle_tree_is_released_and_its_empty_directories_go(self):
         r = self._run("idle")
         assert r == {"rc": 0, "file": True, "mounted": False, "root": False}, r
+
+    def test_empty_directories_on_another_filesystem_stay(self):
+        # M4a review mutation C9: rmdir never walks into a filesystem mounted below a root.
+        r = self._run("otherfs")
+        assert r == {"inner": True}, r
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -5140,6 +5264,26 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
         rc, out = self._run(grub_guard.GUARD_SCRIPT, "", self._TANK)
         assert rc == 0, out
 
+    def test_motd_names_a_zark_drive_imported_without_an_altroot(self):
+        # Mutation G2: the MOTD's org.zark:format branch.
+        rc, out = self._run(apt_guard.MOTD_SCRIPT, "", self._TANK, fmt="2")
+        assert rc == 0, out
+        assert "tank" in out, out
+
+    def test_grub_guard_refuses_a_zark_drive_imported_without_an_altroot(self):
+        # Mutation G6: the grub guard's org.zark:format branch.
+        rc, out = self._run(grub_guard.GUARD_SCRIPT, "", self._TANK, fmt="2")
+        assert rc == 1, out
+        assert "tank" in out, out
+
+    def test_the_advice_never_exports_a_pool(self):
+        # Mutations G4 and G5: an export of a busy pool can leave /boot unmounted (P6).
+        for script, want in ((apt_guard.MOTD_SCRIPT, 0), (grub_guard.GUARD_SCRIPT, 1)):
+            rc, out = self._run(script, "", self._BACKUP)
+            assert rc == want, out
+            assert "backup" in out, out
+            assert "zpool export" not in out, out
+
 
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/identity.py and lib/registry.py (M1: I20–I25, hallazgo 7)
@@ -5606,6 +5750,19 @@ class TestForensics:  # pylint: disable=missing-function-docstring
         calls = mock.calls
         assert "zpool status -vP black" in calls, calls
         assert calls.index("zpool status -vP black") < calls.index("zpool export black")
+
+    def test_readback_captures_when_it_cannot_re_import(self):
+        # Mutation F3: the pool's state is kept when the re-import fails too.
+        dev = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
+        mock = MockShell()
+        mock.on(f"zpool import -o readonly=on -N -R /run/zark/altroot/black -d {dev} black").fails(
+            "cannot import 'black': I/O error"
+        )
+        mock.on_prefix("zpool status -vP black").fails("no such pool")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            rb = ZFS(make_log()).verify_exported_pool_readback("black", device=dev)
+        assert not rb.imported
+        assert mock.was_called("zpool status -vP black"), mock.calls
 
 
 _STATUS_HEAD = """  pool: black
@@ -10635,6 +10792,30 @@ class TestBackupCommand:
         assert rc == 1
         self._untouched(fake)
         assert "no owner recorded and nothing in common" in out.getvalue()
+
+    def test_unowned_drive_sharing_only_older_snapshots_is_accepted(self) -> None:
+        """M4a review mutation O5: every dataset is ROLLBACK (origin lost the
+        newest anchors), which still counts as something in common."""
+        fake = _fresh_fake()
+        _ = _engine_run(fake, "backup", "111", P1)
+        _tick(fake, "2026-10-10_00:00:00_daily")
+        _ = _engine_run(fake, "backup", "111", P2)
+        for ds, d in fake.ds.items():  # origin loses the anchors of P2
+            if ds.split("/")[0] in ("rpool", "bpool"):
+                d.bookmarks = []
+                d.snaps = [s for s in d.snaps if not s.name.startswith("zark_")]
+        del fake.ds["backup"].props["org.zark:origin-machine-id"]
+        with patch_sh(fake), redirect_stdout(StringIO()), patch("builtins.input", return_value=""):
+            states = {
+                p.state
+                for p in engine.plan(
+                    engine.read_origin(engine.source_pools(), strict=True),
+                    engine.read_dest("backup", strict=True),
+                    "",
+                )
+            }
+            engine.check_drive_owner("backup", Log())
+        assert states & set(engine.SHARED_STATES) == {engine.State.ROLLBACK}, states
 
     def test_other_systems_datasets_without_owner_are_refused(self) -> None:
         """M2R-7 (E11a): a registered drive holding another system's datasets

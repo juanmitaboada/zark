@@ -32,12 +32,15 @@ of clean's roots.
 
 Cases:
 
-    busy    a process keeps its cwd inside the bind, so the unmount fails
-    idle    nothing uses the bind
+    busy     a process keeps its cwd inside the bind, so the unmount fails
+    idle     nothing uses the bind
+    otherfs  no clean run: ``_remove_empty_dirs`` is called directly while
+             the bind, holding an empty directory, is still mounted
 
 Prints one JSON object: ``rc`` (clean's exit status), ``file`` (the file in
 the bound tmpfs still exists), ``mounted`` (the bind is still mounted),
-``root`` (``<workdir>/mnt/zark`` still exists).
+``root`` (``<workdir>/mnt/zark`` still exists); for ``otherfs`` only
+``inner`` (the empty directory inside the bind still exists).
 """
 
 import json
@@ -91,6 +94,14 @@ def main() -> int:
     with open(os.path.join(data, "file"), "w", encoding="ascii") as f:
         _ = f.write("precious\n")
     _check(["mount", "--bind", data, home])
+
+    if case == "otherfs":
+        inner = os.path.join(data, "empty")
+        os.makedirs(inner)
+        with patch.object(clean_mod, "ROOTS", (root,)):
+            _ = clean_mod._remove_empty_dirs(Log(log_file="/dev/null"))  # pylint: disable=protected-access
+        print(json.dumps({"inner": os.path.isdir(inner)}))
+        return 0
 
     busy = None
     if case == "busy":
