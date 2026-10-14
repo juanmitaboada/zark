@@ -4493,6 +4493,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("zpool import -o readonly=on").fails(
             "cannot import: insufficient replicas",
         )
+        mock.on("zpool import -o cachefile=none").succeeds()  # the cleanup's read-write import
         mock.on("zpool destroy").succeeds()
         mock.on("rm -rf").succeeds()
         with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
@@ -4677,6 +4678,61 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         for c in mock.calls:
             if c.startswith(("zpool create", "zpool import")):
                 assert "cachefile=none" in c, c
+
+    @staticmethod
+    def _stateful_pool(mock: MockShell, rw_import_ok: bool = True) -> None:
+        """``zpool list``/``readonly`` follow the imports, export and destroy."""
+        state = {"imported": False, "ro": False}
+        real = mock.mock_run
+
+        def spy(cmd: str, **kw: Any) -> RunResult:
+            recorded = real(cmd, **kw)  # mock.calls keeps every command
+            if cmd.startswith("zpool list -H -o name zarktest_"):
+                return RunResult(0 if state["imported"] else 1, "", "", cmd)
+            if cmd.startswith("zpool get -H -o value readonly zarktest_"):
+                return RunResult(0, "on\n" if state["ro"] else "off\n", "", cmd)
+            if cmd.startswith("zpool import") and "zarktest_" in cmd:
+                ok = "readonly=on" in cmd or rw_import_ok
+                if ok:
+                    state.update(imported=True, ro="readonly=on" in cmd)
+                return RunResult(0 if ok else 1, "", "" if ok else "I/O error", cmd)
+            if cmd.startswith(("zpool export zarktest_", "zpool destroy -f zarktest_")):
+                state["imported"] = False
+            return recorded
+
+        mock.mock_run = spy  # type: ignore[method-assign,assignment]
+
+    def test_the_read_back_pool_is_destroyed_read_write(self):
+        # M4aR-1: the read-back leaves the pool imported read-only, whose
+        # destroy returns 0 and writes nothing to its labels.
+        mock = self._cold_mock()
+        self._stateful_pool(mock)
+        result = self._cold(mock, back=True, now="/dev/sdc")
+        assert result.passed and result.cleanup_error == "", result
+        calls = mock.calls
+        ro = next(i for i, c in enumerate(calls) if "readonly=on" in c and "import" in c)
+        export = next(i for i, c in enumerate(calls) if c.startswith("zpool export") and i > ro)
+        rw = next(
+            i
+            for i, c in enumerate(calls)
+            if c.startswith("zpool import") and "readonly" not in c and i > export
+        )
+        destroy = next(i for i, c in enumerate(calls) if c.startswith("zpool destroy"))
+        assert ro < export < rw < destroy, calls
+        assert calls.index("wipefs -a /dev/sdc 2>/dev/null") > destroy
+
+    def test_a_test_pool_that_was_not_destroyed_is_reported(self):
+        mock = self._cold_mock()
+        self._stateful_pool(mock, rw_import_ok=False)
+        result = self._cold(mock, back=True, now="/dev/sdc")
+        assert "could not be imported read-write to destroy it: I/O error" in result.cleanup_error
+        assert "zpool import -d /dev/disk/by-id/usb-Stick_SER-0:0-part1" in result.cleanup_error
+        assert mock.was_not_called("zpool destroy"), mock.calls
+        with patch_sh(MockShell()):
+            text = generate_report(
+                "/dev/sdc", HealthReport(device="/dev/sdc"), result, obfuscate=False
+            )
+        assert "Test pool    : not destroyed: it could not be imported read-write" in text
 
     def test_test_pool_lives_under_zarks_altroot(self):
         # M4aR-3: a run killed with the pool imported leaves it where clean

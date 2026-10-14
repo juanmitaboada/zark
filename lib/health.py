@@ -322,7 +322,7 @@ _CHUNK_FILE_BYTES = 64 * 1024**2  # 64 MB per written file
 
 
 @dataclass
-class TestResult:
+class TestResult:  # pylint: disable=too-many-instance-attributes
     """Outcome of a destructive write-and-verify run."""
 
     profile: str
@@ -338,6 +338,8 @@ class TestResult:
     # corrupt on another run. Non-empty means "passed, but the enclosure is
     # not trustworthy".
     transport_errors: list[str] = field(default_factory=list)
+    # Why the throwaway pool was not destroyed afterwards; "" when it was.
+    cleanup_error: str = ""
 
 
 def device_size_bytes(dev: str) -> int:
@@ -507,10 +509,11 @@ def run_destructive_test(
     """Create a throwaway pool, write with churn, and verify re-import.
 
     DESTRUCTIVE: the caller must have confirmed and validated an empty device.
-    The test pool is always destroyed in the ``finally`` block, even on error,
-    so the device is left empty. ``wait_for_reconnect`` is called (cold only)
-    after the eject, to let the command prompt the operator to physically
-    reconnect; it must block until the drive is back.
+    The cleanup runs after the test, even on error: it destroys the test pool
+    and wipes the disk (see :func:`_remove_test_pool`); a pool it could not
+    destroy is named in the result's ``cleanup_error``. ``wait_for_reconnect``
+    is called (cold only) after the eject, to let the command prompt the
+    operator to physically reconnect; it must block until the drive is back.
     """
     # pylint: disable=too-many-arguments,too-many-locals
     # pylint: disable=too-many-positional-arguments,too-many-return-statements
@@ -526,7 +529,6 @@ def run_destructive_test(
     altroot = backup_altroot(test_pool)
     target = profile_target_bytes(profile, dev)
     cycles = _PROFILE_CYCLES.get(profile, 1)
-    bytes_written = 0
     if cold and not by_id:
         return TestResult(
             profile,
@@ -539,7 +541,11 @@ def run_destructive_test(
     # Mark the kernel-log position so we can later report only the transport
     # errors emitted during this test.
     dmesg_mark = _dmesg_now_ts()
-    try:
+    created = False
+
+    def _attempt() -> TestResult:
+        nonlocal created
+        bytes_written = 0
         log.info(f"Creating throwaway test pool '{test_pool}'...")
         # cachefile=none: the test pool never enters /etc/zfs/zpool.cache.
         # -m / is relative to the altroot: the pool mounts at the altroot.
@@ -558,6 +564,7 @@ def run_destructive_test(
                 f"could not create test pool: {r.stderr.strip()}",
                 _transport_errors_since(base, dmesg_mark),
             )
+        created = True
 
         log.info(f"Writing ~{target // (1024**3)} GB with churn ({cycles} cycle(s))...")
         bytes_written = _write_churn(altroot, target, cycles, log)
@@ -626,32 +633,73 @@ def run_destructive_test(
             detail,
             terrs,
         )
+
+    try:
+        result = _attempt()
     finally:
-        _remove_test_pool(test_pool, vdev, import_from, altroot, log)
+        cleanup_error = _remove_test_pool(test_pool, vdev, import_from, altroot, created, log)
+    result.cleanup_error = cleanup_error
+    return result
 
 
-def _remove_test_pool(test_pool: str, vdev: str, import_from: str, altroot: str, log: Log) -> None:
+def _destroy_test_pool(test_pool: str, import_from: str, altroot: str, log: Log) -> str:
+    """Destroy the test pool read-write; return why it was not, or "".
+
+    A pool imported read-only (the read-back's import) is exported and
+    imported read-write first: ``zpool destroy`` of a read-only pool returns
+    0 and writes nothing to its labels (module/zfs/spa.c, M4aR-1).
+    """
+    rw_import = f"zpool import -o cachefile=none -N -R {altroot} -d {import_from} {test_pool}"
+    imported = run(f"zpool list -H -o name {test_pool}").ok
+    if imported and run(f"zpool get -H -o value readonly {test_pool}").output == "on":
+        r = run(f"zpool export {test_pool}", log=log)
+        if not r.ok:
+            return f"the read-only pool could not be exported: {r.stderr.strip()}"
+        imported = False
+    if not imported:
+        r = run(rw_import, log=log)
+        if not r.ok:
+            return f"it could not be imported read-write to destroy it: {r.stderr.strip()}"
+    r = run(f"zpool destroy -f {test_pool}", log=log)
+    if not r.ok or run(f"zpool list -H -o name {test_pool}").ok:
+        return f"zpool destroy failed: {r.stderr.strip() or 'the pool is still imported'}"
+    log.ok(f"Test pool {test_pool} destroyed")
+    return ""
+
+
+def _remove_test_pool(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    test_pool: str, vdev: str, import_from: str, altroot: str, created: bool, log: Log
+) -> str:
     """Destroy the test pool and leave its disk blank: no orphan zfs_member
     partitions that the empty-drive check would later reject.
 
     The wipe goes to the disk ``vdev`` resolves to now, and only when that
     disk's label is the test pool's or there is none; a disk that is not
     connected, or that carries another pool, is left alone and named.
+    Returns why the test pool was not destroyed, or "" when it was (or was
+    never created). The wipe does not reach labels inside the old first
+    partition, so a pool that was not destroyed may still be listed there.
     """
     if not Path(vdev).exists():
         log.warn(f"{vdev} is not connected: test pool {test_pool} not destroyed, nothing wiped")
-        return
+        return f"{vdev} is not connected: nothing destroyed or wiped" if created else ""
     disk = os.path.realpath(vdev)
-    run(f"zpool import -o cachefile=none -N -R {altroot} -d {import_from} {test_pool} 2>/dev/null")
-    run(f"zpool destroy -f {test_pool} 2>/dev/null")
+    error = _destroy_test_pool(test_pool, import_from, altroot, log) if created else ""
+    if error:
+        error = (
+            f"{error}. Its labels may remain inside the first partition: "
+            + f"zpool import -d {import_from} lists it"
+        )
+        log.error(f"Test pool {test_pool} was not destroyed: {error}")
     run(f"rmdir {altroot} 2>/dev/null")
     label = read_pool_label(part(disk, 1)) or read_pool_label(disk)
     if label is not None and label.name != test_pool:
         log.warn(f"{disk} carries pool '{label.name}', not {test_pool}: not wiped")
-        return
+        return error
     run(f"wipefs -a {disk} 2>/dev/null")
     run(f"sgdisk --zap-all {disk} 2>/dev/null")
     run("sync")
+    return error
 
 
 # ── Diagnostic report ─────────────────────────────────────────────────────────
@@ -728,6 +776,8 @@ def generate_report(  # pylint: disable=too-many-locals
             f"Result       : {'PASS' if test.passed else 'FAIL'}",
             f"Detail       : {test.detail}",
         ]
+        if test.cleanup_error:
+            lines.append(f"Test pool    : not destroyed: {_redact(test.cleanup_error)}")
         if test.transport_errors:
             lines.append(
                 f"Transport errors during test ({len(test.transport_errors)}):",

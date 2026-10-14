@@ -265,9 +265,12 @@ def run(args: list[str]) -> None:
                 ],
             )
 
+        if test.cleanup_error:
+            log.error(f"Test pool was not destroyed: {test.cleanup_error}")
+
     # ── Phase 3: report on any risk or failure ───────────────────────────
     needs_report = report.has_risk or (
-        test is not None and (not test.passed or test.transport_errors)
+        test is not None and (not test.passed or test.transport_errors or test.cleanup_error)
     )
     if needs_report:
         content = generate_report(dev, report, test, obfuscate=obfuscate)
