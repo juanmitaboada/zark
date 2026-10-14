@@ -127,13 +127,15 @@ def _check_fua(base: str) -> Finding | None:
     r = run(f"sh -c \"dmesg | grep -F '[{base}]' | tail -40\"")
     if not r.ok or "doesn't support DPO or FUA" not in r.stdout:
         return None
+    # INFO, not WARN (M2P.12, M4a-12): most USB bridges report this, and an
+    # honest one flushes synchronously; only the known-bad list warns.
     return Finding(
-        level=WARN,
+        level=INFO,
         title="Cache flush (FUA)",
         detail=(
-            f"/dev/{base} reports 'doesn't support DPO or FUA'. Bridges with "
-            "this property may acknowledge writes from volatile cache before "
-            "data reaches NAND, risking pool corruption under load."
+            f"/dev/{base} reports 'doesn't support DPO or FUA', as most USB "
+            "bridges do. Harmless on an honest bridge; the known-problematic "
+            "ones are listed separately."
         ),
         see_hardware_doc=True,
     )
@@ -154,13 +156,15 @@ def _check_transport(base: str) -> Finding | None:
         "sh -c \"dmesg | grep -F 'scsi host' | grep -iE 'uas|usb-storage' | tail -1\"",
     ).output
     if "uas" in drv.lower() and "ignored" not in drv.lower():
+        # INFO (M4a-12): UAS is the normal driver; a bridge that mishandles
+        # it is flagged by the known-bad list, not by the driver alone.
         return Finding(
-            level=WARN,
+            level=INFO,
             title="USB transport",
             detail=(
                 f"/dev/{base} is using the UAS driver. On bridges that "
-                "mishandle UAS this stalls under write load. Consider "
-                "forcing usb-storage via a modprobe quirk."
+                "mishandle UAS this stalls under write load; such bridges "
+                "are flagged separately."
             ),
             see_hardware_doc=True,
         )

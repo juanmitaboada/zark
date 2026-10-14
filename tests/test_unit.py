@@ -169,6 +169,7 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_fua,
     _check_transport,
     _transport_errors_since,
+    check_device,
     estimate_seconds,
     generate_report,
     pool_findings,
@@ -4132,7 +4133,7 @@ class TestHealthChecks:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             finding = _check_fua("sda")
         assert finding is not None
-        assert finding.level == WARN
+        assert finding.level == INFO  # M4a-12: most bridges say this
         assert finding.see_hardware_doc
 
     def test_fua_no_finding_when_clean(self):
@@ -4141,14 +4142,35 @@ class TestHealthChecks:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             assert _check_fua("sda") is None
 
-    def test_transport_uas_warns(self):
+    def test_transport_uas_is_info(self):
         mock = MockShell()
         mock.on("lsblk -dn -o TRAN /dev/sda").succeeds("usb")
         mock.on("scsi host").succeeds("[ 1.0] scsi host0: uas")
         with patch_sh(mock):
             finding = _check_transport("sda")
         assert finding is not None
-        assert finding.level == WARN
+        assert finding.level == INFO  # M4a-12: the known-bad list warns, not the driver
+
+    def _report(self, vid_pid: tuple[str, str]) -> HealthReport:
+        mock = MockShell()
+        mock.on("lsblk -dn -o TRAN /dev/sda").succeeds("usb")
+        mock.on("scsi host").succeeds("[ 1.0] scsi host0: uas")
+        mock.on("dmesg").succeeds("[ 1.0] sd 0:0:0:0: [sda] doesn't support DPO or FUA\n")
+        with (
+            patch_sh(mock),
+            patch("lib.health.whole_disk", return_value="/dev/sda"),
+            patch("lib.health.usb_ids", return_value=vid_pid),
+        ):
+            return check_device("/dev/sda")
+
+    def test_fua_and_uas_on_an_unknown_bridge_is_no_risk(self):
+        # prepare asks, and health writes its report, only on has_risk (M2P.12).
+        report = self._report(("152d", "0583"))
+        assert {f.title for f in report.findings} >= {"Cache flush (FUA)", "USB transport"}
+        assert not report.has_risk
+
+    def test_known_bad_bridge_is_still_a_risk(self):
+        assert self._report(("0634", "5604")).has_risk
 
     def test_transport_usb_storage_info(self):
         mock = MockShell()
