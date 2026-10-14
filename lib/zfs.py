@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lib import forensics
 from lib.identity import BY_ID_DIR
 from lib.log import Log
 from lib.sh import run
@@ -368,6 +369,7 @@ class ZFS:
         r = run(cmd, log=self.log)
         if not r.ok:
             self.log.error(f"Read-back of {name}: could not re-import: {r.stderr.strip()}")
+            _ = forensics.capture(name, "read-back could not re-import the pool", self.log)
             return Readback(imported=False, error=r.stderr.strip())
 
         health = self.pool_health(name)
@@ -375,6 +377,8 @@ class ZFS:
         if health != "ONLINE":
             status = run(f"zpool status -v {name}").output
             self.log.error(f"Read-back of {name}: re-imported, health={health}")
+            # While it is still imported: zpool status -v needs the pool.
+            _ = forensics.capture(name, f"read-back health {health}", self.log)
 
         reexported = (
             run(f"zpool export {name}", log=self.log).ok

@@ -18,7 +18,7 @@ Destroys ZFS pool, overwrites start/end with random data,
 wipes signatures, destroys partition table.
 """
 
-from lib import engine, sh
+from lib import engine, forensics, sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
@@ -45,6 +45,8 @@ def _destroy_labelled_pool(name: str, guid: str, vdev: str, zfs: ZFS, log: Log) 
     elif not zfs.import_backup_pool(name, vdev):
         log.warn(f"Could not import '{name}' — continuing with wipe")
         return
+    # The pool's state goes with it: keep it first (I7).
+    _ = forensics.capture(name, "before purge destroys it", log)
     r = sh.run(f"zpool destroy {name}", log=log)
     if r.ok:
         log.ok(f"Pool {name} destroyed")

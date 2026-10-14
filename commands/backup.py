@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import engine, sh, status
+from lib import engine, forensics, sh, status
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -802,12 +802,14 @@ def run(
             log.ok(f"{pool}: ONLINE")
         elif health == "DEGRADED":
             log.warn(f"{pool}: DEGRADED")
+            _ = forensics.capture(pool, "pre-check: DEGRADED", log)
             if not log.ask(f"{pool} is DEGRADED. Continue anyway?"):
                 log.fatal(
                     f"Aborted — {pool} is DEGRADED",
                     solutions=[f"Run: zpool status {pool}"],
                 )
         else:
+            _ = forensics.capture(pool, f"pre-check: {health}", log)
             log.fatal(f"{pool} is {health}", solutions=[f"Run: zpool status {pool}"])
 
     # ── Pool info summary ────────────────────────────────────────────────

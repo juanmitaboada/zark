@@ -131,6 +131,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
     backup_layout,
     engine,
+    forensics,
     grub_guard,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -5466,6 +5467,48 @@ def _purge_ident(label: PoolLabel | None) -> DiskIdentity:
     )
 
 
+class TestForensics:  # pylint: disable=missing-function-docstring
+    """I7 (M4a-9): a pool's state is kept before anything changes it."""
+
+    def test_capture_writes_every_section_privately_next_to_the_log(self):
+        mock = MockShell()
+        mock.on("zpool status -vP black").succeeds("state: DEGRADED\nerrors: 3 data errors")
+        mock.on("zpool events -v black").fails("no such pool")
+        mock.on_prefix("zpool history -il black").succeeds("2026-09-25 receive")
+        mock.on("command -v journalctl").succeeds("/usr/bin/journalctl")
+        mock.on_prefix("journalctl -k").succeeds("kernel line")
+        mock.on_prefix("lsblk").succeeds("sda 1.8T")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            path = forensics.capture("black", "pre-check: DEGRADED", make_log())
+        try:
+            assert os.path.dirname(path) == os.path.dirname(Log.default_file())
+            assert os.path.basename(path).startswith("zark-forensics-black-")
+            assert os.stat(path).st_mode & 0o777 == 0o600
+            text = Path(path).read_text(encoding="utf-8")
+        finally:
+            os.unlink(path)
+        assert "reason: pre-check: DEGRADED" in text
+        assert "3 data errors" in text
+        assert "$ zpool events -v black  (exit 1)" in text and "no such pool" in text
+        assert "zpool history -il black | tail -n 200" in text
+        assert "kernel line" in text and "sda 1.8T" in text
+
+    def test_readback_captures_while_the_pool_is_still_imported(self):
+        dev = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
+        mock = MockShell()
+        mock.on(
+            f"zpool import -o readonly=on -N -R /run/zark/altroot/black -d {dev} black"
+        ).succeeds()
+        mock.on("zpool list -H -o health black").succeeds("DEGRADED")
+        mock.on("zpool status").succeeds("errors: 3 data errors")
+        mock.on("zpool export black").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            _ = ZFS(make_log()).verify_exported_pool_readback("black", device=dev)
+        calls = mock.calls
+        assert "zpool status -vP black" in calls, calls
+        assert calls.index("zpool status -vP black") < calls.index("zpool export black")
+
+
 class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
     """I21: purge recognises the registered drive and removes its entries."""
 
@@ -5499,6 +5542,10 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         self._run(cfg_dir, ident, mock)
         assert mock.was_called(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup")
         assert mock.was_called("zpool destroy backup")
+        # I7: the pool's state is kept before it is destroyed.
+        assert mock.calls.index("zpool status -vP backup") < mock.calls.index(
+            "zpool destroy backup"
+        )
         assert mock.was_called("sgdisk --zap-all /dev/sdb")
         data = json.loads((cfg_dir / "known_drives.json").read_text())
         assert list(data) == ["black"]
