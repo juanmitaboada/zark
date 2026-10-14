@@ -521,7 +521,9 @@ def run_destructive_test(
     vdev = f"{BY_ID_DIR}/{by_id}" if by_id else f"/dev/{base}"
     import_from = f"{vdev}-part1" if by_id else BY_ID_DIR
     test_pool = f"zarktest_{int(time.time())}"
-    mountpoint = f"/run/{test_pool}"
+    # zark's own altroot: a run killed with the pool imported leaves it where
+    # `zark clean` finds and exports it.
+    altroot = backup_altroot(test_pool)
     target = profile_target_bytes(profile, dev)
     cycles = _PROFILE_CYCLES.get(profile, 1)
     bytes_written = 0
@@ -540,9 +542,10 @@ def run_destructive_test(
     try:
         log.info(f"Creating throwaway test pool '{test_pool}'...")
         # cachefile=none: the test pool never enters /etc/zfs/zpool.cache.
+        # -m / is relative to the altroot: the pool mounts at the altroot.
         r = run(
             "zpool create -f -o ashift=12 -o cachefile=none -O atime=off "
-            + f"-m {mountpoint} {test_pool} {vdev}",
+            + f"-R {altroot} -m / {test_pool} {vdev}",
             log=log,
         )
         if not r.ok:
@@ -557,7 +560,7 @@ def run_destructive_test(
             )
 
         log.info(f"Writing ~{target // (1024**3)} GB with churn ({cycles} cycle(s))...")
-        bytes_written = _write_churn(mountpoint, target, cycles, log)
+        bytes_written = _write_churn(altroot, target, cycles, log)
 
         log.info("Exporting test pool...")
         run("sync")
@@ -586,7 +589,8 @@ def run_destructive_test(
         run("sync")
         run("sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
         imp = run(
-            f"zpool import -o readonly=on -o cachefile=none -N -d {import_from} {test_pool}",
+            f"zpool import -o readonly=on -o cachefile=none -N -R {altroot} "
+            + f"-d {import_from} {test_pool}",
             log=log,
         )
         # Transport errors are read AFTER the re-import attempt so the import's
@@ -623,12 +627,10 @@ def run_destructive_test(
             terrs,
         )
     finally:
-        _remove_test_pool(test_pool, vdev, import_from, mountpoint, log)
+        _remove_test_pool(test_pool, vdev, import_from, altroot, log)
 
 
-def _remove_test_pool(
-    test_pool: str, vdev: str, import_from: str, mountpoint: str, log: Log
-) -> None:
+def _remove_test_pool(test_pool: str, vdev: str, import_from: str, altroot: str, log: Log) -> None:
     """Destroy the test pool and leave its disk blank: no orphan zfs_member
     partitions that the empty-drive check would later reject.
 
@@ -640,9 +642,9 @@ def _remove_test_pool(
         log.warn(f"{vdev} is not connected: test pool {test_pool} not destroyed, nothing wiped")
         return
     disk = os.path.realpath(vdev)
-    run(f"zpool import -o cachefile=none -N -d {import_from} {test_pool} 2>/dev/null")
+    run(f"zpool import -o cachefile=none -N -R {altroot} -d {import_from} {test_pool} 2>/dev/null")
     run(f"zpool destroy -f {test_pool} 2>/dev/null")
-    run(f"rmdir {mountpoint} 2>/dev/null")
+    run(f"rmdir {altroot} 2>/dev/null")
     label = read_pool_label(part(disk, 1)) or read_pool_label(disk)
     if label is not None and label.name != test_pool:
         log.warn(f"{disk} carries pool '{label.name}', not {test_pool}: not wiped")

@@ -4678,6 +4678,26 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
             if c.startswith(("zpool create", "zpool import")):
                 assert "cachefile=none" in c, c
 
+    def test_test_pool_lives_under_zarks_altroot(self):
+        # M4aR-3: a run killed with the pool imported leaves it where clean
+        # finds it; without -R it was "left alone, not imported by zark".
+        mock = self._cold_mock()
+        _ = self._cold(mock, back=True, now="/dev/sdc")
+        cmds = [c for c in mock.calls if c.startswith(("zpool create", "zpool import"))]
+        assert cmds, mock.calls
+        for c in cmds:
+            m = re.search(r" -R (/run/zark/altroot/zarktest_\d+) ", c)
+            assert m, c
+        assert " -m / " in cmds[0], cmds[0]
+        listing = MockShell()
+        listing.on("zpool list -H -o name,altroot").succeeds(
+            "rpool\t-\nzarktest_1\t/run/zark/altroot/zarktest_1"
+        )
+        listing.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+        listing.on("systemctl is-active sanoid.timer").succeeds("active")
+        with patch_sh(listing):
+            assert clean_mod.inventory().pools == ["zarktest_1"]
+
     def test_a_disk_that_does_not_come_back_is_not_wiped(self):
         mock = self._cold_mock()
         result = self._cold(mock, back=False, now="")
