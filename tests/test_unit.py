@@ -10635,6 +10635,41 @@ _NVME = "/dev/disk/by-id/nvme-Samsung_X_S1"
 _USB = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0"
 
 
+class TestM2R16Smalls:  # pylint: disable=missing-function-docstring,protected-access
+    """M2R-16 (M4a-14): change-key failures in recover's verdict; prepare's
+    keystore snapshot never left in origin."""
+
+    def test_failed_change_key_is_an_error(self):
+        mock = MockShell()
+        mock.on("zfs list -H -o name,encryptionroot -r rpool").succeeds(
+            "rpool\trpool\nrpool/ROOT\t-\nrpool/ROOT/be\trpool/ROOT/be\nrpool/home\trpool/home"
+        )
+        mock.on("zfs change-key -i rpool/ROOT/be").succeeds()
+        mock.on("zfs change-key -i rpool/home").fails("key not loaded")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            errors = recover_mod._restore_encryption_root(make_log())
+        assert errors == ["rpool/home: change-key -i failed (still its own encryptionroot)"]
+
+    def test_keystore_snapshot_is_destroyed_when_the_send_dies(self):
+        mock = MockShell()
+        mock.on_prefix("zfs snapshot rpool/keystore@prepare_").succeeds()
+        mock.on_prefix("zfs destroy rpool/keystore@prepare_").succeeds()
+        log = make_log()
+        cleanup = Cleanup(log)
+        with (
+            patch_sh(mock),
+            patch.object(prepare_mod.sh, "run_pipe", side_effect=KeyboardInterrupt),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                _ = prepare_mod._send_keystore("blue", cleanup, log)
+            except KeyboardInterrupt:
+                pass
+            assert mock.was_not_called("zfs destroy")
+            cleanup.run()  # what the signal handler or atexit does
+        assert mock.was_called("zfs destroy rpool/keystore@prepare_")
+
+
 class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
     """M2V-2 (M4a-6): the bpool refusal tells this system's bpool from another disk's."""
 

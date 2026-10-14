@@ -224,7 +224,7 @@ def run(
 
     # ── Keystore: outside the rpool tree, the last ZFS work before export ─
     log.step(3, 4, "Sending the keystore...")
-    keystore_ok = _send_keystore(new_pool, log)
+    keystore_ok = _send_keystore(new_pool, cleanup, log)
     complete = res.ok and keystore_ok
 
     # ── Export, read back, register ──────────────────────────────────────
@@ -345,14 +345,24 @@ def _ask_retention(log: Log) -> dict[str, int]:
         return values
 
 
-def _send_keystore(new_pool: str, log: Log) -> bool:
-    """Send rpool's keystore zvol, then drop the snapshot that carried it (I-B)."""
+def _send_keystore(new_pool: str, cleanup: Cleanup, log: Log) -> bool:
+    """Send rpool's keystore zvol, then drop the snapshot that carried it (I-B).
+
+    The destroy is tracked in Cleanup from the moment the snapshot exists,
+    so a run that dies in the send does not leave it in origin (M4a-14).
+    """
     snap = f"rpool/keystore@prepare_{datetime.now(UTC):%Y%m%d_%H%M%S}"
     if not sh.run(f"zfs snapshot {snap}", log=log).ok:
         log.error("Could not snapshot the keystore")
         return False
+
+    def drop() -> None:
+        _ = sh.run(f"zfs destroy {snap}", log=log)
+
+    cleanup.track_action(drop)
     r = sh.run_pipe(f"zfs send {snap}", f"zfs receive -u {new_pool}/keystore", log=log)
-    _ = sh.run(f"zfs destroy {snap}", log=log)
+    drop()
+    cleanup.untrack_action(drop)
     if not r.ok:
         log.error(f"Keystore send failed: {r.stderr.strip()}")
         return False

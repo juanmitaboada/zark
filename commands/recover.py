@@ -1205,6 +1205,40 @@ def _install_boot_chain(  # pylint: disable=too-many-statements,too-many-branche
     apt_guard.install(target_root=RECOVER_MNT, log=log)
 
 
+def _restore_encryption_root(log: Log) -> list[str]:
+    """``zfs change-key -i`` every received dataset back under rpool's key.
+
+    Returns one error per dataset left as its own encryptionroot, for the
+    verdict (M2R-16, M4a-14).
+    """
+    errors: list[str] = []
+    log.info("Restoring encryption hierarchy (encryptionroot → rpool)...")
+    ds_list = sh.run("zfs list -H -o name,encryptionroot -r rpool").output
+    changed = 0
+    for line in ds_list.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        ds, eroot = parts
+        # Skip rpool itself, containers, and datasets already correct
+        if ds == "rpool" or eroot == "rpool" or eroot == "-":
+            continue
+        r = sh.run(f"zfs change-key -i {ds}")
+        if r.ok:
+            changed += 1
+            log.dbg(f"  change-key -i: {ds}")
+        else:
+            # In the verdict (M2R-16, M4a-14): a dataset left as its own
+            # encryptionroot is not the layout the installer made.
+            log.warn(f"  change-key -i failed: {ds}: {r.stderr.strip()}")
+            errors.append(f"{ds}: change-key -i failed (still its own encryptionroot)")
+    if changed:
+        log.ok(f"Encryption hierarchy restored ({changed} dataset(s) → encryptionroot=rpool) ✓")
+    elif not errors:
+        log.ok("Encryption hierarchy already correct ✓")
+    return errors
+
+
 def run(
     args: list[str],
 ):  # pylint: disable= too-many-statements, too-many-branches, too-many-locals
@@ -1428,27 +1462,7 @@ def run(
     # received dataset becomes its own encryptionroot.  The Ubuntu
     # installer creates all datasets inheriting from rpool, so we must
     # restore that relationship with `zfs change-key -i`.
-    log.info("Restoring encryption hierarchy (encryptionroot → rpool)...")
-    ds_list = sh.run("zfs list -H -o name,encryptionroot -r rpool").output
-    changed = 0
-    for line in ds_list.splitlines():
-        parts = line.split("\t")
-        if len(parts) != 2:
-            continue
-        ds, eroot = parts
-        # Skip rpool itself, containers, and datasets already correct
-        if ds == "rpool" or eroot == "rpool" or eroot == "-":
-            continue
-        r = sh.run(f"zfs change-key -i {ds}")
-        if r.ok:
-            changed += 1
-            log.dbg(f"  change-key -i: {ds}")
-        else:
-            log.warn(f"  change-key -i failed: {ds}: {r.stderr.strip()}")
-    if changed:
-        log.ok(f"Encryption hierarchy restored ({changed} dataset(s) → encryptionroot=rpool) ✓")
-    else:
-        log.ok("Encryption hierarchy already correct ✓")
+    errors += _restore_encryption_root(log)
 
     # ── 11. Boot filesystem (mount properties were set at receive) ───────
     log.step(11, TOTAL_STEPS, "Setting bootfs...")
