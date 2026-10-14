@@ -539,13 +539,14 @@ def _list_snapshots(pool: str, log: Log) -> list[Snap]:
     (M3R-9): a failed read of the marks would turn the drive into a legacy
     one and pick the default point from org.zark:last-point alone."""
     try:
-        return engine.drive_snapshots(pool, strict=True)
+        snaps = engine.drive_snapshots(pool, strict=True)
     except engine.ReadError as e:
         log.fatal(
             f"Cannot read the snapshots of {pool}: {e}",
             causes=["The drive did not answer a zfs listing; nothing was written"],
             solutions=[f"Check the drive: zpool status {pool}", "Run recover again"],
         )
+    return snaps
 
 
 def _referenced(snapshots: list[str]) -> dict[str, int]:

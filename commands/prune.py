@@ -253,9 +253,10 @@ def _reread(pool: str, log: Log) -> dict[str, Dest]:
     """The drive's listing after a removal; fatal when it cannot be read, as
     every read that decides a removal here is (M3R-8)."""
     try:
-        return engine.read_dest(pool, strict=True)
+        dest = engine.read_dest(pool, strict=True)
     except engine.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
+    return dest
 
 
 def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylint: disable=too-many-locals

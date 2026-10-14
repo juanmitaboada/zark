@@ -9952,7 +9952,7 @@ class TestRetentionPolicy:
         p = ret.plan_prune(dest, complete, ret.Policy(window_days=30), NOW)
         assert _gone(p) == {f"{top}@{_pt('2026-11-02')}", f"{child}@{_pt('2026-11-02')}"}
         assert p.datasets == []
-        assert ret.whole_datasets(dest, p.snapshots) == []
+        assert not ret.whole_datasets(dest, p.snapshots)
 
     def test_a_month_with_no_whole_point_keeps_its_newest_run_complete_one(self) -> None:
         """M3F-5 5b: the month's point is its newest whole point; with none
@@ -10901,8 +10901,8 @@ class TestStatus:
             good = status_lib.gather(cfg, Log())
             fake.fail_cmds.add("zfs list -Hp -t snapshot,bookmark")
             bad = status_lib.gather(cfg, Log())
-        assert good.shared == [] and not good.read_error
-        assert bad.shared == [] and bad.read_error.startswith("could not read the source pools")
+        assert not good.shared and not good.read_error
+        assert not bad.shared and bad.read_error.startswith("could not read the source pools")
         assert bad.ages == good.ages and bad.residues == 0
         text = status_lib.motd_text(bad)
         assert "could not read the source pools" in text and "no anchor" not in text
