@@ -158,8 +158,9 @@ def _tops(mounts: list[str]) -> list[str]:
 def _remove_empty_dirs(log: Log) -> list[str]:
     """rmdir every empty directory under ROOTS, deepest first, on one filesystem.
 
-    Called only when no mount is left under ROOTS. Returns what stays (files,
-    or directories that could not be removed), never deleting a file.
+    Called only when no mount is left under ROOTS and no zark pool is still
+    imported. Returns what stays (files, or directories that could not be
+    removed), never deleting a file.
     """
     left: list[str] = []
     for root in ROOTS:
@@ -221,7 +222,10 @@ def run(args: list[str]) -> None:
         log.ok("sanoid.timer started")
 
     after = inventory()
-    leftovers = _remove_empty_dirs(log) if not after.mounts else []
+    # rmdir of an empty directory detaches a copy mounted there in another
+    # mount namespace (the copies that keep a pool's export busy): no
+    # removal while a mount or a zark pool is left.
+    leftovers = _remove_empty_dirs(log) if not after.mounts and not after.pools else []
     remaining = [
         *(f"✗ still mounted: {t}" for t in after.mounts),
         *(f"✗ still imported: {p}" for p in after.pools),
@@ -238,6 +242,11 @@ def run(args: list[str]) -> None:
                 *remaining,
                 *kept,
                 "",
+                *(
+                    ["No directory was removed while a zark pool is still imported."]
+                    if after.pools
+                    else []
+                ),
                 "Nothing below a mount that is still there was removed.",
                 "A process may be using it (fuser -vm <path>), or a copy may",
                 "be held in another mount namespace: reboot to release it.",

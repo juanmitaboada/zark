@@ -2450,6 +2450,23 @@ class TestClean:  # pylint: disable=missing-function-docstring
         assert "CLEANUP INCOMPLETE" in out.getvalue()
         assert "✗ still imported: backup" in out.getvalue()
 
+    def test_no_directory_is_removed_while_a_zark_pool_stays(self):
+        # M4aR-6 (M4aF-7): rmdir would detach copies held in other namespaces,
+        # the ones that keep the export busy.
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            os.makedirs(os.path.join(altroot, "backup", "home"))
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(f"backup\t{altroot}/backup")
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on("zpool export backup").fails("pool is busy")
+            out = StringIO()
+            rc = self._run(mock, stack, out=out)
+            kept = Path(altroot, "backup", "home").is_dir()
+        assert rc == 1 and kept
+        assert "No directory was removed while a zark pool is still imported." in out.getvalue()
+
 
 class TestLock:  # pylint: disable=missing-function-docstring,protected-access
     """M2R-16 / M3P.3 (M4a-5): one kernel lock for every command that changes state."""
