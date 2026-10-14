@@ -10,8 +10,165 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M3 (2.0.0-rc3)** on top of M2 (2.0.0-rc2),
-M1 (2.0.0-rc1) and the development-tooling consolidation that preceded them.
+The tree currently carries **M4a (2.0.0-rc4)** on top of M3 (2.0.0-rc3),
+M2 (2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling consolidation
+that preceded them.
+
+### M4a: guards and destructive commands (2.0.0-rc4)
+
+#### Added
+
+- **One lock for every command that changes state** (M4a-5). The entry
+  point takes an exclusive `flock(2)` on `/run/zark/zark.lock`, without
+  waiting, before it loads the command. A second run is refused at once,
+  naming the run that holds it ("zark backup (pid N, since T)"), with exit
+  status 75. The kernel releases the lock on any death of the process,
+  SIGKILL included, so it is never left stale; child processes do not
+  inherit it. `status`, `explore`, `monitor` and `registry` with no
+  subcommand or `list` run without it. Two backups at once could remove
+  each other's points, and `zark prune` could run during a backup.
+- **Forensic capture before remediation** (I7, M4a-9). Before anything
+  changes or loses a pool's state, zark writes
+  `zark-forensics-<pool>-<UTC>.txt` next to `zark.log` (mode 0600): `zpool
+  status -vP`, `zpool events -v` for the pool, the end of `zpool history
+  -il`, the kernel log of the last two hours, `lsblk` and the USB bridge
+  ids of the pool's disks. It runs, without asking, when the read-back
+  after a backup or prepare fails or is not ONLINE, when backup's
+  pre-check finds a pool that is not clean, and in `purge` before `zpool
+  destroy`. black's checksum errors of 2026-09-25 could not be explained
+  afterwards because purge destroyed the only `zpool status -v`.
+- **Pool health in read-only `zark health`** (I11, M4a-11), without
+  importing anything: an imported pool on the disk is read from its
+  counters (`zpool status -vp`); an exported one from the state `zpool
+  import -d <partition>` reports, with the commands that read its
+  counters under zark's own altroot.
+
+#### Changed
+
+- **`zark clean` touches only what zark mounted or imported** (H6, M4a-1,
+  M4a-2). It used to run `umount -R` and then `rm -rf` on `/mnt/zark` and
+  `/mnt/recover`, so a filesystem still mounted there lost its files; it
+  ran `zfs unmount -a`, unmounted `/run/keystore/rpool` whatever was
+  mounted there, and exported with `-f` every imported pool, rpool and
+  bpool included when rpool was imported. It now builds an inventory of
+  zark's own state
+  (mounts below `/mnt/zark`, `/mnt/recover`, `/mnt/repair`,
+  `/run/zark/altroot` and `/run/zark/probe`; pools imported with an
+  altroot below them; `zark_ks_*` keystore mappings and a keystore mount
+  on top of `/run/keystore/rpool` that comes from one; `sanoid.timer`
+  left stopped by an interrupted backup; `zvol_inhibit_dev=1` left by
+  fix-rpool-mountpoint), shows it, lists the imported pools it leaves
+  alone, and asks (default no). Mounts are unmounted without `-l`, pools
+  exported without `-f`, and only directories left empty are removed
+  (`rmdir`), after every mount below them is gone. Anything still there
+  ends **CLEANUP INCOMPLETE**, exit 1, naming it. The same rules apply on
+  an installed system and on a live session.
+- **The guards see an imported backup pool** (H18, D3, M4a-3). The APT
+  hook, its MOTD reminder and the grub guard looked only at `zpool
+  import`. An imported pool other than rpool/bpool now counts as external
+  when it has an altroot or carries `org.zark:format` (a drive written by
+  zark 1.0.12 or rc1 imported by hand without an altroot puts its kernels
+  in the running system's `grub.cfg`: `10_linux_zfs` takes, in every
+  imported pool, the filesystems whose mountpoint is the pool's altroot or
+  `/`). A permanent data pool imported without an altroot does not block.
+  The advice says to let a running backup finish or end a mount with `zark
+  umount`, then disconnect; it no longer suggests `zpool export`.
+- **`setup` installs both guards** (M4a-4), overwriting a copy that
+  differs; re-running it changes nothing. The grub guard used to reach a
+  system only through recover, repair-boot or finish.
+- **The keystore zvol is found by its dataset name** (H11): each whole
+  `/dev/zdN` is asked its name with `zvol_id`, and `/dev/zvol/<pool>/keystore`
+  is the fallback. The previous code picked by position in a text-sorted
+  list (`zd112` before `zd16`) and used a single zvol of any pool with a
+  warning.
+- **System pools are imported by-id first** (R2-9): `-d /dev/disk/by-id`,
+  then a device hint and its directory, then an auto-scan, each named in
+  a warning when it is not by-id. repair-boot ends **BOOT REPAIR
+  INCOMPLETE** while a system pool has kernel-named vdevs, since the
+  `zpool.cache` it writes records them.
+- A disk with no medium (size 0) is refused before anything is asked
+  (M1P.12).
+- **Several boot environments** (M4a-8): on a drive, a menu lists each
+  with its newest snapshot's time, the newest the default; on the
+  installed system the one mounted at `/` is taken; on a live session the
+  same menu. recover, `zark mount`, `mount local`, `chroot` and
+  repair-boot used the alphabetically first.
+- **Destructive health test** (H19): the throwaway pool is created and
+  imported by its by-id name with `cachefile=none`; a cold pass without a
+  by-id name fails before writing; at the end only the disk that by-id
+  resolves to now is wiped, and only when its label is the test pool's or
+  there is none. The picker lists one physical disk once (I10).
+- **backup's pre-check shows the damage** (I8, M4a-10): a DEGRADED pool,
+  or an ONLINE one with non-zero READ/WRITE/CKSUM counters (which passed
+  silently), is captured, its counters and first 20 permanent errors
+  shown, and asked about with default no.
+- **FUA and UAS findings are INFO** (M2P.12, M4a-12): most USB bridges
+  report no DPO/FUA, and UAS is the normal driver. WARN, prepare's
+  question and health's report file come from the known-bad bridge list
+  and, in read-only health, a damaged pool.
+- **`purge` checks every step and verifies the wipe** (M4a-13). A failed
+  `zpool destroy` stops before anything is overwritten; every wipe step
+  is checked, and all run even after one fails; then `zdb -l` on the old
+  first partition, no partition left and `blkid -p` finding nothing.
+  Any failure ends **PURGE INCOMPLETE**, exit 1, and the registry entries
+  and the pool's anchors in the source stay.
+- **A drive with no owner recorded is accepted only when it shares
+  something** (M2R-7, M4a-7). Before keys, questions or the point, a
+  read-only survey with the run's own planner; with nothing in common
+  (no resume, incremental, bookmark, rollback, written or at-point
+  dataset) it is refused: "no owner recorded and nothing in common with
+  this system: nothing was changed". The owner is written by prepare and
+  by a run that accepted the drive, never by a refusal.
+- **The bpool refusal tells this system's bpool from another disk's**
+  (M2V-2, M4a-6). It lists every importable bpool with its id and devices:
+  the one on rpool's disk is imported by id; any other must not be
+  imported (it would mount over `/boot`) and its disk disconnected; with
+  none on rpool's disk, the system has no bpool of its own. The advice
+  never includes exporting bpool: on a running systemd system the export
+  fails as busy (service mount namespaces hold copies of `/boot`) after
+  unmounting the host's `/boot` (P6 on eli).
+- recover puts a failed `zfs change-key -i` in its verdict (**RECOVERY
+  COMPLETED WITH ERRORS**); prepare's keystore snapshot is destroyed by the
+  cleanup when the run dies in the send (M2R-16, M4a-14).
+
+#### Known limitations
+
+- `zark clean` cannot release a mount held in another mount namespace (a
+  service's or a snap's): it says so, and a reboot releases it.
+- A drive prepared by zark 2.0.0-rc2 or earlier and never backed up has
+  no owner and nothing in common, and is refused; `prepare` it again.
+- A system whose disk holds no bpool is refused while another disk's
+  bpool is importable; with none importable it backs up without one, as
+  before.
+- `clean` reuses umount's tree unmount unchanged; the propagation of
+  unmounts to other namespaces (X-3, X-4) is M4b's.
+
+#### Rejected approaches
+
+- **A lock file with a pid** checked for liveness: a reused pid or a
+  killed run leaves it wrong; `flock(2)` is released by the kernel.
+- **`clean` by environment** (everything on a live session, only zark's
+  on an installed system): the altroot already tells zark's imports apart
+  in both, and a pool imported by hand on a live session is the operator's.
+- **Forced or lazy unmounts and exports in `clean`** (`umount -l`,
+  `zpool export -f`): a mount that disappears from view while still in
+  use makes the directory below look empty to the removal that follows,
+  and a forced export pulls a pool from under whoever is using it.
+- **Asking before the forensic capture**: it changes nothing and the
+  answer is always yes. Capturing after the export: the events and
+  errors are gone by then.
+- **Only warning for an ONLINE pool with error counters** (M4a-10 10b):
+  checksum errors on an ONLINE pool are damage already done.
+- **Importing the pool read-only in `health` to read its counters**
+  (M4a-11 11b): a read-only check should not import, and importing a
+  damaged pool is the step that can fail or hang.
+- **Removing purge's registry entry and anchors after a failed step**
+  (M4a-13 13b): it loses the only record of a pool that may still be on
+  the disk.
+- **A typed ADOPT for a drive with no owner and nothing in common**
+  (M4a-7 7b): purge and prepare already give that path.
+- **Supporting systems without bpool** (M4a-6 6b): backup, recover and
+  finish would all need their own work; out of M4a's size.
 
 ### M3 — space (2.0.0-rc3)
 

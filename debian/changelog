@@ -1,3 +1,35 @@
+zark (2.0.0~rc4-1) UNRELEASED; urgency=medium
+
+  * Milestone M4a of zark 2 (guards and destructive commands). Not for
+    release: nothing is published until the final 2.0.0.
+  * clean: acts only on what zark mounted or imported (mounts below its
+    own roots, pools imported under them, its keystore mappings, a stopped
+    sanoid.timer, zvol_inhibit_dev), shows it and asks; no forced or lazy
+    unmount or export; only empty directories removed; CLEANUP INCOMPLETE
+    and exit 1 when anything stays.
+  * One lock (/run/zark/zark.lock, flock) for every command that changes
+    state; a second run is refused with exit status 75.
+  * The APT hook, its MOTD reminder and the grub guard also count an
+    imported backup pool (an altroot, or org.zark:format); setup installs
+    both guards.
+  * The keystore zvol is found by its dataset name (zvol_id); system pools
+    are imported by-id first; a disk with no medium is refused; several
+    boot environments are offered in a menu.
+  * Forensic capture (zpool status, events, history, kernel log, lsblk,
+    USB ids) before a damaged pool is touched or destroyed.
+  * backup: counters and permanent errors shown before continuing on a
+    damaged pool, ONLINE with errors included; a drive with no owner is
+    accepted only when it shares something with this system; the bpool
+    refusal tells this system's bpool from another disk's.
+  * health: pool health in read-only mode; FUA and UAS findings are INFO;
+    the destructive test works by by-id and wipes only its own disk.
+  * purge: every step checked and the wipe verified; PURGE INCOMPLETE
+    keeps the registry entry and the anchors.
+  * recover: a failed change-key is in the verdict; prepare's keystore
+    snapshot is destroyed when the run dies in the send.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Wed, 14 Oct 2026 15:22:18 +0200
+
 zark (2.0.0~rc3-1) UNRELEASED; urgency=medium
 
   * Milestone M3 of zark 2 (space). Not for release: nothing is published

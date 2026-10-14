@@ -55,7 +55,7 @@ zark automates the entire process:
 | `chroot`           | Open an interactive chroot into the installed system (live USB) |
 | `mount`            | Mount a backup pool — or the local system (`mount local`) — for inspection/chroot |
 | `umount`           | Unmount a backup pool, or the local system (`umount local`)  |
-| `clean`            | Emergency cleanup: unmount everything, export all pools      |
+| `clean`            | Release what an interrupted zark run left mounted or imported |
 | `purge`            | Securely wipe a managed backup drive                         |
 | `monitor`          | Live progress monitor (run in a separate terminal)           |
 | `simulate`         | Boot the target disk in QEMU/KVM to verify the boot chain    |
@@ -203,6 +203,8 @@ zark/
 │   ├── mount.py         # Mount/unmount orchestration
 │   ├── replication.py   # Backup planner: what each dataset needs (pure)
 │   ├── engine.py        # Backup executor: point, send/receive, anchors
+│   ├── lock.py          # One lock for every command that changes state
+│   ├── forensics.py     # Pool state captured before it is changed
 │   └── cleanup.py       # Trap handler, safe teardown
 ├── commands/
 │   ├── backup.py            # Incremental encrypted backup
@@ -215,7 +217,7 @@ zark/
 │   ├── mount.py             # Backup pool mounting (+ `mount local` for the system)
 │   ├── umount.py            # Backup pool unmounting (+ `umount local`)
 │   ├── chroot.py            # Interactive chroot into the installed system (live USB)
-│   ├── clean.py             # Emergency cleanup
+│   ├── clean.py             # Release what an interrupted run left
 │   ├── purge.py             # Secure drive wipe
 │   ├── monitor.py           # Live progress display
 │   └── simulate.py          # QEMU boot test (read-only by default)
@@ -243,13 +245,21 @@ zark 1.x replicated with syncoid. syncoid bases each incremental on the newest s
 
 When an external ZFS backup pool is connected, Ubuntu's `10_linux_zfs` GRUB script auto-imports all visible pools and attempts to mount their encrypted datasets. When this fails (no key loaded), it generates a `grub.cfg` with zero kernel entries - an unbootable system.
 
-zark installs `09_zfs_backup_guard`, a lightweight script that detects external pools and blocks `update-grub` with a clear error message before any damage occurs.
+zark installs `09_zfs_backup_guard`, a lightweight script that detects external pools and blocks `update-grub` with a clear error message before any damage occurs. An external pool is one `zpool import` lists, or an imported one other than `rpool`/`bpool` that has an alternate root or carries `org.zark:format` (a zark drive imported by hand without an altroot would add its kernels to `grub.cfg`); a permanent data pool imported without an altroot does not block it. `setup` installs it on the running system, as `recover`, `repair-boot` and `finish` do.
 
 ### The apt guard
 
 The GRUB guard fires late: it can refuse to regenerate `grub.cfg`, but by then a kernel package upgrade has already unpacked the new kernel into `/boot` and autoremove may have pulled the old one — leaving a `grub.cfg` that points at a kernel which no longer exists. This is exactly how a background `unattended-upgrades` run, with a backup drive still connected, can brick a system.
 
-To close that vector, `setup` (on the running system) and `recover`/`finish` (on a recovered system) install an apt guard: a standalone `/usr/local/lib/zark/apt-zfs-backup-guard` script wired in as a `DPkg::Pre-Install-Pkgs` hook. APT runs it *before* dpkg unpacks anything; when a boot-critical package (`linux-image-*`, `linux-headers-*`, `grub-*`, `shim-*`, `zfs-*`) is being installed while an external ZFS pool is connected, the hook aborts the entire transaction. It detects pools with `zpool` directly — no dependency on zark itself — so it keeps protecting a recovered system after the live USB is gone. zark's own recovery flows set `ZARK_INTERNAL=1` to bypass it; a login-time MOTD reminder (`/etc/update-motd.d/99-zark-external-pool`) warns when an external pool is attached.
+To close that vector, `setup` (on the running system) and `recover`/`finish` (on a recovered system) install an apt guard: a standalone `/usr/local/lib/zark/apt-zfs-backup-guard` script wired in as a `DPkg::Pre-Install-Pkgs` hook. APT runs it *before* dpkg unpacks anything; when a boot-critical package (`linux-image-*`, `linux-headers-*`, `grub-*`, `shim-*`, `zfs-*`) is being installed while an external ZFS pool is connected (detected as the GRUB guard does), the hook aborts the entire transaction. It detects pools with `zpool` directly (no dependency on zark itself), so it keeps protecting a recovered system after the live USB is gone. zark's own recovery flows set `ZARK_INTERNAL=1` to bypass it; a login-time MOTD reminder (`/etc/update-motd.d/99-zark-external-pool`) warns when an external pool is attached.
+
+### One run at a time, and `zark clean`
+
+Every command that changes state takes one lock, `/run/zark/zark.lock` (`flock(2)`), before it starts; a second run is refused at once, naming the one in progress, with exit status 75. The kernel releases the lock however the run ends, so it is never left stale. `status`, `explore`, `monitor` and `registry list` run without it.
+
+When a run was interrupted, `zark clean` lists what zark itself left (mounts below its own roots, pools it imported under its altroots, its keystore mappings, a stopped sanoid timer), names the imported pools it leaves alone, asks, and releases only that, without forcing anything. Only directories left empty are removed; anything that stays ends `CLEANUP INCOMPLETE`, naming it.
+
+Before a damaged pool is touched or destroyed (a failed read-back, a backup pre-check that finds errors, `purge`), zark writes `zark-forensics-<pool>-<UTC>.txt` next to `zark.log`: `zpool status`, the pool's events and history, the kernel log and the USB bridge ids. `purge` checks every step and verifies the disk is blank; otherwise it ends `PURGE INCOMPLETE` and keeps the registry entry and the anchors.
 
 ### Boot chain integrity
 
@@ -360,7 +370,7 @@ When a backup would leave the drive with less free space than its margin (10 % o
 
 ### Drive staleness reporting
 
-`zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host, its machine-id and the last point (`org.zark:*`). A drive whose machine-id is not this system's is refused before anything is touched. After a backup it lists how many days have passed since every other drive's last backup, and for a drive with no anchor in the source what it still shares and what its next backup will ask (a rollback to the newest shared snapshot, or a full resend).
+`zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host, its machine-id and the last point (`org.zark:*`). A drive whose machine-id is not this system's is refused before anything is touched. A drive with no machine-id recorded (written by zark 2.0.0-rc2 or earlier) is accepted only when it shares something with this system, a snapshot or bookmark to continue from, and that run records the owner; one with nothing in common is refused, and `purge` plus `prepare` make it this system's. After a backup it lists how many days have passed since every other drive's last backup, and for a drive with no anchor in the source what it still shares and what its next backup will ask (a rollback to the newest shared snapshot, or a full resend).
 
 ### Divergence and datasets only on the drive
 
@@ -422,7 +432,7 @@ A clean `zpool export` is not proof that the pool survived. The same FUA-lying b
 
 The bridge chipsets that cause all of the above are documented, with their USB IDs, exact kernel signatures, and the system-level `usb-storage` quirk that forces the conservative transport, in [**`docs/HARDWARE.md`**](docs/HARDWARE.md). If you hit `BACKUP NOT VERIFIED`, an import that fails with `insufficient replicas` on a healthy-looking drive, or `Synchronize Cache(10) failed: DID_ERROR` under load, read that first.
 
-To check a drive's risk factors up front without writing anything, run `zark health [/dev/sdX]`. It is fully interactive: it asks whether you want a read-only check (default) or a destructive write-and-verify test, gathers any further choices, then runs unattended. The read-only check inspects the bridge's reported cache semantics, the active USB transport (UAS vs usb-storage), and the bridge model against a known-problematic list. The destructive test creates a throwaway pool, writes with transaction churn (fast ~2 GB, medium ~15 GB, or whole-disk "surface"), and re-imports to confirm the bridge actually persisted the data; an optional cold pass powers the device down and has you physically reconnect it before re-importing, so the read-back comes strictly from NAND. `prepare` runs the same read-only check before doing any work and asks for confirmation if a risk factor is present. Whenever a risk or test failure is found, a diagnostic report is written to `/tmp` with instructions for filing a GitHub issue. Note that a non-destructive check can only flag *risk* — it cannot prove a bridge is honest, since that only shows under write load. The authoritative proof is the read-back that `prepare`, `backup`, and the destructive test perform after writing.
+To check a drive's risk factors up front without writing anything, run `zark health [/dev/sdX]`. It is fully interactive: it asks whether you want a read-only check (default) or a destructive write-and-verify test, gathers any further choices, then runs unattended. The read-only check shows the bridge's reported cache semantics and the active USB transport (UAS vs usb-storage) as information, warns when the bridge model is on the known-problematic list, and reports the health of any pool on the drive without importing it. The destructive test creates a throwaway pool, writes with transaction churn (fast ~2 GB, medium ~15 GB, or whole-disk "surface"), and re-imports to confirm the bridge actually persisted the data; an optional cold pass powers the device down and has you physically reconnect it before re-importing, so the read-back comes strictly from NAND. `prepare` runs the same read-only check before doing any work and asks for confirmation when the bridge is a known-problematic one. Whenever a risk or test failure is found, a diagnostic report is written to `/tmp` with instructions for filing a GitHub issue. Note that a non-destructive check can only flag *risk*: it cannot prove a bridge is honest, since that only shows under write load. The authoritative proof is the read-back that `prepare`, `backup`, and the destructive test perform after writing.
 
 ---
 

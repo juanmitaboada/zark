@@ -95,22 +95,31 @@ for the canonical end-to-end sequences.
     *destructive* write-and-verify test, gathers any further choices up front,
     then runs unattended except for a single pause.
 
-    The read-only check inspects kernel/sysfs state for risk factors: a
-    USB-SATA bridge that reports it does not support DPO/FUA, the UAS
-    transport on a bridge that may mishandle it, and the bridge's USB VID:PID
-    against a known-problematic list. It writes nothing and flags *risk*
-    only — it cannot prove a bridge honest, which shows solely under load.
+    The read-only check inspects kernel/sysfs state: whether the USB-SATA
+    bridge reports DPO/FUA support and whether it runs the UAS transport
+    (both shown as information: most USB bridges report no FUA, and UAS is
+    the normal driver), and the bridge's USB VID:PID against a
+    known-problematic list, the one risk it warns about. It also reports the
+    health of any pool on the drive without importing it: an imported pool
+    from its error counters, an exported one from the state **zpool import
+    -d** reports, with the commands that read its counters. It writes
+    nothing and flags *risk* only; it cannot prove a bridge honest, which
+    shows solely under load.
 
     The destructive test (after explicit confirmation, on a blank drive)
-    creates a throwaway pool and writes with transaction churn — *fast*
-    (~2 GB), *medium* (~15 GB), or *surface* (whole disk, capped) — then
+    creates a throwaway pool on the drive's by-id name, never written to
+    */etc/zfs/zpool.cache*, and writes with transaction churn (*fast*,
+    ~2 GB; *medium*, ~15 GB; or *surface*, whole disk, capped), then
     re-imports to confirm the writes persisted. An optional *cold* pass
     powers the device down, waits for you to physically reconnect it, and
     re-imports, so the read-back comes strictly from NAND rather than the
     bridge's cache. Time estimates are shown from a measured write speed. The
-    throwaway pool is always destroyed afterwards, leaving the drive blank.
+    throwaway pool is always destroyed afterwards, leaving the drive blank;
+    only the disk its by-id name resolves to then is wiped, and only when
+    its label is the test pool's or there is none. A cold pass needs a
+    by-id name and fails before writing without one.
 
-    Whenever a risk or test failure is found, a self-contained diagnostic
+    Whenever a risk (a warning) or test failure is found, a self-contained diagnostic
     report is written to */tmp* (environment, drive, bridge VID:PID, findings,
     dmesg tail) with instructions for filing a GitHub issue; you may choose to
     obfuscate serials/GUIDs. See the enclosure notes in **docs/HARDWARE.md**.
@@ -124,7 +133,8 @@ for the canonical end-to-end sequences.
     **DEPENDENCIES** section, drops a **sanoid** template tuned for
     Ubuntu-on-ZFS into */etc/sanoid/*, and registers the **sanoid** systemd
     timer so snapshots are taken automatically. Also installs the apt guard
-    (see **NOTES**) on the running system, so a background kernel or GRUB
+    and the update-grub guard (see **NOTES**; a copy that differs is
+    replaced, a current one left alone) on the running system, so a background kernel or GRUB
     upgrade cannot half-apply while a backup drive is connected, and the
     space and backup-age alerts (see **alerts**).
 
@@ -156,8 +166,8 @@ for the canonical end-to-end sequences.
     for the same drive are offered for replacement.
 
     Before doing any work, **prepare** runs the same non-destructive risk
-    check as **health** and, if a risk factor is present, warns and asks for
-    confirmation. After the transfer it performs a read-back verification
+    check as **health** and, when the bridge is on the known-problematic
+    list, warns and asks for confirmation. After the transfer it performs a read-back verification
     (identical to **backup**'s): because the initial raw send is a full
     write-under-load, a successful re-import here proves the bridge survives
     real load. The drive is registered, with *last_backup_at* set, only
@@ -174,11 +184,31 @@ for the canonical end-to-end sequences.
     the health check, the passphrase and any question; nothing on it is
     changed (the import and the export stay in the pool's history), and the
     message names the drive's host and last date. A drive whose metadata
-    cannot be read is refused the same way. Drives written by an older
-    **zark**, without that property, are accepted.
+    cannot be read is refused the same way. A drive without that property
+    (written by **zark** 2.0.0-rc2 or earlier, or not by **zark**) is
+    accepted only when at least one dataset has something in common with
+    this system (a snapshot or bookmark to continue from, a rollback, a
+    transfer to resume); this is read before any key, question or change,
+    and the run that accepts it records this system as its owner. With
+    nothing in common it is refused; **purge** and **prepare** make it this
+    system's drive.
+
+    Before the transfer, **backup** checks the health of the source pool
+    and of the drive. A pool that is DEGRADED, or ONLINE with non-zero
+    read, write or checksum error counters, is captured (see
+    **zark-forensics** under **FILES**), its counters and first permanent
+    errors are shown, and the run continues only on a yes (default no).
+    Any other state stops the run.
 
     **backup** and **prepare** refuse to run while a pool named **bpool**
-    can be imported (**zpool import** lists it) but is not, and **backup**
+    can be imported (**zpool import** lists it) but is not. The refusal
+    lists each such **bpool** with its id and devices: the one on
+    **rpool**'s disk is this system's and is imported by id (**sudo zpool
+    import** *id*); one on any other disk must not be imported, since it
+    would mount over */boot*: disconnect that disk. Exporting **bpool** on a
+    running system is never the way out: service mount namespaces hold
+    copies of */boot*, so the export fails as busy after unmounting the
+    host's */boot*. **backup**
     stops before any question when the drive holds a **bpool** backup and
     the source's **bpool** is not imported: a backup without it would leave
     the kernels out.
@@ -362,6 +392,15 @@ for the canonical end-to-end sequences.
     run there. Partitions and disks holding the running system, a mounted
     filesystem or active swap are refused.
 
+    The pool's state is captured before it is destroyed (see
+    **zark-forensics** under **FILES**). A failed **zpool destroy** stops
+    before anything is overwritten. Every wipe step is checked, and all of
+    them run even after one fails; then the ZFS labels on the first
+    partition, any partition left and any signature **blkid -p** finds are
+    checked. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
+    the registry entries and the anchors in the source are kept, since the
+    disk may still hold the pool.
+
 **registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\] | **retention** *name* \[**window=***N*\] \[**max_age=***N*|**off**\] \[**margin=***N*\]\]
 :   Inspect and repair **known_drives.json** without editing it by hand.
     **list** (the default) shows every entry, whether its disk is connected
@@ -389,7 +428,9 @@ for the canonical end-to-end sequences.
     drive connected.
 
     The procedure scans for backup drives, imports the chosen pool
-    read-only by its exact device, prompts for the rpool passphrase and
+    read-only by its exact device, prompts for the rpool passphrase (when
+    the drive holds several boot environments, a menu lists each with its
+    newest snapshot's time, the newest the default) and
     offers the restore points found on the drive, ordered by snapshot
     creation time: backup points are labelled as such, one entry per backup
     point, those of a backup that did not reach every dataset as
@@ -436,12 +477,16 @@ for the canonical end-to-end sequences.
     writes records stable device names. A system whose pools still record
     kernel names (*/dev/sdb4*) can fail to boot when a USB disk plugged in
     at power-on takes that name; **backup** and **finish** warn about it,
-    and one **repair-boot** fixes it.
+    and one **repair-boot** fixes it. While a system pool's vdevs still
+    carry kernel names after the import, **repair-boot** ends **BOOT REPAIR
+    INCOMPLETE** naming them, since the *zpool.cache* it writes records them.
 
 **chroot** \[*device*\]
 :   Open an interactive **chroot**(1) into the installed ZFS system from a
     live USB. Imports **rpool** and **bpool** under an alternate root,
-    unlocks the keystore, mounts the boot environment, sets up the
+    unlocks the keystore, mounts the boot environment (with several, a menu
+    lists each with its newest snapshot's time; the same choice applies to
+    **mount local** and **repair-boot**), sets up the
     **/proc**, **/sys**, **/dev**, **/dev/pts**, **/run**, **efivars** and
     ESP bind mounts a chroot needs, and starts a login shell inside the
     system. Inside, ordinary tools (**apt**(8), **update-grub**(8),
@@ -449,11 +494,11 @@ for the canonical end-to-end sequences.
     command unmounts everything and exports both pools cleanly, so the next
     real boot imports them without **-f**.
 
-    The optional *device* is an import hint (for example */dev/nvme0n1* or
-    a */dev/disk/by-id/* path), tried before anything else, so **rpool**
-    then records the names it was found under. When omitted, **rpool** is
-    looked for in */dev/disk/by-id* first and by a full scan only when that
-    fails.
+    **rpool** and **bpool** are looked for in */dev/disk/by-id* first; the
+    optional *device* (for example */dev/nvme0n1*) is a hint tried next,
+    and a full scan comes last. An import that did not go through
+    */dev/disk/by-id* is named in a warning, since the pool then records
+    those names.
     **chroot** refuses to run when **rpool** is already imported — if that
     is the running system you are already inside it, and if it is a
     leftover from a previous run, **prune**
@@ -580,7 +625,8 @@ for the canonical end-to-end sequences.
 
     Read-only imports the pool read-only and rebuilds the backed-up
     system's tree under */mnt/zark/<poolname>/* the way **recover** would
-    restore it: the boot environment at the top, */home*, */boot* and every
+    restore it: the boot environment at the top (with several on the drive,
+    chosen from a menu, the newest the default), */home*, */boot* and every
     other dataset at the origin's mountpoint (from the origin's
     *zfs-list.cache* inside the backup, else the Ubuntu layout). Nothing
     is written to the drive; a dataset whose mountpoint directory does not
@@ -614,10 +660,23 @@ for the canonical end-to-end sequences.
     system's own **rpool**.
 
 **clean**
-:   Emergency cleanup. Forcibly unmounts everything under */mnt/zark/*,
-    closes any open LUKS mappings and exports every imported backup
-    pool. Intended as a "get me back to a clean state" command after a
-    previous operation has been interrupted.
+:   Release what an interrupted **zark** run left mounted or imported, and
+    nothing else. It lists what **zark** owns: mounts below */mnt/zark*,
+    */mnt/recover*, */mnt/repair*, */run/zark/altroot* and
+    */run/zark/probe*; pools imported with an alternate root below them;
+    keystore mappings */dev/mapper/zark_ks_\**, and a mount on top of
+    */run/keystore/rpool* that comes from one; a **sanoid** timer left
+    stopped by an interrupted **backup**; **zvol_inhibit_dev=1** left by
+    **fix-rpool-mountpoint**. It also names the imported pools it leaves
+    alone (a pool without an alternate root, such as the running system's
+    **rpool** and **bpool** or one imported by hand, is never touched).
+    After a yes (default no) it unmounts, closes and exports, without
+    forcing anything, and removes only the directories left empty once
+    nothing is mounted below them. Anything that stays (a mount in use, or
+    held in another mount namespace) ends **CLEANUP INCOMPLETE** with exit
+    status 1, naming it; a reboot releases a copy held by another
+    namespace. The same rules apply on an installed system and on a live
+    session.
 
 # WORKFLOWS
 
@@ -695,6 +754,19 @@ To verify a recovery without rebooting:
 :   Alternate-root mountpoint base used by **mount** and (transiently) by
     **recover** and **repair-boot**.
 
+*/run/zark/zark.lock*
+:   The lock every command that changes state takes with **flock**(2)
+    before it starts; **status**, **explore**, **monitor** and **registry**
+    (list) run without it. The kernel releases it when the run ends, however
+    it ends. Its content (command, pid, start time) is only for the refusal
+    message.
+
+*zark-forensics-\<pool\>-\<UTC\>.txt*
+:   Written next to *zark.log* (mode 0600) before a damaged pool is
+    touched or destroyed: **zpool status -vP**, **zpool events -v**, the end
+    of **zpool history -il**, the kernel log of the last two hours,
+    **lsblk** and the USB bridge ids of the pool's disks.
+
 */run/keystore/rpool/system.key*
 :   In-memory location of the unlocked rpool key on a running system.
     Created by the **dracut**(8) keystore module at boot.
@@ -720,6 +792,10 @@ To verify a recovery without rebooting:
 :   A fatal error occurred. The **\[FATAL\]** banner printed just before
     exit explains the cause and lists likely remediations. With
     **--debug**, a Python traceback is also printed.
+
+**75**
+:   Another **zark** run that changes state is in progress (it holds
+    */run/zark/zark.lock*); the message names it. Run again once it ends.
 
 **130**
 :   The user pressed **Ctrl-C** (SIGINT). **zark** registers a cleanup
@@ -778,9 +854,12 @@ just **zark**-recovered systems; an upstream bug has been filed against
 
 ## update-grub guard
 
-The **recover**, **repair-boot** and **finish** commands install
-*/etc/grub.d/09_zfs_backup_guard*, which aborts **update-grub**(8) when a
-registered **zark** backup drive is connected. This prevents the most
+The **setup**, **recover**, **repair-boot** and **finish** commands install
+*/etc/grub.d/09_zfs_backup_guard*, which aborts **update-grub**(8) while an
+external pool is connected: one **zpool import** lists, or one imported,
+other than **rpool** and **bpool**, with an alternate root or carrying
+**org.zark:format** (a **zark** drive imported by hand). A permanent data
+pool imported without an alternate root does not block it. This prevents the most
 common cause of post-update boot failure: **update-grub** picking up the
 backup pool and writing its UUIDs into **grub.cfg**.
 
@@ -794,7 +873,8 @@ recovered system) install a complementary, earlier line of defence:
 **dpkg**(1) unpacks anything; if a boot-critical package (**linux-image**,
 **linux-headers**, **grub**, **shim**, **zfs**, …) is being installed
 *while an external ZFS pool is connected*, the hook aborts the whole
-transaction. This stops a background **unattended-upgrades**(8) run from
+transaction. An external pool is one **zpool import** lists, or an imported
+one detected as the update-grub guard does. This stops a background **unattended-upgrades**(8) run from
 half-applying a kernel upgrade — new kernel unpacked, **update-grub**
 blocked by the guard above, old kernel autoremoved — which would leave
 **grub.cfg** pointing at a missing kernel and the system unbootable.
