@@ -5669,6 +5669,19 @@ class TestBackupHealthCheck:  # pylint: disable=missing-function-docstring,prote
         assert not damage.any
 
 
+def _wipe_succeeds(mock: MockShell, failing: str = "") -> None:
+    """Every wipe step of purge succeeds and the disk probes blank, except ``failing``."""
+    if failing:
+        mock.on(failing).fails("injected")
+    mock.on_prefix("dd if=/dev/urandom of=/dev/sdb").succeeds()
+    mock.on("blockdev --getsize64 /dev/sdb").succeeds(str(64 * 1024**3))
+    mock.on_prefix("blockdev --flushbufs").succeeds()
+    mock.on("wipefs -a /dev/sdb").succeeds()
+    mock.on("sgdisk --zap-all /dev/sdb").succeeds()
+    mock.on("lsblk -nr -o NAME,TYPE /dev/sdb").succeeds("sdb disk")
+    mock.on("blkid -p /dev/sdb").returns(2)
+
+
 class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
     """I21: purge recognises the registered drive and removes its entries."""
 
@@ -5698,6 +5711,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         vdev = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
         mock.on(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup").succeeds()
         mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock)
         ident = _purge_ident(PoolLabel("backup", "3446866051930726346"))
         self._run(cfg_dir, ident, mock)
         assert mock.was_called(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup")
@@ -5718,6 +5732,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
             patch.object(Config, "default_config_dir", return_value=cfg_dir),
             patch.object(purge_mod, "validate_external_block_device", return_value=ident),
             patch.object(ZFS, "import_backup_pool", return_value=True),
+            patch.object(purge_mod, "_wipe", return_value=[]),  # FakeZfs has no disk
             patch("builtins.input", side_effect=["yes", "sdb", "n"]),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(out),
@@ -5757,12 +5772,95 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
     def test_foreign_rpool_label_is_never_imported(self):
         cfg_dir = Path(tempfile.mkdtemp())
         mock = MockShell()
+        _wipe_succeeds(mock)
         ident = _purge_ident(PoolLabel("rpool", "99"))
         with patch("lib.log.Log.ask", return_value=True):
             self._run(cfg_dir, ident, mock)
         assert mock.was_not_called("zpool import")
         assert mock.was_not_called("zpool destroy")
         assert mock.was_called("wipefs -a /dev/sdb")
+
+
+class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
+    """M4a-13: a failed step or a disk that is not blank keeps the entry and anchors."""
+
+    def _purge(
+        self, mock: MockShell, part1_exists: bool = False
+    ) -> tuple[str, int, dict[str, object]]:
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json",
+            {"backup": {"guid": "3446866051930726346", "drive_id": _KINGSTON_ID}},
+        )
+        mock.on("zpool list backup").fails()
+        mock.on_prefix("zpool import -N -R /run/zark/altroot/backup").succeeds()
+        ident = _purge_ident(PoolLabel("backup", "3446866051930726346"))
+        out = StringIO()
+        rc = 0
+        with (
+            patch_sh(mock),
+            patch.object(Config, "default_config_dir", return_value=cfg_dir),
+            patch.object(purge_mod, "validate_external_block_device", return_value=ident),
+            patch.object(purge_mod.forensics, "capture", return_value=""),
+            patch.object(purge_mod.engine, "drop_anchors_of", return_value="") as drop,
+            patch.object(purge_mod.os.path, "exists", return_value=part1_exists),
+            patch("builtins.input", side_effect=["yes", "sdb", "n"]),
+            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+            redirect_stdout(out),
+        ):
+            try:
+                purge_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
+            except SystemExit as e:
+                rc = int(e.code) if isinstance(e.code, int) else 1
+        if rc:
+            drop.assert_not_called()
+        return out.getvalue(), rc, json.loads((cfg_dir / "known_drives.json").read_text())
+
+    def test_all_steps_and_a_blank_disk_complete(self):
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock)
+        assert rc == 0 and "DRIVE PURGED" in out and not data
+
+    def test_failing_wipefs_is_incomplete(self):
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock, failing="wipefs -a /dev/sdb")
+        out, rc, data = self._purge(mock)
+        assert rc == 1 and "PURGE INCOMPLETE" in out and "wipefs: injected" in out
+        assert "DRIVE PURGED" not in out
+        assert "backup" in data
+        assert mock.was_called("sgdisk --zap-all /dev/sdb")  # the rest still runs
+
+    def test_failing_destroy_writes_nothing(self):
+        mock = MockShell()
+        mock.on("zpool destroy backup").fails("pool is busy")
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock)
+        assert rc == 1 and "zpool export backup" in out
+        assert mock.was_not_called("dd if=/dev/urandom")
+        assert "backup" in data
+
+    def test_label_left_on_part1_is_incomplete(self):
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        mock.on_prefix("zdb -l").succeeds(
+            "LABEL 2\n    name: 'backup'\n    pool_guid: 3446866051930726346"
+        )
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock, part1_exists=True)
+        assert rc == 1 and "ZFS label still on" in out
+        assert "backup" in data
+
+    def test_signature_left_is_incomplete(self):
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        mock.on("blkid -p /dev/sdb").succeeds('/dev/sdb: PTTYPE="gpt"')
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock)
+        assert rc == 1 and "signature still on /dev/sdb" in out
+        assert "backup" in data
 
 
 class TestPrepareIdentity:  # pylint: disable=missing-function-docstring

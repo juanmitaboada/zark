@@ -15,43 +15,118 @@
 zark purge — Securely wipe a managed backup drive.
 
 Destroys ZFS pool, overwrites start/end with random data,
-wipes signatures, destroys partition table.
+wipes signatures, destroys partition table, then verifies the disk is blank
+(M4a-13). Any failed step ends PURGE INCOMPLETE with exit status 1, and the
+registry entry and the pool's anchors in origin stay: the disk may still
+hold the pool.
 """
+
+import os
 
 from lib import engine, forensics, sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
-from lib.identity import match_registry
+from lib.identity import match_registry, read_pool_label
 from lib.log import Log
 from lib.zfs import ZFS
 
 
-def _destroy_labelled_pool(name: str, guid: str, vdev: str, zfs: ZFS, log: Log) -> None:
+def _destroy_labelled_pool(name: str, guid: str, vdev: str, zfs: ZFS, log: Log) -> str:
     """Destroy the pool whose label is on the disk being purged.
 
     The pool is imported device-exact under a private altroot (I-G) so
     nothing it contains is mounted over the running system. A pool of the
     same name that is imported with a different GUID lives on another disk
     and is left alone; the wipe below erases this disk's labels anyway.
+
+    Returns "" when the wipe may go on, otherwise why it must not: a pool
+    that is still imported from this disk would rewrite its labels.
     """
     if name in SYSTEM_POOLS:
-        log.warn(f"Label says '{name}' — not importing a system pool name; wiping only")
-        return
+        log.warn(f"Label says '{name}': not importing a system pool name; wiping only")
+        return ""
     if zfs.pool_exists(name):
         if zfs.pool_guid(name) != guid:
-            log.warn(f"A different pool named '{name}' is imported — wiping only")
-            return
+            log.warn(f"A different pool named '{name}' is imported: wiping only")
+            return ""
     elif not zfs.import_backup_pool(name, vdev):
-        log.warn(f"Could not import '{name}' — continuing with wipe")
-        return
+        log.warn(f"Could not import '{name}': the wipe erases its labels; verified below")
+        return ""
     # The pool's state goes with it: keep it first (I7).
     _ = forensics.capture(name, "before purge destroys it", log)
     r = sh.run(f"zpool destroy {name}", log=log)
     if r.ok:
         log.ok(f"Pool {name} destroyed")
-    else:
-        log.warn(f"Could not destroy {name} — continuing with wipe")
+        return ""
+    return f"zpool destroy {name} failed: {r.stderr.strip() or f'exit {r.returncode}'}"
+
+
+def _step(cmd: str, what: str, failures: list[str], log: Log) -> bool:
+    """Run one wipe command; record ``what`` with the error when it fails."""
+    r = sh.run(cmd, log=log)
+    if not r.ok:
+        failures.append(f"{what}: {r.stderr.strip() or f'exit {r.returncode}'}")
+    return r.ok
+
+
+def _wipe(target_dev: str, part1: str, log: Log) -> list[str]:
+    """Overwrite both ends, wipe signatures and the partition table, verify.
+
+    Every step runs even when an earlier one failed (more erased is never
+    worse); the returned list says what failed or what is still there.
+    """
+    failures: list[str] = []
+    log.step(2, 5, "Overwriting first 10MB...")
+    if _step(
+        f"dd if=/dev/urandom of={target_dev} bs=1M count=10 conv=fsync",
+        "overwrite of the first 10MB",
+        failures,
+        log,
+    ):
+        log.ok("First 10MB overwritten")
+
+    log.step(3, 5, "Overwriting last 10MB...")
+    disk_bytes = sh.run(f"blockdev --getsize64 {target_dev}").output
+    if not disk_bytes.isdigit():
+        failures.append(f"size of {target_dev} unreadable: last 10MB not overwritten")
+    elif int(disk_bytes) > 20 * 1024 * 1024:
+        offset = (int(disk_bytes) - 10 * 1024 * 1024) // 512
+        if _step(
+            f"dd if=/dev/urandom of={target_dev} bs=512 seek={offset} count=20480 conv=fsync",
+            "overwrite of the last 10MB",
+            failures,
+            log,
+        ):
+            log.ok("Last 10MB overwritten")
+
+    log.step(4, 5, "Wiping filesystem signatures...")
+    if _step(f"wipefs -a {target_dev}", "wipefs", failures, log):
+        log.ok("Signatures wiped")
+    # The ZFS labels live in the partition: read them there while it exists.
+    # flushbufs: the writes went through the whole disk's node, not part1's.
+    if os.path.exists(part1):
+        _ = sh.run(f"blockdev --flushbufs {part1}")
+        label = read_pool_label(part1)
+        if label is not None:
+            failures.append(f"ZFS label still on {part1}: pool {label.name} ({label.guid})")
+
+    log.step(5, 5, "Destroying partition table...")
+    if _step(f"sgdisk --zap-all {target_dev}", "sgdisk --zap-all", failures, log):
+        log.ok("Partition table destroyed")
+
+    _ = sh.run(f"blockdev --flushbufs {target_dev}")
+    parts = sh.run(f"lsblk -nr -o NAME,TYPE {target_dev}")
+    left = [ln.split()[0] for ln in parts.lines if ln.split()[1:2] == ["part"]]
+    if left:
+        failures.append(f"partitions still present: {', '.join(left)}")
+    # blkid -p: exit 2 is "nothing found"; 0 means a signature is still there.
+    probe = sh.run(f"blkid -p {target_dev}")
+    if probe.returncode == 0:
+        failures.append(f"signature still on {target_dev}: {probe.output}")
+    elif probe.returncode != 2:
+        failures.append(f"blkid -p {target_dev} failed: exit {probe.returncode}")
+    return failures
 
 
 def run(
@@ -102,36 +177,34 @@ def run(
 
     # ── Destroy pool ─────────────────────────────────────────────────────
     log.step(1, 5, "Destroying ZFS pool...")
+    stop = ""
     if ident.label:
-        _destroy_labelled_pool(ident.label.name, ident.label.guid, ident.part1, zfs, log)
+        stop = _destroy_labelled_pool(ident.label.name, ident.label.guid, ident.part1, zfs, log)
     else:
-        log.info("No ZFS label on this disk — nothing to destroy")
+        log.info("No ZFS label on this disk: nothing to destroy")
+    failures = [stop] if stop else _wipe(target_dev, ident.part1, log)
 
-    # ── Overwrite start ──────────────────────────────────────────────────
-    log.step(2, 5, "Overwriting first 10MB...")
-    _ = sh.run(f"dd if=/dev/urandom of={target_dev} bs=1M count=10 conv=fsync", log=log)
-    log.ok("First 10MB overwritten")
-
-    # ── Overwrite end ────────────────────────────────────────────────────
-    log.step(3, 5, "Overwriting last 10MB...")
-    disk_bytes = sh.run(f"blockdev --getsize64 {target_dev}").output
-    if disk_bytes.isdigit() and int(disk_bytes) > 20 * 1024 * 1024:
-        offset = (int(disk_bytes) - 10 * 1024 * 1024) // 512
-        _ = sh.run(
-            f"dd if=/dev/urandom of={target_dev} bs=512 seek={offset} count=20480 conv=fsync",
-            log=log,
+    if failures:
+        if stop and ident.label:
+            advice = [
+                "Nothing was overwritten: the pool is still imported from this",
+                f"disk. Export it (zpool export {ident.label.name}), then purge again.",
+            ]
+        else:
+            advice = [
+                "The disk may still hold the pool. Purge again, or look:",
+                f"  blkid -p {target_dev}; lsblk {target_dev}",
+            ]
+        log.banner_error(
+            "PURGE INCOMPLETE",
+            [
+                *(f"✗ {f}" for f in failures),
+                "",
+                *advice,
+                "Registry entries and the pool's anchors in origin are kept.",
+            ],
         )
-        log.ok("Last 10MB overwritten")
-
-    # ── Wipe signatures ──────────────────────────────────────────────────
-    log.step(4, 5, "Wiping filesystem signatures...")
-    _ = sh.run(f"wipefs -a {target_dev}", log=log)
-    log.ok("Signatures wiped")
-
-    # ── Destroy partition table ──────────────────────────────────────────
-    log.step(5, 5, "Destroying partition table...")
-    _ = sh.run(f"sgdisk --zap-all {target_dev}", log=log)
-    log.ok("Partition table destroyed")
+        raise SystemExit(1)
 
     # The wiped pool's anchors in origin (M2R-6): nothing can use them now.
     anchors_left = ""
