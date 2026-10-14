@@ -23,6 +23,7 @@ Used by:
     from a live USB)
 """
 
+from lib.backup_layout import choose_dataset
 from lib.cleanup import Cleanup
 from lib.keystore import KeystoreLike, open_keystore
 from lib.log import Log
@@ -30,22 +31,26 @@ from lib.sh import run
 from lib.zfs import ZFS
 
 
-def find_system_root_dataset() -> str | None:
+def find_system_root_dataset(log: Log) -> str | None:
     """Return the ``rpool/ROOT/<ubuntu_name>`` boot-environment dataset, or None.
 
     The system layout (as opposed to a backup pool's nested ``<pool>/rpool``)
-    keeps the root filesystem one level under ``rpool/ROOT``. We pick the first
-    non-snapshot child of ``rpool/ROOT`` — there is normally exactly one active
-    boot environment; if several exist, the caller is recovering an installed
-    system and the first is the conventional choice.
+    keeps the root filesystem one level under ``rpool/ROOT``. With several
+    boot environments, the one mounted at ``/`` is the running system's;
+    otherwise (a live session) the operator chooses (M4a-8).
     """
+    found: list[str] = []
     for line in run("zfs list -H -o name -r rpool/ROOT").lines:
         ds = line.strip()
         # rpool/ROOT/<name>  → exactly two slashes, no snapshot marker, and the
         # parent container rpool/ROOT itself is excluded.
         if ds and ds != "rpool/ROOT" and "@" not in ds and ds.count("/") == 2:
-            return ds
-    return None
+            found.append(ds)
+    if len(found) > 1:
+        running = run("findmnt -n -o SOURCE /").output.strip()
+        if running in found:
+            return running
+    return choose_dataset(found, "rpool", log) or None
 
 
 def mount_system_pools(
@@ -115,7 +120,7 @@ def mount_system_pools(
     log.ok(f"Loaded {loaded} encryption key(s)")
 
     # ── Locate the boot-environment root dataset ──────────────────────────
-    root_ds = find_system_root_dataset()
+    root_ds = find_system_root_dataset(log)
     if not root_ds:
         log.error("Cannot find root dataset under rpool/ROOT")
         return None

@@ -1282,7 +1282,7 @@ def run(
 
     # ── 3. Select restore point ──────────────────────────────────────────
     log.step(3, TOTAL_STEPS, "Available restore points...")
-    ubuntu_name = _find_be(pool_name)
+    ubuntu_name = _find_be(pool_name, log)
     if not ubuntu_name:
         log.fatal("Cannot find root dataset in backup")
     log.ok(f"Root dataset: {ubuntu_name}")

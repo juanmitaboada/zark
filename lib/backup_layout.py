@@ -20,6 +20,9 @@ properties recorded on it (``org.zark:*``, M2+). The values that decide
 where each dataset goes come from :mod:`lib.mount_props`.
 """
 
+from datetime import UTC, datetime
+
+from lib.log import Log
 from lib.sh import run
 
 
@@ -35,13 +38,51 @@ def list_datasets(pool: str) -> dict[str, str]:
     return out
 
 
-def find_be(pool: str) -> str:
-    """Boot environment name: the first child of <pool>/rpool/ROOT."""
+def newest_snapshot(dataset: str) -> tuple[int, str]:
+    """(creation, name) of a dataset's newest snapshot; (0, "") without one."""
+    r = run(f"zfs list -H -p -t snapshot -o name,creation -s creation -d 1 {dataset}")
+    lines = [line.split("\t") for line in r.lines if r.ok and "\t" in line]
+    if not lines:
+        return 0, ""
+    name, creation = lines[-1][0], lines[-1][1]
+    return (int(creation) if creation.isdigit() else 0), name.partition("@")[2]
+
+
+def choose_dataset(candidates: list[str], what: str, log: Log) -> str:
+    """One of ``candidates``: the only one, or the operator's choice when there
+    are several (M4a-8), listed newest snapshot first, the newest the default."""
+    if len(candidates) <= 1:
+        return candidates[0] if candidates else ""
+    newest = {c: newest_snapshot(c) for c in candidates}
+    order = sorted(candidates, key=lambda c: newest[c][0], reverse=True)
+    labels = [
+        f"{c}  (newest snapshot "
+        + (
+            datetime.fromtimestamp(newest[c][0], UTC).strftime("%Y-%m-%d %H:%M UTC")
+            if newest[c][0]
+            else "none"
+        )
+        + ")"
+        for c in order
+    ]
+    return order[log.ask_choice(f"{what} holds {len(order)} boot environments: which one?", labels)]
+
+
+def boot_environments(pool: str) -> list[str]:
+    """Names of the boot environments under <pool>/rpool/ROOT (archived lineages left out)."""
+    found: list[str] = []
     for line in run(f"zfs list -H -o name -r {pool}/rpool/ROOT").lines:
         ds = line.strip()
         if ds.count("/") == 3 and "@" not in ds and ".archived-" not in ds:
-            return ds.split("/")[-1]
-    return ""
+            found.append(ds.split("/")[-1])
+    return found
+
+
+def find_be(pool: str, log: Log) -> str:
+    """Boot environment name on the drive, asked when it holds several (M4a-8)."""
+    bes = boot_environments(pool)
+    chosen = choose_dataset([f"{pool}/rpool/ROOT/{be}" for be in bes], pool, log)
+    return chosen.split("/")[-1] if chosen else ""
 
 
 def zark_props(pool: str) -> dict[str, tuple[str, str]]:

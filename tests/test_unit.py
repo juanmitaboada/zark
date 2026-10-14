@@ -128,6 +128,7 @@ from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E
 )
 from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
+    backup_layout,
     engine,
     grub_guard,
 )
@@ -4450,7 +4451,50 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
             "rpool/ROOT\nrpool/ROOT/ubuntu_8bt2zy\n",
         )
         with patch_sh(mock):
-            assert find_system_root_dataset() == "rpool/ROOT/ubuntu_8bt2zy"
+            assert find_system_root_dataset(make_log()) == "rpool/ROOT/ubuntu_8bt2zy"
+
+    @staticmethod
+    def _two_bes(mock: MockShell, root: str) -> None:
+        mock.on(f"zfs list -H -o name -r {root}").succeeds(
+            f"{root}\n{root}/ubuntu_x\n{root}/ubuntu_x/var\n{root}/zt5b\n"
+            f"{root}/zt5b.archived-20261009\n",
+        )
+        snaps = f"zfs list -H -p -t snapshot -o name,creation -s creation -d 1 {root}"
+        mock.on(f"{snaps}/ubuntu_x").succeeds(f"{root}/ubuntu_x@a\t1700000000")
+        mock.on(f"{snaps}/zt5b").succeeds(f"{root}/zt5b@b\t1800000000")
+
+    def test_running_root_is_taken_without_a_question(self):
+        mock = MockShell()
+        self._two_bes(mock, "rpool/ROOT")
+        mock.on("findmnt -n -o SOURCE /").succeeds("rpool/ROOT/ubuntu_x")
+        with patch_sh(mock), patch("builtins.input", side_effect=AssertionError("asked")):
+            assert find_system_root_dataset(make_log()) == "rpool/ROOT/ubuntu_x"
+
+    def test_live_session_asks_newest_first(self):
+        # M2 review section 9: alphabetical order picked ubuntu_x.
+        mock = MockShell()
+        self._two_bes(mock, "rpool/ROOT")
+        mock.on("findmnt -n -o SOURCE /").succeeds("/cow")
+        with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
+            assert find_system_root_dataset(make_log()) == "rpool/ROOT/zt5b"
+
+    def test_drive_with_two_boot_environments_asks(self):
+        mock = MockShell()
+        self._two_bes(mock, "backup/rpool/ROOT")
+        out = StringIO()
+        with patch_sh(mock), patch("builtins.input", return_value="2"), redirect_stdout(out):
+            assert backup_layout.find_be("backup", make_log()) == "ubuntu_x"
+        assert "archived" not in out.getvalue()
+        with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(out):
+            assert backup_layout.find_be("backup", make_log()) == "zt5b"
+
+    def test_drive_with_one_boot_environment_does_not_ask(self):
+        mock = MockShell()
+        mock.on("zfs list -H -o name -r backup/rpool/ROOT").succeeds(
+            "backup/rpool/ROOT\nbackup/rpool/ROOT/ubuntu_x\n",
+        )
+        with patch_sh(mock), patch("builtins.input", side_effect=AssertionError("asked")):
+            assert backup_layout.find_be("backup", make_log()) == "ubuntu_x"
 
     def test_mount_system_pools_imports_both_and_returns_root(self):
         mock = MockShell()

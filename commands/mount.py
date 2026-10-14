@@ -132,7 +132,7 @@ def _mount_origin_layout(  # pylint: disable=too-many-locals
     checks neither (cmd/mount_zfs.c:300-326).
     """
     opts = "ro,zfsutil" if readonly else "zfsutil"
-    be = find_be(pool)
+    be = find_be(pool, log)
     if not be:
         log.fatal(f"No boot environment under {pool}/rpool/ROOT")
     _ = sh.run(f"mkdir -p {mnt}")
