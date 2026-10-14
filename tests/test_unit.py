@@ -11149,6 +11149,30 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
         assert "this system has none of its own" in out
         assert "sudo zpool import" not in out
 
+    def test_a_bpool_sharing_one_disk_with_rpool_is_this_systems(self):
+        # M4aR-4 (review E2 case 5): a mirrored bpool, rpool on one of its disks.
+        listing = (
+            "   pool: bpool\n     id: 111\n  state: ONLINE\n config:\n\n"
+            f"\tbpool  ONLINE\n\t  mirror-0  ONLINE\n\t    {_NVME}-part3  ONLINE\n"
+            f"\t    {_USB}-part3  ONLINE\n\n"
+        )
+        out = self._refusal(listing)
+        assert "on rpool's disk" in out and "sudo zpool import 111" in out
+        assert "another disk's" not in out and "Disconnect" not in out
+        assert "none of its own" not in out
+
+    def test_a_bpool_without_a_readable_device_is_not_called_another_disks(self):
+        # M4aR-4 (review E2 case 6): its only vdev is shown by guid.
+        listing = (
+            "   pool: bpool\n     id: 333\n  state: UNAVAIL\n config:\n\n"
+            "\tbpool  UNAVAIL\n\t  1234567890123456789  UNAVAIL\n\n"
+        )
+        out = self._refusal(listing)
+        assert "bpool id 333: no readable device; cannot tell whose it is" in out
+        assert "sudo zpool import (it only lists)" in out
+        assert "Disconnect" not in out and "another disk's" not in out
+        assert "none of its own" not in out
+
 
 class TestDriveMetadata:
     """Decision 17a: drive metadata written by backup, shown by recover and mount."""
