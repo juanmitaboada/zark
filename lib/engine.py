@@ -53,6 +53,7 @@ from pathlib import Path
 
 from lib import sh
 from lib.cleanup import Cleanup
+from lib.identity import disks_under
 from lib.log import Log
 from lib.replication import (
     POINT_RE,
@@ -227,32 +228,80 @@ def require_bookmark_v2(log: Log) -> None:
         )
 
 
+def _importable_bpools() -> list[tuple[str, list[str]]]:
+    """(id, vdev paths) of every pool named bpool that ``zpool import`` lists.
+
+    ``zpool import`` without a pool name only lists what could be imported
+    (cmd/zpool/zpool_main.c:3986-4017); ZPOOL_VDEV_NAME_PATH=1 makes it print
+    each vdev by its full path (lib/libzfs/libzfs_pool.c:4521).
+    """
+    r = sh.run("env LC_ALL=C ZPOOL_VDEV_NAME_PATH=1 zpool import")
+    found: list[tuple[str, list[str]]] = []
+    for block in re.split(r"^\s*pool: ", r.stdout, flags=re.MULTILINE)[1:]:
+        lines = block.splitlines()
+        if not lines or lines[0].strip() != "bpool":
+            continue
+        m = re.search(r"^\s*id: (\d+)", block, re.MULTILINE)
+        devices = [w for ln in lines[1:] for w in ln.split()[:1] if w.startswith("/dev/")]
+        found.append((m.group(1) if m else "?", devices))
+    return found
+
+
+def _rpool_disks() -> set[str]:
+    """Whole disks under the imported rpool's vdevs (empty when it is not imported)."""
+    r = sh.run("zpool list -vHP rpool")
+    disks: set[str] = set()
+    for line in r.lines[1:] if r.ok else []:
+        path = line.strip().split("\t")[0].split(" ")[0]
+        if path.startswith("/dev/"):
+            disks |= disks_under(path)
+    return disks
+
+
 def require_boot_pool(log: Log) -> None:
     """Refuse while a pool named bpool can be imported here but is not (M2R-4).
 
     With bpool not imported ``/boot`` is not mounted either, so the pool's
     absence from ``zpool list`` is all there is to see; a run would then
     leave the kernels and initrds out and still call itself complete.
-    ``zpool import`` without a pool name only lists what could be imported
-    (cmd/zpool/zpool_main.c:3986-4017).
+
+    Each importable bpool is named with its id and devices (M2V-2, M4a-6):
+    the one on rpool's disk is this system's and is imported by id; any
+    other belongs to another disk and must not be imported, since it would
+    mount over ``/boot``. The advice never includes exporting bpool: on a
+    running system that cannot succeed and leaves ``/boot`` unmounted (P6).
     """
     if sh.run("zpool list -H -o name bpool").ok:
         return
-    r = sh.run("env LC_ALL=C zpool import")
-    m = re.search(r"^\s*pool: bpool\s*\n\s*id: (\d+)", r.stdout, re.MULTILINE)
-    if m is None:
+    candidates = _importable_bpools()
+    if not candidates:
         return
-    log.fatal(
-        "bpool is not imported",
-        causes=[
-            f"`zpool import` lists a pool named bpool (id {m.group(1)}) that is not imported",
-            "Without it the backup would leave out /boot: the kernels and initrds",
-        ],
-        solutions=[
-            "Import it, then run again: sudo zpool import bpool",
-            "If that bpool belongs to another system's disk, disconnect that disk",
-        ],
-    )
+    mine = _rpool_disks()
+    own: list[str] = []
+    causes = ["Without this system's bpool the backup would leave out /boot"]
+    solutions: list[str] = []
+    for pool_id, devices in candidates:
+        disks = set().union(*(disks_under(d) for d in devices)) if devices else set()
+        where = ", ".join(devices) or "device unknown"
+        if disks and disks <= mine:
+            own.append(pool_id)
+            causes.append(f"bpool id {pool_id} on {where}: on rpool's disk, not imported")
+        else:
+            causes.append(f"bpool id {pool_id} on {where}: another disk's")
+            solutions.append(
+                f"Disconnect the disk holding bpool id {pool_id}; do not import it: "
+                + "it would mount over /boot"
+            )
+    if len(own) == 1:
+        solutions.insert(
+            0, f"Import this system's bpool, then run again: sudo zpool import {own[0]}"
+        )
+    elif own:
+        solutions.insert(0, "More than one bpool on rpool's disk: import the right one by id")
+    else:
+        causes.append("rpool's disk holds no bpool: this system has none of its own")
+        solutions.append("zark needs Ubuntu's ZFS layout, with bpool on rpool's disk")
+    log.fatal("bpool is not imported", causes=causes, solutions=solutions)
 
 
 @dataclass

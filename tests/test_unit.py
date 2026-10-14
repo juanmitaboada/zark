@@ -10631,6 +10631,56 @@ class TestBackupCommand:
         assert "backup/rpool" not in fake.ds
 
 
+_NVME = "/dev/disk/by-id/nvme-Samsung_X_S1"
+_USB = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0"
+
+
+class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
+    """M2V-2 (M4a-6): the bpool refusal tells this system's bpool from another disk's."""
+
+    def _refusal(self, listing: str) -> str:
+        mock = MockShell()
+        mock.on("zpool list -H -o name bpool").fails("no such pool")
+        mock.on("env LC_ALL=C ZPOOL_VDEV_NAME_PATH=1 zpool import").succeeds(listing)
+        mock.on("zpool list -vHP rpool").succeeds(f"rpool\t1T\n\t{_NVME}-part4\t1T")
+        mock.on_prefix(f"lsblk -nrs -o NAME,TYPE {_NVME}").succeeds("nvme0n1p4 part\nnvme0n1 disk")
+        mock.on_prefix(f"lsblk -nrs -o NAME,TYPE {_USB}").succeeds("sdb1 part\nsdb disk")
+        out = StringIO()
+        with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(out):
+            try:
+                engine.require_boot_pool(make_log())
+            except SystemExit:
+                return out.getvalue()
+        raise AssertionError("expected a refusal")
+
+    @staticmethod
+    def _bpool(pool_id: str, dev: str) -> str:
+        return (
+            f"   pool: bpool\n     id: {pool_id}\n  state: ONLINE\n config:\n\n"
+            f"\tbpool  ONLINE\n\t  {dev}  ONLINE\n\n"
+        )
+
+    def test_own_bpool_is_imported_by_id(self):
+        out = self._refusal(self._bpool("111", f"{_NVME}-part3"))
+        assert "bpool id 111" in out and "on rpool's disk" in out
+        assert "sudo zpool import 111" in out
+        assert "zpool export" not in out
+
+    def test_another_disks_bpool_is_never_advised_for_import(self):
+        out = self._refusal(
+            self._bpool("111", f"{_NVME}-part3") + self._bpool("222", f"{_USB}-part2")
+        )
+        assert "sudo zpool import 111" in out
+        assert "bpool id 222" in out and "another disk's" in out
+        assert "sudo zpool import 222" not in out and "sudo zpool import bpool" not in out
+        assert "do not import it" in out
+
+    def test_system_without_its_own_bpool(self):
+        out = self._refusal(self._bpool("222", f"{_USB}-part2"))
+        assert "this system has none of its own" in out
+        assert "sudo zpool import" not in out
+
+
 class TestDriveMetadata:
     """Decision 17a: drive metadata written by backup, shown by recover and mount."""
 
