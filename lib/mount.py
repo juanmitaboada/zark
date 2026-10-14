@@ -24,7 +24,6 @@ Used by:
 """
 
 from lib.cleanup import Cleanup
-from lib.identity import BY_ID_DIR
 from lib.keystore import KeystoreLike, open_keystore
 from lib.log import Log
 from lib.sh import run
@@ -93,9 +92,8 @@ def mount_system_pools(
     # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
     # ── Import rpool (no-mount) under altroot ─────────────────────────────
     if not zfs.pool_exists("rpool"):
-        # Scanning by-id first makes the pool (and the zpool.cache written
-        # from it) record stable names instead of /dev/sdX.
-        if not zfs.pool_import("rpool", device=device or BY_ID_DIR, altroot=altroot, no_mount=True):
+        # pool_import scans by-id first; the hint is only its fallback.
+        if not zfs.pool_import("rpool", device=device, altroot=altroot, no_mount=True):
             log.error("Cannot import rpool (tried clean import and -f)")
             return None
         cleanup.track_pool("rpool")
@@ -147,7 +145,7 @@ def mount_system_pools(
 
     # ── Import + mount bpool (/boot) ──────────────────────────────────────
     if not zfs.pool_exists("bpool"):
-        if zfs.pool_import("bpool", device=BY_ID_DIR, altroot=altroot, no_mount=True):
+        if zfs.pool_import("bpool", altroot=altroot, no_mount=True):
             cleanup.track_pool("bpool")
         else:
             log.warn("Could not import bpool — /boot will be unavailable in the chroot")

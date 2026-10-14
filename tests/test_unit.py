@@ -3972,57 +3972,65 @@ class TestNoAnchorLine:
         assert guaranteed_lives(conf_path=Path("/tmp/zark-test-nonexistent.conf")) is None
 
 
-class TestPoolImportExactDevice:  # pylint: disable=missing-function-docstring
-    """#4: pool_import must try the exact device path before any fallback.
+class TestSystemPoolImportOrder:  # pylint: disable=missing-function-docstring
+    """R2-9: system pools are imported by /dev/disk/by-id first.
 
-    Regression guard for the bridge bogus-WWN bug: when a precise device is
-    supplied, ``zpool import -d <device>`` must be the first command issued,
-    so ZFS opens that exact partition rather than scanning a directory and
-    resolving the vdev through a generic ``wwn-0x...`` alias.
+    A device hint (``zark chroot <device>``) is only the fallback, and any
+    import that did not go through by-id is named in a warning: its vdevs,
+    and the zpool.cache written from them, may carry kernel names.
     """
 
-    DEV = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
+    HINT = "/dev/sda4"
 
-    def test_exact_device_tried_first(self):
-        mock = MockShell()
-        # Not already imported.
-        mock.on("zpool list black").fails()
-        # Exact-device import succeeds.
-        mock.on(f"zpool import -d {self.DEV} black").succeeds()
-        with patch_sh(mock):
-            zfs = ZFS(make_log())
-            assert zfs.pool_import("black", device=self.DEV)
-        import_calls = [c for c in mock.calls if c.startswith("zpool import")]
-        assert import_calls, "no import attempted"
-        # First import attempt must be the exact device, no -f.
-        assert import_calls[0] == f"zpool import -d {self.DEV} black"
+    @staticmethod
+    def _imports(mock: MockShell) -> list[str]:
+        return [c for c in mock.calls if c.startswith("zpool import")]
 
-    def test_falls_back_when_exact_device_fails(self):
+    def test_by_id_first_even_with_a_hint(self):
         mock = MockShell()
-        mock.on("zpool list black").fails()
-        # Exact device (with and without -f) fails…
-        mock.on(f"zpool import -d {self.DEV} black").fails("insufficient replicas")
-        mock.on(f"zpool import -f -d {self.DEV} black").fails("insufficient replicas")
-        # …directory fallback succeeds.
-        mock.on("zpool import -d /dev/disk/by-id black").succeeds()
-        with patch_sh(mock):
-            zfs = ZFS(make_log())
-            assert zfs.pool_import("black", device=self.DEV)
-        import_calls = [c for c in mock.calls if c.startswith("zpool import")]
-        # Exact device attempts come strictly before the directory fallback.
-        assert import_calls[0] == f"zpool import -d {self.DEV} black"
-        assert any("/dev/disk/by-id" in c for c in import_calls)
+        mock.on("zpool list rpool").fails()
+        mock.on("zpool import -d /dev/disk/by-id rpool").succeeds()
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            assert ZFS(make_log()).pool_import("rpool", device=self.HINT)
+        assert self._imports(mock) == ["zpool import -d /dev/disk/by-id rpool"]
+        assert "not /dev/disk/by-id" not in out.getvalue()
 
-    def test_no_device_uses_fallbacks_only(self):
+    def test_the_hint_is_the_fallback_and_is_named(self):
         mock = MockShell()
-        mock.on("zpool list black").fails()
-        mock.on("zpool import black").succeeds()
-        with patch_sh(mock):
-            zfs = ZFS(make_log())
-            assert zfs.pool_import("black")  # device=None
-        import_calls = [c for c in mock.calls if c.startswith("zpool import")]
-        # No exact-device -d should appear when device is None.
-        assert all("usb-Micron" not in c for c in import_calls)
+        mock.on("zpool list rpool").fails()
+        mock.on("zpool import -d /dev/disk/by-id rpool").fails("no such pool")
+        mock.on("zpool import -f -d /dev/disk/by-id rpool").fails("no such pool")
+        mock.on(f"zpool import -d {self.HINT} rpool").succeeds()
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            assert ZFS(make_log()).pool_import("rpool", device=self.HINT)
+        assert self._imports(mock)[-1] == f"zpool import -d {self.HINT} rpool"
+        assert f"rpool was imported by {self.HINT}, not /dev/disk/by-id" in out.getvalue()
+
+    def test_the_auto_scan_is_last_and_named(self):
+        mock = MockShell()
+        mock.on("zpool list rpool").fails()
+        mock.on("zpool import rpool").succeeds()
+        mock.on_prefix("zpool import -d").fails("no such pool")
+        mock.on_prefix("zpool import -f -d").fails("no such pool")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            assert ZFS(make_log()).pool_import("rpool")
+        assert self._imports(mock) == [
+            "zpool import -d /dev/disk/by-id rpool",
+            "zpool import -f -d /dev/disk/by-id rpool",
+            "zpool import rpool",
+        ]
+        assert "a scan of every device" in out.getvalue()
+
+    def test_by_id_is_never_tried_twice(self):
+        mock = MockShell()
+        mock.on("zpool list rpool").fails()
+        mock.on_prefix("zpool import").fails("no such pool")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not ZFS(make_log()).pool_import("rpool", device="/dev/disk/by-id")
+        assert sum("by-id" in c for c in self._imports(mock)) == 2  # with and without -f
 
 
 class TestReadbackVerification:  # pylint: disable=missing-function-docstring
@@ -4396,14 +4404,18 @@ class TestRepairBootImport:  # pylint: disable=missing-function-docstring,too-fe
         zfs = ZFS(make_log())
         mock = MockShell()
         mock.on("zpool list bpool").fails()  # not yet imported
-        mock.on("zpool import -N -R /mnt/repair bpool").fails("pool was previously in use")
-        mock.on("zpool import -f -N -R /mnt/repair bpool").succeeds()
-        with patch_sh(mock):
+        mock.on("zpool import -N -R /mnt/repair -d /dev/disk/by-id bpool").fails(
+            "pool was previously in use"
+        )
+        mock.on("zpool import -f -N -R /mnt/repair -d /dev/disk/by-id bpool").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
             assert zfs.pool_import("bpool", altroot="/mnt/repair", no_mount=True)
         import_calls = [c for c in mock.calls if c.startswith("zpool import")]
         # Clean attempt strictly precedes the forced one.
-        assert import_calls[0] == "zpool import -N -R /mnt/repair bpool"
-        assert "zpool import -f -N -R /mnt/repair bpool" in import_calls
+        assert import_calls == [
+            "zpool import -N -R /mnt/repair -d /dev/disk/by-id bpool",
+            "zpool import -f -N -R /mnt/repair -d /dev/disk/by-id bpool",
+        ]
 
 
 class _FakeKeystore:  # pylint: disable=missing-class-docstring,missing-function-docstring,too-few-public-methods # noqa: E501
@@ -6608,6 +6620,7 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
     def _run(
         export_rpool_ok: bool,
         grub_failure: str = "",
+        vdev: str = "/dev/disk/by-id/ata-DISK-part4",
     ) -> tuple[MockShell, str, bool, list[str]]:
         mock = MockShell()
         order: list[str] = []
@@ -6620,8 +6633,8 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
             mock.on("zpool export rpool").fails("pool is busy")
             mock.on("zpool export -f rpool").fails("pool is busy")
         mock.on("zpool export bpool").succeeds()
-        mock.on("zpool list -vHP rpool").succeeds("rpool\t1G\n\t/dev/sda4\t1G")
-        mock.on("lsblk -nrs -o NAME,TYPE /dev/sda4").succeeds("sda4 part\nsda disk")
+        mock.on("zpool list -vHP rpool").succeeds(f"rpool\t1G\n\t{vdev}\t1G")
+        mock.on(f"lsblk -nrs -o NAME,TYPE {vdev}").succeeds("sda4 part\nsda disk")
         mock.on("lsblk -nr -o NAME,PARTTYPE /dev/sda").succeeds(
             "sda\nsda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b\n"
             "sda4 6a898cc3-1dd2-11b2-99a6-080020736631",
@@ -6700,6 +6713,13 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         # 10_linux_zfs skips kernels without an initrd (E8 on eli).
         _, _, _, order = self._run(export_rpool_ok=True)
         assert order == ["guard", "initrd", "grub"]
+
+    def test_kernel_named_vdevs_make_the_repair_incomplete(self):
+        # R2-9: the zpool.cache written here keeps whatever the import recorded.
+        _, out, exited, _ = self._run(export_rpool_ok=True, vdev="/dev/sda4")
+        assert exited
+        assert "BOOT REPAIR INCOMPLETE" in out
+        assert "vdevs recorded by kernel names: /dev/sda4" in out
 
     def test_banner_does_not_lie_when_grub_cfg_is_not_regenerated(self):
         _, out, exited, _ = self._run(export_rpool_ok=True, grub_failure="no entries")

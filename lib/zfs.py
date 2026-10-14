@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from lib.identity import BY_ID_DIR
 from lib.log import Log
 from lib.sh import run
 
@@ -175,20 +176,18 @@ class ZFS:
         force: bool = False,
     ) -> bool:
         """
-        Import a pool. Tries multiple strategies, in order:
-          1. -d <exact device> — the precise device path the caller gave us
-             (e.g. /dev/disk/by-id/usb-...-part1), tried first so ZFS opens
-             that exact partition instead of scanning a directory and picking
-             a generic wwn-0x... alias that points at the whole disk (which
-             fails to locate the pool labels and yields insufficient
-             replicas).
-          2. -d <device directory> — fallback: scan the device's parent dir.
-          3. -d /dev/disk/by-id/ — fallback: scan the by-id directory.
-          4. Auto-scan (no -d) — last resort, ZFS searches all devices.
-          Each candidate is attempted without -f first, then with -f.
+        Import a system pool (rpool, bpool). Candidates, in order:
+          1. -d /dev/disk/by-id: the pool, and the zpool.cache written from
+             it, record stable names instead of /dev/sdX (eli 2026-09-30: a
+             kernel-named vdev stopped the boot with a USB stick plugged in);
+          2. the caller's device hint, then its directory (``zark chroot
+             <device>``), when by-id finds nothing;
+          3. auto-scan (no -d), the last resort.
+          Each candidate is attempted without -f first, then with -f. A pool
+          imported by anything but by-id is named in a warning, since its
+          vdevs may now be recorded by kernel names.
 
-        Used for the system pools (rpool/bpool) from a live USB. Backup pools
-        go through :meth:`import_backup_pool`, which never scans.
+        Backup pools go through :meth:`import_backup_pool`, which never scans.
         """
         del force  # currently unused, but could be added as a param to try force first if desired
         if self.pool_exists(name):
@@ -208,24 +207,13 @@ class ZFS:
             cmd += f" {name}"
             return cmd
 
-        # Ordered list of -d candidates. The exact device, when supplied,
-        # comes first: pointing -d at the precise partition avoids ZFS
-        # resolving the vdev through the bridge's bogus shared WWN alias
-        # (observed identical across enclosures), which both collides between
-        # drives and targets the whole disk rather than the labelled part1.
-        dev_args: list[str] = []
+        dev_args: list[str] = [BY_ID_DIR]
         if device:
-            dev_args.append(device)  # exact device first
-            dev_dir = os.path.dirname(device)
-            if dev_dir and dev_dir not in dev_args:
-                dev_args.append(dev_dir)
-            if "/dev/disk/by-id" not in dev_dir:
-                dev_args.append("/dev/disk/by-id/")
+            for candidate in (device, os.path.dirname(device)):
+                if candidate and candidate.rstrip("/") != BY_ID_DIR and candidate not in dev_args:
+                    dev_args.append(candidate)
         dev_args.append("")  # auto-scan, last resort
 
-        # Try each candidate without force first, then with force, so an
-        # exact-device import that merely needs -f is still preferred over a
-        # directory/auto-scan that could latch onto the wrong alias.
         last_err = ""
         for darg in dev_args:
             for use_force in (False, True):
@@ -233,6 +221,11 @@ class ZFS:
                 r = run(cmd, log=self.log)
                 if r.ok:
                     self.log.ok(f"Pool {name} imported")
+                    if darg != BY_ID_DIR:
+                        self.log.warn(
+                            f"{name} was imported by {darg or 'a scan of every device'}, "
+                            + f"not {BY_ID_DIR}: its vdevs may be recorded by kernel names",
+                        )
                     return True
                 last_err = r.stderr.strip()
 

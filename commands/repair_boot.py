@@ -27,7 +27,7 @@ from lib.identity import disks_under
 from lib.initrd import regenerate_initrd
 from lib.keystore import Keystore
 from lib.log import Log
-from lib.mount import mount_system_pools
+from lib.mount import kernel_named_vdevs, mount_system_pools
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 REPAIR_MNT = "/mnt/repair"
@@ -121,6 +121,8 @@ def run(
         log.fatal("Could not import and mount the system — see messages above.")
     _, ubuntu_name = result
     log.ok(f"Boot environment: {ubuntu_name}")
+    # The zpool.cache written below records the vdev paths the import used.
+    kernel_named = kernel_named_vdevs()
 
     kernels = list(Path(f"{REPAIR_MNT}/boot").glob("vmlinuz-*"))
     if kernels:
@@ -197,10 +199,11 @@ def run(
         *(f"✗ {f}" for f in initrd_failures),
         *(["Pools exported cleanly ✓"] if not still else []),
         *(f"✗ {p} is still imported — run: sudo zpool export {p}" for p in still),
+        *([f"✗ vdevs recorded by kernel names: {', '.join(kernel_named)}"] if kernel_named else []),
         "",
         "Next: remove live USB and reboot.",
     ]
-    if still or initrd_failures or grub_failure:
+    if still or initrd_failures or grub_failure or kernel_named:
         log.banner_error("BOOT REPAIR INCOMPLETE", lines)
         raise SystemExit(1)
     log.banner_ok("BOOT REPAIR COMPLETE", lines)
