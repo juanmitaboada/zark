@@ -31,15 +31,16 @@ reproduces the failure; a standalone `zark health --destructive` is a
 possible future addition).
 """
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib.identity import whole_disk
+from lib.identity import BY_ID_DIR, by_id_names, preferred_by_id, read_pool_label, whole_disk
 from lib.log import Log
-from lib.sh import run
+from lib.sh import part, run
 
 # ── Known problematic USB-SATA bridges ───────────────────────────────────────
 #
@@ -459,18 +460,34 @@ def run_destructive_test(
     # pylint: disable=too-many-arguments,too-many-locals
     # pylint: disable=too-many-positional-arguments,too-many-return-statements
     base = _base_disk(dev)
+    # Held by its stable name: after the cold reconnect the kernel name can
+    # belong to another disk, and the cleanup below wipes what it points at.
+    by_id = preferred_by_id(by_id_names(f"/dev/{base}"))
+    vdev = f"{BY_ID_DIR}/{by_id}" if by_id else f"/dev/{base}"
+    import_from = f"{vdev}-part1" if by_id else BY_ID_DIR
     test_pool = f"zarktest_{int(time.time())}"
     mountpoint = f"/run/{test_pool}"
     target = profile_target_bytes(profile, dev)
     cycles = _PROFILE_CYCLES.get(profile, 1)
     bytes_written = 0
+    if cold and not by_id:
+        return TestResult(
+            profile,
+            cold,
+            0,
+            write_mb_s,
+            False,
+            f"/dev/{base} has no /dev/disk/by-id name: the cold pass could not find it again",
+        )
     # Mark the kernel-log position so we can later report only the transport
     # errors emitted during this test.
     dmesg_mark = _dmesg_now_ts()
     try:
         log.info(f"Creating throwaway test pool '{test_pool}'...")
+        # cachefile=none: the test pool never enters /etc/zfs/zpool.cache.
         r = run(
-            f"zpool create -f -o ashift=12 -O atime=off -m {mountpoint} {test_pool} /dev/{base}",
+            "zpool create -f -o ashift=12 -o cachefile=none -O atime=off "
+            + f"-m {mountpoint} {test_pool} {vdev}",
             log=log,
         )
         if not r.ok:
@@ -497,14 +514,24 @@ def run_destructive_test(
             run(f"eject /dev/{base}", log=log)
             if wait_for_reconnect is not None:
                 wait_for_reconnect()  # blocks until operator reconnects
+            if not Path(vdev).exists():
+                return TestResult(
+                    profile,
+                    cold,
+                    bytes_written,
+                    write_mb_s,
+                    False,
+                    f"the disk did not reappear as {by_id} after the reconnect",
+                    _transport_errors_since(base, dmesg_mark),
+                )
 
-        # Verify re-import. For the cold path the device name may change after
-        # reconnect, so import by pool name with a directory scan.
+        # Verify re-import, from the disk's own partition (by-id survives the
+        # reconnect; the kernel name may not).
         log.info("Re-importing to verify persistence...")
         run("sync")
         run("sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
         imp = run(
-            f"zpool import -o readonly=on -N -d /dev/disk/by-id {test_pool}",
+            f"zpool import -o readonly=on -o cachefile=none -N -d {import_from} {test_pool}",
             log=log,
         )
         # Transport errors are read AFTER the re-import attempt so the import's
@@ -541,16 +568,33 @@ def run_destructive_test(
             terrs,
         )
     finally:
-        # Always destroy the test pool AND wipe the device, so it is left
-        # genuinely blank — not with orphan zfs_member partitions that would
-        # make it look like it holds real data (and that the empty-drive check
-        # would later reject).
-        run(f"zpool import -N -d /dev/disk/by-id {test_pool} 2>/dev/null")
-        run(f"zpool destroy -f {test_pool} 2>/dev/null")
-        run(f"rm -rf {mountpoint}")
-        run(f"wipefs -a /dev/{base} 2>/dev/null")
-        run(f"sgdisk --zap-all /dev/{base} 2>/dev/null")
-        run("sync")
+        _remove_test_pool(test_pool, vdev, import_from, mountpoint, log)
+
+
+def _remove_test_pool(
+    test_pool: str, vdev: str, import_from: str, mountpoint: str, log: Log
+) -> None:
+    """Destroy the test pool and leave its disk blank: no orphan zfs_member
+    partitions that the empty-drive check would later reject.
+
+    The wipe goes to the disk ``vdev`` resolves to now, and only when that
+    disk's label is the test pool's or there is none; a disk that is not
+    connected, or that carries another pool, is left alone and named.
+    """
+    if not Path(vdev).exists():
+        log.warn(f"{vdev} is not connected: test pool {test_pool} not destroyed, nothing wiped")
+        return
+    disk = os.path.realpath(vdev)
+    run(f"zpool import -o cachefile=none -N -d {import_from} {test_pool} 2>/dev/null")
+    run(f"zpool destroy -f {test_pool} 2>/dev/null")
+    run(f"rmdir {mountpoint} 2>/dev/null")
+    label = read_pool_label(part(disk, 1)) or read_pool_label(disk)
+    if label is not None and label.name != test_pool:
+        log.warn(f"{disk} carries pool '{label.name}', not {test_pool}: not wiped")
+        return
+    run(f"wipefs -a {disk} 2>/dev/null")
+    run(f"sgdisk --zap-all {disk} 2>/dev/null")
+    run("sync")
 
 
 # ── Diagnostic report ─────────────────────────────────────────────────────────

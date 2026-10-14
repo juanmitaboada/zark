@@ -163,6 +163,7 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
     WARN,
     Finding,
     HealthReport,
+    TestResult as HealthResult,
     _check_fua,
     _check_transport,
     _transport_errors_since,
@@ -4214,7 +4215,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("zpool import").succeeds()
         mock.on("zpool destroy").succeeds()
         mock.on("rm -rf").succeeds()
-        with patch_sh(mock):
+        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -4239,7 +4240,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         )
         mock.on("zpool destroy").succeeds()
         mock.on("rm -rf").succeeds()
-        with patch_sh(mock):
+        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -4257,6 +4258,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
             called["reconnect"] = True
 
         mock = MockShell()
+        mock.on_prefix("find /dev/disk/by-id/").succeeds("usb-Stick_SER-0:0\t../../sda\n")
         mock.on("zpool create").succeeds()
         mock.on("dd").succeeds()
         mock.on("sync").succeeds()
@@ -4266,7 +4268,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("zpool import").succeeds()
         mock.on("zpool destroy").succeeds()
         mock.on("rm -rf").succeeds()
-        with patch_sh(mock):
+        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -4302,7 +4304,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
             "[ 200.5] sd 0:0:0:0: [sda] Synchronize Cache(10) failed: "
             "Result: hostbyte=DID_ERROR driverbyte=DRIVER_OK\n",
         )
-        with patch_sh(mock):
+        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -4329,7 +4331,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("wipefs").succeeds()
         mock.on("sgdisk").succeeds()
         mock.on("dmesg").succeeds("")
-        with patch_sh(mock):
+        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
             run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -4367,6 +4369,78 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         assert "2449E8CD1F15" not in clean
         assert "<redacted>" in clean
         assert "2449E8CD1F15" in raw
+
+    @staticmethod
+    def _cold_mock(
+        by_id: str = "usb-Stick_SER-0:0\t../../sdb\n",
+        label: str = "",
+    ) -> MockShell:
+        mock = MockShell()
+        mock.on_prefix("find /dev/disk/by-id/").succeeds(by_id)
+        if label:
+            mock.on("zdb -l /dev/sdc1").succeeds(label)
+        for cmd in ("zpool create", "dd", "sync", "zpool export", "eject", "drop_caches"):
+            mock.on(cmd).succeeds()
+        mock.on("zpool import").succeeds()
+        mock.on("zpool destroy").succeeds()
+        mock.on("rmdir").succeeds()
+        mock.on("wipefs").succeeds()
+        mock.on("sgdisk").succeeds()
+        mock.on("dmesg").succeeds("")
+        mock.on_prefix("zdb -l").fails("failed to unpack label")
+        return mock
+
+    def _cold(self, mock: MockShell, back: bool, now: str) -> HealthResult:
+        by_id = "/dev/disk/by-id/usb-Stick_SER-0:0"
+        with (
+            patch_sh(mock),
+            patch("lib.health.Path.exists", side_effect=lambda p=None: back),
+            patch("lib.health.os.path.realpath", side_effect=lambda p: now if p == by_id else p),
+            redirect_stdout(StringIO()),
+        ):
+            return run_destructive_test(
+                "/dev/sdb",
+                PROFILE_FAST,
+                True,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+                wait_for_reconnect=lambda: None,
+            )
+
+    def test_cold_wipe_follows_the_disk_not_its_old_name(self):
+        # H19: after the reconnect the stick is sdc and sdb is another disk.
+        mock = self._cold_mock()
+        result = self._cold(mock, back=True, now="/dev/sdc")
+        assert result.passed
+        assert mock.was_called("wipefs -a /dev/sdc")
+        assert mock.was_not_called("/dev/sdb 2>"), mock.calls
+        assert mock.was_called("-d /dev/disk/by-id/usb-Stick_SER-0:0-part1 zarktest_")
+
+    def test_test_pool_never_enters_the_cachefile(self):
+        mock = self._cold_mock()
+        _ = self._cold(mock, back=True, now="/dev/sdc")
+        for c in mock.calls:
+            if c.startswith(("zpool create", "zpool import")):
+                assert "cachefile=none" in c, c
+
+    def test_a_disk_that_does_not_come_back_is_not_wiped(self):
+        mock = self._cold_mock()
+        result = self._cold(mock, back=False, now="")
+        assert not result.passed
+        assert "did not reappear" in result.detail
+        assert mock.was_not_called("wipefs"), mock.calls
+        assert mock.was_not_called("sgdisk"), mock.calls
+
+    def test_a_disk_with_another_pool_is_not_wiped(self):
+        mock = self._cold_mock(label="LABEL 0\n    name: 'black'\n    pool_guid: 1\n")
+        _ = self._cold(mock, back=True, now="/dev/sdc")
+        assert mock.was_not_called("wipefs"), mock.calls
+
+    def test_cold_without_a_by_id_name_stops_before_writing(self):
+        mock = self._cold_mock(by_id="")
+        result = self._cold(mock, back=True, now="/dev/sdb")
+        assert not result.passed
+        assert mock.was_not_called("zpool create"), mock.calls
 
 
 class TestIsLiveUsb:  # pylint: disable=missing-function-docstring
