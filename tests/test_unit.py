@@ -59,6 +59,7 @@ import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # 
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.finish as finish_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.health as health_cmd  # pylint: disable=wrong-import-position # noqa: E402
 import commands.monitor as monitor_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.mount as mount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.prepare as prepare_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -4181,6 +4182,36 @@ class _FakeHealthZFS:  # pylint: disable=too-few-public-methods
     def pool_health(self, _name):
         """Return a constant healthy status for any pool name."""
         return "ONLINE"
+
+
+class TestHealthPicker:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """I10: the health picker lists one physical disk once."""
+
+    def test_registered_drive_and_bare_disk_are_one_entry(self):
+        drive = ConnectedDrive(
+            name="black",
+            guid="1",
+            drive_id="usb-Micron-0:0",
+            dev_path="/dev/sda1",
+            known=True,
+            guid_changed=False,
+            renamed=False,
+            state="exported",
+        )
+        out = StringIO()
+        with (
+            patch.object(health_cmd, "scan_connected_drives", return_value=[drive]),
+            patch.object(health_cmd, "_usb_disks", return_value=[("/dev/sda", "sda [USB disk]")]),
+            patch.object(
+                health_cmd, "whole_disk", side_effect=lambda d: d.rstrip("0123456789"), create=True
+            ),
+            patch.object(health_cmd.Config, "load", return_value=make_config()),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            dev = health_cmd._select_device([], make_log())  # pylint: disable=protected-access
+        assert dev == "/dev/sda1"
+        assert "Which drive" not in out.getvalue()  # a single entry: nothing to choose
 
 
 class TestHealthDestructive:  # pylint: disable=missing-function-docstring

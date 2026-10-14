@@ -49,6 +49,7 @@ from lib.health import (
     run_destructive_test,
     write_report_file,
 )
+from lib.identity import whole_disk
 from lib.log import Log
 from lib.zfs import ZFS
 
@@ -117,14 +118,15 @@ def _select_device(args: list[str], log: Log) -> str:
             if by_id.exists():
                 dev = str(by_id.resolve())
         if dev:
-            real = str(Path(dev).resolve())
-            seen.add(real)
+            # One physical disk, however it is spelled: blkid gives the
+            # partition, the bare-disk list below gives the whole disk (I10).
+            seen.add(whole_disk(dev) or str(Path(dev).resolve()))
             devs.append(dev)
             labels.append(f"{d.name}  ({d.model or d.drive_id}, {d.size})")
 
     # Then any bare USB disks not already covered above.
     for dev, label in _usb_disks():
-        if str(Path(dev).resolve()) not in seen:
+        if (whole_disk(dev) or str(Path(dev).resolve())) not in seen:
             devs.append(dev)
             labels.append(label)
 
