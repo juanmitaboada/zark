@@ -38,7 +38,7 @@ future is automatically covered the next time setup runs.
 from pathlib import Path
 from typing import TypedDict
 
-from lib import alerts, apt_guard, sh
+from lib import alerts, apt_guard, grub_guard, sh
 from lib.engine import bookmark_feature
 
 # from lib.config import Config
@@ -687,6 +687,18 @@ def _check_secure_boot_alternatives(log: Log) -> None:
         log.warn("update-grub had warnings — review the log")
 
 
+def _install_guards(log: Log) -> None:
+    """Install both backup guards on the running system, current versions.
+
+    The APT guard stops a kernel/GRUB/ZFS package operation (unattended
+    upgrades included) while a backup drive is attached or imported; the grub
+    guard stops update-grub in the same situation. Overwriting brings a guard
+    written by an older zark up to date (finish keeps an existing one).
+    """
+    apt_guard.install(target_root="", log=log)
+    grub_guard.install(target_root="", log=log)
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
@@ -826,11 +838,7 @@ def run(
     log.step(6, 6, "Verifying Secure Boot binaries...")
     _check_secure_boot_alternatives(log)
 
-    # Install the apt guard on this (running) productive system. Unlike the
-    # grub guard — which is a recovery-time tool — this protects the live
-    # system from the unattended-upgrades vector: a background kernel/GRUB
-    # upgrade running while a zark backup drive is plugged in.
-    apt_guard.install(target_root="", log=log)
+    _install_guards(log)
     # Space and backup-age alerts: MOTD and an hourly timer (M3 decision 13a).
     alerts.install(log)
 

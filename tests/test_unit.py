@@ -52,7 +52,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # isort: split
 
 from unittest import SkipTest  # pylint: disable=wrong-import-position # noqa: E402
-from unittest.mock import MagicMock, patch  # pylint: disable=wrong-import-position # noqa: E402
+from unittest.mock import ANY, MagicMock, patch  # pylint: disable=wrong-import-position # noqa: E402
 
 import commands.backup as backup_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -67,6 +67,7 @@ import commands.purge as purge_mod  # pylint: disable=wrong-import-position # no
 import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.setup as setup_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.status as status_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -4755,6 +4756,30 @@ class TestAptGuard:  # pylint: disable=missing-function-docstring
                 check=False,
             )
             assert proc.returncode == 0
+
+
+class TestSetupInstallsBothGuards:  # pylint: disable=missing-function-docstring
+    """M4a-4: setup brings both guards up to date on the running system."""
+
+    def test_setup_installs_both_guards_overwriting(self):
+        with (
+            patch.object(setup_mod.apt_guard, "install") as apt,
+            patch.object(setup_mod.grub_guard, "install") as grub,
+        ):
+            setup_mod._install_guards(make_log())  # pylint: disable=protected-access
+        apt.assert_called_once_with(target_root="", log=ANY)
+        grub.assert_called_once_with(target_root="", log=ANY)
+
+    def test_grub_guard_rewrites_a_stale_copy_and_leaves_a_current_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td, grub_guard.GUARD_RELATIVE_PATH)
+            path.parent.mkdir(parents=True)
+            path.write_text("#!/bin/sh\nold guard\n", encoding="utf-8")
+            grub_guard.install(target_root=td, log=make_log())
+            assert path.read_text(encoding="utf-8") == grub_guard.GUARD_SCRIPT
+            os.utime(path, (1, 1))
+            grub_guard.install(target_root=td, log=make_log())
+            assert path.stat().st_mtime == 1
 
 
 class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstring

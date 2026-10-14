@@ -101,6 +101,13 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> None:
 
     if guard_path.exists() and not overwrite:
         return
+    try:
+        current = guard_path.read_text(encoding="utf-8") if guard_path.exists() else None
+    except (OSError, UnicodeDecodeError):
+        current = None
+    if current == GUARD_SCRIPT and guard_path.stat().st_mode & 0o111:
+        log.ok("Grub guard already current ✓")
+        return
 
     guard_path.parent.mkdir(parents=True, exist_ok=True)
     _ = guard_path.write_text(GUARD_SCRIPT, encoding="utf-8")
