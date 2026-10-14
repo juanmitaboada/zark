@@ -24,6 +24,7 @@ import os
 import signal
 import sys
 
+from lib import lock
 from lib.config import VERSION, Config
 from lib.log import Log
 
@@ -136,6 +137,10 @@ def main():
         print(f"\033[0;31mError:\033[0m unknown command '{cmd_name}'")
         print("  Run: sudo ./zark --help")
         sys.exit(1)
+
+    # Two zark runs at once can remove each other's points or prune under a
+    # backup: every command that changes state takes the one lock first.
+    lock.guard(cmd_name, cmd_args)
 
     # Import and run the command. CLI uses kebab-case (e.g. "repair-boot"),
     # Python module names use snake_case (e.g. "repair_boot.py").

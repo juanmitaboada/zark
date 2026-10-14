@@ -28,6 +28,8 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 # line limit.
 
 import atexit
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -70,6 +72,7 @@ import commands.umount as umount_mod  # pylint: disable=wrong-import-position # 
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
@@ -2355,6 +2358,99 @@ class TestClean:  # pylint: disable=missing-function-docstring
             value = param.read_text(encoding="ascii").strip()
         assert value == "0", mock.calls
         assert rc == 0
+
+
+class TestLock:  # pylint: disable=missing-function-docstring,protected-access
+    """M2R-16 / M3P.3 (M4a-5): one kernel lock for every command that changes state."""
+
+    _HOLD = (
+        "import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "os.ftruncate(fd, 0); os.write(fd, b'zark backup (pid 1, since then)')\n"
+        "print('held', flush=True); time.sleep(60)\n"
+    )
+
+    def test_read_only_commands_run_without_the_lock(self):
+        assert not lock_mod.needs_lock("status", ["--refresh"])
+        assert not lock_mod.needs_lock("explore", [])
+        assert not lock_mod.needs_lock("monitor", [])
+        assert not lock_mod.needs_lock("registry", [])
+        assert not lock_mod.needs_lock("registry", ["list"])
+        for cmd in ("backup", "prune", "prepare", "purge", "recover", "clean", "health"):
+            assert lock_mod.needs_lock(cmd, []), cmd
+        assert lock_mod.needs_lock("registry", ["forget", "x"])
+
+    def test_a_second_run_is_refused_while_the_first_holds_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.lock")
+            holder = subprocess.Popen(  # pylint: disable=consider-using-with
+                [sys.executable, "-c", self._HOLD, path],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+                out = StringIO()
+                with (
+                    patch.object(lock_mod, "LOCK_PATH", path),
+                    patch.dict(lock_mod._STATE, clear=True),
+                    redirect_stdout(out),
+                ):
+                    try:
+                        lock_mod.guard("prune", [])
+                    except SystemExit as e:
+                        assert e.code == lock_mod.EX_TEMPFAIL
+                    else:
+                        raise AssertionError("a second run was not refused")
+                assert "zark backup (pid 1, since then)" in out.getvalue()
+            finally:
+                holder.kill()
+                _ = holder.wait()
+            with patch.object(lock_mod, "LOCK_PATH", path), patch.dict(lock_mod._STATE, clear=True):
+                lock_mod.guard("prune", [])
+                os.close(lock_mod._STATE["fd"])
+            assert Path(path).read_text(encoding="utf-8").startswith("zark prune (pid ")
+
+    def test_a_killed_holder_leaves_no_stale_lock(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "zark.lock")
+            holder = subprocess.Popen(  # pylint: disable=consider-using-with
+                [sys.executable, "-c", self._HOLD, path],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+            holder.send_signal(signal.SIGKILL)
+            _ = holder.wait()
+            with patch.object(lock_mod, "LOCK_PATH", path), patch.dict(lock_mod._STATE, clear=True):
+                lock_mod.guard("backup", [])
+                os.close(lock_mod._STATE["fd"])
+
+    def test_the_entry_point_takes_it_before_running_a_command(self):
+        path = str(Path(__file__).resolve().parent.parent / "zark")
+        loader = importlib.machinery.SourceFileLoader("zark_entry", path)
+        spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
+        assert spec is not None
+        entry = importlib.util.module_from_spec(spec)
+        sigpipe = signal.getsignal(signal.SIGPIPE)
+        try:
+            loader.exec_module(entry)  # the entry point sets SIGPIPE to SIG_DFL
+        finally:
+            _ = signal.signal(signal.SIGPIPE, sigpipe)
+        ran: list[str] = []
+        with (
+            patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.geteuid", return_value=0),
+            patch.object(lock_mod, "guard", side_effect=SystemExit(lock_mod.EX_TEMPFAIL)) as g,
+            patch.object(prune_mod, "run", side_effect=lambda _a: ran.append("prune")),
+        ):
+            try:
+                entry.main()
+            except SystemExit as e:
+                assert e.code == lock_mod.EX_TEMPFAIL
+        g.assert_called_once_with("prune", [])
+        assert not ran
 
 
 class TestCleanOnRealMounts:  # pylint: disable=missing-function-docstring
