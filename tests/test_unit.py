@@ -926,59 +926,63 @@ class TestZFS:  # pylint: disable=missing-function-docstring
 class TestKeystore:
     """Tests for Keystore zvol detection and mounting logic with mocked shell commands."""
 
-    def test_find_zvol_no_rpool(self):
-        """When rpool is not imported, first /dev/zd* is used."""
+    @staticmethod
+    def _zvols(mock: MockShell, names: dict[str, str]) -> None:
+        mock.on("ls -1 /dev/zd*").succeeds("\n".join(names))
+        for dev, name in names.items():
+            mock.on(f"/usr/lib/udev/zvol_id {dev}", regex=False).succeeds(name)
+        mock.on_prefix("readlink -f /dev/zvol/").fails()
+
+    def test_find_zvol_by_name_not_by_order(self):
+        """H11: zd112 sorts before zd16 as text; the backup's keystore is zd16."""
         mock = MockShell()
-        log = make_log()
-        ks = Keystore(log)
-
-        mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0\n/dev/zd16")
-        mock.on("zfs list -H -o objsetid backup/keystore").fails()
-        mock.on("zpool list rpool").fails()  # rpool NOT imported
-
-        with patch_sh(mock):
-            dev = ks.find_zvol_for_pool("backup")
-            assert dev == "/dev/zd0"
-
-    def test_find_zvol_with_rpool(self):
-        """When rpool is imported, backup keystore is second device."""
-        mock = MockShell()
-        log = make_log()
-        ks = Keystore(log)
-
-        mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0\n/dev/zd16")
-        mock.on("zfs list -H -o objsetid backup/keystore").fails()
+        self._zvols(
+            mock,
+            {
+                "/dev/zd0": "rpool/keystore",
+                "/dev/zd112": "rpool/vm",
+                "/dev/zd16": "backup/keystore",
+            },
+        )
         mock.on("zpool list rpool").succeeds()
-
         with patch_sh(mock):
-            dev = ks.find_zvol_for_pool("backup")
-            assert dev == "/dev/zd16"
+            assert Keystore(make_log()).find_zvol_for_pool("backup") == "/dev/zd16"
 
-    def test_find_zvol_rpool_target(self):
-        """When target is rpool itself, first device."""
+    def test_find_zvol_skips_partitions(self):
+        """H11: a partition node of another zvol shifted the old index."""
         mock = MockShell()
-        log = make_log()
-        ks = Keystore(log)
-
-        mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0")
-        mock.on("zfs list -H -o objsetid rpool/keystore").fails()
-        mock.on("zpool list rpool").succeeds()
-
+        mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0\n/dev/zd0p1\n/dev/zd16")
+        mock.on("/usr/lib/udev/zvol_id /dev/zd0").succeeds("rpool/vm")
+        mock.on("/usr/lib/udev/zvol_id /dev/zd16").succeeds("rpool/keystore")
+        mock.on("zpool list rpool").fails()
         with patch_sh(mock):
-            dev = ks.find_zvol_for_pool("rpool")
-            assert dev == "/dev/zd0"
+            assert Keystore(make_log()).find_zvol_for_pool("rpool") == "/dev/zd16"
+        assert mock.was_not_called("zvol_id /dev/zd0p1")
+
+    def test_find_zvol_single_device_of_another_pool_is_not_used(self):
+        """Phase 0: one zvol and rpool imported used to be tried 'anyway'."""
+        mock = MockShell()
+        self._zvols(mock, {"/dev/zd0": "rpool/keystore"})
+        mock.on("zpool list rpool").succeeds()
+        with patch_sh(mock):
+            assert Keystore(make_log()).find_zvol_for_pool("backup") is None
+
+    def test_find_zvol_falls_back_to_the_udev_link(self):
+        """Without zvol_id, the udev link /dev/zvol/<pool>/keystore decides."""
+        mock = MockShell()
+        mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0\n/dev/zd16")
+        mock.on_prefix("/usr/lib/udev/zvol_id").fails("not found", rc=127)
+        mock.on("readlink -f /dev/zvol/backup/keystore").succeeds("/dev/zd16")
+        with patch_sh(mock):
+            assert Keystore(make_log()).find_zvol_for_pool("backup") == "/dev/zd16"
 
     def test_find_zvol_none(self):
         """No zvol devices found."""
         mock = MockShell()
-        log = make_log()
-        ks = Keystore(log)
-
         mock.on("ls -1 /dev/zd*").fails("No such file")
-
+        mock.on_prefix("readlink -f /dev/zvol/").fails()
         with patch_sh(mock):
-            dev = ks.find_zvol_for_pool("backup")
-            assert dev is None
+            assert Keystore(make_log()).find_zvol_for_pool("backup") is None
 
     def test_mount_wrong_passphrase(self):
         """Mount fails with wrong passphrase."""
@@ -987,8 +991,7 @@ class TestKeystore:
         ks = Keystore(log)
 
         mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0")
-        mock.on("zfs list -H -o objsetid").fails()
-        mock.on("zpool list rpool").fails()
+        mock.on("/usr/lib/udev/zvol_id /dev/zd0").succeeds("backup/keystore")
         mock.on("cryptsetup open").fails("No key available", rc=2)
 
         with patch_sh(mock):
@@ -5216,8 +5219,7 @@ class TestKeystoreReadonlyAndRetry:  # pylint: disable=missing-function-docstrin
     def test_readonly_mount_uses_readonly_luks_and_noload(self):
         mock = MockShell()
         mock.on("ls -1 /dev/zd*").succeeds("/dev/zd0")
-        mock.on("zfs list -H -o objsetid backup/keystore").succeeds("12")
-        mock.on("zpool list rpool").fails()
+        mock.on("/usr/lib/udev/zvol_id /dev/zd0").succeeds("backup/keystore")
         mock.on("cryptsetup open --readonly /dev/zd0 zark_ks_backup").succeeds()
         mock.on("mount -o ro,noload /dev/mapper/zark_ks_backup /run/keystore/rpool").succeeds()
         ks = Keystore(make_log())

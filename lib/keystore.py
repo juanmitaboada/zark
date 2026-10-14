@@ -18,16 +18,21 @@ The keystore is a ZFS zvol (rpool/keystore or <pool>/keystore) containing
 a LUKS-encrypted volume with system.key. This key is used to unlock all
 encrypted datasets in rpool.
 
-CRITICAL: zvol device detection must be robust. We identify the correct
-zvol by matching its LUKS UUID or by pool relationship, NOT by assuming
-/dev/zd* ordering (which is unreliable).
+The keystore's zvol device is found by its dataset name (zvol_id), never
+by the order of the /dev/zd* devices.
 """
 
+import re
 from pathlib import Path
 from typing import Protocol
 
 from lib.log import Log
 from lib.sh import run
+
+# Prints a zvol device's dataset name; Ubuntu's zfsutils-linux installs it
+# here, and udev's 60-zvol.rules builds /dev/zvol/<dataset> from it.
+ZVOL_ID = "/usr/lib/udev/zvol_id"
+_WHOLE_ZD = re.compile(r"^/dev/zd\d+$")
 
 # Standard Ubuntu path where system.key is expected
 KEYSTORE_MOUNT = "/run/keystore/rpool"
@@ -106,61 +111,33 @@ class Keystore:
             self._mounted = True
 
     def find_zvol_for_pool(self, pool: str) -> str | None:
-        """
-        Find the /dev/zd* device for a pool's keystore zvol.
+        """The /dev/zd* device of ``<pool>/keystore``, found by its dataset name.
 
-        Strategy: check which zvol belongs to which pool by looking at
-        the ZFS dataset that owns it, rather than assuming device order.
+        Each whole zvol device (``/dev/zdN``, not its ``pN`` partitions) is
+        asked its dataset name with ``zvol_id`` (``ioctl(BLKZNAME)``, OpenZFS
+        ``udev/zvol_id.c``); when that tool is missing, the udev link
+        ``/dev/zvol/<pool>/keystore`` that it feeds is read instead. Device
+        order says nothing about ownership (``zd112`` sorts before ``zd16``,
+        and any other zvol shifts the numbers), so there is no guess.
         """
-        # List all zd devices
+        want = f"{pool}/keystore"
         r = run("ls -1 /dev/zd* 2>/dev/null")
-        if not r.ok:
-            self.log.warn("No ZFS volume devices found (/dev/zd*)")
-            return None
-
-        zd_devices = sorted(r.lines)
-        self.log.dbg(f"Found zvol devices: {zd_devices}")
-
-        if not zd_devices:
-            return None
-
-        # Try to identify which zd device belongs to which pool
-        # by checking /sys/class/block/zdN/dm/name or by testing
-        # LUKS open with the passphrase
-        #
-        # Primary method: check if the pool has a keystore dataset
-        # and find its associated zvol via /sys
-        keystore_ds = f"{pool}/keystore"
-        r_ks = run(f"zfs list -H -o objsetid {keystore_ds}")
-        if r_ks.ok:
-            objsetid = r_ks.output.strip()
-            self.log.dbg(f"Keystore dataset {keystore_ds} objsetid={objsetid}")
-
-        # Fallback: if rpool is imported (live system), rpool's keystore = first zd,
-        # backup pool's keystore = second zd. If rpool not imported, first zd is ours.
-        rpool_imported = run("zpool list rpool").ok
-
-        if not rpool_imported:
-            # No live rpool — first device is our target
-            self.log.dbg(f"No rpool imported: using {zd_devices[0]}")
-            return zd_devices[0]
-
-        if pool == "rpool":
-            self.log.dbg(f"Target is rpool: using {zd_devices[0]}")
-            return zd_devices[0]
-
-        # rpool is imported and we want a different pool's keystore
-        if len(zd_devices) >= 2:
-            self.log.dbg(f"rpool imported + backup pool: using {zd_devices[1]}")
-            return zd_devices[1]
-
-        # Only one device — might be rpool's, might be ours
-        self.log.warn(
-            f"Only one zvol device ({zd_devices[0]}) but rpool is imported. "
-            "Cannot distinguish keystore ownership.",
+        devs = sorted(
+            (line.strip() for line in r.lines if _WHOLE_ZD.match(line.strip())) if r.ok else (),
+            key=lambda d: int(d[len("/dev/zd") :]),
         )
-        # Try it anyway — worst case, wrong passphrase will fail cleanly
-        return zd_devices[0]
+        self.log.dbg(f"Found zvol devices: {devs}")
+        for dev in devs:
+            name = run(f"{ZVOL_ID} {dev}")
+            if name.ok and name.output.strip() == want:
+                self.log.dbg(f"{want} is {dev} (zvol_id)")
+                return dev
+        link = run(f"readlink -f /dev/zvol/{want}")
+        if link.ok and _WHOLE_ZD.match(link.output.strip()):
+            self.log.dbg(f"{want} is {link.output.strip()} (/dev/zvol link)")
+            return link.output.strip()
+        self.log.warn(f"No zvol device carries {want} ({len(devs)} zvol device(s) checked)")
+        return None
 
     def mount(self, pool: str, passphrase: str, *, readonly: bool = False) -> bool:
         """
