@@ -930,8 +930,8 @@ def _accept_unowned(pool: str, log: Log) -> None:
         f"{pool} has no owner recorded and nothing in common with this system: "
         + "nothing was changed",
         causes=[
-            "Prepared by zark <= 2.0.0-rc2 and never backed up, or not by zark, "
-            + "or the backup of another system",
+            "No snapshot or bookmark in common with this system: a blank drive, "
+            + "one whose anchors in origin are all gone, or another system's backup",
             *([f"It holds {len(held)} dataset(s) this system shares nothing with"] if held else []),
         ],
         solutions=[

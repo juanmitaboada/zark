@@ -11022,6 +11022,10 @@ class TestBackupCommand:
         assert rc == 1
         self._untouched(fake)
         assert "no owner recorded and nothing in common" in out.getvalue()
+        # M4aR-7: a prepared drive shares its point with origin; what is
+        # refused is a drive with nothing in common, not "never backed up".
+        assert "No snapshot or bookmark in common with this system" in out.getvalue()
+        assert "never backed up" not in out.getvalue()
 
     def test_unowned_drive_sharing_only_older_snapshots_is_accepted(self) -> None:
         """M4a review mutation O5: every dataset is ROLLBACK (origin lost the
