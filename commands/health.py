@@ -16,9 +16,10 @@ zark health — interactive drive analysis and debugging tool.
 
 Two modes, both chosen interactively:
 
-  * read-only (default) — inspects kernel/sysfs state for risk factors
-    (no-FUA bridge, UAS transport, known-problematic bridge). Writes
-    nothing; flags risk, cannot prove a drive safe.
+  * read-only (default): inspects kernel/sysfs state for risk factors
+    (no-FUA bridge, UAS transport, known-problematic bridge) and the health
+    of any pool on the drive, without importing it. Writes nothing; flags
+    risk, cannot prove a drive safe.
 
   * destructive — creates a throwaway pool, writes with transaction churn,
     and verifies the pool re-imports. This reproduces the USB-SATA FUA-lie
@@ -45,6 +46,7 @@ from lib.health import (
     estimate_seconds,
     generate_report,
     measure_write_speed,
+    pool_findings,
     render_report,
     run_destructive_test,
     write_report_file,
@@ -211,6 +213,9 @@ def run(args: list[str]) -> None:
     # ── Phase 2: unattended execution ────────────────────────────────────
     log.info(f"Checking {dev}...")
     report = check_device(dev)
+    if not destructive:
+        # A destructive run needs a blank drive: there is no pool to read.
+        report.findings += pool_findings(dev)
     render_report(report, log)
 
     test = None

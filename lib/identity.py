@@ -163,6 +163,35 @@ def _sectors(name: str) -> int | None:
         return None
 
 
+def usb_ids(base: str) -> tuple[str, str]:
+    """Return (vendor, product) lowercase hex for a USB-backed block device.
+
+    Walks /sys/block/<base> back to the owning USB device and reads
+    idVendor/idProduct. Returns ("", "") for non-USB devices or when the
+    attributes cannot be found.
+    """
+    sys_block = Path(f"/sys/block/{base}")
+    if not sys_block.exists():
+        return "", ""
+    # Resolve the real sysfs path and walk up looking for idVendor/idProduct.
+    node = sys_block.resolve()
+    for _ in range(12):  # bounded walk up the device tree
+        vid = node / "idVendor"
+        pid = node / "idProduct"
+        if vid.exists() and pid.exists():
+            try:
+                return (
+                    vid.read_text().strip().lower(),
+                    pid.read_text().strip().lower(),
+                )
+            except OSError:
+                return "", ""
+        if node.parent == node:
+            break
+        node = node.parent
+    return "", ""
+
+
 def whole_disk(device: str) -> str:
     """Whole-disk node for any device path (disk, partition, by-id), or ""."""
     node = os.path.realpath(device)

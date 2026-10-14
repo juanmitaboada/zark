@@ -33,7 +33,7 @@ from pathlib import Path
 
 from lib import sh
 from lib.config import VERSION
-from lib.identity import disks_under
+from lib.identity import disks_under, usb_ids
 from lib.log import Log
 
 HISTORY_LINES = 200
@@ -49,9 +49,6 @@ def _section(title: str, cmd: str) -> str:
 
 def _usb_ids(pool: str) -> str:
     """VID:PID of the USB bridge behind each disk of ``pool``."""
-    # Late import: lib.health is not needed by anything else here.
-    from lib.health import _usb_ids_for  # pylint: disable=import-outside-toplevel
-
     r = sh.run(f"zpool list -vHP {pool}")
     lines: list[str] = []
     for line in r.lines[1:] if r.ok else []:
@@ -59,7 +56,7 @@ def _usb_ids(pool: str) -> str:
         if not path.startswith("/dev/"):
             continue
         for disk in sorted(disks_under(path)):
-            vid, pid = _usb_ids_for(Path(disk).name)
+            vid, pid = usb_ids(Path(disk).name)
             lines.append(f"{path} -> {disk}: {vid or '?'}:{pid or '?'}")
     return "== USB bridge ids\n" + ("\n".join(lines) or "(no USB disk found)") + "\n"
 

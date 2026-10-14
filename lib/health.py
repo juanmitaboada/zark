@@ -38,9 +38,17 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib.identity import BY_ID_DIR, by_id_names, preferred_by_id, read_pool_label, whole_disk
+from lib.identity import (
+    BY_ID_DIR,
+    by_id_names,
+    preferred_by_id,
+    read_pool_label,
+    usb_ids,
+    whole_disk,
+)
 from lib.log import Log
 from lib.sh import part, run
+from lib.zfs import backup_altroot, parse_damage
 
 # ── Known problematic USB-SATA bridges ───────────────────────────────────────
 #
@@ -108,35 +116,6 @@ def _base_disk(dev: str) -> str:
     return Path(disk).name if disk else Path(dev).name
 
 
-def _usb_ids_for(base: str) -> tuple[str, str]:
-    """Return (vendor, product) lowercase hex for a USB-backed block device.
-
-    Walks /sys/block/<base> back to the owning USB device and reads
-    idVendor/idProduct. Returns ("", "") for non-USB devices or when the
-    attributes cannot be found.
-    """
-    sys_block = Path(f"/sys/block/{base}")
-    if not sys_block.exists():
-        return "", ""
-    # Resolve the real sysfs path and walk up looking for idVendor/idProduct.
-    node = sys_block.resolve()
-    for _ in range(12):  # bounded walk up the device tree
-        vid = node / "idVendor"
-        pid = node / "idProduct"
-        if vid.exists() and pid.exists():
-            try:
-                return (
-                    vid.read_text().strip().lower(),
-                    pid.read_text().strip().lower(),
-                )
-            except OSError:
-                return "", ""
-        if node.parent == node:
-            break
-        node = node.parent
-    return "", ""
-
-
 def _check_fua(base: str) -> Finding | None:
     """Flag drives whose bridge reports it does not support DPO/FUA.
 
@@ -194,7 +173,7 @@ def _check_transport(base: str) -> Finding | None:
 
 def _check_known_bridge(base: str) -> Finding | None:
     """Flag the device if its USB bridge VID:PID is in the known-bad list."""
-    vid, pid = _usb_ids_for(base)
+    vid, pid = usb_ids(base)
     if not vid or not pid:
         return None
     key = f"{vid}:{pid}"
@@ -226,6 +205,78 @@ def check_device(dev: str) -> HealthReport:
         if finding is not None:
             report.findings.append(finding)
     return report
+
+
+def _labelled_pools(dev: str) -> dict[str, tuple[str, str]]:
+    """Pool guid -> (name, partition) for every ZFS label on the disk of ``dev``."""
+    disk = whole_disk(dev) or dev
+    r = run(f"lsblk -nrpo NAME {disk}")
+    found: dict[str, tuple[str, str]] = {}
+    for node in r.lines if r.ok else []:
+        node = node.strip()
+        label = read_pool_label(node) if node else None
+        if label is not None and label.guid not in found:
+            found[label.guid] = (label.name, node)
+    return found
+
+
+def _import_state(part_node: str, guid: str) -> str:
+    """State ``zpool import -d`` reports for an exported pool (it lists, never imports)."""
+    r = run(f"zpool import -d {part_node}")
+    block_guid = ""
+    for line in r.lines if r.ok else []:
+        key, _, value = line.strip().partition(":")
+        if key == "id":
+            block_guid = value.strip()
+        elif key == "state" and block_guid == guid:
+            return value.strip().split()[0] if value.strip() else ""
+    return ""
+
+
+def _imported_finding(title: str, pool: str) -> Finding:
+    """Health and non-zero counters of an imported pool."""
+    health = run(f"zpool list -H -o health {pool}").output or "UNKNOWN"
+    st = run(f"zpool status -vp {pool}")
+    damage = parse_damage(st.stdout if st.ok else "")
+    if health == "ONLINE" and not damage.any:
+        return Finding(OK, title, "imported, ONLINE, no errors")
+    parts = [f"imported, {health}"]
+    parts += [f"errors (READ WRITE CKSUM): {c}" for c in damage.counters]
+    if damage.errors:
+        parts.append(f"permanent errors in {len(damage.errors)} object(s)")
+    parts.append(f"see: zpool status -v {pool}")
+    return Finding(WARN, title, "; ".join(parts))
+
+
+def pool_findings(dev: str) -> list[Finding]:
+    """Health of the pools on the disk of ``dev``, without importing anything (I11).
+
+    An imported pool is read from its counters (``zpool status -vp``); an
+    exported one from the state ``zpool import -d`` reports, with the
+    commands that would read its counters.
+    """
+    imported: dict[str, str] = {}
+    r = run("zpool list -H -o guid,name")
+    for line in r.lines if r.ok else []:
+        guid, _, name = line.strip().partition("\t")
+        imported[guid.strip()] = name.strip()
+    findings: list[Finding] = []
+    for guid, (name, node) in _labelled_pools(dev).items():
+        title = f"Pool {name}"
+        if guid in imported:
+            findings.append(_imported_finding(title, imported[guid]))
+            continue
+        state = _import_state(node, guid) or "unknown (zpool import -d did not list it)"
+        # zark's own altroot, so `zark clean` releases it if left imported.
+        probe = backup_altroot(name)
+        detail = (
+            f"exported, zpool import reports {state}. Its error counters are "
+            "only readable while imported: "
+            f"zpool import -o readonly=on -N -R {probe} -d {node} {guid}; "
+            f"zpool status -v {name}; zpool export {name}"
+        )
+        findings.append(Finding(INFO if state == "ONLINE" else WARN, title, detail))
+    return findings
 
 
 # ── Destructive write-and-verify test ────────────────────────────────────────
@@ -629,7 +680,7 @@ def generate_report(  # pylint: disable=too-many-locals
     model = run(f"lsblk -dn -o MODEL /dev/{base}").output
     size = run(f"lsblk -dn -o SIZE /dev/{base}").output
     tran = run(f"lsblk -dn -o TRAN /dev/{base}").output
-    vid, pid = _usb_ids_for(base)
+    vid, pid = usb_ids(base)
     dmesg = run(
         "sh -c \"dmesg | grep -iE 'sd |uas|usb-storage|synchronize cache|"
         "did_error|did_no_connect|metaslab_init' | tail -40\"",

@@ -171,6 +171,7 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
     _transport_errors_since,
     estimate_seconds,
     generate_report,
+    pool_findings,
     profile_target_bytes,
     run_destructive_test,
 )
@@ -4214,6 +4215,72 @@ class TestHealthPicker:  # pylint: disable=missing-function-docstring,too-few-pu
             dev = health_cmd._select_device([], make_log())  # pylint: disable=protected-access
         assert dev == "/dev/sda1"
         assert "Which drive" not in out.getvalue()  # a single entry: nothing to choose
+
+
+class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
+    """I11 (M4a-11): read-only health reports the pool without importing it."""
+
+    def _findings(self, mock: MockShell) -> list[Finding]:
+        mock.on("lsblk -nrpo NAME /dev/sdb").succeeds("/dev/sdb\n/dev/sdb1")
+        labels = {"/dev/sdb1": PoolLabel(name="black", guid="42", hostid="", hostname="")}
+        with (
+            patch_sh(mock),
+            patch("lib.health.whole_disk", return_value="/dev/sdb"),
+            patch("lib.health.read_pool_label", side_effect=labels.get),
+        ):
+            found = pool_findings("/dev/sdb")
+        assert not any(c.startswith("zpool import -o") for c in mock.calls), mock.calls
+        return found
+
+    def test_exported_pool_shows_import_state_and_how_to_read_counters(self):
+        mock = MockShell()
+        mock.on("zpool list -H -o guid,name").succeeds("7\trpool")
+        mock.on("zpool import -d /dev/sdb1").succeeds(
+            "   pool: black\n     id: 42\n  state: DEGRADED\nstatus: One or more devices..."
+        )
+        found = self._findings(mock)
+        assert len(found) == 1, found
+        finding = found[0]
+        assert finding.level == WARN and finding.title == "Pool black"
+        assert "zpool import reports DEGRADED" in finding.detail
+        assert "zpool import -o readonly=on -N -R /run/zark/altroot/black" in finding.detail
+
+    def test_imported_pool_with_checksum_errors_warns(self):
+        mock = MockShell()
+        mock.on("zpool list -H -o guid,name").succeeds("42\tblack")
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("zpool status -vp black").succeeds(_damaged_status("ONLINE", 4, 2))
+        found = self._findings(mock)
+        assert len(found) == 1, found
+        finding = found[0]
+        assert finding.level == WARN
+        assert "ONLINE 0 0 4" in finding.detail
+        assert "permanent errors in 2 object(s)" in finding.detail
+
+    def test_read_only_run_reports_the_pool(self):
+        out = StringIO()
+        pool = Finding(WARN, "Pool black", "exported, zpool import reports DEGRADED")
+        with (
+            patch.object(health_cmd, "_select_device", return_value="/dev/sdb"),
+            patch.object(health_cmd, "check_device", return_value=HealthReport("/dev/sdb")),
+            patch.object(health_cmd, "pool_findings", return_value=[pool], create=True),
+            patch.object(health_cmd, "generate_report", return_value=""),
+            patch.object(health_cmd, "write_report_file", return_value="/tmp/r.txt"),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            health_cmd.run([])
+        assert "Pool black: exported, zpool import reports DEGRADED" in out.getvalue()
+
+    def test_imported_clean_pool_is_ok(self):
+        mock = MockShell()
+        mock.on("zpool list -H -o guid,name").succeeds("42\tblack")
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("zpool status -vp black").succeeds(_damaged_status("ONLINE", 0, 0))
+        found = self._findings(mock)
+        assert len(found) == 1, found
+        finding = found[0]
+        assert finding.level == OK
 
 
 class TestHealthDestructive:  # pylint: disable=missing-function-docstring
