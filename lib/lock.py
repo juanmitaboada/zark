@@ -81,11 +81,11 @@ def guard(command: str, args: list[str]) -> None:
     try:
         acquire(command)
     except LockHeld as e:
-        _refuse(str(e))
+        _refuse(f"Another zark run is in progress: {e}. Wait for it to end, then run again.")
     except OSError as e:
-        _refuse(f"(cannot open {LOCK_PATH}: {e})")
+        _refuse(f"Cannot take the lock {LOCK_PATH}: {e}")
 
 
-def _refuse(holder: str) -> NoReturn:
-    Log().error(f"Another zark run is in progress: {holder}. Wait for it to end, then run again.")
+def _refuse(message: str) -> NoReturn:
+    Log().error(message)
     raise SystemExit(EX_TEMPFAIL)

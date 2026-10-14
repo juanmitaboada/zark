@@ -2557,6 +2557,24 @@ class TestLock:  # pylint: disable=missing-function-docstring,protected-access
                 holder.kill()
                 _ = holder.wait()
 
+    def test_a_lock_file_that_cannot_be_opened_says_so(self):
+        # M4aR-9: not "another zark run"; the exit status stays 75 (try later).
+        out = StringIO()
+        with (
+            patch.object(lock_mod.os, "open", side_effect=PermissionError(13, "Permission denied")),
+            patch.dict(lock_mod._STATE, clear=True),
+            redirect_stdout(out),
+        ):
+            try:
+                lock_mod.guard("backup", [])
+            except SystemExit as e:
+                assert e.code == lock_mod.EX_TEMPFAIL
+            else:
+                raise AssertionError("expected a refusal")
+        text = out.getvalue()
+        assert f"Cannot take the lock {lock_mod.LOCK_PATH}: [Errno 13] Permission denied" in text
+        assert "Another zark run" not in text
+
     def test_the_lock_file_is_private(self):
         # Mutation L6: mode 0600 whatever the umask.
         with tempfile.TemporaryDirectory() as td:
