@@ -693,6 +693,44 @@ def _heal_drive_id(cfg: Config, pool_name: str, device: str | None, log: Log) ->
     log.ok(f"Registry: {pool_name} drive_id {old} → {by_id}")
 
 
+SHOWN_ERRORS = 20
+
+
+def _check_health(zfs: ZFS, pool: str, log: Log) -> None:
+    """Pre-check of one pool (I8, M4a-10).
+
+    ONLINE with zero counters passes. DEGRADED, or ONLINE with non-zero
+    READ/WRITE/CKSUM counters, is captured (M4a-9), its counters and first
+    permanent errors shown, and the run continues only on an explicit yes.
+    Any other health is captured and fatal.
+    """
+    health = zfs.pool_health(pool)
+    if health not in ("ONLINE", "DEGRADED"):
+        _ = forensics.capture(pool, f"pre-check: {health}", log)
+        log.fatal(f"{pool} is {health}", solutions=[f"Run: zpool status -v {pool}"])
+    damage = zfs.pool_damage(pool)
+    if health == "ONLINE" and not damage.any:
+        log.ok(f"{pool}: ONLINE")
+        return
+    state = health if health == "DEGRADED" else "ONLINE with errors"
+    log.warn(f"{pool}: {state}")
+    path = forensics.capture(pool, f"pre-check: {state}", log)
+    for line in damage.counters:
+        log.warn(f"  errors (READ WRITE CKSUM): {line}")
+    if damage.errors:
+        log.warn(f"  permanent errors in {len(damage.errors)} object(s):")
+        for obj in damage.errors[:SHOWN_ERRORS]:
+            log.warn(f"    {obj}")
+        rest = len(damage.errors) - SHOWN_ERRORS
+        if rest > 0:
+            log.warn(f"    ... and {rest} more in {path or f'zpool status -v {pool}'}")
+    if not log.ask(f"{pool} is {state}. Continue anyway?", default=False):
+        log.fatal(
+            f"Aborted: {pool} is {state}",
+            solutions=[f"Run: zpool status -v {pool}"],
+        )
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
@@ -797,20 +835,7 @@ def run(
     log.step(3, TOTAL_STEPS, "Checking pool health...")
 
     for pool in (cfg.source_pool, pool_name):
-        health = zfs.pool_health(pool)
-        if health == "ONLINE":
-            log.ok(f"{pool}: ONLINE")
-        elif health == "DEGRADED":
-            log.warn(f"{pool}: DEGRADED")
-            _ = forensics.capture(pool, "pre-check: DEGRADED", log)
-            if not log.ask(f"{pool} is DEGRADED. Continue anyway?"):
-                log.fatal(
-                    f"Aborted — {pool} is DEGRADED",
-                    solutions=[f"Run: zpool status {pool}"],
-                )
-        else:
-            _ = forensics.capture(pool, f"pre-check: {health}", log)
-            log.fatal(f"{pool} is {health}", solutions=[f"Run: zpool status {pool}"])
+        _check_health(zfs, pool, log)
 
     # ── Pool info summary ────────────────────────────────────────────────
     log.step(4, TOTAL_STEPS, "Gathering pool info...")

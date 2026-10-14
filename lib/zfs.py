@@ -19,7 +19,7 @@ Wraps zfs/zpool commands with structured output and error handling.
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -43,6 +43,43 @@ class PoolInfo:  # pylint: disable=too-many-instance-attributes
     avail_bytes: int = 0
     size_bytes: int = 0
     pct_used: int = 0
+
+
+@dataclass
+class Damage:
+    """What ``zpool status -vp`` reports wrong with a pool (I8)."""
+
+    counters: list[str] = field(default_factory=list)  # vdev lines with READ/WRITE/CKSUM > 0
+    errors: list[str] = field(default_factory=list)  # the "Permanent errors" list
+
+    @property
+    def any(self) -> bool:
+        """True when a counter is non-zero or an object is listed."""
+        return bool(self.counters or self.errors)
+
+
+def parse_damage(text: str) -> Damage:
+    """Read the non-zero vdev counters and the permanent errors from ``zpool status -vp``."""
+    damage = Damage()
+    in_config = in_errors = False
+    for line in text.splitlines():
+        words = line.split()
+        if words[:5] == ["NAME", "STATE", "READ", "WRITE", "CKSUM"]:
+            in_config = True
+            continue
+        if line.startswith("errors:"):
+            in_config = False
+            in_errors = "Permanent errors" in line
+            continue
+        if in_config:
+            if not words:
+                in_config = False
+            elif len(words) >= 5 and all(w.isdigit() for w in words[2:5]):
+                if any(int(w) for w in words[2:5]):
+                    damage.counters.append(" ".join(words))
+        elif in_errors and words:
+            damage.errors.append(line.strip())
+    return damage
 
 
 @dataclass
@@ -403,6 +440,12 @@ class ZFS:
         """Get pool health status (e.g. "ONLINE", "DEGRADED")."""
         r = run(f"zpool list -H -o health {name}")
         return r.output if r.ok else "UNKNOWN"
+
+    def pool_damage(self, name: str) -> Damage:
+        """Non-zero counters and permanent errors of an imported pool (I8)."""
+        # -p: exact counters; "1.2K" would not parse as a number.
+        r = run(f"zpool status -vp {name}")
+        return parse_damage(r.stdout) if r.ok else Damage()
 
     def write_zpool_cache(self, cache_path: str, pools: list[str]) -> None:
         """

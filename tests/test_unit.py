@@ -237,6 +237,7 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     PoolInfo,
     Readback,
     fix_grub_bpool_uuid,
+    parse_damage,
 )
 from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     FakeZfs,
@@ -5507,6 +5508,76 @@ class TestForensics:  # pylint: disable=missing-function-docstring
         calls = mock.calls
         assert "zpool status -vP black" in calls, calls
         assert calls.index("zpool status -vP black") < calls.index("zpool export black")
+
+
+_STATUS_HEAD = """  pool: black
+ state: {state}
+config:
+
+\tNAME                                        STATE     READ WRITE CKSUM
+\tblack                                       {state}     0     0     0
+\t  /dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1  {state}     0     0    {cksum}
+
+errors: {errors}
+"""
+
+
+def _damaged_status(state: str, cksum: int, objects: int) -> str:
+    errors = "No known data errors"
+    if objects:
+        errors = "Permanent errors have been detected in the following files:\n\n"
+        errors += "\n".join(f"        black/home@zark-1:/file{i}" for i in range(objects))
+    return _STATUS_HEAD.format(state=state, cksum=cksum, errors=errors)
+
+
+class TestBackupHealthCheck:  # pylint: disable=missing-function-docstring,protected-access
+    """I8 (M4a-10): counters and objects are shown before the question."""
+
+    def _check(self, health: str, status: str, answer: str = "") -> tuple[str, bool, object]:
+        mock = MockShell()
+        mock.on("zpool list -H -o health black").succeeds(health)
+        mock.on("zpool status -vp black").succeeds(status)
+        out = StringIO()
+        exited = False
+        with (
+            patch_sh(mock),
+            patch.object(backup_mod.forensics, "capture", return_value="/var/log/f.txt") as cap,
+            patch("builtins.input", return_value=answer),
+            redirect_stdout(out),
+        ):
+            try:
+                backup_mod._check_health(ZFS(make_log()), "black", make_log())
+            except SystemExit:
+                exited = True
+        return out.getvalue(), exited, cap
+
+    def test_clean_online_passes_without_question_or_capture(self):
+        out, exited, cap = self._check("ONLINE", _damaged_status("ONLINE", 0, 0))
+        assert not exited and "Continue anyway" not in out
+        cap.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_online_with_checksum_errors_asks_and_defaults_to_no(self):
+        out, exited, cap = self._check("ONLINE", _damaged_status("ONLINE", 12, 0))
+        assert "Continue anyway" in out  # empty answer below: the default is no
+        assert "usb-Micron_X_SERIAL-0:0-part1 ONLINE 0 0 12" in out
+        assert exited
+        cap.assert_called_once()  # type: ignore[attr-defined]
+
+    def test_degraded_shows_first_objects_and_where_the_rest_are(self):
+        out, exited, _ = self._check("DEGRADED", _damaged_status("DEGRADED", 3, 25), "y")
+        assert not exited
+        assert "permanent errors in 25 object(s)" in out
+        assert "black/home@zark-1:/file19" in out and "/file20" not in out
+        assert "and 5 more in /var/log/f.txt" in out
+
+    def test_faulted_is_captured_and_fatal(self):
+        _, exited, cap = self._check("FAULTED", "")
+        assert exited
+        cap.assert_called_once()  # type: ignore[attr-defined]
+
+    def test_parse_damage_ignores_header_and_clean_vdevs(self):
+        damage = parse_damage(_damaged_status("ONLINE", 0, 0))
+        assert not damage.any
 
 
 class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
