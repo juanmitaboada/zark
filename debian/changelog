@@ -22,10 +22,13 @@ zark (2.0.0~rc4-1) UNRELEASED; urgency=medium
     accepted only when it shares something with this system; the bpool
     refusal tells this system's bpool from another disk's.
   * health: pool health in read-only mode; FUA and UAS findings are INFO;
-    the destructive test works by by-id and wipes only its own disk.
-  * purge: every step checked and the wipe verified; PURGE INCOMPLETE
-    keeps the registry entry and the anchors and lists every step with
-    its result.
+    the destructive test works by by-id and wipes only its own disk; its
+    pool lives under zark's altroot, is destroyed read-write and is
+    reported when it was not; the cold pass waits for the disk's links.
+  * purge: every step checked and the wipe verified, the first
+    partition's labels read before wipefs; a pool found imported
+    read-only is destroyed read-write; PURGE INCOMPLETE keeps the
+    registry entry and the anchors and lists every step with its result.
   * recover: a failed change-key is in the verdict; prepare's keystore
     snapshot is destroyed when the run dies in the send.
 

@@ -114,10 +114,17 @@ for the canonical end-to-end sequences.
     powers the device down, waits for you to physically reconnect it, and
     re-imports, so the read-back comes strictly from NAND rather than the
     bridge's cache. Time estimates are shown from a measured write speed. The
-    throwaway pool is always destroyed afterwards, leaving the drive blank;
-    only the disk its by-id name resolves to then is wiped, and only when
-    its label is the test pool's or there is none. A cold pass needs a
-    by-id name and fails before writing without one.
+    throwaway pool lives under */run/zark/altroot*, so **clean** releases
+    one a killed run left imported. Afterwards it is destroyed read-write
+    (a read-only import is exported and imported read-write first: a
+    read-only pool's destroy writes nothing to its labels), and a pool that
+    could not be destroyed is reported as an error, with the command that
+    lists what may remain, and in the diagnostic report. Then only the disk
+    its by-id name resolves to is wiped, and only when its label is the
+    test pool's or there is none. A cold pass needs a by-id name and fails
+    before writing without one; after the reconnect it waits for udev and
+    up to 10 seconds for the disk's by-id links, and a partition link that
+    never appears is its own failure.
 
     Whenever a risk (a warning) or test failure is found, a self-contained diagnostic
     report is written to */tmp* (environment, drive, bridge VID:PID, findings,
@@ -394,10 +401,14 @@ for the canonical end-to-end sequences.
 
     The pool's state is captured before it is destroyed (see
     **zark-forensics** under **FILES**). A failed **zpool destroy** stops
-    before anything is overwritten. Every wipe step is checked, and all of
-    them run even after one fails; then the ZFS labels on the first
-    partition, any partition left and any signature **blkid -p** finds are
-    checked. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
+    before anything is overwritten; a pool found imported read-only (a
+    finished read-only **mount**) is exported and imported read-write
+    first, and a failed export or re-import stops there too. Every wipe
+    step is checked, and all of them run even after one fails. The ZFS
+    labels on the first partition are read right after the overwrite,
+    before **wipefs**(8) removes the partition (and again after it, if it
+    left the table); then any partition left and any signature **blkid
+    -p** finds are checked. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
     the registry entries and the anchors in the source are kept, since the
     disk may still hold the pool. The banner lists every step and check as
     done, failed or not done, so it shows what state the disk is in.
@@ -672,8 +683,11 @@ for the canonical end-to-end sequences.
     alone (a pool without an alternate root, such as the running system's
     **rpool** and **bpool** or one imported by hand, is never touched).
     After a yes (default no) it unmounts, closes and exports, without
-    forcing anything, and removes only the directories left empty once
-    nothing is mounted below them. Anything that stays (a mount in use, or
+    forcing anything, and removes only the directories left empty, the
+    roots themselves included, once nothing is mounted below them and no
+    pool of its own is still imported (removing a directory would detach a
+    copy mounted there in another mount namespace). Anything that stays (a
+    mount in use, or
     held in another mount namespace) ends **CLEANUP INCOMPLETE** with exit
     status 1, naming it; a reboot releases a copy held by another
     namespace. The same rules apply on an installed system and on a live
@@ -797,6 +811,7 @@ To verify a recovery without rebooting:
 **75**
 :   Another **zark** run that changes state is in progress (it holds
     */run/zark/zark.lock*); the message names it. Run again once it ends.
+    Also when the lock file cannot be opened; the message says so.
 
 **130**
 :   The user pressed **Ctrl-C** (SIGINT). **zark** registers a cleanup

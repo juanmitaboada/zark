@@ -24,8 +24,10 @@ that preceded them.
   naming the run that holds it ("zark backup (pid N, since T)"), with exit
   status 75. The kernel releases the lock on any death of the process,
   SIGKILL included, so it is never left stale; child processes do not
-  inherit it. `status`, `explore`, `monitor` and `registry` with no
-  subcommand or `list` run without it. Two backups at once could remove
+  inherit it. When the lock file cannot be opened the message says so
+  ("Cannot take the lock ..."), with the same exit status (M4aR-9).
+  `status`, `explore`, `monitor` and `registry` with no subcommand or
+  `list` run without it. Two backups at once could remove
   each other's points, and `zark prune` could run during a backup.
 - **Forensic capture before remediation** (I7, M4a-9). Before anything
   changes or loses a pool's state, zark writes
@@ -60,7 +62,10 @@ that preceded them.
   fix-rpool-mountpoint), shows it, lists the imported pools it leaves
   alone, and asks (default no). Mounts are unmounted without `-l`, pools
   exported without `-f`, and only directories left empty are removed
-  (`rmdir`), after every mount below them is gone. Anything still there
+  (`rmdir`), the roots themselves included (M4aF-8), after every mount
+  below them is gone and while no zark pool is still imported: `rmdir`
+  of a directory that is a mountpoint only in another mount namespace
+  detaches that copy (M4aR-6, M4aF-7). Anything still there
   ends **CLEANUP INCOMPLETE**, exit 1, naming it. The same rules apply on
   an installed system and on a live session.
 - **The guards see an imported backup pool** (H18, D3, M4a-3). The APT
@@ -97,7 +102,17 @@ that preceded them.
   imported by its by-id name with `cachefile=none`; a cold pass without a
   by-id name fails before writing; at the end only the disk that by-id
   resolves to now is wiped, and only when its label is the test pool's or
-  there is none. The picker lists one physical disk once (I10).
+  there is none. The picker lists one physical disk once (I10). The pool
+  is created and imported under `/run/zark/altroot/<pool>` (`-R`), so
+  `zark clean` finds one a killed run left imported (M4aR-3). It is
+  destroyed read-write: the read-back's read-only import is exported and
+  imported read-write first, since `zpool destroy` of a read-only pool
+  returns 0 and writes nothing to its labels; a test pool that could not
+  be destroyed is reported, with the command that lists what may remain,
+  and goes into the diagnostic report (M4aR-1, M4aF-10). After the cold
+  reconnect it waits for udev (`udevadm settle`) and up to 10 s for the
+  disk's by-id links before importing; a partition link that never
+  appears is its own failure (M4aR-8, M4aF-11).
 - **backup's pre-check shows the damage** (I8, M4a-10): a DEGRADED pool,
   or an ONLINE one with non-zero READ/WRITE/CKSUM counters (which passed
   silently), is captured, its counters and first 20 permanent errors
@@ -108,8 +123,15 @@ that preceded them.
   and, in read-only health, a damaged pool.
 - **`purge` checks every step and verifies the wipe** (M4a-13). A failed
   `zpool destroy` stops before anything is overwritten; every wipe step
-  is checked, and all run even after one fails; then `zdb -l` on the old
-  first partition, no partition left and `blkid -p` finding nothing.
+  is checked, and all run even after one fails. The ZFS labels are read
+  on the old first partition right after the two overwrites, before
+  `wipefs` removes its node (and again after it, if `wipefs` left the
+  partition table); then no partition left and `blkid -p` finding nothing
+  (M4aR-2). A pool purge finds imported read-only (a finished read-only
+  `zark mount`) is exported and imported read-write before its destroy,
+  which on a read-only pool writes nothing to the labels; a failed export
+  or re-import stops purge before anything is overwritten (M4aR-1,
+  M4aF-9).
   Any failure ends **PURGE INCOMPLETE**, exit 1, and the registry entries
   and the pool's anchors in the source stay. The banner lists every step
   and check with ✓ (done), ✗ (failed) or - (not done, and why), so it
@@ -126,9 +148,11 @@ that preceded them.
   by a run that accepted the drive, never by a refusal.
 - **The bpool refusal tells this system's bpool from another disk's**
   (M2V-2, M4a-6). It lists every importable bpool with its id and devices:
-  the one on rpool's disk is imported by id; any other must not be
-  imported (it would mount over `/boot`) and its disk disconnected; with
-  none on rpool's disk, the system has no bpool of its own. The advice
+  one with a disk in common with rpool is this system's and is imported by
+  id; any other must not be imported (it would mount over `/boot`) and its
+  disk disconnected; one whose devices cannot be read is named as such,
+  with no advice about its disk (M4aR-4, M4aF-12); with none on rpool's
+  disk, the system has no bpool of its own. The advice
   never includes exporting bpool: on a running systemd system the export
   fails as busy (service mount namespaces hold copies of `/boot`) after
   unmounting the host's `/boot` (P6 on eli).
@@ -140,8 +164,9 @@ that preceded them.
 
 - `zark clean` cannot release a mount held in another mount namespace (a
   service's or a snap's): it says so, and a reboot releases it.
-- A drive prepared by zark 2.0.0-rc2 or earlier and never backed up has
-  no owner and nothing in common, and is refused; `prepare` it again.
+- A drive with no owner recorded (written by zark 2.0.0-rc2 or earlier)
+  and no snapshot or bookmark in common with this system (blank, or every
+  anchor in origin gone) is refused; `prepare` it again (M4aR-7).
 - A system whose disk holds no bpool is refused while another disk's
   bpool is importable; with none importable it backs up without one, as
   before.
@@ -174,6 +199,14 @@ that preceded them.
   (M4a-7 7b): purge and prepare already give that path.
 - **Supporting systems without bpool** (M4a-6 6b): backup, recover and
   finish would all need their own work; out of M4a's size.
+- **purge refusing a pool it finds imported read-only** (M4aF-9 9b),
+  instead of exporting and importing it read-write: one more step for the
+  operator, for the same result.
+- **health exiting 1 when its test pool was not destroyed** (M4aF-10
+  10b): health exits 0 whatever the test found; one exception would
+  surprise scripts more than it helps.
+- **Only polling for the links after the cold reconnect** (M4aF-11 11b):
+  `udevadm settle` first lets the events udevd already queued finish.
 
 ### M3 — space (2.0.0-rc3)
 
