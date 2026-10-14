@@ -52,7 +52,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # isort: split
 
 from unittest import SkipTest  # pylint: disable=wrong-import-position # noqa: E402
-from unittest.mock import ANY, MagicMock, patch  # pylint: disable=wrong-import-position # noqa: E402
+from unittest.mock import (  # pylint: disable=wrong-import-position # noqa: E402
+    ANY,
+    MagicMock,
+    patch,
+)
 
 import commands.backup as backup_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
