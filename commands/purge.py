@@ -62,6 +62,11 @@ def _destroy_labelled_pool(name: str, guid: str, vdev: str, zfs: ZFS, log: Log) 
     return f"zpool destroy {name} failed: {r.stderr.strip() or f'exit {r.returncode}'}"
 
 
+def _present(path: str) -> bool:
+    """Whether ``path`` exists; its own function so tests can answer for one path."""
+    return os.path.exists(path)
+
+
 def _step(cmd: str, what: str, failures: list[str], log: Log) -> bool:
     """Run one wipe command; record ``what`` with the error when it fails."""
     r = sh.run(cmd, log=log)
@@ -105,7 +110,7 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[str]:
         log.ok("Signatures wiped")
     # The ZFS labels live in the partition: read them there while it exists.
     # flushbufs: the writes went through the whole disk's node, not part1's.
-    if os.path.exists(part1):
+    if _present(part1):
         _ = sh.run(f"blockdev --flushbufs {part1}")
         label = read_pool_label(part1)
         if label is not None:

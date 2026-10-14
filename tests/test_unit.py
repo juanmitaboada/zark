@@ -5812,7 +5812,9 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
             patch.object(purge_mod, "validate_external_block_device", return_value=ident),
             patch.object(purge_mod.forensics, "capture", return_value=""),
             patch.object(purge_mod.engine, "drop_anchors_of", return_value="") as drop,
-            patch.object(purge_mod.os.path, "exists", return_value=part1_exists),
+            # Only part1's presence: a global os.path.exists patch also hides the
+            # registry from Path.exists on Python 3.14.
+            patch.object(purge_mod, "_present", return_value=part1_exists),
             patch("builtins.input", side_effect=["yes", "sdb", "n"]),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(out),
