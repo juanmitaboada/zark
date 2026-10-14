@@ -275,6 +275,11 @@ _ = patch.object(
 # Disk sizes come from sysfs; the machine running the tests must not decide
 # whether a mocked /dev/sdb has a medium. The empty directory reads as "unknown".
 _SYSFS_ROOT = patch("lib.identity.SYS_BLOCK", _TEST_LOG_DIR, create=True).start()
+# Nor its machine-id whether a drive is this system's (M4a-7): the drives
+# _fresh_fake prepares name this one as their owner, as prepare does.
+TEST_MACHINE_ID = "7e57000000000000000000000000beef"
+Path(_TEST_LOG_DIR, "machine-id").write_text(TEST_MACHINE_ID + "\n", encoding="ascii")
+_MACHINE_ID = patch("lib.engine.MACHINE_ID_PATH", os.path.join(_TEST_LOG_DIR, "machine-id")).start()
 
 
 def _real_log_state() -> dict[str, tuple[int, int] | None]:
@@ -8622,6 +8627,7 @@ def _fresh_fake(pools: tuple[str, ...] = ("backup",)) -> FakeZfs:
     _origin_fixture(fake)
     for p in pools:
         fake.pool(p)
+        fake.ds[p].props["org.zark:origin-machine-id"] = TEST_MACHINE_ID  # as prepare writes
     return fake
 
 
@@ -10483,14 +10489,17 @@ class TestBackupCommand:
         return path
 
     def test_drive_records_this_machine_id(self) -> None:
-        """Every backup writes origin-machine-id; the next one accepts it."""
+        """A backup writes origin-machine-id: a drive whose owner was lost, and
+        that holds this system's point, is accepted and owned again (M4a-7)."""
         fake = _fresh_fake()
+        fake.ds["backup"].props["org.zark:origin-machine-id"] = "aaaa1111"
         with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
             _, rc = self._run(fake)
             assert rc == 0
-            assert fake.ds["backup"].props["org.zark:origin-machine-id"] == "aaaa1111"
+            del fake.ds["backup"].props["org.zark:origin-machine-id"]
             _, rc = self._run(fake)
         assert rc == 0
+        assert fake.ds["backup"].props["org.zark:origin-machine-id"] == "aaaa1111"
 
     def test_drive_of_another_system_is_refused_untouched(self) -> None:
         """A mismatch is fatal before any question, key, point or sanoid change."""
@@ -10552,12 +10561,39 @@ class TestBackupCommand:
         assert not any(c.startswith(("zfs snapshot", "systemctl stop")) for c in fake.calls)
         assert "backup/rpool" not in fake.ds
 
-    def test_drive_without_machine_id_is_accepted(self) -> None:
-        """A drive written by an older zark has no origin-machine-id: as before."""
+    def _untouched(self, fake: FakeZfs) -> None:
+        assert not any(
+            c.startswith(("zfs snapshot", "systemctl stop", "zfs set", "zfs destroy"))
+            for c in fake.calls
+        ), fake.calls
+        assert "org.zark:origin-machine-id" not in fake.ds["backup"].props
+
+    def test_blank_drive_without_owner_is_refused(self) -> None:
+        """M2R-7 (M4a-7): no owner and nothing in common: refused, owner not written."""
         fake = _fresh_fake()
-        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
-            _, rc = self._run(fake)
-        assert rc == 0
+        del fake.ds["backup"].props["org.zark:origin-machine-id"]
+        out = StringIO()
+        _, rc = self._run(fake, patch("sys.stdout", out))
+        assert rc == 1
+        self._untouched(fake)
+        assert "no owner recorded and nothing in common" in out.getvalue()
+
+    def test_other_systems_datasets_without_owner_are_refused(self) -> None:
+        """M2R-7 (E11a): a registered drive holding another system's datasets
+        and no owner: refused before any question, key or point."""
+        fake = _fresh_fake()
+        del fake.ds["backup"].props["org.zark:origin-machine-id"]
+        for rel in ("backup/rpool", "backup/rpool/ROOT", "backup/rpool/ROOT/other"):
+            fake.dataset(rel)
+        _ = fake.snap("backup/rpool/ROOT/other", "autosnap_2026-10-01_00:00:00_daily")
+        reached = AssertionError("reached past the owner check")
+        _, rc = self._run(
+            fake,
+            patch.object(ZFS, "datasets_needing_key", side_effect=reached),
+            patch("lib.log.Log.ask", side_effect=reached),
+        )
+        assert rc == 1
+        self._untouched(fake)
 
     def test_owner_check_messages(self) -> None:
         """The refusal names the drive's host and date and the way out."""
@@ -10615,6 +10651,7 @@ class TestDriveMetadata:
     def test_pre_v2_drive(self):
         """A drive without org.zark:* is named as written by an older zark."""
         fake = _fresh_fake()
+        del fake.ds["backup"].props["org.zark:origin-machine-id"]
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out):
             assert not engine.log_metadata("backup", Log())

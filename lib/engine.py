@@ -788,23 +788,40 @@ def machine_id() -> str:
         return ""
 
 
+# States that mean the drive and this system share a snapshot or bookmark
+# (or a partial receive of one): an unowned drive is accepted on these (M4a-7).
+SHARED_STATES = frozenset(
+    {
+        State.AT_POINT,
+        State.RESUME,
+        State.INCREMENTAL,
+        State.VIA_BOOKMARK,
+        State.ROLLBACK,
+        State.MODIFIED,
+    },
+)
+
+
 def check_drive_owner(pool: str, log: Log) -> None:
     """Refuse a drive whose metadata names another system (2026-10-08).
 
     A drive without ``org.zark:origin-machine-id`` (written by zark <=
-    2.0.0-rc2) is accepted as before; one whose metadata cannot be read is
-    refused, since unreadable would otherwise pass as absent (M2R-7).
+    2.0.0-rc2, or not by zark) is accepted only when it shares something
+    with this system (M2R-7, M4a-7); see :func:`_accept_unowned`. One whose
+    metadata cannot be read is refused, since unreadable would otherwise
+    pass as absent.
     """
     try:
         meta = read_metadata(pool, strict=True)
     except ReadError as e:
         log.fatal(
-            f"Cannot read the zark metadata of {pool} — nothing was changed",
+            f"Cannot read the zark metadata of {pool}: nothing was changed",
             causes=[str(e)],
             solutions=["Check the drive: zpool status " + pool, "Reconnect it and run again"],
         )
     theirs = meta.get("origin-machine-id", "")
     if not theirs:
+        _accept_unowned(pool, log)
         return
     mine = machine_id()
     if mine and mine == theirs:
@@ -812,7 +829,7 @@ def check_drive_owner(pool: str, log: Log) -> None:
         return
     when = meta.get("last-backup-at") or meta.get("prepared-at") or "?"
     log.fatal(
-        f"{pool} is the backup of another system — nothing was changed",
+        f"{pool} is the backup of another system: nothing was changed",
         causes=[
             f"Drive written for host {meta.get('origin-host', '?')} (last: {when})",
             f"Its machine-id {theirs} is not this system's "
@@ -821,6 +838,49 @@ def check_drive_owner(pool: str, log: Log) -> None:
         solutions=[
             "Connect this system's own backup drive",
             "To reuse this drive for this system, wipe and re-prepare it: "
+            + "sudo zark purge <device> && sudo zark prepare <device>",
+        ],
+    )
+
+
+def _accept_unowned(pool: str, log: Log) -> None:
+    """Accept a drive with no owner recorded only when it shares something.
+
+    Read-only, before keys, questions or the point: the same listings and
+    planner as a run. With nothing in common the drive is another system's
+    or a blank one zark did not prepare, and a run would offer to destroy
+    or replace what it holds; it is refused. The owner is then written by
+    this run's metadata (backup's ``_write_metadata``), never by a refusal.
+    """
+    try:
+        origin = read_origin(source_pools(), strict=True)
+        dest = read_dest(pool, strict=True)
+    except ReadError as e:
+        log.fatal(
+            f"Cannot read {pool} or this system's pools: nothing was changed",
+            causes=[str(e)],
+            solutions=[f"Check: zpool status {pool}", "Reconnect it and run again"],
+        )
+    plans = plan(origin, dest, "")  # no point yet: nothing is AT_POINT
+    shared = [p.rel for p in plans if p.state in SHARED_STATES]
+    if shared:
+        log.info(
+            f"{pool}: no owner recorded; shares {len(shared)} dataset(s) with this system, "
+            + "accepted (this run records the owner)"
+        )
+        return
+    held = [p.rel for p in plans if p.state in (State.DIVERGED, State.ORPHAN)]
+    log.fatal(
+        f"{pool} has no owner recorded and nothing in common with this system: "
+        + "nothing was changed",
+        causes=[
+            "Prepared by zark <= 2.0.0-rc2 and never backed up, or not by zark, "
+            + "or the backup of another system",
+            *([f"It holds {len(held)} dataset(s) this system shares nothing with"] if held else []),
+        ],
+        solutions=[
+            "Connect this system's own backup drive",
+            "To use this drive for this system, wipe and prepare it: "
             + "sudo zark purge <device> && sudo zark prepare <device>",
         ],
     )
