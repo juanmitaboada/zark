@@ -496,6 +496,19 @@ def _transport_errors_since(base: str, since_ts: float) -> list[str]:
     return hits
 
 
+# How long the cold pass waits for the disk's by-id links after Enter.
+LINK_WAIT_SEC = 10
+
+
+def _wait_for_path(path: str) -> bool:
+    """Whether ``path`` exists within LINK_WAIT_SEC, polled every 0.5 s."""
+    for _ in range(LINK_WAIT_SEC * 2):
+        if Path(path).exists():
+            return True
+        time.sleep(0.5)
+    return Path(path).exists()
+
+
 def run_destructive_test(
     dev: str,
     profile: str,
@@ -579,14 +592,28 @@ def run_destructive_test(
             run(f"eject /dev/{base}", log=log)
             if wait_for_reconnect is not None:
                 wait_for_reconnect()  # blocks until operator reconnects
-            if not Path(vdev).exists():
+            # The kernel announces the disk, then each partition, and udev
+            # makes each by-id link from that device's own event (block/
+            # genhd.c disk_uevent; 60-persistent-storage.rules). settle waits
+            # only for the events udevd has already queued, so the links are
+            # waited for too: zpool import -d skips a path that does not exist.
+            run("udevadm settle --timeout=10", log=log)
+            missing = ""
+            if not _wait_for_path(vdev):
+                missing = f"the disk did not reappear as {by_id} after the reconnect"
+            elif not _wait_for_path(import_from):
+                missing = (
+                    f"the partition link {import_from} did not appear within "
+                    + f"{LINK_WAIT_SEC} s of the reconnect"
+                )
+            if missing:
                 return TestResult(
                     profile,
                     cold,
                     bytes_written,
                     write_mb_s,
                     False,
-                    f"the disk did not reappear as {by_id} after the reconnect",
+                    missing,
                     _transport_errors_since(base, dmesg_mark),
                 )
 

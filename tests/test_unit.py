@@ -78,6 +78,7 @@ import commands.umount as umount_mod  # pylint: disable=wrong-import-position # 
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.health as health_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
@@ -4652,6 +4653,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
             patch_sh(mock),
             patch("lib.health.Path.exists", side_effect=lambda p=None: back),
             patch("lib.health.os.path.realpath", side_effect=lambda p: now if p == by_id else p),
+            patch("lib.health.time.sleep"),
             redirect_stdout(StringIO()),
         ):
             return run_destructive_test(
@@ -4733,6 +4735,26 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
                 "/dev/sdc", HealthReport(device="/dev/sdc"), result, obfuscate=False
             )
         assert "Test pool    : not destroyed: it could not be imported read-write" in text
+
+    def test_the_links_are_waited_for_after_the_reconnect(self):
+        # M4aR-8: udev makes <by-id>-part1 a moment after the disk's link.
+        seen = iter([False, False, True])
+        with (
+            patch("lib.health.Path.exists", side_effect=lambda: next(seen)),
+            patch("lib.health.time.sleep") as sleep,
+        ):
+            assert health_mod._wait_for_path("/dev/disk/by-id/x-part1")  # pylint: disable=protected-access
+        assert sleep.call_count == 2
+
+    def test_a_partition_link_that_never_appears_is_its_own_failure(self):
+        mock = self._cold_mock()
+        with patch("lib.health._wait_for_path", side_effect=lambda p: not p.endswith("-part1")):
+            result = self._cold(mock, back=True, now="/dev/sdc")
+        assert not result.passed
+        part1 = "/dev/disk/by-id/usb-Stick_SER-0:0-part1"
+        assert f"the partition link {part1} did not appear within 10 s" in result.detail
+        assert mock.call_count("udevadm settle --timeout=10") == 1, mock.calls
+        assert not [c for c in mock.calls if "readonly=on" in c], mock.calls
 
     def test_test_pool_lives_under_zarks_altroot(self):
         # M4aR-3: a run killed with the pool imported leaves it where clean
