@@ -121,6 +121,20 @@ def _step(cmd: str, done: str, what: str, marks: list[Mark], log: Log) -> bool:
     return r.ok
 
 
+def _label_mark(part1: str, when: str, log: Log) -> Mark:
+    """Whether a ZFS label is still readable on ``part1``; logged either way."""
+    # flushbufs: the writes went through the whole disk's node, not part1's.
+    _ = sh.run(f"blockdev --flushbufs {part1}", log=log)
+    label = read_pool_label(part1)
+    if label is not None:
+        text = f"ZFS label still on {part1} {when}: pool {label.name} ({label.guid})"
+        log.error(text)
+        return (False, text)
+    text = f"no ZFS label on the first partition {when}"
+    log.ok(text[0].upper() + text[1:])
+    return (True, text)
+
+
 def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     """Overwrite both ends, wipe signatures and the partition table, verify.
 
@@ -153,17 +167,18 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     else:
         marks.append((None, "last 10MB: the disk is 20MB or less, covered by the first"))
 
+    # The ZFS labels live in the partition, and zdb -l reads them at offsets
+    # of the device it is given: read them on part1 right after the
+    # overwrite, while its node exists (a successful wipefs re-reads the
+    # partition table and removes it). This is the check that sees a dd that
+    # returned 0 without reaching the medium.
+    if _present(part1):
+        marks.append(_label_mark(part1, "after the overwrite", log))
+
     log.step(4, 5, "Wiping filesystem signatures...")
     _ = _step(f"wipefs -a {target_dev}", "signatures wiped", "wipefs -a", marks, log)
-    # The ZFS labels live in the partition: read them there while it exists.
-    # flushbufs: the writes went through the whole disk's node, not part1's.
-    if _present(part1):
-        _ = sh.run(f"blockdev --flushbufs {part1}")
-        label = read_pool_label(part1)
-        if label is not None:
-            marks.append((False, f"ZFS label still on {part1}: pool {label.name} ({label.guid})"))
-        else:
-            marks.append((True, "no ZFS label left on the first partition"))
+    if _present(part1):  # wipefs left the partition table
+        marks.append(_label_mark(part1, "after wipefs", log))
 
     log.step(5, 5, "Destroying partition table...")
     _ = _step(

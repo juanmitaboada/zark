@@ -5951,7 +5951,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
     """M4a-13: a failed step or a disk that is not blank keeps the entry and anchors."""
 
     def _purge(
-        self, mock: MockShell, part1_exists: bool = False
+        self, mock: MockShell, part1_exists: bool | Callable[[str], bool] = False
     ) -> tuple[str, int, dict[str, object]]:
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(
@@ -5971,7 +5971,11 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
             patch.object(purge_mod.engine, "drop_anchors_of", return_value="") as drop,
             # Only part1's presence: a global os.path.exists patch also hides the
             # registry from Path.exists on Python 3.14.
-            patch.object(purge_mod, "_present", return_value=part1_exists),
+            patch.object(
+                purge_mod,
+                "_present",
+                side_effect=part1_exists if callable(part1_exists) else lambda _p: part1_exists,
+            ),
             patch("builtins.input", side_effect=["yes", "sdb", "n"]),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(out),
@@ -6085,6 +6089,37 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert "Purge again: it imports the pool read-write itself." in out
         assert mock.was_not_called("zpool destroy"), mock.calls
         assert mock.was_not_called("dd if=/dev/urandom"), mock.calls
+        assert "backup" in data
+
+    def test_part1_labels_are_read_after_the_overwrite_before_wipefs(self):
+        # M4aR-2: a successful wipefs removes part1's node, so the only read
+        # that can see a dd that never reached the medium comes before it.
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        mock.on_prefix("zdb -l").fails("failed to unpack label")
+        _wipe_succeeds(mock)
+        part1 = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
+        out, rc, _ = self._purge(mock, lambda _p: not mock.was_called("wipefs -a /dev/sdb"))
+        calls = mock.calls
+        assert rc == 0, out
+        assert calls.count(f"zdb -l {part1}") == 1, calls
+        second_dd = max(i for i, c in enumerate(calls) if c.startswith("dd if=/dev/urandom"))
+        flush = calls.index(f"blockdev --flushbufs {part1}")
+        assert (
+            second_dd < flush < calls.index(f"zdb -l {part1}") < calls.index("wipefs -a /dev/sdb")
+        )
+        assert "No ZFS label on the first partition after the overwrite" in out
+
+    def test_a_label_left_by_the_overwrite_is_incomplete(self):
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        mock.on_prefix("zdb -l").succeeds(
+            "LABEL 0\n    name: 'backup'\n    pool_guid: 3446866051930726346"
+        )
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock, lambda _p: not mock.was_called("wipefs -a /dev/sdb"))
+        assert rc == 1 and "PURGE INCOMPLETE" in out
+        assert "after the overwrite: pool backup (3446866051930726346)" in out
         assert "backup" in data
 
     def test_label_left_on_part1_is_incomplete(self):
