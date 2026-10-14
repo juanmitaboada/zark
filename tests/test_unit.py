@@ -5839,7 +5839,20 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         mock.on("zpool destroy backup").succeeds()
         _wipe_succeeds(mock, failing="wipefs -a /dev/sdb")
         out, rc, data = self._purge(mock)
-        assert rc == 1 and "PURGE INCOMPLETE" in out and "wipefs: injected" in out
+        assert rc == 1 and "PURGE INCOMPLETE" in out
+        # M4aF-4: every step is in the banner, done or not, not only the failure.
+        for line in (
+            "✓ pool backup destroyed",
+            "✓ first 10MB overwritten",
+            "✓ last 10MB overwritten",
+            "✗ wipefs -a failed: injected",
+            "✓ partition table destroyed",
+            "✓ no partition left",
+            "✓ no signature found (blkid -p)",
+            "Kept: the registry entries backup and the pool's anchors.",
+        ):
+            assert line in out, line
+        assert f"{Log.Y}⚠  IRREVERSIBLE OPERATION{Log.N}" in out  # M4aF-5
         assert "DRIVE PURGED" not in out
         assert "backup" in data
         assert mock.was_called("sgdisk --zap-all /dev/sdb")  # the rest still runs
@@ -5850,6 +5863,8 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         _wipe_succeeds(mock)
         out, rc, data = self._purge(mock)
         assert rc == 1 and "zpool export backup" in out
+        assert "✗ zpool destroy backup failed: pool is busy" in out
+        assert "- nothing overwritten: the pool is still imported from this disk" in out
         assert mock.was_not_called("dd if=/dev/urandom")
         assert "backup" in data
 
@@ -5872,6 +5887,43 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         out, rc, data = self._purge(mock)
         assert rc == 1 and "signature still on /dev/sdb" in out
         assert "backup" in data
+
+
+class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
+    """M4aF-4: an unregistered blank-label disk has nothing to keep; M4aF-5: the warning."""
+
+    def test_unregistered_disk_without_label_says_nothing_is_kept(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        mock = MockShell()
+        _wipe_succeeds(mock, failing="wipefs -a /dev/sdb")
+        out = StringIO()
+        rc = 0
+        with (
+            patch_sh(mock),
+            patch.object(Config, "default_config_dir", return_value=cfg_dir),
+            patch.object(
+                purge_mod, "validate_external_block_device", return_value=_purge_ident(None)
+            ),
+            patch.object(purge_mod, "_present", return_value=False),
+            patch("builtins.input", side_effect=["y", "yes", "sdb", "n"]),
+            redirect_stdout(out),
+        ):
+            try:
+                purge_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
+            except SystemExit as e:
+                rc = int(e.code) if isinstance(e.code, int) else 1
+        text = out.getvalue()
+        assert rc == 1
+        assert "- no ZFS label on this disk: no pool to destroy" in text
+        assert "Not registered and no pool label: nothing to keep." in text
+        assert "anchors" not in text.split("PURGE INCOMPLETE", 1)[1]
+
+    def test_irreversible_subtitle_is_yellow(self):
+        out = StringIO()
+        with redirect_stdout(out):
+            make_log().banner("PURGE BACKUP DRIVE", "⚠  IRREVERSIBLE OPERATION", warn=True)
+        assert f"{Log.Y}⚠  IRREVERSIBLE OPERATION{Log.N}" in out.getvalue()
 
 
 class TestPrepareIdentity:  # pylint: disable=missing-function-docstring

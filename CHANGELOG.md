@@ -111,7 +111,12 @@ that preceded them.
   is checked, and all run even after one fails; then `zdb -l` on the old
   first partition, no partition left and `blkid -p` finding nothing.
   Any failure ends **PURGE INCOMPLETE**, exit 1, and the registry entries
-  and the pool's anchors in the source stay.
+  and the pool's anchors in the source stay. The banner lists every step
+  and check with ✓ (done), ✗ (failed) or - (not done, and why), so it
+  says what state the disk was left in; its last line names what is kept,
+  or says there is nothing to keep for an unregistered disk with no pool
+  label (M4aF-4, after eli P). The "IRREVERSIBLE OPERATION" line of
+  purge's opening banner is yellow (M4aF-5).
 - **A drive with no owner recorded is accepted only when it shares
   something** (M2R-7, M4a-7). Before keys, questions or the point, a
   read-only survey with the run's own planner; with nothing in common

@@ -399,7 +399,8 @@ for the canonical end-to-end sequences.
     partition, any partition left and any signature **blkid -p** finds are
     checked. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
     the registry entries and the anchors in the source are kept, since the
-    disk may still hold the pool.
+    disk may still hold the pool. The banner lists every step and check as
+    done, failed or not done, so it shows what state the disk is in.
 
 **registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\] | **retention** *name* \[**window=***N*\] \[**max_age=***N*|**off**\] \[**margin=***N*\]\]
 :   Inspect and repair **known_drives.json** without editing it by hand.

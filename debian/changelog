@@ -24,7 +24,8 @@ zark (2.0.0~rc4-1) UNRELEASED; urgency=medium
   * health: pool health in read-only mode; FUA and UAS findings are INFO;
     the destructive test works by by-id and wipes only its own disk.
   * purge: every step checked and the wipe verified; PURGE INCOMPLETE
-    keeps the registry entry and the anchors.
+    keeps the registry entry and the anchors and lists every step with
+    its result.
   * recover: a failed change-key is in the verdict; prepare's keystore
     snapshot is destroyed when the run dies in the send.
 

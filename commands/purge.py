@@ -31,8 +31,15 @@ from lib.identity import match_registry, read_pool_label
 from lib.log import Log
 from lib.zfs import ZFS
 
+# One line of purge's report (M4aF-4): True done, False failed, None not done
+# (with the reason). The final banner lists every line, so it says what
+# happened to the disk, not only what failed.
+Mark = tuple[bool | None, str]
 
-def _destroy_labelled_pool(name: str, guid: str, vdev: str, zfs: ZFS, log: Log) -> str:
+
+def _destroy_labelled_pool(
+    name: str, guid: str, vdev: str, zfs: ZFS, log: Log
+) -> tuple[Mark, bool]:
     """Destroy the pool whose label is on the disk being purged.
 
     The pool is imported device-exact under a private altroot (I-G) so
@@ -40,26 +47,30 @@ def _destroy_labelled_pool(name: str, guid: str, vdev: str, zfs: ZFS, log: Log) 
     same name that is imported with a different GUID lives on another disk
     and is left alone; the wipe below erases this disk's labels anyway.
 
-    Returns "" when the wipe may go on, otherwise why it must not: a pool
-    that is still imported from this disk would rewrite its labels.
+    Returns the report line and whether the wipe must not run: a pool that
+    is still imported from this disk would rewrite its labels.
     """
     if name in SYSTEM_POOLS:
         log.warn(f"Label says '{name}': not importing a system pool name; wiping only")
-        return ""
+        return (None, f"pool {name} not imported (a system pool name): wiped only"), False
     if zfs.pool_exists(name):
         if zfs.pool_guid(name) != guid:
             log.warn(f"A different pool named '{name}' is imported: wiping only")
-            return ""
+            return (None, f"pool {name} not destroyed: the imported one is another disk's"), False
     elif not zfs.import_backup_pool(name, vdev):
         log.warn(f"Could not import '{name}': the wipe erases its labels; verified below")
-        return ""
+        return (None, f"pool {name} could not be imported: its labels are wiped below"), False
     # The pool's state goes with it: keep it first (I7).
     _ = forensics.capture(name, "before purge destroys it", log)
     r = sh.run(f"zpool destroy {name}", log=log)
     if r.ok:
         log.ok(f"Pool {name} destroyed")
-        return ""
-    return f"zpool destroy {name} failed: {r.stderr.strip() or f'exit {r.returncode}'}"
+        return (True, f"pool {name} destroyed"), False
+    return (False, f"zpool destroy {name} failed: {_error(r)}"), True
+
+
+def _error(r: sh.RunResult) -> str:
+    return r.stderr.strip() or f"exit {r.returncode}"
 
 
 def _present(path: str) -> bool:
@@ -67,71 +78,90 @@ def _present(path: str) -> bool:
     return os.path.exists(path)
 
 
-def _step(cmd: str, what: str, failures: list[str], log: Log) -> bool:
-    """Run one wipe command; record ``what`` with the error when it fails."""
+def _step(cmd: str, done: str, what: str, marks: list[Mark], log: Log) -> bool:
+    """Run one wipe command and add its line to the report."""
     r = sh.run(cmd, log=log)
-    if not r.ok:
-        failures.append(f"{what}: {r.stderr.strip() or f'exit {r.returncode}'}")
+    marks.append((True, done) if r.ok else (False, f"{what} failed: {_error(r)}"))
+    if r.ok:
+        log.ok(done[0].upper() + done[1:])
     return r.ok
 
 
-def _wipe(target_dev: str, part1: str, log: Log) -> list[str]:
+def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     """Overwrite both ends, wipe signatures and the partition table, verify.
 
     Every step runs even when an earlier one failed (more erased is never
-    worse); the returned list says what failed or what is still there.
+    worse); the report has one line per step and per check.
     """
-    failures: list[str] = []
+    marks: list[Mark] = []
     log.step(2, 5, "Overwriting first 10MB...")
-    if _step(
+    _ = _step(
         f"dd if=/dev/urandom of={target_dev} bs=1M count=10 conv=fsync",
+        "first 10MB overwritten",
         "overwrite of the first 10MB",
-        failures,
+        marks,
         log,
-    ):
-        log.ok("First 10MB overwritten")
+    )
 
     log.step(3, 5, "Overwriting last 10MB...")
     disk_bytes = sh.run(f"blockdev --getsize64 {target_dev}").output
     if not disk_bytes.isdigit():
-        failures.append(f"size of {target_dev} unreadable: last 10MB not overwritten")
+        marks.append((False, f"last 10MB not overwritten: size of {target_dev} unreadable"))
     elif int(disk_bytes) > 20 * 1024 * 1024:
         offset = (int(disk_bytes) - 10 * 1024 * 1024) // 512
-        if _step(
+        _ = _step(
             f"dd if=/dev/urandom of={target_dev} bs=512 seek={offset} count=20480 conv=fsync",
+            "last 10MB overwritten",
             "overwrite of the last 10MB",
-            failures,
+            marks,
             log,
-        ):
-            log.ok("Last 10MB overwritten")
+        )
+    else:
+        marks.append((None, "last 10MB: the disk is 20MB or less, covered by the first"))
 
     log.step(4, 5, "Wiping filesystem signatures...")
-    if _step(f"wipefs -a {target_dev}", "wipefs", failures, log):
-        log.ok("Signatures wiped")
+    _ = _step(f"wipefs -a {target_dev}", "signatures wiped", "wipefs -a", marks, log)
     # The ZFS labels live in the partition: read them there while it exists.
     # flushbufs: the writes went through the whole disk's node, not part1's.
     if _present(part1):
         _ = sh.run(f"blockdev --flushbufs {part1}")
         label = read_pool_label(part1)
         if label is not None:
-            failures.append(f"ZFS label still on {part1}: pool {label.name} ({label.guid})")
+            marks.append((False, f"ZFS label still on {part1}: pool {label.name} ({label.guid})"))
+        else:
+            marks.append((True, "no ZFS label left on the first partition"))
 
     log.step(5, 5, "Destroying partition table...")
-    if _step(f"sgdisk --zap-all {target_dev}", "sgdisk --zap-all", failures, log):
-        log.ok("Partition table destroyed")
+    _ = _step(
+        f"sgdisk --zap-all {target_dev}",
+        "partition table destroyed",
+        "sgdisk --zap-all",
+        marks,
+        log,
+    )
 
     _ = sh.run(f"blockdev --flushbufs {target_dev}")
     parts = sh.run(f"lsblk -nr -o NAME,TYPE {target_dev}")
     left = [ln.split()[0] for ln in parts.lines if ln.split()[1:2] == ["part"]]
-    if left:
-        failures.append(f"partitions still present: {', '.join(left)}")
+    marks.append(
+        (False, f"partitions still present: {', '.join(left)}")
+        if left
+        else (True, "no partition left")
+    )
     # blkid -p: exit 2 is "nothing found"; 0 means a signature is still there.
     probe = sh.run(f"blkid -p {target_dev}")
     if probe.returncode == 0:
-        failures.append(f"signature still on {target_dev}: {probe.output}")
+        marks.append((False, f"signature still on {target_dev}: {probe.output}"))
     elif probe.returncode != 2:
-        failures.append(f"blkid -p {target_dev} failed: exit {probe.returncode}")
-    return failures
+        marks.append((False, f"blkid -p {target_dev} failed: exit {probe.returncode}"))
+    else:
+        marks.append((True, "no signature found (blkid -p)"))
+    return marks
+
+
+def _report_lines(marks: list[Mark]) -> list[str]:
+    sign = {True: "✓", False: "✗", None: "-"}
+    return [f"{sign[ok]} {text}" for ok, text in marks]
 
 
 def run(
@@ -147,7 +177,7 @@ def run(
     ident = validate_external_block_device(target_arg, log, command="purge")
     target_dev = ident.disk
 
-    log.banner("PURGE BACKUP DRIVE", "⚠  IRREVERSIBLE OPERATION")
+    log.banner("PURGE BACKUP DRIVE", "⚠  IRREVERSIBLE OPERATION", warn=True)  # M4aF-5
 
     log.info(f"Device: {target_dev}  ({ident.by_id_path or 'no by-id name'})")
     log.info(f"Model:  {ident.model}  Serial: {ident.serial}")
@@ -182,33 +212,34 @@ def run(
 
     # ── Destroy pool ─────────────────────────────────────────────────────
     log.step(1, 5, "Destroying ZFS pool...")
-    stop = ""
+    stop = False
     if ident.label:
-        stop = _destroy_labelled_pool(ident.label.name, ident.label.guid, ident.part1, zfs, log)
+        first, stop = _destroy_labelled_pool(
+            ident.label.name, ident.label.guid, ident.part1, zfs, log
+        )
     else:
         log.info("No ZFS label on this disk: nothing to destroy")
-    failures = [stop] if stop else _wipe(target_dev, ident.part1, log)
+        first = (None, "no ZFS label on this disk: no pool to destroy")
+    if stop:
+        marks = [first, (None, "nothing overwritten: the pool is still imported from this disk")]
+    else:
+        marks = [first, *_wipe(target_dev, ident.part1, log)]
 
-    if failures:
+    if any(ok is False for ok, _ in marks):
         if stop and ident.label:
-            advice = [
-                "Nothing was overwritten: the pool is still imported from this",
-                f"disk. Export it (zpool export {ident.label.name}), then purge again.",
-            ]
+            advice = [f"Export it (zpool export {ident.label.name}), then purge again."]
         else:
             advice = [
                 "The disk may still hold the pool. Purge again, or look:",
                 f"  blkid -p {target_dev}; lsblk {target_dev}",
             ]
-        log.banner_error(
-            "PURGE INCOMPLETE",
-            [
-                *(f"✗ {f}" for f in failures),
-                "",
-                *advice,
-                "Registry entries and the pool's anchors in origin are kept.",
-            ],
-        )
+        if matched:
+            kept = f"Kept: the registry entries {', '.join(matched)} and the pool's anchors."
+        elif ident.label:
+            kept = "Not registered. The pool's anchors in origin, if any, are kept."
+        else:
+            kept = "Not registered and no pool label: nothing to keep."
+        log.banner_error("PURGE INCOMPLETE", [*_report_lines(marks), "", *advice, kept])
         raise SystemExit(1)
 
     # The wiped pool's anchors in origin (M2R-6): nothing can use them now.

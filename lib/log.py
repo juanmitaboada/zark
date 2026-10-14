@@ -149,8 +149,8 @@ class Log:
 
     # ── Banners ──────────────────────────────────────────────────────────
 
-    def banner(self, title: str, subtitle: str = ""):
-        """Big colored banner for command start."""
+    def banner(self, title: str, subtitle: str = "", *, warn: bool = False):
+        """Big colored banner for command start; ``warn`` shows the subtitle in yellow."""
         w = 58
         self.blank()
         print(f"{self.BOLD}{self.C}╔{'═' * w}╗{self.N}")
@@ -159,9 +159,10 @@ class Log:
             f"{self.W}{title}{self.N}{' ' * (w - len(title) - 2)}{self.BOLD}{self.C}║{self.N}",
         )
         if subtitle:
+            shown = f"{self.Y}{subtitle}{self.N}" if warn else subtitle
             print(
                 f"{self.BOLD}{self.C}║{self.N}  "
-                f"{subtitle}{' ' * (w - len(subtitle) - 2)}{self.BOLD}{self.C}║{self.N}",
+                f"{shown}{' ' * (w - len(subtitle) - 2)}{self.BOLD}{self.C}║{self.N}",
             )
         print(f"{self.BOLD}{self.C}╚{'═' * w}╝{self.N}")
         self.blank()
