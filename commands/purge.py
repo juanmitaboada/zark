@@ -22,6 +22,7 @@ hold the pool.
 """
 
 import os
+from typing import NamedTuple
 
 from lib import engine, forensics, sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
@@ -37,36 +38,69 @@ from lib.zfs import ZFS
 Mark = tuple[bool | None, str]
 
 
-def _destroy_labelled_pool(
+class Stop(NamedTuple):
+    """Why purge overwrites nothing after the destroy step, and what to do."""
+
+    reason: str
+    advice: str
+
+
+def _destroy_labelled_pool(  # pylint: disable=too-many-return-statements
     name: str, guid: str, vdev: str, zfs: ZFS, log: Log
-) -> tuple[Mark, bool]:
+) -> tuple[Mark, Stop | None]:
     """Destroy the pool whose label is on the disk being purged.
 
     The pool is imported device-exact under a private altroot (I-G) so
     nothing it contains is mounted over the running system. A pool of the
     same name that is imported with a different GUID lives on another disk
-    and is left alone; the wipe below erases this disk's labels anyway.
+    and is left alone; the wipe below erases this disk's labels anyway. A
+    pool found imported read-only is exported and imported read-write
+    first: destroying it read-only returns 0 but writes nothing to its
+    labels (M4aR-1).
 
-    Returns the report line and whether the wipe must not run: a pool that
-    is still imported from this disk would rewrite its labels.
+    Returns the report line and, when the wipe must not run, why and what
+    to do: a pool still imported from this disk would rewrite its labels,
+    and one that was not destroyed is still on it.
     """
     if name in SYSTEM_POOLS:
         log.warn(f"Label says '{name}': not importing a system pool name; wiping only")
-        return (None, f"pool {name} not imported (a system pool name): wiped only"), False
-    if zfs.pool_exists(name):
-        if zfs.pool_guid(name) != guid:
-            log.warn(f"A different pool named '{name}' is imported: wiping only")
-            return (None, f"pool {name} not destroyed: the imported one is another disk's"), False
-    elif not zfs.import_backup_pool(name, vdev):
+        return (None, f"pool {name} not imported (a system pool name): wiped only"), None
+    found = zfs.pool_exists(name)
+    if found and zfs.pool_guid(name) != guid:
+        log.warn(f"A different pool named '{name}' is imported: wiping only")
+        return (None, f"pool {name} not destroyed: the imported one is another disk's"), None
+    if not found and not zfs.import_backup_pool(name, vdev):
         log.warn(f"Could not import '{name}': the wipe erases its labels; verified below")
-        return (None, f"pool {name} could not be imported: its labels are wiped below"), False
-    # The pool's state goes with it: keep it first (I7).
+        return (None, f"pool {name} could not be imported: its labels are wiped below"), None
+    # The pool's state goes with it: keep it first, as purge found it (I7).
     _ = forensics.capture(name, "before purge destroys it", log)
+    export_first = Stop(
+        "nothing overwritten: the pool is still imported from this disk",
+        f"Export it (zpool export {name}), then purge again.",
+    )
+    done = f"pool {name} destroyed"
+    if found and sh.run(f"zpool get -H -o value readonly {name}").output == "on":
+        r = sh.run(f"zpool export {name}", log=log)
+        if not r.ok:
+            return (
+                False,
+                f"pool {name} is imported read-only and could not be exported: {_error(r)}",
+            ), export_first
+        if not zfs.import_backup_pool(name, vdev, guid=guid):
+            return (
+                False,
+                f"pool {name} was exported but could not be imported read-write to destroy it",
+            ), Stop(
+                "nothing overwritten: the pool was not destroyed",
+                "Purge again: it imports the pool read-write itself. To see the disk: "
+                + f"zpool import -d {vdev}",
+            )
+        done += " (it was imported read-only: exported and imported read-write first)"
     r = sh.run(f"zpool destroy {name}", log=log)
     if r.ok:
-        log.ok(f"Pool {name} destroyed")
-        return (True, f"pool {name} destroyed"), False
-    return (False, f"zpool destroy {name} failed: {_error(r)}"), True
+        log.ok(done[0].upper() + done[1:])
+        return (True, done), None
+    return (False, f"zpool destroy {name} failed: {_error(r)}"), export_first
 
 
 def _error(r: sh.RunResult) -> str:
@@ -212,7 +246,7 @@ def run(
 
     # ── Destroy pool ─────────────────────────────────────────────────────
     log.step(1, 5, "Destroying ZFS pool...")
-    stop = False
+    stop: Stop | None = None
     if ident.label:
         first, stop = _destroy_labelled_pool(
             ident.label.name, ident.label.guid, ident.part1, zfs, log
@@ -221,13 +255,13 @@ def run(
         log.info("No ZFS label on this disk: nothing to destroy")
         first = (None, "no ZFS label on this disk: no pool to destroy")
     if stop:
-        marks = [first, (None, "nothing overwritten: the pool is still imported from this disk")]
+        marks = [first, (None, stop.reason)]
     else:
         marks = [first, *_wipe(target_dev, ident.part1, log)]
 
     if any(ok is False for ok, _ in marks):
-        if stop and ident.label:
-            advice = [f"Export it (zpool export {ident.label.name}), then purge again."]
+        if stop:
+            advice = [stop.advice]
         else:
             advice = [
                 "The disk may still hold the pool. Purge again, or look:",

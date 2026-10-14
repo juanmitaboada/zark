@@ -6025,6 +6025,68 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("dd if=/dev/urandom")
         assert "backup" in data
 
+    @staticmethod
+    def _found_read_only(mock: MockShell, export_ok: bool = True) -> None:
+        """The pool is already imported read-only when purge starts (a finished
+        read-only ``zark mount``); exporting it removes it from ``zpool list``."""
+        listed = mock.on("zpool list backup").succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("3446866051930726346")
+        mock.on("zpool get -H -o value readonly backup").succeeds("on")
+        export = mock.on("zpool export backup")
+        _ = export.succeeds() if export_ok else export.fails("pool is busy")
+        real = mock.mock_run
+
+        def spy(cmd: str, **kw: Any) -> RunResult:
+            r = real(cmd, **kw)
+            if cmd == "zpool export backup" and r.ok:
+                _ = listed.fails()
+            return r
+
+        mock.mock_run = spy  # type: ignore[method-assign,assignment]
+
+    def test_a_read_only_pool_is_destroyed_read_write(self):
+        # M4aR-1: a read-only pool's destroy returns 0 and leaves its labels.
+        mock = MockShell()
+        self._found_read_only(mock)
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock)
+        calls = mock.calls
+        rw = "zpool import -N -R /run/zark/altroot/backup -d "
+        imports = [c for c in calls if c.startswith(rw)]
+        assert imports and "readonly" not in imports[0], calls
+        assert (
+            calls.index("zpool export backup")
+            < calls.index(imports[0])
+            < calls.index("zpool destroy backup")
+        ), calls
+        assert rc == 0 and "DRIVE PURGED" in out and not data
+        assert "exported and imported read-write first" in out
+
+    def test_a_read_only_pool_that_will_not_export_writes_nothing(self):
+        mock = MockShell()
+        self._found_read_only(mock, export_ok=False)
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock)
+        assert rc == 1 and "could not be exported: pool is busy" in out
+        assert "Export it (zpool export backup), then purge again." in out
+        assert mock.was_not_called("zpool destroy"), mock.calls
+        assert mock.was_not_called("dd if=/dev/urandom"), mock.calls
+        assert "backup" in data
+
+    def test_a_read_only_pool_that_will_not_re_import_writes_nothing(self):
+        mock = MockShell()
+        self._found_read_only(mock)
+        mock.on_prefix("zpool import -N -R /run/zark/altroot/backup").fails("I/O error")
+        _wipe_succeeds(mock)
+        out, rc, data = self._purge(mock)
+        assert rc == 1 and "could not be imported read-write to destroy it" in out
+        assert "- nothing overwritten: the pool was not destroyed" in out
+        assert "Purge again: it imports the pool read-write itself." in out
+        assert mock.was_not_called("zpool destroy"), mock.calls
+        assert mock.was_not_called("dd if=/dev/urandom"), mock.calls
+        assert "backup" in data
+
     def test_label_left_on_part1_is_incomplete(self):
         mock = MockShell()
         mock.on("zpool destroy backup").succeeds()
