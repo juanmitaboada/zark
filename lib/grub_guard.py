@@ -49,8 +49,18 @@ ALLOWED_POOLS="rpool bpool"
 # List pools available for import (exported or on connected drives)
 available="$(zpool import 2>/dev/null | awk '/pool:/{print $2}' | sort -u)"
 
+# 10_linux_zfs also takes, from every imported pool, the filesystems whose
+# mountpoint is the pool's altroot (or / without one) as root datasets: an
+# imported backup (an altroot, or zark's metadata on its root) is external too.
+imported="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altroot; do
+    case " $ALLOWED_POOLS " in *" $name "*) continue ;; esac
+    if [ "$altroot" != "-" ]; then echo "$name"; continue; fi
+    fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
+    if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
+done || true)"
+
 extra=""
-for pool in $available; do
+for pool in $available $imported; do
     is_allowed=false
     for a in $ALLOWED_POOLS; do
         [ "$pool" = "$a" ] && is_allowed=true
@@ -65,7 +75,8 @@ if [ -n "$extra" ]; then
     echo "  The 10_linux_zfs script will try to mount their encrypted datasets," >&2
     echo "  fail, and generate a grub.cfg WITHOUT kernel entries." >&2
     echo "" >&2
-    echo "  Fix: disconnect the external drive(s) and run update-grub again." >&2
+    echo "  Fix: let a running zark backup finish (or end a zark mount with" >&2
+    echo "  sudo zark umount), disconnect the drive(s), run update-grub again." >&2
     echo "" >&2
     exit 1
 fi

@@ -128,6 +128,7 @@ from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E
 from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
     engine,
+    grub_guard,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
     Cleanup,
@@ -4754,6 +4755,98 @@ class TestAptGuard:  # pylint: disable=missing-function-docstring
                 check=False,
             )
             assert proc.returncode == 0
+
+
+class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstring
+    """H18 / D3 (M4a-3): an imported backup pool blocks boot-critical updates too.
+
+    The scripts run under sh with zpool, zfs and dpkg-deb stubbed; their PATH
+    line is pointed at the stubs, so the machine's own pools are never read.
+    """
+
+    _DEB = "/var/cache/apt/archives/linux-image-7.0.0-99-generic_1_amd64.deb\n"
+
+    @staticmethod
+    def _stubs(td: str, importable: str, imported: str, zark_format: str) -> str:
+        stub = Path(td, "stub")
+        stub.mkdir()
+        scripts = {
+            "zpool": (
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                f"  import) printf '{importable}' ;;\n"
+                f"  list) printf '{imported}' ;;\n"
+                "esac\n"
+            ),
+            "zfs": f"#!/bin/sh\nprintf '{zark_format}\\n'\n",
+            "dpkg-deb": '#!/bin/sh\nbasename "$2" | cut -d_ -f1\n',
+        }
+        for name, body in scripts.items():
+            Path(stub, name).write_text(body, encoding="ascii")
+            Path(stub, name).chmod(0o755)
+        return str(stub)
+
+    @staticmethod
+    def _script(td: str, text: str, stub: str) -> str:
+        path = Path(td, "script")
+        path.write_text(
+            text.replace("PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"),
+            encoding="utf-8",
+        )
+        return str(path)
+
+    def _run(self, text: str, importable: str, imported: str, fmt: str = "-") -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as td:
+            stub = self._stubs(td, importable, imported, fmt)
+            env = {k: v for k, v in os.environ.items() if k != "ZARK_INTERNAL"}
+            env["PATH"] = f"{stub}:/usr/bin:/bin"
+            proc = subprocess.run(
+                ["sh", self._script(td, text, stub)],
+                input=self._DEB,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+        return proc.returncode, proc.stdout + proc.stderr
+
+    _SYSTEM = "rpool\\t-\\nbpool\\t-\\n"
+    _BACKUP = "rpool\\t-\\nbpool\\t-\\nbackup\\t/run/zark/altroot/backup\\n"
+    _TANK = "rpool\\t-\\nbpool\\t-\\ntank\\t-\\n"
+
+    def test_hook_refuses_with_a_backup_imported_under_an_altroot(self):
+        rc, out = self._run(apt_guard.HOOK_SCRIPT, "", self._BACKUP)
+        assert rc == 1, out
+        assert "backup" in out
+
+    def test_hook_refuses_with_a_zark_drive_imported_without_an_altroot(self):
+        rc, out = self._run(apt_guard.HOOK_SCRIPT, "", self._TANK, fmt="2")
+        assert rc == 1, out
+
+    def test_hook_allows_a_permanent_data_pool(self):
+        rc, out = self._run(apt_guard.HOOK_SCRIPT, "", self._TANK)
+        assert rc == 0, out
+
+    def test_hook_allows_the_system_pools_alone(self):
+        rc, out = self._run(apt_guard.HOOK_SCRIPT, "", self._SYSTEM)
+        assert rc == 0, out
+
+    def test_hook_still_refuses_an_importable_pool(self):
+        rc, out = self._run(apt_guard.HOOK_SCRIPT, "   pool: black\\n", self._SYSTEM)
+        assert rc == 1, out
+
+    def test_motd_names_an_imported_backup(self):
+        rc, out = self._run(apt_guard.MOTD_SCRIPT, "", self._BACKUP)
+        assert rc == 0, out
+        assert "backup" in out
+
+    def test_grub_guard_refuses_with_a_backup_imported(self):
+        rc, out = self._run(grub_guard.GUARD_SCRIPT, "", self._BACKUP)
+        assert rc == 1, out
+
+    def test_grub_guard_allows_the_system_pools_alone(self):
+        rc, out = self._run(grub_guard.GUARD_SCRIPT, "", self._TANK)
+        assert rc == 0, out
 
 
 # ═════════════════════════════════════════════════════════════════════════

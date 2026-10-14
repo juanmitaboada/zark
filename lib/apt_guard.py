@@ -137,11 +137,20 @@ done
 [ -n "$sensitive" ] || exit 0
 
 # Boot-critical packages ARE present. Now check for an external pool: any pool
-# available for import that is not rpool/bpool.
+# available for import that is not rpool/bpool, and any imported one that is
+# a backup (imported under an altroot, or zark's metadata on its root): while
+# zark holds a backup imported, a kernel unpacked into /boot would land in
+# the bpool snapshot of the point being taken.
 ALLOWED_POOLS="rpool bpool"
 available="$(zpool import 2>/dev/null | awk '/pool:/{print $2}' | sort -u)"
+imported="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altroot; do
+    case " $ALLOWED_POOLS " in *" $name "*) continue ;; esac
+    if [ "$altroot" != "-" ]; then echo "$name"; continue; fi
+    fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
+    if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
+done || true)"
 extra=""
-for pool in $available; do
+for pool in $available $imported; do
     is_allowed=false
     for a in $ALLOWED_POOLS; do
         [ "$pool" = "$a" ] && is_allowed=true
@@ -161,8 +170,8 @@ echo "  Upgrading the kernel / GRUB / shim / ZFS while an external ZFS backup" >
 echo "  pool is connected risks a half-applied boot update (new kernel unpacked" >&2
 echo "  but update-grub blocked), leaving an unbootable system." >&2
 echo "" >&2
-echo "  Fix: disconnect or export the external pool(s), then run apt again:" >&2
-echo "      sudo zpool export$extra" >&2
+echo "  Fix: let a running zark backup finish (or end a zark mount with" >&2
+echo "  sudo zark umount), disconnect the drive, then run apt again." >&2
 echo "" >&2
 echo "  (Installed by zark. Bypass once with ZARK_INTERNAL=1, or remove" >&2
 echo "  __APT_CONF_ABS__ to disable.)" >&2
@@ -194,8 +203,14 @@ export PATH
 
 ALLOWED_POOLS="rpool bpool"
 available="$(zpool import 2>/dev/null | awk '/pool:/{print $2}' | sort -u)"
+imported="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altroot; do
+    case " $ALLOWED_POOLS " in *" $name "*) continue ;; esac
+    if [ "$altroot" != "-" ]; then echo "$name"; continue; fi
+    fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
+    if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
+done || true)"
 extra=""
-for pool in $available; do
+for pool in $available $imported; do
     is_allowed=false
     for a in $ALLOWED_POOLS; do
         [ "$pool" = "$a" ] && is_allowed=true
@@ -207,7 +222,7 @@ done
 
 printf '\\n\\033[1;33mWARNING (zark):\\033[0m external ZFS pool(s) connected:%s\\n' "$extra"
 printf '  Kernel / GRUB / ZFS upgrades are blocked while these are attached.\\n'
-printf '  Disconnect or export them before upgrading:  sudo zpool export%s\\n\\n' "$extra"
+printf '  Disconnect them before upgrading (sudo zark umount ends a zark mount).\\n\\n'
 """
 
 
