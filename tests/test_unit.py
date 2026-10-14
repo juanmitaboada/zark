@@ -265,6 +265,9 @@ _ = patch.object(
     "default_file",
     classmethod(lambda _cls: os.path.join(_TEST_LOG_DIR, "zark.log")),
 ).start()
+# Disk sizes come from sysfs; the machine running the tests must not decide
+# whether a mocked /dev/sdb has a medium. The empty directory reads as "unknown".
+_SYSFS_ROOT = patch("lib.identity.SYS_BLOCK", _TEST_LOG_DIR, create=True).start()
 
 
 def _real_log_state() -> dict[str, tuple[int, int] | None]:
@@ -5000,6 +5003,24 @@ class TestIdentity:  # pylint: disable=missing-function-docstring
         ):
             ident = resolve_disk("/dev/sdb1", allow_partition=True)
         assert ident.disk == "/dev/sdb"
+
+    def test_resolve_refuses_a_disk_with_no_medium(self):
+        # M1P.12: a card reader with no card was accepted until zpool create.
+        mock = _identity_mock()
+        with tempfile.TemporaryDirectory() as sysfs:
+            Path(sysfs, "sdb").mkdir()
+            Path(sysfs, "sdb", "size").write_text("0\n", encoding="ascii")
+            with (
+                patch_sh(mock),
+                patch("lib.identity.SYS_BLOCK", sysfs, create=True),
+                patch("lib.identity.os.path.realpath", return_value="/dev/sdb"),
+            ):
+                try:
+                    resolve_disk(f"/dev/disk/by-id/{_KINGSTON_ID}")
+                except IdentityError as e:
+                    assert "no medium" in str(e)
+                    return
+        raise AssertionError("expected IdentityError")
 
     def test_match_registry_by_label_guid_and_drive_id(self):
         drives = {

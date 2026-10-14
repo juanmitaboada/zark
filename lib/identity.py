@@ -37,6 +37,7 @@ from lib.config import DriveInfo
 from lib.sh import part, run
 
 BY_ID_DIR = "/dev/disk/by-id"
+SYS_BLOCK = "/sys/class/block"
 
 # by-id prefixes in order of preference. wwn-/scsi-/nvme-eui. names come
 # last: USB-SATA bridges can report a bogus WWN shared across enclosures
@@ -154,6 +155,14 @@ def read_pool_label(device: str) -> PoolLabel | None:
     )
 
 
+def _sectors(name: str) -> int | None:
+    """Size of a block device in 512-byte sectors, from sysfs; None if unreadable."""
+    try:
+        return int(Path(SYS_BLOCK, name, "size").read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None
+
+
 def whole_disk(device: str) -> str:
     """Whole-disk node for any device path (disk, partition, by-id), or ""."""
     node = os.path.realpath(device)
@@ -186,6 +195,10 @@ def resolve_disk(device: str, *, allow_partition: bool = False) -> DiskIdentity:
         info = _lsblk_fields(node)
     if info.get("TYPE") != "disk":
         raise IdentityError(f"{device}: type '{info.get('TYPE', '?')}' is not a disk")
+    if _sectors(Path(node).name) == 0:
+        # A card reader or enclosure with nothing in it: zpool create would
+        # only fail later, with ENOMEDIUM (M1 checklist F3).
+        raise IdentityError(f"{device}: no medium (size 0): insert the card or disk")
 
     aliases = tuple(by_id_names(node))
     by_id = preferred_by_id(list(aliases))
