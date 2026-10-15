@@ -7318,6 +7318,108 @@ class TestRecoverPlanArchived:  # pylint: disable=missing-function-docstring
         assert {r.rel for r in plan.rows} == {f"rpool/ROOT/{_BE}", f"rpool/ROOT/{_BE}/var"}
 
 
+class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
+    """M3P.13 (M4b-6 6a): each dataset starts from its newest monthly before
+    the point, so origin shares it with the drives in rotation."""
+
+    P2 = "zark_2026-10-08_10:00:00Z"
+    MONTHLY = "autosnap_2026-09-01_00:00:00_monthly"
+
+    def _plan(self) -> tuple[RestorePlan, str]:
+        be = f"rpool/ROOT/{_BE}"
+        t0, t1, t2 = 1_756_684_800, 1_759_312_800, 1_759_917_600
+        lines = [
+            f"backup/{be}@autosnap_2026-08-01_00:00:00_monthly\t1\t1\t{t0 - 2_678_400}",
+            f"backup/{be}@{self.MONTHLY}\t2\t2\t{t0}",
+            f"backup/{be}@autosnap_2026-10-01_00:00:00_daily\t5\t5\t{t1}",
+            f"backup/{be}@{self.P2}\t6\t6\t{t2}",
+            f"backup/{be}/var@{self.P2}\t7\t7\t{t2}",
+        ]
+        snaps = parse_snapshots(lines, "backup")
+        point = next(
+            p for p in restore_points(snaps, be) if any(x.name == self.P2 for x in p.members[be])
+        )
+        mock = MockShell()
+        mock.on("zfs list -Hp -o name,type -r backup/rpool").succeeds(
+            "\n".join(f"backup/{n}\tfilesystem" for n in ("rpool", "rpool/ROOT", be, f"{be}/var"))
+        )
+        mock.on("zfs list -Hp -o name,type -r backup/bpool").fails()
+        mock.on_prefix("zfs get -Hp -s local -o name,property,value org.zark").succeeds("")
+        mock.on("zfs list -Hp -t snapshot -o name,createtxg -s createtxg backup/keystore").succeeds(
+            "backup/keystore@prepare_20261001_100000\t9",
+        )
+        mock.on(f"zfs get -Hp -o value written@{self.MONTHLY} backup/{be}@{self.P2}").succeeds(
+            "300\n"
+        )
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
+            patch.object(
+                recover_mod, "_referenced", side_effect=lambda names: dict.fromkeys(names, 1000)
+            ),
+            patch.object(recover_mod, "_empty_root", return_value=False),
+            redirect_stdout(out),
+        ):
+            plan = _plan("backup", "/dev/sdb1", _BE, point, snaps, Log())
+        return plan, out.getvalue()
+
+    def test_the_newest_monthly_before_the_point_is_the_base(self):
+        plan, out = self._plan()
+        be = plan.row(f"rpool/ROOT/{_BE}")
+        var = plan.row(f"rpool/ROOT/{_BE}/var")
+        assert be is not None and be.base is not None and be.base.name == self.MONTHLY
+        assert be.base_bytes == 300  # monthly 1000 + written since 300 - point 1000
+        assert var is not None and var.base is None
+        assert "1 dataset(s) restored from the point only" in out
+        assert plan.rpool_bytes == 1000 + 300 + 1000 + plan.keystore_bytes
+
+    def test_the_base_is_sent_in_full_then_the_point_from_it(self):
+        plan, _ = self._plan()
+        row = plan.row(f"rpool/ROOT/{_BE}")
+        assert row is not None
+        pipes: list[str] = []
+        mock = MockShell()
+
+        def pipe(cmd1: str, _cmd2: str, _log: object = None) -> RunResult:
+            pipes.append(cmd1)
+            return RunResult(0, "", "", cmd1)
+
+        mock.mock_run_pipe = pipe  # type: ignore[method-assign,assignment]
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
+        be = f"backup/rpool/ROOT/{_BE}"
+        assert pipes == [
+            f"zfs send -w {be}@{self.MONTHLY}",
+            f"zfs send -w -i {be}@{self.MONTHLY} {be}@{self.P2}",
+        ]
+
+    def test_a_monthly_in_another_lineage_is_not_a_base(self):
+        # An incremental needs both snapshots in one dataset: a monthly kept
+        # in an archived lineage cannot be the base of the live point.
+        rel = "rpool/ROOT/x"
+        point = Snap(rel, self.P2, "2", 6, 6)
+        archived = Snap(rel, self.MONTHLY, "1", 2, 2, source=f"{rel}.archived-20261001")
+        row = RestoreRow(rel, point)
+        monthly_base = recover_mod._monthly_base  # pylint: disable=protected-access
+        assert monthly_base(row, [archived, point]) is None
+        live = Snap(rel, self.MONTHLY, "1", 2, 2)
+        assert monthly_base(row, [live, point]) == live
+
+    def test_bases_that_do_not_fit_are_dropped_before_refusing(self):
+        snap = Snap("rpool/ROOT/x", "a", "1", 1, 1)
+        base = Snap("rpool/ROOT/x", self.MONTHLY, "0", 0, 0)
+        rows = [
+            RestoreRow(
+                "rpool/ROOT/x", snap, referenced=300 * 1024**3, base=base, base_bytes=200 * 1024**3
+            )
+        ]
+        point = restore_points([snap], "rpool/ROOT/x")[0]
+        plan = RestorePlan("backup", "/dev/sdb1", "x", point, rows, "backup/keystore@k", 1024**2)
+        assert TestRecoverSizeCheck._check(plan, str(476 * 1024**3))  # pylint: disable=protected-access
+        assert rows[0].base is None and rows[0].base_bytes == 0
+
+
 def _sized_plan(rpool: int, bpool: int, keystore: int = 16 * 1024**2) -> RestorePlan:
     snap = Snap("rpool/ROOT/x", "a", "1", 1, 1)
     rows = [

@@ -81,7 +81,7 @@ from lib.mount_props import (
     receive_options,
     rpool_root_mountpoint,
 )
-from lib.replication import ANCHOR_RE, POINT_PREFIX
+from lib.replication import ANCHOR_RE, POINT_PREFIX, shared_kind
 from lib.restore_points import (
     Point,
     Snap,
@@ -487,6 +487,10 @@ class RestoreRow:  # pylint: disable=too-many-instance-attributes
     options: list[str] = field(default_factory=list)
     effective: str = ""  # effective mountpoint after receive
     note: str = ""  # why the dataset is not restored
+    # The newest monthly before the point, restored first so that origin
+    # shares it with every drive in rotation (M3P.13, M4b-6), and what it adds.
+    base: Snap | None = None
+    base_bytes: int = 0
 
     @property
     def restored(self) -> bool:
@@ -525,13 +529,22 @@ class RestorePlan:  # pylint: disable=too-many-instance-attributes
 
     @property
     def rpool_bytes(self) -> int:
-        """Bytes received into rpool (datasets + keystore)."""
-        return sum(r.referenced for r in self.rpool_rows) + self.keystore_bytes
+        """Bytes received into rpool (datasets, their monthly bases, keystore)."""
+        rows = self.rpool_rows
+        return sum(r.referenced + r.base_bytes for r in rows) + self.keystore_bytes
 
     @property
     def bpool_bytes(self) -> int:
-        """Bytes received into bpool."""
-        return sum(r.referenced for r in self.rows if r.rel.startswith("bpool/") and r.restored)
+        """Bytes received into bpool (with its monthly base)."""
+        rows = [r for r in self.rows if r.rel.startswith("bpool/") and r.restored]
+        return sum(r.referenced + r.base_bytes for r in rows)
+
+    def drop_bases(self) -> int:
+        """Restore the point only, everywhere; how many bases were dropped."""
+        dropped = sum(1 for r in self.rows if r.base is not None)
+        for r in self.rows:
+            r.base, r.base_bytes = None, 0
+        return dropped
 
 
 def _list_snapshots(pool: str, log: Log) -> list[Snap]:
@@ -731,6 +744,7 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
     for r in rows:
         if r.restored and r.snap:
             r.referenced = refs.get(f"{pool}/{r.snap.stored}@{r.snap.name}", -1)
+    _plan_bases(pool, rows, snaps, log)
 
     ks = sh.run(f"zfs list -Hp -t snapshot -o name,createtxg -s createtxg {pool}/keystore")
     ks_snap = ks.lines[-1].split("\t")[0] if ks.ok and ks.lines else ""
@@ -747,6 +761,54 @@ def _plan(  # pylint: disable=too-many-locals,too-many-branches
         rpool_mountpoint=root_mp,
         rpool_mountpoint_source=root_src,
     )
+
+
+def _monthly_base(row: RestoreRow, snaps: list[Snap]) -> Snap | None:
+    """The newest sanoid monthly before the row's point in the same lineage
+    (an incremental needs both in one dataset); None when there is none."""
+    snap = row.snap
+    if snap is None or shared_kind(snap.name) == "monthly":
+        return None
+    older = [
+        s
+        for s in snaps
+        if s.dataset == row.rel
+        and s.stored == snap.stored
+        and shared_kind(s.name) == "monthly"
+        and s.createtxg < snap.createtxg
+    ]
+    return max(older, key=lambda s: s.createtxg, default=None)
+
+
+def _plan_bases(pool: str, rows: list[RestoreRow], snaps: list[Snap], log: Log) -> None:
+    """6a (M3P.13, M4b-6): each restored dataset starts from its newest
+    monthly before the point, sent in full, then the point with ``-i``, so
+    the recovered system shares that monthly with every drive that carried
+    it and their next backups continue instead of resending. The extra space
+    is the monthly's ``referenced`` plus what the point wrote since it, less
+    the point's own ``referenced``; when it cannot be read the dataset gets
+    the point only."""
+    without = 0
+    for r in rows:
+        base = _monthly_base(r, snaps) if r.restored else None
+        if base is None:
+            without += r.restored
+            continue
+        assert r.snap is not None
+        point = f"{pool}/{r.snap.stored}@{r.snap.name}"
+        whole = f"{pool}/{base.stored}@{base.name}"
+        ref = _referenced([whole]).get(whole, -1)
+        w = sh.run(f"zfs get -Hp -o value written@{base.name} {point}")
+        written = int(w.output.strip()) if w.ok and w.output.strip().isdigit() else -1
+        if ref < 0 or written < 0 or r.referenced < 0:
+            without += 1
+            continue
+        r.base, r.base_bytes = base, max(ref + written - r.referenced, 0)
+    if without:
+        log.info(
+            f"{without} dataset(s) restored from the point only: no monthly snapshot before it "
+            + "on the drive (other drives' next backup of them is a full send)"
+        )
 
 
 def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str) -> str:
@@ -854,6 +916,16 @@ def _check_sizes(plan: RestorePlan, target_disk: str, log: Log) -> None:
     rpool_part = disk_bytes - _LAYOUT_BEFORE_RPOOL_MIB * 1024**2
     need_r = plan.rpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
     need_b = plan.bpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
+    if need_r > rpool_part or need_b > _BPOOL_PART_BYTES:
+        # The monthly bases are a convenience (M4b-6): the point alone may fit.
+        dropped = plan.drop_bases()
+        if dropped:
+            log.warn(
+                f"With their monthly bases the datasets do not fit on {target_disk}: "
+                + f"{dropped} dataset(s) restored from the point only"
+            )
+            need_r = plan.rpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
+            need_b = plan.bpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
     log.info(
         f"Restore size: rpool {sh.humanize_bytes(plan.rpool_bytes)} "
         + f"(partition {sh.humanize_bytes(max(rpool_part, 0))}), "
@@ -958,9 +1030,12 @@ def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
     _check_sizes(plan, target_disk, log)
 
 
-def _receive(src: str, dst: str, options: list[str], raw: bool, log: Log) -> bool:
-    """``zfs send [-w] src | zfs receive -u <options> dst``; ENOSPC is fatal."""
-    send = f"zfs send -w {src}" if raw else f"zfs send {src}"
+def _receive(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    src: str, dst: str, options: list[str], raw: bool, log: Log, base: str = ""
+) -> bool:
+    """``zfs send [-w] [-i base] src | zfs receive -u <options> dst``; ENOSPC
+    is fatal."""
+    send = "zfs send " + ("-w " if raw else "") + (f"-i {base} " if base else "") + src
     recv = f"zfs receive -u {' '.join(options)} {dst}".replace("  ", " ")
     log.info(f"  {dst} ← @{src.split('@', 1)[1]}")
     r = sh.run_pipe(send, recv)
@@ -974,6 +1049,19 @@ def _receive(src: str, dst: str, options: list[str], raw: bool, log: Log) -> boo
         )
     log.error(f"  receive failed: {dst}: {r.stderr.strip()}")
     return False
+
+
+def _receive_row(pool: str, row: RestoreRow, raw: bool, log: Log) -> bool:
+    """One dataset: its monthly base in full, then the point with ``-i``
+    from it (M4b-6); the point in full when it has no base."""
+    assert row.snap is not None
+    point = f"{pool}/{row.snap.stored}@{row.snap.name}"
+    if row.base is None:
+        return _receive(point, row.rel, row.options, raw=raw, log=log)
+    base = f"{pool}/{row.base.stored}@{row.base.name}"
+    if not _receive(base, row.rel, row.options, raw=raw, log=log):
+        return False
+    return _receive(point, row.rel, row.options, raw=raw, log=log, base=base)
 
 
 def _export_verified(pool: str, log: Log) -> None:
@@ -1432,14 +1520,7 @@ def run(
 
     be_ds = f"rpool/ROOT/{ubuntu_name}"
     for row in plan.rpool_rows:
-        assert row.snap is not None
-        ok = _receive(
-            f"{pool_name}/{row.snap.stored}@{row.snap.name}",
-            row.rel,
-            row.options,
-            raw=True,
-            log=log,
-        )
+        ok = _receive_row(pool_name, row, raw=True, log=log)
         if not ok:
             if row.rel == be_ds:
                 log.fatal("Failed to raw send root dataset")
@@ -1485,13 +1566,7 @@ def run(
     bpool_row = plan.row(f"bpool/BOOT/{ubuntu_name}")
     if bpool_row is not None and bpool_row.restored and bpool_row.snap is not None:
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
-        bpool_received = _receive(
-            f"{pool_name}/{bpool_row.snap.stored}@{bpool_row.snap.name}",
-            bpool_row.rel,
-            bpool_row.options,
-            raw=False,
-            log=log,
-        )
+        bpool_received = _receive_row(pool_name, bpool_row, raw=False, log=log)
         if not bpool_received:
             errors.append("bpool: receive failed — kernels need reinstallation")
     else:
