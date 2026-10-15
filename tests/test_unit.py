@@ -8799,6 +8799,25 @@ class TestUmountPropagation:  # pylint: disable=missing-function-docstring
         r = self._run("nested-bind")
         assert r["host_lost"] == [], r
 
+    def test_the_harness_refuses_before_any_mount_without_its_own_namespace(self):
+        # X-3: an unshare that changed nothing must stop the harness before its
+        # first mount command, or `--make-rprivate /` would hit the host.
+        import tests.umount_propagation_harness as harness  # pylint: disable=import-outside-toplevel
+
+        calls: list[tuple[str, ...]] = []
+        with (
+            patch.object(harness.os, "unshare", lambda _flags: None),
+            patch.object(harness, "_run", lambda *a: calls.append(a)),
+            patch.object(harness.sys, "argv", ["harness", tempfile.gettempdir(), "datasets"]),
+        ):
+            try:
+                harness.main()
+            except SystemExit as e:
+                assert "refusing" in str(e.code), e.code
+            else:
+                raise AssertionError("the harness ran without a namespace of its own")
+        assert not calls, calls
+
 
 class TestStableVdevs:  # pylint: disable=missing-function-docstring
     """eli 2026-09-30: kernel-named vdevs broke the boot with a USB stick plugged in."""

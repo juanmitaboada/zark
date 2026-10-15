@@ -120,9 +120,11 @@ def main() -> None:
         raise SystemExit(f"unknown case {case!r}")
     system_ns = os.readlink("/proc/self/ns/mnt")
     os.unshare(os.CLONE_NEWNS)
-    _run("mount", "--make-rprivate", "/")
+    # Checked before the first mount: in the system's namespace even
+    # `--make-rprivate /` would cut propagation to every service (X-3).
     if os.readlink("/proc/self/ns/mnt") == system_ns:
         raise SystemExit("refusing to run: no mount namespace of its own")
+    _run("mount", "--make-rprivate", "/")
 
     _run("mount", "-t", "tmpfs", "zarkhost", work)
     _run("mount", "--make-shared", work)  # what systemd does for / on the host
