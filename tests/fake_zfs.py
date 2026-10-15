@@ -220,6 +220,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
     def _get(self, args: list[str]) -> RunResult:
         """``zfs get -H [-s local] -o value|property,value <prop|all> <ds>``, and
         ``zfs get -H -p -r -s local -t snapshot -o name,value <prop> <root>``."""
+        named = [a for a in args if "@" in a or "#" in a]
+        if named and "-r" not in args:
+            return self._get_named(args[args.index(named[0]) - 1], named)
         ds, prop = args[-1], args[-2]
         if ds not in self.ds:
             return _err("does not exist")
@@ -229,6 +232,22 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         if prop == "all":
             return _ok("".join(f"{k}\t{v}\n" for k, v in sorted(props.items()) if ":" in k))
         return _ok(props.get(prop, "-") + "\n")
+
+    def _get_named(self, prop: str, names: list[str]) -> RunResult:
+        """``zfs get -Hp -o value guid <ds@snap|ds#bookmark>...``: one line each."""
+        if prop != "guid":
+            return _err(f"fake zfs get: {prop} of a snapshot or bookmark is not modelled")
+        out: list[str] = []
+        for n in names:
+            sep = "@" if "@" in n else "#"
+            ds, _, short = n.partition(sep)
+            d = self.ds.get(ds)
+            lst = (d.snaps if sep == "@" else d.bookmarks) if d else []
+            s = next((x for x in lst if x.name == short), None)
+            if s is None:
+                return _err(f"cannot open '{n}': dataset does not exist")
+            out.append(f"{s.guid}\n")
+        return _ok("".join(out))
 
     def _get_snapshots(self, root: str, prop: str, local: bool) -> RunResult:
         rows: list[str] = []
@@ -333,7 +352,14 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
     # ── snapshots, bookmarks, destroy, rename, rollback, set ─────────────
 
     def _snapshot(self, args: list[str]) -> RunResult:
-        names = [a for a in args if not a.startswith("-")]
+        # `-o <user property>=<value>` is set on every snapshot of the call, in
+        # the same sync task (module/zfs/zfs_ioctl.c:3815-3870).
+        props = dict(args[i + 1].split("=", 1) for i, a in enumerate(args[:-1]) if a == "-o")
+        names = [
+            a
+            for i, a in enumerate(args)
+            if not a.startswith("-") and (i == 0 or args[i - 1] != "-o")
+        ]
         pools = {n.split("/")[0].split("@")[0] for n in names}
         if len(pools) != 1:
             return _err("cannot create snapshots: cross-device link (EXDEV)")
@@ -346,7 +372,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         for n in names:
             ds, snap = n.split("@")
             self.guid += 1
-            self.ds[ds].snaps.append(FSnap(snap, str(self.guid), self.txg, self.clock))
+            self.ds[ds].snaps.append(
+                FSnap(snap, str(self.guid), self.txg, self.clock, props=dict(props))
+            )
         return _ok()
 
     def _bookmark(self, args: list[str]) -> RunResult:
@@ -356,6 +384,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         s = next((x for x in self.ds[ds].snaps if x.name == snap), None)
         if s is None:
             return _err(f"cannot bookmark '{src}': does not exist")
+        if bm in self.bookmarks(ds):
+            return _err(f"cannot create bookmark '{dst}': bookmark exists")
         ivset = self.features[ds.split("/")[0]] in ("enabled", "active")
         if ivset:
             self.features[ds.split("/")[0]] = "active"

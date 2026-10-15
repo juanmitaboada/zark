@@ -1,4 +1,4 @@
-# Copyright 2026 Juanmi Taboada
+# Copyright 2026 Juanmi Taboada # pylint: disable=too-many-lines
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -72,6 +72,7 @@ from lib.replication import (
     old_anchors,
     parent,
     plan,
+    point_name,
     reached,
     shared_snapshots,
 )
@@ -94,6 +95,12 @@ SANOID_WAIT_SECONDS = 600
 # so a marker found with the timer inactive means a zark run that died
 # without its cleanup left the timer stopped.
 SANOID_MARKER = "/run/zark/sanoid-paused"
+# Set on every snapshot of a backup point when it is taken (same sync task):
+# the pool GUID of the drive the run was for, so whatever removes a point a
+# run left in origin first anchors it for that drive (M4b-4, 8b).
+POINT_FOR = "org.zark:point-for"
+# One more try for an anchor that failed (M3R-5); later runs retry it too.
+ANCHOR_RETRY_SECONDS = 2.0
 
 
 def _q(word: str) -> str:
@@ -328,6 +335,7 @@ class Verdict:
     target: str  # "ds@snap" or "ds#bookmark"
     drop: bool
     reason: str
+    owner: str = ""  # a point left by another drive's run: anchor it for that drive first
 
 
 @dataclass
@@ -415,7 +423,9 @@ class Run:  # pylint: disable=too-many-instance-attributes
             if not names:
                 continue
             r = sh.run(
-                "zfs snapshot " + " ".join(_q(f"{n}@{self.point}") for n in names), log=self.log
+                f"zfs snapshot -o {POINT_FOR}={_q(self.disk_guid)} "
+                + " ".join(_q(f"{n}@{self.point}") for n in names),
+                log=self.log,
             )
             if not r.ok:
                 self.log.error(f"Cannot take {self.point} on {pool}: {r.stderr.strip()}")
@@ -694,21 +704,62 @@ class Run:  # pylint: disable=too-many-instance-attributes
     def anchor(self, at_point: list[str]) -> list[str]:
         """Anchor every dataset that reached the point; return the failures.
 
-        Older anchors are not removed here: :meth:`drop_check` decides.
+        A failed anchor is tried once more (M3R-5); one that still fails is
+        retried by :meth:`anchor_held` at the end of every later run of this
+        drive. Older anchors are not removed here: :meth:`drop_check` decides.
         """
         failed: list[str] = []
-        keep = anchor_name(self.disk_guid, self.point)
         for rel in at_point:
             if rel not in self.origin:
                 continue
-            if is_bpool(rel):
-                # I-F: bpool keeps a per-disk snapshot instead of a bookmark.
-                cmd = f"zfs rename {_q(f'{rel}@{self.point}')} {_q(f'{rel}@{keep}')}"
-            else:
-                cmd = f"zfs bookmark {_q(f'{rel}@{self.point}')} {_q(f'{rel}#{keep}')}"
-            if not sh.run(cmd, log=self.log).ok:
-                failed.append(rel)
+            if not _anchor_point(rel, self.point, self.disk_guid, self.log):
+                self.sleep(ANCHOR_RETRY_SECONDS)
+                if not _anchor_point(rel, self.point, self.disk_guid, self.log):
+                    failed.append(rel)
         return failed
+
+    def anchor_held(self) -> list[str]:
+        """Bookmark, as this drive's anchor, the newest snapshot the drive
+        holds of every rpool dataset when origin still has it and no bookmark
+        of this drive does; return the datasets anchored (M4b-4, 8b).
+
+        Run at the end of every run, normal or not: the datasets that reached
+        the point of an interrupted run, a ``-I`` stream cut after a carried
+        snapshot (M2R-2 b), an anchor that failed before (M3R-5, M2P.7). bpool
+        cannot take bookmarks (I-F): a cut there still needs ROLLBACK.
+        Nothing is done when either side cannot be read.
+        """
+        try:
+            origin = read_origin(self.pools, strict=True)
+            dest = read_dest(self.pool, strict=True)
+        except ReadError as e:
+            self.log.warn(f"Anchors not checked: {e}")
+            return []
+        done: list[str] = []
+        for rel in expected(origin):
+            d, o = dest.get(rel), origin[rel]
+            newest = d.newest if d is not None else None
+            if is_bpool(rel) or newest is None or o.snap_by_guid(newest.guid) is None:
+                continue
+            snap = o.snap_by_guid(newest.guid)
+            assert snap is not None
+            # Named after the moment it marks, not this run's point: only the
+            # point's own anchor lets drop_check supersede the older ones.
+            name = anchor_name(
+                self.disk_guid, point_name(datetime.fromtimestamp(snap.creation, UTC))
+            )
+            mine = [b for b in o.bookmarks if anchor_disk(b.name) == self.disk_guid]
+            if any(b.guid == newest.guid for b in mine) or any(b.name == name for b in mine):
+                continue
+            r = sh.run(
+                f"zfs bookmark {_q(f'{rel}@{snap.name}')} {_q(f'{rel}#{name}')}", log=self.log
+            )
+            if r.ok:
+                self.log.info(f"  {rel}: anchored {snap.name} for {self.pool} (its newest there)")
+                done.append(rel)
+            else:
+                self.log.warn(f"  {rel}: could not anchor {snap.name}: {r.stderr.strip()}")
+        return done
 
     def shared_with_origin(self) -> dict[str, list[Ref]] | None:
         """What the drive shares with origin now, besides its anchors (M3
@@ -731,6 +782,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         try:
             origin = read_origin(self.pools, strict=True)
             dest = read_dest(self.pool, strict=True)
+            owners = point_owners(self.pools)
         except ReadError as e:
             self.log.warn(f"Nothing removed in origin: {e}")
             return []
@@ -760,10 +812,14 @@ class Run:  # pylint: disable=too-many-instance-attributes
                     verdicts.append(Verdict(target, True, "dataset not replicated"))
                 elif partial:
                     verdicts.append(Verdict(target, False, "partial receive to resume"))
-                elif verified:
-                    verdicts.append(Verdict(target, True, f"on the backup, anchored as {keep}"))
                 elif s is point_snap and s.guid not in on_backup:
                     verdicts.append(Verdict(target, True, "not on the backup, nothing to resume"))
+                elif verified:
+                    owner = owners.get(target, "")
+                    other = owner if owner != self.disk_guid and s is not point_snap else ""
+                    verdicts.append(
+                        Verdict(target, True, f"on the backup, anchored as {keep}", other)
+                    )
                 else:
                     verdicts.append(Verdict(target, False, "may be the base of the next run"))
             for name in old_anchors([a.name for a in new], self.disk_guid, keep):
@@ -785,6 +841,11 @@ class Run:  # pylint: disable=too-many-instance-attributes
             if not v.drop:
                 self.log.info(f"  kept {v.target}: {v.reason}")
                 continue
+            if v.owner:
+                # A point another drive's run left (no cleanup ran): anchored
+                # for that drive first, so its removal costs it no rollback.
+                dropped += release_point(v.target, v.owner, self.log)
+                continue
             r = sh.run(f"zfs destroy {_q(v.target)}", log=self.log)
             if r.ok:
                 self.log.info(f"  removed {v.target}: {v.reason}")
@@ -794,13 +855,93 @@ class Run:  # pylint: disable=too-many-instance-attributes
         return dropped
 
     def undo_point(self) -> None:
-        """Cleanup action for an interrupted run: drop the point where no
-        receive began (where one did, the next run resumes it)."""
+        """Cleanup action for a run that did not end normally (8b, M4b-4).
+
+        The backup pool is still imported here. Every dataset the drive holds
+        at the point is anchored, as at the end of a normal run, and so is the
+        newest snapshot the drive holds of every other rpool dataset
+        (:meth:`anchor_held`). The point then goes wherever no partial receive
+        needs it (the next run resumes one), or wherever the drive cannot be
+        read and no receive began (the rule before 8b).
+        """
+        try:
+            dest = read_dest(self.pool, strict=True)
+        except ReadError as e:
+            self.log.warn(f"Anchors not checked after the interruption: {e}")
+            dest = None
+        at_point: list[str] = []
+        partial: set[str] = set()
+        if dest is not None:
+            for rel in expected(self.origin):
+                d = dest.get(rel)
+                own = next((s for s in self.origin[rel].snaps if s.name == self.point), None)
+                if d is not None and d.token:
+                    partial.add(rel)
+                elif d is not None and own is not None and any(x.guid == own.guid for x in d.snaps):
+                    at_point.append(rel)
+            # Anchored (renamed on bpool): no longer a point to remove.
+            renamed = {rel for rel in at_point if is_bpool(rel)}
+            failed = set(self.anchor(at_point))
+            _ = self.anchor_held()
+            keep = partial | {rel for rel in failed if not is_bpool(rel)} | (renamed & failed)
+            gone = renamed - failed
+        else:
+            keep, gone = set(self.started), set()
         for rel in expected(self.origin):
-            if rel in self.started:
+            if rel in keep or rel in gone:
                 continue
             _ = sh.run(f"zfs destroy {_q(f'{rel}@{self.point}')}")
         self.resume_sanoid()
+
+
+def _anchor_point(rel: str, point: str, disk_guid: str, log: Log) -> bool:
+    """Make ``rel@point`` drive ``disk_guid``'s anchor: a bookmark on rpool;
+    on bpool, where I-F forbids bookmarks, the snapshot renamed."""
+    keep = anchor_name(disk_guid, point)
+    if is_bpool(rel):
+        cmd = f"zfs rename {_q(f'{rel}@{point}')} {_q(f'{rel}@{keep}')}"
+        return sh.run(cmd, log=log).ok
+    cmd = f"zfs bookmark {_q(f'{rel}@{point}')} {_q(f'{rel}#{keep}')}"
+    if sh.run(cmd, log=log).ok:
+        return True
+    # A run stopped between its bookmark and the destroy (power loss) left
+    # both: the anchor is there already when the guids match.
+    r = sh.run(f"zfs get -Hp -o value guid {_q(f'{rel}@{point}')} {_q(f'{rel}#{keep}')}", log=log)
+    return r.ok and len(r.lines) == 2 and r.lines[0] == r.lines[1]
+
+
+def point_owners(pools: list[str]) -> dict[str, str]:
+    """``rel@point`` → the pool GUID of the drive its run was for
+    (:data:`POINT_FOR`), read from the snapshots themselves; strict
+    (:class:`ReadError` when a listing fails). Points taken before rc5 carry
+    no owner and are not listed."""
+    out: dict[str, str] = {}
+    for pool in pools:
+        for name, value in snapshot_marks(pool, strict=True, prop=POINT_FOR).items():
+            # A bpool point renamed to an anchor keeps the property: not a point.
+            if value.isdigit() and POINT_RE.match(name.partition("@")[2]):
+                out[name] = value
+    return out
+
+
+def release_point(target: str, owner: str, log: Log) -> bool:
+    """Take a point a run left in origin out of the way for drive ``owner``
+    (8b, M4b-4): on rpool it is bookmarked as that drive's anchor, then
+    destroyed; on bpool it is renamed to that drive's anchor. True when the
+    point is gone; when the anchor cannot be made the point stays."""
+    rel, _, point = target.partition("@")
+    if not _anchor_point(rel, point, owner, log):
+        log.warn(f"  kept {target}: could not anchor it for drive {owner}")
+        return False
+    if is_bpool(rel):
+        log.info(f"  {target}: renamed to drive {owner}'s anchor")
+        return True
+    r = sh.run(f"zfs destroy {_q(target)}", log=log)
+    if r.ok:
+        log.info(f"  removed {target}: anchored for drive {owner} first")
+    else:
+        log.warn(f"  could not remove {target}: {r.stderr.strip()}")
+    return r.ok
 
 
 def write_metadata(pool: str, fields: dict[str, str], log: Log) -> bool:
@@ -955,13 +1096,13 @@ def log_metadata(pool: str, log: Log) -> dict[str, str]:
     return meta
 
 
-def snapshot_marks(root: str, strict: bool = False) -> dict[str, str]:
-    """Completion marks set on the snapshots themselves under ``root`` (M2V-3):
-    ``-s local`` leaves out what a snapshot only inherits from its filesystems
-    (module/zfs/dsl_prop.c:1224-1245). ``strict`` raises :class:`ReadError`
-    when the listing fails."""
+def snapshot_marks(root: str, strict: bool = False, prop: str = COMPLETE_PROP) -> dict[str, str]:
+    """A user property (the completion mark by default, M2V-3) as set on the
+    snapshots themselves under ``root``: ``-s local`` leaves out what a
+    snapshot only inherits from its filesystems (module/zfs/dsl_prop.c:
+    1224-1245). ``strict`` raises :class:`ReadError` when the listing fails."""
     r = _checked(
-        sh.run(f"zfs get -H -p -r -s local -t snapshot -o name,value {COMPLETE_PROP} {_q(root)}"),
+        sh.run(f"zfs get -H -p -r -s local -t snapshot -o name,value {prop} {_q(root)}"),
         strict,
     )
     out: dict[str, str] = {}
@@ -1328,6 +1469,7 @@ def replicate(run: Run, decide: Decide) -> Result:
         return res
     at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
     res.anchor_failed = run.anchor(at_point)
+    _ = run.anchor_held()
     _ = run.drop(run.drop_check())
     return res
 

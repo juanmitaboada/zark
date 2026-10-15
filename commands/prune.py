@@ -153,20 +153,32 @@ def _residues(inv: Inventory, log: Log) -> None:
 
 
 def _points(inv: Inventory, log: Log) -> None:
+    try:
+        owners = engine.point_owners(engine.source_pools())
+    except engine.ReadError as e:
+        log.warn(f"Could not read which drive each point is for: {e}")
+        owners = {}
     for i in inv.points:
-        log.info(f"  {i.target}")
-    # An interrupted run anchors nothing, so a drive that completed some
-    # datasets shares only this point with origin on them (eli R8.7, 8a); a
-    # complete run whose anchor failed kept its point as that base too (M3R-5).
+        owner = owners.get(i.target, "")
+        log.info(f"  {i.target}" + (f"  (for drive {owner})" if owner else ""))
+    # A point names its drive since rc5 (8b): it is anchored for that drive
+    # before it goes, so that drive keeps a base; a partial receive still
+    # needs the snapshot itself. Older points carry no owner (eli R8.7, 8a; M3R-5).
     log.warn(
-        "A drive that received part of one of these rolls those datasets back at its next "
-        + "backup (it asks first; only snapshots of that incomplete point go), a drive "
-        + "whose transfer was interrupted discards it and sends it again, and a drive whose "
-        + "backup completed but could not be anchored on a dataset rolls that dataset back "
-        + "too (its newest backup point goes on it)"
+        "A point that names its drive is first anchored for it (on bpool it becomes that "
+        + "drive's anchor), so that drive does not roll back; without a named drive, a "
+        + "drive that received part of the point rolls those datasets back at its next "
+        + "backup (it asks first). Either way, a drive whose transfer was interrupted "
+        + "discards it and sends it again"
     )
     if _typed(log, f"remove {len(inv.points)} backup point(s)"):
-        _remove(inv.points, "backup point left in origin", log)
+        named = [i for i in inv.points if owners.get(i.target)]
+        gone = sum(engine.release_point(i.target, owners[i.target], log) for i in named)
+        if named:
+            log.ok(f"{gone} point snapshot(s) anchored for their drive and taken out")
+        rest = [i for i in inv.points if not owners.get(i.target)]
+        if rest:
+            _remove(rest, "backup point left in origin", log)
 
 
 def _anchors(inv: Inventory, drives: dict[str, str], log: Log) -> None:

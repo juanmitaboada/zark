@@ -9638,7 +9638,9 @@ class TestEngine:  # pylint: disable=too-many-public-methods
 
     def test_partial_receive_whose_source_is_gone_is_discarded(self) -> None:
         """M2R-10: the token's incremental source pruned in origin: the
-        partial state cannot resume and goes; no snapshot is lost."""
+        partial state cannot resume and goes; no snapshot is lost, and the
+        hourly the drive holds, anchored when the run stopped (8b), is the
+        base of the next one."""
         fake = self._fresh()
         assert _engine_run(fake, "backup", "111", P1).ok
         _tick(fake, "2026-10-07_12:00:00_hourly")
@@ -9652,7 +9654,8 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
         assert "partial receive discarded: cannot resume send: incremental source" in out.getvalue()
         assert not fake.ds["backup/rpool/USERDATA/home"].token
-        assert fake.names("backup/rpool/USERDATA/home") == before
+        after = fake.names("backup/rpool/USERDATA/home")
+        assert after[: len(before)] == before and after[-1] == P3
 
     def test_stale_partial_is_discarded_before_the_questions(self) -> None:
         """M2F-11a (eli N7, after a recover): a partial receive that can never
@@ -9669,6 +9672,9 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         home.snaps = [
             s for s in home.snaps if s.name not in (named, "autosnap_2026-10-07_12:00:00_hourly")
         ]
+        # Nor the hourly's anchor (8b): no bookmark outlives its snapshot's recover.
+        hourly = fake.ds["backup/rpool/USERDATA/home"].snaps[-1].guid
+        home.bookmarks = [b for b in home.bookmarks if b.guid != hourly]
         asked: list[repl.State] = []
 
         def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
@@ -9894,7 +9900,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
     def test_no_point_left_when_bpool_snapshot_fails(self) -> None:
         """M2R-11 (E5): rpool's point is taken, bpool's fails: nothing is left."""
         fake = self._fresh()
-        fake.fail_cmds.add("zfs snapshot bpool")
+        fake.fail_cmds.add("zfs snapshot -o org.zark:point-for=111 bpool")
         res = _engine_run(fake, "backup", "111", P1)
         assert res.aborted
         assert _origin_points(fake) == []
@@ -10256,18 +10262,20 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert old not in fake.bookmarks("rpool/ROOT/be")  # verified there: superseded
 
     def test_interrupted_run_keeps_the_point_where_a_receive_began(self) -> None:
-        """Decision 13: after a Ctrl-C the point stays on every dataset whose
-        receive began (the next run resumes or continues from it) and goes
-        everywhere else."""
+        """Decision 13, as 8b amends it (M4b-4): after a Ctrl-C the point
+        stays where a partial receive needs it, and goes everywhere else; a
+        dataset that reached it keeps it as this drive's anchor instead."""
         fake = self._fresh()
         assert _engine_run(fake, "backup", "111", P1).ok
         _tick(fake, "2026-10-08_08:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)  # the hourly lands
         real_pipe = fake.mock_run_pipe
 
         def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
-            if "rpool/USERDATA/home" in cmd1:
-                raise KeyboardInterrupt
-            return real_pipe(cmd1, cmd2, log)
+            r = real_pipe(cmd1, cmd2, log)
+            if "rpool/USERDATA/home" in cmd1 and not r.ok:
+                raise KeyboardInterrupt  # the Ctrl-C that cut that receive
+            return r
 
         fake.mock_run_pipe = pipe  # type: ignore[method-assign]
         with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
@@ -10279,10 +10287,97 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             except KeyboardInterrupt:
                 pass
             cleanup.run()
+        assert fake.ds["backup/rpool/USERDATA/home"].token
         left = _origin_points(fake)
-        assert f"rpool/USERDATA/home@{P2}" in left  # its receive began
-        assert f"rpool/var/lib/docker@{P2}" not in left  # never started
-        assert all(f"{rel}@{P2}" in left for rel in eng.started)
+        assert left == [f"rpool/USERDATA/home@{P2}"]  # the partial resumes from it
+        reached = [r for r in eng.started if P2 in fake.names(f"backup/{r}")]
+        assert reached and all(
+            f"zark_111_{P2[len('zark_') :]}" in fake.bookmarks(r)
+            for r in reached
+            if "bpool" not in r
+        )
+        # The hourly home holds is anchored: the next run continues from it.
+        hourly = fake.ds["backup/rpool/USERDATA/home"].snaps[-1].guid
+        assert any(b.guid == hourly for b in fake.ds["rpool/USERDATA/home"].bookmarks)
+
+    def test_every_point_names_its_drive(self) -> None:
+        """8b (M4b-4): the point is taken with ``org.zark:point-for`` in the
+        same ``zfs snapshot``, so one left in origin says whose it is."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        assert _origin_points(fake) == [f"rpool/USERDATA/home@{P2}"]
+        with patch_sh(fake):
+            assert engine.point_owners(["rpool", "bpool"]) == {f"rpool/USERDATA/home@{P2}": "111"}
+        takes = [c for c in fake.calls if c.startswith("zfs snapshot") and P2 in c]
+        assert takes and all(c.startswith("zfs snapshot -o org.zark:point-for=111 ") for c in takes)
+
+    def test_another_drives_point_is_anchored_for_it_before_it_goes(self) -> None:
+        """8b (M4b-4): a point another drive's run left (its anchor failed)
+        is bookmarked as that drive's anchor before this drive's run removes
+        it; that drive then continues without a rollback."""
+        fake = self._fresh(("backup", "other"))
+        assert _engine_run(fake, "backup", "111", P1).ok
+        assert _engine_run(fake, "other", "222", P1).ok
+        fake.fail_cmds.add("rpool/USERDATA/home#zark_222_")  # every anchor of 222 on home
+        assert _engine_run(fake, "other", "222", P2).ok
+        fake.fail_cmds.clear()
+        assert f"rpool/USERDATA/home@{P2}" in _origin_points(fake)
+        guid = next(s.guid for s in fake.ds["rpool/USERDATA/home"].snaps if s.name == P2)
+        assert _engine_run(fake, "backup", "111", P3).ok
+        assert f"rpool/USERDATA/home@{P2}" not in _origin_points(fake)
+        mark = next(
+            b for b in fake.ds["rpool/USERDATA/home"].bookmarks if b.name == f"zark_222_{P2[5:]}"
+        )
+        assert mark.guid == guid
+        asked: list[repl.State] = []
+
+        def decide(plans: list[repl.DatasetPlan], _eng: engine.Run) -> bool:
+            asked.extend(p.state for p in plans)
+            return True
+
+        assert _engine_run(fake, "other", "222", "zark_2026-10-10_10:00:00Z", decide).ok
+        assert repl.State.ROLLBACK not in asked
+
+    def test_an_anchor_that_fails_is_retried_once(self) -> None:
+        """M3R-5 / M2P.7 (M4b-4): a failed ``zfs bookmark`` is tried again
+        after a pause; when that works the point goes as usual."""
+        fake = self._fresh()
+        real = fake.mock_run
+        failed: list[str] = []
+
+        def failing_once(cmd: str, *args: object, **kwargs: object) -> RunResult:
+            if cmd.startswith("zfs bookmark") and "rpool/USERDATA/home@" in cmd and not failed:
+                failed.append(cmd)
+                return RunResult(
+                    1, "", "cannot create bookmark: pool I/O is currently suspended\n", cmd
+                )
+            return real(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        fake.mock_run = failing_once  # type: ignore[method-assign]
+        slept: list[float] = []
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            log = Log()
+            eng = engine.Run("backup", "111", log, P1, sleep=slept.append)
+            res = engine.execute(eng, Cleanup(log), lambda _p, _r: True)
+        assert res.ok and failed
+        assert engine.ANCHOR_RETRY_SECONDS in slept
+        assert f"zark_111_{P1[5:]}" in fake.bookmarks("rpool/USERDATA/home")
+        assert _origin_points(fake) == []
+
+    def test_a_point_whose_anchor_exists_already_is_released(self) -> None:
+        """A run stopped between the bookmark and the destroy left both: the
+        existing anchor (same guid) counts, and the point goes."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.snap("rpool/USERDATA/home", P2)
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert fake.mock_run(
+                f"zfs bookmark rpool/USERDATA/home@{P2} rpool/USERDATA/home#zark_222_{P2[5:]}"
+            ).ok
+            assert engine.release_point(f"rpool/USERDATA/home@{P2}", "222", Log())
+        assert P2 not in fake.names("rpool/USERDATA/home")
 
 
 class TestCleanupActions:
@@ -12368,9 +12463,9 @@ class TestPruneCommand:
         assert "Not confirmed (PRUNE was not typed) — nothing removed" in out
 
     def test_interrupted_points_warn_of_both_effects(self) -> None:
-        """M3 decision 8a (eli R8.7): removing an interrupted run's point
-        costs a rollback on a drive that received part of it, and a resend
-        on one whose transfer it started; the warning names both."""
+        """M3 decision 8a (eli R8.7), shrunk by 8b (M4b-4): each point names
+        its drive, and the warning says it is anchored for it first; the
+        rollback remains for points without a named drive, the resend for all."""
         fake = _fresh_fake()
         assert _engine_run(fake, "backup", "111", P1).ok
         _tick(fake, "2026-10-07_12:00:00_hourly")
@@ -12398,14 +12493,50 @@ class TestPruneCommand:
             patch("builtins.input", side_effect=EOFError),
         )
         text = " ".join(out.split())
+        assert f"rpool/USERDATA/home@{P2} (for drive 111)" in text
         assert (
-            "A drive that received part of one of these rolls those datasets back at its next "
-            + "backup (it asks first; only snapshots of that incomplete point go), a drive "
-            + "whose transfer was interrupted discards it and sends it again, and a drive whose "
-            + "backup completed but could not be anchored on a dataset rolls that dataset back "
-            + "too (its newest backup point goes on it)"
+            "A point that names its drive is first anchored for it (on bpool it becomes that "
+            + "drive's anchor), so that drive does not roll back; without a named drive, a "
+            + "drive that received part of the point rolls those datasets back at its next "
+            + "backup (it asks first). Either way, a drive whose transfer was interrupted "
+            + "discards it and sends it again"
         ) in text
         assert _origin_points(fake)
+
+    def test_a_point_that_names_its_drive_is_anchored_for_it_first(self) -> None:
+        """8b (M4b-4): a confirmed removal bookmarks a named point as its
+        drive's anchor before destroying it."""
+        fake = _fresh_fake(("backup", "other"))
+        assert _engine_run(fake, "other", "222", P1).ok
+        fake.fail_cmds.add("rpool/USERDATA/home#zark_222_")  # every anchor of 222 on home
+        assert _engine_run(fake, "other", "222", P2).ok
+        fake.fail_cmds.clear()
+        guid = next(s.guid for s in fake.ds["rpool/USERDATA/home"].snaps if s.name == P2)
+        wanted = (
+            "remove backup points left in origin (interrupted runs, or a run whose anchor failed)"
+        )
+        picked: list[str] = []
+
+        def pick(_q: str, options: list[str], _d: int = 0) -> int:
+            if wanted in options and not picked:
+                picked.append(wanted)
+                return options.index(wanted)
+            return 0
+
+        out = self._origin(
+            fake,
+            make_config(),
+            patch.object(Log, "ask_choice", side_effect=pick),
+            patch.object(Log, "ask_text", return_value=prune_mod.WORD),
+            patch("builtins.input", side_effect=EOFError),
+        )
+        assert f"rpool/USERDATA/home@{P2}  (for drive 222)" in out
+        assert _origin_points(fake) == []
+        assert fake.calls.count(f"zfs destroy rpool/USERDATA/home@{P2}") == 1  # once, released
+        mark = next(
+            b for b in fake.ds["rpool/USERDATA/home"].bookmarks if b.name == f"zark_222_{P2[5:]}"
+        )
+        assert mark.guid == guid
 
     def test_residues_need_a_yes_and_follow_the_rule(self) -> None:
         """11a: removed after a yes; one a registered drive may need stays."""
