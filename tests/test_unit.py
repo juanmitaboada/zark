@@ -28,6 +28,7 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 # line limit.
 
 import atexit
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -38,8 +39,14 @@ import signal
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
-from contextlib import AbstractContextManager, ExitStack, redirect_stderr, redirect_stdout
+from collections.abc import Callable, Iterator
+from contextlib import (
+    AbstractContextManager,
+    ExitStack,
+    contextmanager,
+    redirect_stderr,
+    redirect_stdout,
+)
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import StringIO
@@ -6224,15 +6231,47 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("dd if=/dev/urandom"), mock.calls
         assert "backup" in data
 
+    @staticmethod
+    def _udev(mock: MockShell, locking: bool = True) -> tuple[ExitStack, dict[str, bool]]:
+        """What udevd does on eli (checklist R4, M4aF-14): when a dd closes the
+        disk, it re-reads the partition table, and the overwritten
+        protective MBR takes part1 away, unless the disk is held with
+        LOCK_EX. part1 is gone after wipefs in any case."""
+        state = {"held": False, "gone": False}
+        real = mock.mock_run
+
+        def spy(cmd: str, **kw: Any) -> RunResult:
+            r = real(cmd, **kw)
+            if cmd.startswith("dd if=/dev/urandom of=/dev/sdb") and not state["held"]:
+                state["gone"] = True
+            if cmd.startswith("wipefs -a /dev/sdb"):
+                state["gone"] = True
+            return r
+
+        @contextmanager
+        def held(_disk: str, _log: Log) -> Iterator[None]:
+            state["held"] = locking
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+        stack = ExitStack()
+        _ = stack.enter_context(patch.object(mock, "mock_run", side_effect=spy))
+        _ = stack.enter_context(patch.object(purge_mod, "_held_from_udev", held))
+        return stack, state
+
     def test_part1_labels_are_read_after_the_overwrite_before_wipefs(self):
-        # M4aR-2: a successful wipefs removes part1's node, so the only read
-        # that can see a dd that never reached the medium comes before it.
+        # M4aR-2, M4aF-14: the read comes after both dd passes, while the disk
+        # is held from udev, and before wipefs.
         mock = MockShell()
         mock.on("zpool destroy backup").succeeds()
         mock.on_prefix("zdb -l").fails("failed to unpack label")
         _wipe_succeeds(mock)
         part1 = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
-        out, rc, _ = self._purge(mock, lambda _p: not mock.was_called("wipefs -a /dev/sdb"))
+        stack, state = self._udev(mock)
+        with stack:
+            out, rc, _ = self._purge(mock, lambda _p: not state["gone"])
         calls = mock.calls
         assert rc == 0, out
         assert calls.count(f"zdb -l {part1}") == 1, calls
@@ -6243,6 +6282,41 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         )
         assert "No ZFS label on the first partition after the overwrite" in out
 
+    def test_without_the_lock_udev_takes_part1_and_purge_says_so(self):
+        # What eli showed in R4 before M4aF-14: the label read never ran, silently.
+        mock = MockShell()
+        _wipe_succeeds(mock)
+        part1 = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
+        stack, state = self._udev(mock, locking=False)
+        with (
+            stack,
+            patch_sh(mock),
+            patch.object(purge_mod, "_present", side_effect=lambda _p: not state["gone"]),
+            redirect_stdout(StringIO()),
+        ):
+            marks = purge_mod._wipe("/dev/sdb", part1, make_log())  # pylint: disable=protected-access
+        assert mock.was_not_called("zdb -l"), mock.calls
+        assert (
+            None,
+            "labels on the first partition not read: it went away during the overwrite",
+        ) in marks, marks
+
+    def test_the_disk_is_held_from_udev_while_the_body_runs(self):
+        # udevd takes LOCK_SH|LOCK_NB before it re-reads the partition table.
+        with tempfile.NamedTemporaryFile() as disk:
+            probe = os.open(disk.name, os.O_RDONLY)
+            try:
+                with redirect_stdout(StringIO()), purge_mod._held_from_udev(disk.name, make_log()):  # pylint: disable=protected-access
+                    try:
+                        fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        raise AssertionError("udevd could take the lock")
+                fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)  # released on exit
+            finally:
+                os.close(probe)
+
     def test_a_label_left_by_the_overwrite_is_incomplete(self):
         mock = MockShell()
         mock.on("zpool destroy backup").succeeds()
@@ -6250,7 +6324,9 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
             "LABEL 0\n    name: 'backup'\n    pool_guid: 3446866051930726346"
         )
         _wipe_succeeds(mock)
-        out, rc, data = self._purge(mock, lambda _p: not mock.was_called("wipefs -a /dev/sdb"))
+        stack, state = self._udev(mock)
+        with stack:
+            out, rc, data = self._purge(mock, lambda _p: not state["gone"])
         assert rc == 1 and "PURGE INCOMPLETE" in out
         assert "after the overwrite: pool backup (3446866051930726346)" in out
         assert "backup" in data

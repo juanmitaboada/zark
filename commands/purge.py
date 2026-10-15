@@ -21,7 +21,11 @@ registry entry and the pool's anchors in origin stay: the disk may still
 hold the pool.
 """
 
+import fcntl
 import os
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import NamedTuple
 
 from lib import engine, forensics, sh
@@ -135,6 +139,36 @@ def _label_mark(part1: str, when: str, log: Log) -> Mark:
     return (True, text)
 
 
+@contextmanager
+def _held_from_udev(disk: str, log: Log) -> Iterator[None]:
+    """Hold a BSD LOCK_EX on the whole disk while the body runs.
+
+    udevd takes LOCK_SH|LOCK_NB on a disk before it processes it and skips
+    it, partition-table re-read included, while that fails
+    (src/shared/reread-partition-table.c:256-270). The lock is waited for up
+    to 10 s (udevd may be probing); without it the body still runs. The
+    descriptor is read-only, so closing it triggers no new event.
+    """
+    try:
+        fd = os.open(disk, os.O_RDONLY | os.O_CLOEXEC)
+    except OSError as e:
+        log.warn(f"Cannot open {disk} to hold it from udev: {e}")
+        yield
+        return
+    try:
+        for _ in range(100):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(0.1)
+        else:
+            log.warn(f"Cannot lock {disk}: udev may remove its partitions during the overwrite")
+        yield
+    finally:
+        os.close(fd)
+
+
 def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     """Overwrite both ends, wipe signatures and the partition table, verify.
 
@@ -142,38 +176,46 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     worse); the report has one line per step and per check.
     """
     marks: list[Mark] = []
-    log.step(2, 5, "Overwriting first 10MB...")
-    _ = _step(
-        f"dd if=/dev/urandom of={target_dev} bs=1M count=10 conv=fsync",
-        "first 10MB overwritten",
-        "overwrite of the first 10MB",
-        marks,
-        log,
-    )
-
-    log.step(3, 5, "Overwriting last 10MB...")
-    disk_bytes = sh.run(f"blockdev --getsize64 {target_dev}").output
-    if not disk_bytes.isdigit():
-        marks.append((False, f"last 10MB not overwritten: size of {target_dev} unreadable"))
-    elif int(disk_bytes) > 20 * 1024 * 1024:
-        offset = (int(disk_bytes) - 10 * 1024 * 1024) // 512
+    # The ZFS labels live in part1, and zdb -l reads them at offsets of the
+    # device it is given, so only part1's node shows them: they are read
+    # there right after the overwrite. That is the check that sees a dd that
+    # returned 0 without reaching the medium. udevd re-reads the partition
+    # table when a writer closes the disk (60-block.rules "watch"; udev-
+    # watch.c), and the first dd destroys the protective MBR, so part1's node
+    # would go at once; the disk is held with LOCK_EX meanwhile, which makes
+    # udevd leave it alone (systemd docs/BLOCK_DEVICE_LOCKING.md).
+    had_part1 = _present(part1)
+    with _held_from_udev(target_dev, log):
+        log.step(2, 5, "Overwriting first 10MB...")
         _ = _step(
-            f"dd if=/dev/urandom of={target_dev} bs=512 seek={offset} count=20480 conv=fsync",
-            "last 10MB overwritten",
-            "overwrite of the last 10MB",
+            f"dd if=/dev/urandom of={target_dev} bs=1M count=10 conv=fsync",
+            "first 10MB overwritten",
+            "overwrite of the first 10MB",
             marks,
             log,
         )
-    else:
-        marks.append((None, "last 10MB: the disk is 20MB or less, covered by the first"))
 
-    # The ZFS labels live in the partition, and zdb -l reads them at offsets
-    # of the device it is given: read them on part1 right after the
-    # overwrite, while its node exists (a successful wipefs re-reads the
-    # partition table and removes it). This is the check that sees a dd that
-    # returned 0 without reaching the medium.
-    if _present(part1):
-        marks.append(_label_mark(part1, "after the overwrite", log))
+        log.step(3, 5, "Overwriting last 10MB...")
+        disk_bytes = sh.run(f"blockdev --getsize64 {target_dev}").output
+        if not disk_bytes.isdigit():
+            marks.append((False, f"last 10MB not overwritten: size of {target_dev} unreadable"))
+        elif int(disk_bytes) > 20 * 1024 * 1024:
+            offset = (int(disk_bytes) - 10 * 1024 * 1024) // 512
+            _ = _step(
+                f"dd if=/dev/urandom of={target_dev} bs=512 seek={offset} count=20480 conv=fsync",
+                "last 10MB overwritten",
+                "overwrite of the last 10MB",
+                marks,
+                log,
+            )
+        else:
+            marks.append((None, "last 10MB: the disk is 20MB or less, covered by the first"))
+        if _present(part1):
+            marks.append(_label_mark(part1, "after the overwrite", log))
+        elif had_part1:
+            marks.append(
+                (None, "labels on the first partition not read: it went away during the overwrite")
+            )
 
     log.step(4, 5, "Wiping filesystem signatures...")
     _ = _step(f"wipefs -a {target_dev}", "signatures wiped", "wipefs -a", marks, log)

@@ -405,10 +405,11 @@ for the canonical end-to-end sequences.
     finished read-only **mount**) is exported and imported read-write
     first, and a failed export or re-import stops there too. Every wipe
     step is checked, and all of them run even after one fails. The ZFS
-    labels on the first partition are read right after the overwrite,
-    before **wipefs**(8) removes the partition (and again after it, if it
-    left the table); then any partition left and any signature **blkid
-    -p** finds are checked. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
+    labels on the first partition are read right after the overwrite, with
+    the disk locked against **udev**(7), which would otherwise re-read the
+    partition table and remove the partition (and again after
+    **wipefs**(8), if it left the table); then any partition left and any
+    signature **blkid -p** finds are checked. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
     the registry entries and the anchors in the source are kept, since the
     disk may still hold the pool. The banner lists every step and check as
     done, failed or not done, so it shows what state the disk is in.

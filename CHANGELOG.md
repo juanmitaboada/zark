@@ -124,10 +124,12 @@ that preceded them.
 - **`purge` checks every step and verifies the wipe** (M4a-13). A failed
   `zpool destroy` stops before anything is overwritten; every wipe step
   is checked, and all run even after one fails. The ZFS labels are read
-  on the old first partition right after the two overwrites, before
-  `wipefs` removes its node (and again after it, if `wipefs` left the
-  partition table); then no partition left and `blkid -p` finding nothing
-  (M4aR-2). A pool purge finds imported read-only (a finished read-only
+  on the old first partition right after the two overwrites, with the disk
+  held from udev (`flock`, systemd's block device locking): udev re-reads
+  the partition table as soon as the first overwrite closes the disk, and
+  the partition would be gone (M4aR-2, M4aF-14, seen on eli). They are
+  read again after `wipefs` if it left the partition table; then no
+  partition left and `blkid -p` finding nothing. A pool purge finds imported read-only (a finished read-only
   `zark mount`) is exported and imported read-write before its destroy,
   which on a read-only pool writes nothing to the labels; a failed export
   or re-import stops purge before anything is overwritten (M4aR-1,
