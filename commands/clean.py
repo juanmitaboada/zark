@@ -37,7 +37,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from commands.umount import _unmount_tree
+from commands.umount import _unmount_tree, release_elsewhere
 from lib import engine, sh
 from lib.keystore import KEYSTORE_MOUNT
 from lib.log import Log
@@ -183,6 +183,25 @@ def _remove_empty_dirs(log: Log) -> list[str]:
     return [p for p in left if not any(p.startswith(f"{q}/") for q in left if q != p)]
 
 
+def _export(pool: str, log: Log) -> bool:
+    """``zpool export`` without ``-f``."""
+    if sh.run(f"zpool export {pool}", log=log).ok:
+        log.ok(f"Exported {pool}")
+        return True
+    return False
+
+
+def _export_pools(pools: list[str], tops: list[str], log: Log) -> None:
+    """Export each pool; when one is busy, release the copies other mount
+    namespaces keep below the unmounted trees (W-1) and try again."""
+    busy = [pool for pool in pools if not _export(pool, log)]
+    if busy:
+        for top in tops:
+            _ = release_elsewhere(top, log)
+        for pool in busy:
+            _ = _export(pool, log)
+
+
 def run(args: list[str]) -> None:
     """Show what zark left behind, ask, and undo only that."""
     del args  # Unused
@@ -201,16 +220,15 @@ def run(args: list[str]) -> None:
         log.info("Aborted: nothing changed")
         return
 
-    for top in _tops(inv.mounts):
+    tops = _tops(inv.mounts)
+    for top in tops:
         log.info(f"Unmounting {top}...")
-        _unmount_tree(top)
+        _ = _unmount_tree(top, inv.pools)
     if inv.keystore_mounted:
         _ = sh.run(f"umount {KEYSTORE_MOUNT}", log=log)
     for name in inv.keystores:
         _ = sh.run(f"cryptsetup close {name}", log=log)
-    for pool in inv.pools:
-        if sh.run(f"zpool export {pool}", log=log).ok:
-            log.ok(f"Exported {pool}")
+    _export_pools(inv.pools, tops, log)
     if inv.zvol_inhibited and not inventory().pools:
         try:
             _ = Path(ZVOL_INHIBIT).write_text("0\n", encoding="ascii")
@@ -249,7 +267,7 @@ def run(args: list[str]) -> None:
                 ),
                 "Nothing below a mount that is still there was removed.",
                 "A process may be using it (fuser -vm <path>), or a copy may",
-                "be held in another mount namespace: reboot to release it.",
+                "be held in a mount namespace zark could not enter: reboot.",
             ],
         )
         raise SystemExit(1)

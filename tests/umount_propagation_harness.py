@@ -36,14 +36,21 @@ Cases:
     bind-hostmount  datasets + that bind, then a host mount below the host directory
     nested-bind     datasets + /dev and /dev/pts binds, as ``zark chroot`` does
 
-Prints one JSON object: ``other_left`` (mounts under the tree still present
-in the second namespace), ``tree_left`` (the same, here), ``host_lost`` (host
-mounts outside the tree that existed before the unmount and are gone).
+After ``_unmount_tree`` it calls ``release_elsewhere`` for the second
+namespace only (W-1), as umount does when the export then fails.
+
+Prints one JSON object: ``propagated_left`` (mounts under the tree still
+present in the second namespace after ``_unmount_tree``, before the release),
+``other_left`` (the same after the release), ``tree_left`` (the same, here), ``host_lost`` (host
+mounts outside the tree that existed before the unmount and are gone). It
+stops with an error instead when its own setup is not as described: the tree
+visible here and in the second namespace, the host's mounts listed (X-2).
 """
 
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -57,6 +64,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 from lib import sh  # pylint: disable=wrong-import-position # noqa: E402
+from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
 from lib.sh import RunResult  # pylint: disable=wrong-import-position # noqa: E402
 
 DATASET_SOURCE = "zarkds"
@@ -67,10 +75,15 @@ def _run(*args: str) -> None:
     _ = subprocess.run(args, check=True, capture_output=True)
 
 
+def _unescape(field: str) -> str:
+    """mountinfo's octal escapes (``\\040``) only; UTF-8 stays as it is (X-2)."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
+
+
 def _mount_targets(mountinfo: str) -> list[str]:
-    """Mount points listed in a mountinfo file (field 5, octal escapes decoded)."""
+    """Mount points listed in a mountinfo file (field 5)."""
     with open(mountinfo, encoding="utf-8") as f:
-        return [line.split()[4].encode().decode("unicode_escape") for line in f if line.strip()]
+        return [_unescape(line.split()[4]) for line in f if line.strip()]
 
 
 def _below(targets: list[str], root: str) -> list[str]:
@@ -81,14 +94,14 @@ def _findmnt_as_zfs(real_run: Callable[..., RunResult] = sh.run) -> Callable[...
     """sh.run with the tree's tmpfs datasets reported as zfs by findmnt."""
 
     def fake(cmd: str, *args: object, **kwargs: object) -> RunResult:
-        if cmd != "findmnt -rn -o TARGET,FSTYPE":
+        if cmd != "findmnt -rn -o TARGET,FSTYPE,SOURCE":
             return real_run(cmd, *args, **kwargs)
-        r = real_run("findmnt -rn -o TARGET,FSTYPE,SOURCE")
+        r = real_run(cmd)
         rows = []
         for line in r.lines:
             rest, _, source = line.rpartition(" ")
             target, _, fstype = rest.rpartition(" ")
-            rows.append(f"{target} {'zfs' if source == DATASET_SOURCE else fstype}")
+            rows.append(f"{target} {'zfs' if source == DATASET_SOURCE else fstype} {source}")
         return replace(r, stdout="\n".join(rows) + "\n", command=cmd)
 
     return fake
@@ -150,11 +163,17 @@ def main() -> None:
 
         here = _mount_targets("/proc/self/mountinfo")
         host_before = [t for t in here if t.startswith(f"{work}/host/")]
+        elsewhere = _mount_targets(f"/proc/{other}/mountinfo")
+        if not (_below(here, root) and _below(elsewhere, root) and host_before):
+            raise SystemExit(f"setup not as described: {here=} {elsewhere=}")
         with patch.object(umount_mod.sh, "run", side_effect=_findmnt_as_zfs()):
-            umount_mod._unmount_tree(root)  # pylint: disable=protected-access
+            _ = umount_mod._unmount_tree(root, (DATASET_SOURCE,))  # pylint: disable=protected-access
+            propagated_left = _below(_mount_targets(f"/proc/{other}/mountinfo"), root)
+            _ = umount_mod.release_elsewhere(root, Log(os.devnull), [f"/proc/{other}/ns/mnt"])
 
         here = _mount_targets("/proc/self/mountinfo")
         result = {
+            "propagated_left": propagated_left,
             "other_left": _below(_mount_targets(f"/proc/{other}/mountinfo"), root),
             "tree_left": _below(here, root),
             "host_lost": [t for t in host_before if t not in here],

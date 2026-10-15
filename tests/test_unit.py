@@ -2309,7 +2309,7 @@ class TestClean:  # pylint: disable=missing-function-docstring
             mock = MockShell()
             mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
             mock.on("findmnt -rn -o TARGET,SOURCE").succeeds(f"{home} /srv/data")
-            mock.on("findmnt -rn -o TARGET,FSTYPE").succeeds(f"{home} ext4")
+            mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(f"{home} ext4 /dev/x")
             mock.on("systemctl is-active sanoid.timer").succeeds("active")
             mock.on_prefix("umount").fails("target is busy")
             mock.on_prefix("mount --make-rprivate").succeeds()
@@ -2403,7 +2403,7 @@ class TestClean:  # pylint: disable=missing-function-docstring
             mock = MockShell()
             mock.on("zpool list -H -o name,altroot").succeeds("rpool\t-")
             mock.on("findmnt -rn -o TARGET,SOURCE").succeeds(f"{home} /srv/data")
-            mock.on("findmnt -rn -o TARGET,FSTYPE").succeeds(f"{home} ext4")
+            mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(f"{home} ext4 /dev/x")
             mock.on("systemctl is-active sanoid.timer").succeeds("active")
             mock.on_prefix("umount").fails("target is busy")
             mock.on_prefix("mount --make-rprivate").succeeds()
@@ -5051,17 +5051,18 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         mock.on("zpool list rpool").succeeds("rpool")
         mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
         mock.on("zpool list bpool").succeeds("bpool")
-        mock.on("findmnt -rn -o TARGET,FSTYPE").succeeds(
-            "/ overlay\n"
-            "/mnt/zark/system zfs\n"
-            "/mnt/zark/system/boot zfs\n"
-            "/mnt/zark/system/proc proc\n"
-            "/mnt/zark/system/run tmpfs\n"
-            "/mnt/zark/system/run/user/1000 tmpfs\n"
-            "/mnt/zark/system/home zfs\n"
-            "/mnt/zark/systemx tmpfs\n"
-            "/mnt/zark/backup zfs\n"
-            "/mnt/zark/backup/proc proc",
+        mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+            "/ overlay overlay\n"
+            "/mnt/zark/system zfs rpool/ROOT/be\n"
+            "/mnt/zark/system/boot zfs bpool/BOOT/be\n"
+            "/mnt/zark/system/proc proc proc\n"
+            "/mnt/zark/system/run tmpfs tmpfs\n"
+            "/mnt/zark/system/run/user/1000 tmpfs tmpfs\n"
+            "/mnt/zark/system/home zfs rpool/USERDATA/home\n"
+            "/mnt/zark/system/srv zfs data/srv\n"
+            "/mnt/zark/systemx tmpfs tmpfs\n"
+            "/mnt/zark/backup zfs backup/rpool/ROOT/be\n"
+            "/mnt/zark/backup/proc proc proc",
         )
         mock.on("zfs unload-key -r bpool").succeeds()
         mock.on("zfs unload-key -r rpool").succeeds()
@@ -5077,11 +5078,15 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         # each once at its top; the ZFS tree is unmounted without that, so the
         # unmount reaches its copies in other mount namespaces (eli, K6).
         tree = [c for c in mock.calls if c.startswith(("mount --make-rprivate", "umount -R"))]
+        # W-2: a host ZFS directory bound under the tree (data/srv, not one
+        # of the pools being released) is a bind, made private like the rest.
         assert tree == [
             "mount --make-rprivate /mnt/zark/system/proc",
             "umount -R /mnt/zark/system/proc",
             "mount --make-rprivate /mnt/zark/system/run",
             "umount -R /mnt/zark/system/run",
+            "mount --make-rprivate /mnt/zark/system/srv",
+            "umount -R /mnt/zark/system/srv",
             "umount -R /mnt/zark/system",
         ]
         assert mock.was_not_called("zfs unmount")
@@ -8791,7 +8796,9 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
             assert all("resolves to" in x.reason for x in skipped)
 
     @staticmethod
-    def _umount_backup(export_ok: bool) -> tuple[MockShell, str]:
+    def _umount_backup(
+        export_ok: bool, setup: Callable[[MockShell, str], None] | None = None
+    ) -> tuple[MockShell, str]:
         mock = MockShell()
         buf = StringIO()
         mock.on("zpool list backup").succeeds("backup")
@@ -8802,8 +8809,11 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
             mock.on("zpool export -f backup").fails("pool is busy")
         with tempfile.TemporaryDirectory() as td:
             os.makedirs(os.path.join(td, "backup", "home"))
+            if setup is not None:
+                setup(mock, td)
             with (
                 patch_sh(mock),
+                patch.object(umount_mod, "_namespaces", return_value=["/proc/42/ns/mnt"]),
                 patch.object(umount_mod, "MNT_BASE", td),
                 patch.object(umount_mod.Config, "load", return_value=make_config()),
                 patch.object(umount_mod, "flush_device_cache"),
@@ -8829,6 +8839,62 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         _, out = self._umount_backup(export_ok=False)
         assert "BACKUP NOT UNMOUNTED" in out and "backup is still imported" in out, out
         assert "exported ✓" not in out, out
+
+    def test_copies_held_elsewhere_are_released_then_the_export_retried(self):
+        # W-1 (M4b-3 3b): the propagated unmount skips a bind with a mount of
+        # its own below it; umount releases the copies where they are, only
+        # below its tree, and exports again.
+        ns = "nsenter --mount=/proc/42/ns/mnt"
+        seen: dict[str, str] = {}
+
+        def setup(mock: MockShell, td: str) -> None:
+            tree = seen["tree"] = f"{td}/backup"
+            listing = mock.on(f"{ns} findmnt -rn -o TARGET").succeeds(
+                f"/\n{tree}\n{tree}/run\n{tree}/run/user\n/srv"
+            )
+            export = mock.on("zpool export backup").fails("pool is busy")
+            # Ahead of the helper's own answer: busy until the release.
+            mock._responses.insert(0, mock._responses.pop())  # pylint: disable=protected-access
+            mock.on(f"{ns} umount -R {tree}").succeeds()
+            real = mock.mock_run
+
+            def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
+                r = real(cmd, *a, **k)
+                if str(cmd) == f"{ns} umount -R {tree}":
+                    _ = listing.succeeds("/\n/srv")
+                    _ = export.succeeds()
+                return r
+
+            mock.mock_run = run_hook  # type: ignore[method-assign]
+
+        mock, out = self._umount_backup(export_ok=True, setup=setup)
+        umounts = [c for c in mock.calls if c.startswith(f"{ns} umount")]
+        assert umounts == [f"{ns} umount -R {seen['tree']}"], mock.calls
+        assert mock.call_count("zpool export backup") == 2, mock.calls
+        assert "BACKUP NOT UNMOUNTED" not in out, out
+
+    def test_every_other_mount_namespace_is_listed_once(self):
+        # Processes share namespaces; snapd pins some with no process in them.
+        own = os.readlink("/proc/self/ns/mnt")
+        with tempfile.TemporaryDirectory() as td:
+            proc, snapd = Path(td, "proc"), Path(td, "snapd")
+            for pid, ns in (("100", "mnt:[1]"), ("101", "mnt:[1]"), ("102", own), ("self", "x")):
+                Path(proc, pid, "ns").mkdir(parents=True)
+                os.symlink(ns, Path(proc, pid, "ns", "mnt"))
+            snapd.mkdir()
+            Path(snapd, "lxd.mnt").write_text("", encoding="ascii")
+            Path(snapd, "lxd.info").write_text("", encoding="ascii")
+            got = umount_mod._namespaces(str(proc), str(snapd))  # pylint: disable=protected-access
+        assert got == [f"{proc}/100/ns/mnt", f"{snapd}/lxd.mnt"], got
+
+    def test_what_stays_mounted_here_is_named(self):
+        # R2§11.4a: a process inside the tree keeps it here; the banner names
+        # that mount instead of only blaming other namespaces.
+        def setup(mock: MockShell, td: str) -> None:
+            mock.on("findmnt -rn -o TARGET").succeeds(f"/\n{td}/backup\n{td}/backup/home")
+
+        _, out = self._umount_backup(export_ok=False, setup=setup)
+        assert "still mounted here:" in out and "/backup (in use? fuser -vm" in out, out
 
     def test_umount_lets_the_zfs_unmount_propagate(self):
         # eli K6: a private backup tree left its copies mounted in the service
@@ -8873,7 +8939,9 @@ class TestUmountPropagation:  # pylint: disable=missing-function-docstring
     def _run(self, case: str) -> dict[str, list[str]]:
         self._skip_unless_possible()
         harness = Path(__file__).parent / "umount_propagation_harness.py"
-        with tempfile.TemporaryDirectory() as td:
+        # findmnt -r escapes spaces and non-ASCII bytes (\x20), so the tree's
+        # path is kept plain, as zark's own trees are.
+        with tempfile.TemporaryDirectory(dir="/tmp") as td:
             r = subprocess.run(
                 [sys.executable, str(harness), td, case],
                 capture_output=True,
@@ -8889,23 +8957,24 @@ class TestUmountPropagation:  # pylint: disable=missing-function-docstring
     def test_datasets_leave_nothing_in_another_namespace(self):
         # eli K6: a private tree (commit 28) left both datasets in the other namespace.
         r = self._run("datasets")
-        assert r == {"other_left": [], "tree_left": [], "host_lost": []}, r
+        assert r == {"propagated_left": [], "other_left": [], "tree_left": [], "host_lost": []}, r
 
     def test_an_empty_bind_leaves_nothing_in_another_namespace(self):
         r = self._run("bind")
-        assert r == {"other_left": [], "tree_left": [], "host_lost": []}, r
+        assert r == {"propagated_left": [], "other_left": [], "tree_left": [], "host_lost": []}, r
 
     def test_a_host_mount_below_a_bound_directory_survives(self):
         # V-3: a plain `umount -R` (commit 21) unmounted it through the shared bind.
-        # The copies left in the other namespace are W-1 (M4, with hallazgo 12).
+        # W-1: the copies the propagated unmount leaves elsewhere are released.
         r = self._run("bind-hostmount")
-        assert r["host_lost"] == [], r
+        assert r["propagated_left"], r  # what the release is there for
+        assert (r["other_left"], r["tree_left"], r["host_lost"]) == ([], [], []), r
 
     def test_nested_binds_as_chroot_makes_lose_no_host_mount(self):
-        # /dev with /dev/pts inside it. What stays in the other namespace, and the
-        # stacked copy left on the host's /dev/pts, is W-1 (M4, with hallazgo 12).
+        # /dev with /dev/pts inside it, as `zark chroot` binds them (X-1): no
+        # host mount lost, nothing left here or in the other namespace (W-1).
         r = self._run("nested-bind")
-        assert r["host_lost"] == [], r
+        assert (r["other_left"], r["tree_left"], r["host_lost"]) == ([], [], []), r
 
     def test_the_harness_refuses_before_any_mount_without_its_own_namespace(self):
         # X-3: an unshare that changed nothing must stop the harness before its
