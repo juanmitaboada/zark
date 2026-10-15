@@ -291,18 +291,16 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             log.info(f"  {p.rel}: common {p.common.lstrip('@')}; newer on the backup: {shown}")
             if more > 0:
                 log.file(f"  {p.rel}: every snapshot the rollback destroys: {', '.join(names)}")
-        tops = _tops([p.rel for p in rollbacks])
-        before = dict(sizes)
-        full = sum(resend(t) for t in tops)
-        archived_sizes, sizes = sizes, before
+        # Either way each one is then an incremental from its common snapshot.
+        sizes.update({p.rel: eng.estimate(p) for p in rollbacks})
         opts = ["abort the backup (nothing changes)"]
-        fits = sum(archived_sizes.values()) <= avail
+        # Keeping the newer snapshots costs no space now and resends nothing
+        # (M3R-1, M4b-5); it replaces "archive and resend in full" here.
+        fits = sum(sizes.values()) <= avail
         if fits:
-            below = sum(len(_subtree(plans, t)) for t in tops) - len(tops)
             opts.append(
-                f"archive {', '.join(tops)}"
-                + (f" (and {below} dataset(s) below)" if below else "")
-                + f" and resend in full ({_gib(full)})",
+                f"keep the {destroyed} newer snapshot(s) in archived lineages and continue "
+                + "from the common snapshot (nothing destroyed, nothing resent)"
             )
         opts.append(f"roll back: destroy the {destroyed} newer snapshot(s) listed above")
         pick = _ask_confirmed(
@@ -314,12 +312,9 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         if pick == 0:
             return False
         if fits and pick == 1:
-            sizes = archived_sizes
-            moved.update(tops)
-            actions += [partial(eng.archive, p) for p in rollbacks if p.rel in tops]
+            # Parents first: each one's children are back under it before theirs go.
+            actions += [partial(eng.branch, p) for p in sorted(rollbacks, key=lambda q: q.rel)]
         else:
-            # After the rollback each one is an incremental from its common snapshot.
-            sizes.update({p.rel: eng.estimate(p) for p in rollbacks})
             actions += [partial(eng.rollback, p) for p in rollbacks]
             confirmed_any = True
 

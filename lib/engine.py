@@ -549,6 +549,43 @@ class Run:  # pylint: disable=too-many-instance-attributes
             self.dest[new] = self.dest.pop(p.rel, Dest(new))
         return new if r.ok else ""
 
+    def branch(self, p: DatasetPlan, now: datetime | None = None) -> bool:
+        """ROLLBACK option a (M3R-1, M4b-5): keep the drive's newer snapshots
+        in an archive and continue from the common one, destroying nothing
+        and resending nothing.
+
+        The lineage is renamed aside, ``zfs clone -u`` of its common snapshot
+        takes its place and ``zfs promote`` gives it the snapshots up to that
+        one, so the archive keeps only the newer ones, as a clone of
+        ``<ds>@<common>``. Promote is allowed with the keys unloaded when the
+        archive is its own encryption root, as every raw-received lineage is
+        (zfs-2.4.1 module/zfs/dsl_crypt.c:1695-1720, 1745-1791; staged on eli,
+        M4b-5). The children, which the rename took along, go back under the
+        live dataset. The next survey plans an incremental from the common
+        snapshot (raw: it is the live dataset's newest).
+        """
+        children = sorted(rel for rel in self.dest if parent(rel) == p.rel)
+        new = self.archive(p, now)
+        if not new:
+            return False
+        live, kept = self._dst(p.rel), self._dst(new)
+        for cmd in (f"zfs clone -u {_q(kept + p.common)} {_q(live)}", f"zfs promote {_q(live)}"):
+            r = sh.run(cmd, log=self.log)
+            if not r.ok:
+                self.log.error(f"  {p.rel}: {cmd} failed: {r.stderr.strip()}")
+                return False
+        for child in children:
+            moved = new + child[len(p.rel) :]
+            r = sh.run(f"zfs rename {_q(self._dst(moved))} {_q(self._dst(child))}", log=self.log)
+            if not r.ok:
+                self.log.error(f"  {child}: could not move it back from {new}: {r.stderr.strip()}")
+                return False
+        self.log.ok(
+            f"Kept the {len(p.newer)} newer snapshot(s) of {p.rel} in {new}; "
+            + f"{p.rel} continues from {p.common.lstrip('@')}"
+        )
+        return True
+
     def destroy(self, p: DatasetPlan) -> bool:
         """Destroy a destination tree (DIVERGED, ORPHAN, ROLLBACK when chosen)."""
         r = sh.run(f"zfs destroy -r {_q(self._dst(p.rel))}", log=self.log)

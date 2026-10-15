@@ -10716,12 +10716,30 @@ class TestBackupDecide:
         # O6: on a v2 drive the warning names both causes.
         assert "recovered from an older point, or snapshots destroyed in origin" in out.getvalue()
 
-    def test_archive_offered_only_when_it_fits(self) -> None:
-        """Without room for a full resend, option 2 is the rollback."""
+    def test_keeping_the_newer_snapshots_is_offered_only_when_it_fits(self) -> None:
+        """M4b-5: without room for the incrementals that follow, option 2 is
+        the rollback; a full resend is never offered for ROLLBACK."""
         fake = self._with_rollback()
-        ok, _ = self._decide(fake, [1], typed="ROLLBACK", avail=10**6)
-        assert ok
-        assert not any(".archived-" in d for d in fake.ds)
+        offered: list[list[str]] = []
+
+        def choice(_q: str, opts: list[str], _d: int = 0) -> int:
+            offered.append(list(opts))
+            return 1
+
+        plans, eng = self._plans(fake)
+        with (
+            patch_sh(fake),
+            patch.object(Log, "ask_choice", side_effect=choice),
+            patch.object(Log, "ask_text", return_value="ROLLBACK"),
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                _ = _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=1), Log())
+            except SystemExit:
+                pass  # the transfer does not fit either
+        assert len(offered[0]) == 2 and offered[0][1].startswith("roll back")
+        assert not any("resend in full" in o for opts in offered for o in opts)
 
     def test_orphan_keep_and_destroy(self) -> None:
         """Keep marks the dataset; destroy needs DESTROY typed."""
@@ -10794,26 +10812,27 @@ class TestBackupDecide:
         ):
             return _engine_run(fake, "backup", "111", P3, decide)
 
-    def test_archive_renames_only_the_top_of_a_subtree(self) -> None:
-        """Archiving rpool/var moves its children with it: one rename, no
-        failed renames, the three resent in full, every old snapshot kept."""
+    def test_newer_snapshots_kept_and_each_lineage_continues(self) -> None:
+        """M3R-1 (M4b-5): each rolled-ahead dataset keeps its newer snapshot
+        in an archive, its children go back under it, and every one
+        continues with an incremental from the common snapshot: nothing is
+        destroyed and nothing is resent in full."""
         fake = self._var_tree_rolled_ahead()
+        before = len(fake.calls)
         res = self._run_with_answers(fake, [1])
         assert res.ok, res
-        renames = [c for c in fake.calls if c.startswith("zfs rename backup/")]
-        assert renames == [f"zfs rename backup/rpool/var backup/rpool/var.archived-{TODAY}"]
-        archived = next(d for d in fake.ds if d.startswith("backup/rpool/var.archived-"))
-        assert "autosnap_gone" in fake.names(f"{archived}/lib/docker")
-        assert fake.names("backup/rpool/var/lib/docker") == [P3]
-
-    def test_archive_space_counts_the_whole_subtree(self) -> None:
-        """Room for the top alone is not room for its subtree: no archive option."""
-        fake = self._var_tree_rolled_ahead()
-        # Full sends are 1e9 each in the fake: 3e9 for the subtree, 1e9 for the top.
-        res = self._run_with_answers(fake, [1], typed="ROLLBACK", avail=2 * 10**9)
-        assert res.ok, res
-        assert not any(".archived-" in d for d in fake.ds)  # option 1 was the rollback
-        assert "autosnap_gone" not in fake.names("backup/rpool/var")
+        calls = fake.calls[before:]
+        for ds in ("rpool/var", "rpool/var/lib", "rpool/var/lib/docker"):
+            kept = f"backup/{ds}.archived-{TODAY}"
+            assert fake.names(kept) == [P2, "autosnap_gone"], ds  # newer than autosnap_h1
+            assert fake.ds[kept].origin == f"backup/{ds}@autosnap_h1"
+            names = fake.names(f"backup/{ds}")
+            assert "autosnap_gone" not in names and names[-1] == P3 and P1 in names
+        sends = [c for c in calls if c.startswith("zfs send ") and "rpool/var" in c]
+        assert sends and all(" -i " in c or " -I " in c for c in sends if "-nvP" not in c)
+        assert not any(
+            c.startswith(("zfs destroy backup/rpool/var", "zfs rollback")) for c in calls
+        )
 
     def test_diverged_children_of_an_archived_top_are_not_asked(self) -> None:
         """One question for a diverged subtree; the children go with their parent."""

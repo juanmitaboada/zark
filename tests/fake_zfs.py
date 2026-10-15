@@ -69,6 +69,7 @@ class FDataset:
     bookmarks: list[FSnap] = field(default_factory=list)
     token: str = ""
     written: int = 0  # bytes written since the newest snapshot (a read-write mount)
+    origin: str = ""  # a clone's origin snapshot
 
 
 def _ok(out: str = "") -> RunResult:
@@ -159,6 +160,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zfs", "bookmark"): self._bookmark,
             ("zfs", "destroy"): self._destroy,
             ("zfs", "rename"): self._rename,
+            ("zfs", "clone"): self._clone,
+            ("zfs", "promote"): self._promote,
             ("zfs", "rollback"): self._rollback,
             ("zfs", "set"): self._set,
             ("zfs", "inherit"): self._inherit,
@@ -435,6 +438,35 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err("could not find any snapshots to destroy; check snapshot names.")
         lines = [f"destroy\t{ds}@{x.name}\n" for x in hit]
         return _ok("".join(lines) + f"reclaim\t{sum(x.used for x in hit)}\n")
+
+    def _clone(self, args: list[str]) -> RunResult:
+        """``zfs clone [-u] ds@snap new``: an empty head on that snapshot."""
+        src, dst = args[-2], args[-1]
+        ds, _, name = src.partition("@")
+        s = next((x for x in self.ds[ds].snaps if x.name == name), None) if ds in self.ds else None
+        if s is None:
+            return _err(f"cannot open '{src}': dataset does not exist")
+        if dst in self.ds:
+            return _err(f"cannot create '{dst}': dataset already exists")
+        old = self.ds[ds]
+        self.ds[dst] = FDataset(kind=old.kind, props=dict(old.props), origin=src)
+        s.clones = dst
+        return _ok()
+
+    def _promote(self, args: list[str]) -> RunResult:
+        """``zfs promote clone``: the origin's snapshots up to the clone's
+        origin move to the clone, which the old lineage is then a clone of."""
+        ds = args[-1]
+        d = self.ds.get(ds)
+        if d is None or not d.origin:
+            return _err(f"cannot promote '{ds}': not a cloned filesystem")
+        src, _, name = d.origin.partition("@")
+        old = self.ds[src]
+        cut = [x.name for x in old.snaps].index(name) + 1
+        d.snaps, old.snaps = old.snaps[:cut] + d.snaps, old.snaps[cut:]
+        d.snaps[cut - 1].clones = src
+        d.origin, old.origin = "", f"{ds}@{name}"
+        return _ok()
 
     def _rename(self, args: list[str]) -> RunResult:
         src, dst = args[-2], args[-1]
