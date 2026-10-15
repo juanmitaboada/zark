@@ -8581,6 +8581,12 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         got = self._without_reader("quietend:")
         assert got == (0, {"cleanup": 1, "continued": True, "cleanup_done": True}), got
 
+    def test_a_child_that_owns_the_terminal_keeps_its_ctrl_c(self):
+        # chroot's shell, simulate's QEMU: a Ctrl-C to zark is let through,
+        # a later SIGTERM stops the child (SIGHUP to it), then the cleanup.
+        self._assert_stopped("interactive:INT,TERM", 128 + signal.SIGTERM)
+        self._assert_stopped("interactive:HUP", 128 + signal.SIGHUP)
+
     def test_the_entry_point_installs_the_handler_before_a_command(self):
         path = str(Path(__file__).resolve().parent.parent / "zark")
         loader = importlib.machinery.SourceFileLoader("zark_entry", path)

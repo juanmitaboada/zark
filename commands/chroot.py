@@ -30,9 +30,7 @@ path). When omitted, ZFS auto-scans for rpool/bpool, which is the usual case
 for the single internal disk.
 """
 
-import subprocess  # nosec B404 — interactive chroot shell; see launch note below
-
-from lib import sh
+from lib import sh, signals
 from lib.cleanup import Cleanup
 from lib.keystore import Keystore
 from lib.log import Log
@@ -151,16 +149,11 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
         ],
     )
 
-    # Interactive shell: this is the one place zark does NOT route through
-    # sh.run(). sh.run captures stdout/stderr for logging, which would break
-    # an interactive terminal. We hand the controlling TTY straight to bash
-    # and wait. nosec B603: the command vector is fixed (no shell, no user
-    # string interpolation); `root_path` is a constant module path.
-    proc = subprocess.run(  # nosec B603
-        ["chroot", root_path, "/bin/bash", "--login"],
-        check=False,
-    )
-    log.info(f"Chroot shell exited (status {proc.returncode}). Cleaning up...")
+    # Interactive shell: not through sh.run(), which captures the output.
+    # The shell keeps the terminal; a closed terminal or a SIGTERM stops it
+    # first, then Cleanup unmounts its binds (lib.signals.run_interactive).
+    status = signals.run_interactive(["chroot", root_path, "/bin/bash", "--login"])
+    log.info(f"Chroot shell exited (status {status}). Cleaning up...")
 
     # ── Teardown (explicit; atexit would also catch it) ───────────────────
     cleanup.run()

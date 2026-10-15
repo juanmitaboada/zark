@@ -59,11 +59,12 @@ Otherwise it falls back to virtio-vga + EDID with a warning.
 
 import os
 import shutil
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import sh
+from lib import sh, signals
 from lib.log import Log
 
 # OVMF firmware search paths (Ubuntu / Debian)
@@ -685,9 +686,9 @@ def run(
     log.blank()
 
     try:
-        _ = subprocess.run(cmd, check=False)
-    except KeyboardInterrupt:
-        log.info("QEMU terminated by user")
+        # QEMU keeps the terminal (its Ctrl-C is QEMU's); a SIGTERM or a
+        # closed terminal stops it with SIGTERM before zark's cleanup.
+        _ = signals.run_interactive(cmd, stop_with=signal.SIGTERM)
     except FileNotFoundError:
         log.fatal("qemu-system-x86_64 not found in PATH")
     finally:

@@ -39,7 +39,7 @@ import subprocess
 import sys
 import time
 from types import FrameType
-from typing import NoReturn, TextIO, cast
+from typing import TextIO, cast
 
 from lib.log import Log
 
@@ -50,6 +50,7 @@ STOP_WAIT_SECONDS = 30.0
 _received: list[int] = []
 _log: list[Log] = []
 _teardown: list[bool] = []
+_interactive: list[bool] = []
 
 
 def received() -> int | None:
@@ -63,7 +64,9 @@ def child_signal() -> int:
     return signal.SIGINT if received() == signal.SIGINT else signal.SIGTERM
 
 
-def _on_signal(signum: int, _frame: FrameType | None) -> NoReturn:
+def _on_signal(signum: int, _frame: FrameType | None) -> None:
+    if signum == signal.SIGINT and _interactive:
+        return  # the terminal's Ctrl-C belongs to the child that owns it
     for sig in EXIT_SIGNALS:
         _ = signal.signal(sig, signal.SIG_IGN)
     _received.append(signum)
@@ -149,6 +152,36 @@ def _stream_gone(stream: TextIO) -> None:
         "[WARN]    Output closed (its reader went away): stopping, then cleaning up"
     )
     raise SystemExit(128 + signal.SIGPIPE)
+
+
+def run_interactive(argv: list[str], stop_with: int = signal.SIGHUP) -> int:
+    """Run a child that owns the terminal (``zark chroot``'s shell,
+    ``simulate``'s QEMU) and return its exit status.
+
+    It stays in zark's process group, so the terminal is its own; while it
+    runs a Ctrl-C is the child's and zark's handler lets it pass. SIGTERM or
+    SIGHUP still stop the command: the child gets ``stop_with`` first (an
+    interactive bash passes a SIGHUP on to its jobs), then up to
+    ``STOP_WAIT_SECONDS`` and SIGKILL, then the cleanup unmounts what the
+    child had (W-1's first trigger: a chroot whose terminal closed).
+    """
+    proc = subprocess.Popen(argv)  # pylint: disable=consider-using-with
+    _interactive[:] = [True]
+    try:
+        return proc.wait()
+    except BaseException:
+        try:
+            os.kill(proc.pid, stop_with)
+        except ProcessLookupError:
+            pass
+        try:
+            _ = proc.wait(timeout=STOP_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _ = proc.wait()
+        raise
+    finally:
+        _interactive.clear()
 
 
 def stop_children(

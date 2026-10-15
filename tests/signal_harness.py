@@ -29,6 +29,8 @@ passes it on. Scenarios:
                     cleanup prints too
     quietend:       one line, then the command ends normally after the reader
                     went away; only the cleanup prints
+    interactive:<SIGS>  signals one second apart while a child that owns the
+                    terminal runs (lib.signals.run_interactive)
 
 Writes ``<workdir>/result.json``: ``cleanup`` (how many times it ran),
 ``children_alive`` (children still running when it ran), ``continued``
@@ -64,11 +66,15 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def _sender(names: list[str], delay: float) -> None:
-    """Send the signals from outside, all pending at once when several."""
+def _sender(names: list[str], delay: float, apart: bool = False) -> None:
+    """Send the signals from outside: all pending at once when several, or
+    one second apart."""
     me = os.getpid()
-    kills = "; ".join(f"kill -{n} {me}" for n in names)
-    script = f"sleep {delay}; kill -STOP {me}; {kills}; kill -CONT {me}"
+    if apart:
+        script = f"sleep {delay}; " + "; sleep 1; ".join(f"kill -{n} {me}" for n in names)
+    else:
+        kills = "; ".join(f"kill -{n} {me}" for n in names)
+        script = f"sleep {delay}; kill -STOP {me}; {kills}; kill -CONT {me}"
     _ = subprocess.Popen(["sh", "-c", script], start_new_session=True)  # pylint: disable=consider-using-with
 
 
@@ -109,9 +115,11 @@ def main() -> None:  # pylint: disable=too-many-locals
     cleanup.register()
     cleanup.track_action(action)
     if sigs:
-        _sender(sigs[:1] if kind == "cleanup" else sigs, 0.5)
+        _sender(sigs[:1] if kind == "cleanup" else sigs, 0.5, apart=kind == "interactive")
     try:
-        if kind == "quietend":
+        if kind == "interactive":
+            _ = signals.run_interactive(["sh", "-c", f"echo $$ > {pids[0]}; exec sleep 60"])
+        elif kind == "quietend":
             print("started", flush=True)
             time.sleep(1.0)
         elif kind == "deadpipe":
