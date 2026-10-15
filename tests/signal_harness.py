@@ -25,6 +25,10 @@ passes it on. Scenarios:
     pipe:<SIGS>     signals while sh.run_pipe waits (several = pending together)
     run:<SIGS>      the same while sh.run waits
     cleanup:<SIG>   one signal to stop, a second one while the cleanup runs
+    deadpipe:       lines printed until the reader of stdout goes away; the
+                    cleanup prints too
+    quietend:       one line, then the command ends normally after the reader
+                    went away; only the cleanup prints
 
 Writes ``<workdir>/result.json``: ``cleanup`` (how many times it ran),
 ``children_alive`` (children still running when it ran), ``continued``
@@ -34,7 +38,6 @@ Writes ``<workdir>/result.json``: ``cleanup`` (how many times it ran),
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -95,6 +98,8 @@ def main() -> None:  # pylint: disable=too-many-locals
         if kind == "cleanup":
             _sender([sigs[1]], 0.0)
             time.sleep(1.5)
+        if kind in ("deadpipe", "quietend"):
+            print("cleaning up with nobody reading", flush=True)
         result["cleanup_done"] = True
         write()
 
@@ -103,9 +108,17 @@ def main() -> None:  # pylint: disable=too-many-locals
     cleanup = Cleanup(log)
     cleanup.register()
     cleanup.track_action(action)
-    _sender(sigs[:1] if kind == "cleanup" else sigs, 0.5)
+    if sigs:
+        _sender(sigs[:1] if kind == "cleanup" else sigs, 0.5)
     try:
-        if kind == "run":
+        if kind == "quietend":
+            print("started", flush=True)
+            time.sleep(1.0)
+        elif kind == "deadpipe":
+            for i in range(600):
+                print(f"line {i}", flush=True)
+                time.sleep(0.05)
+        elif kind == "run":
             _ = sh.run(f"sh -c 'echo $$ > {pids[0]}; exec sleep 60'")
         else:
             _ = sh.run_pipe(
@@ -119,5 +132,4 @@ def main() -> None:  # pylint: disable=too-many-locals
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # as zark sets it
     main()

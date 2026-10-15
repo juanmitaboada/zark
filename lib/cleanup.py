@@ -40,6 +40,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from lib import signals
 from lib.keystore import KeystoreLike
 from lib.log import Log
 from lib.sh import run
@@ -307,6 +308,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
             return
         if not (self._mounts or self._keystores or self._pools or self._dirs or self._actions):
             return
+        signals.teardown()
         self.log.info("Cleaning up...")
 
         self._exported_pools = []

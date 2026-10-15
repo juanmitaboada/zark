@@ -21,7 +21,6 @@ Usage:    sudo ./zark <command> [options]
 """
 
 import os
-import signal
 import sys
 
 from lib import lock, signals
@@ -31,13 +30,6 @@ from lib.log import Log
 # Add project root to path so lib/ and commands/ are importable
 ZARK_ROOT = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, ZARK_ROOT)
-
-# Restore the default SIGPIPE handler. Python's default is to convert
-# EPIPE on stdout into a BrokenPipeError exception with a traceback,
-# which clutters output when the user pipes zark to head/grep/less and
-# closes the pipe early. SIG_DFL gives the standard Unix behaviour:
-# silently terminate.
-signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
 COMMANDS = {
     "backup": "Run incremental backup to connected drive",
@@ -110,6 +102,9 @@ def main():
     Main entry point: parse command and dispatch to appropriate module
     """
     args = sys.argv[1:]
+    # SIGPIPE stays ignored (Python's default): output whose reader went away
+    # stops zark through its cleanup instead of killing it before (M4b-2).
+    signals.guard_output()
 
     # Short-circuit informational flags BEFORE the root check. These
     # produce static output that depends on neither system state nor

@@ -2620,15 +2620,12 @@ class TestLock:  # pylint: disable=missing-function-docstring,protected-access
         spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
         assert spec is not None
         entry = importlib.util.module_from_spec(spec)
-        sigpipe = signal.getsignal(signal.SIGPIPE)
-        try:
-            loader.exec_module(entry)  # the entry point sets SIGPIPE to SIG_DFL
-        finally:
-            _ = signal.signal(signal.SIGPIPE, sigpipe)
+        loader.exec_module(entry)
         ran: list[str] = []
         with (
             patch.object(sys, "argv", ["zark", "prune"]),
             patch("os.geteuid", return_value=0),
+            patch("lib.signals.guard_output"),
             patch.object(lock_mod, "guard", side_effect=SystemExit(lock_mod.EX_TEMPFAIL)) as g,
             patch.object(prune_mod, "run", side_effect=lambda _a: ran.append("prune")),
         ):
@@ -8554,27 +8551,54 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         self._assert_stopped("cleanup:TERM,HUP", 128 + signal.SIGTERM)
         self._assert_stopped("cleanup:INT,TERM", 128 + signal.SIGINT)
 
+    @staticmethod
+    def _without_reader(scenario: str) -> tuple[int, dict[str, Any]]:
+        """Run a scenario whose stdout reader goes away after the first line."""
+        harness = Path(__file__).parent / "signal_harness.py"
+        with tempfile.TemporaryDirectory() as td:
+            p = subprocess.Popen(  # pylint: disable=consider-using-with
+                [sys.executable, str(harness), td, scenario],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            assert p.stdout is not None
+            _ = p.stdout.readline()
+            p.stdout.close()  # the reader goes away
+            rc = p.wait(timeout=60)
+            path = Path(td, "result.json")
+            result = json.loads(path.read_text(encoding="ascii")) if path.exists() else {}
+        return rc, {k: result.get(k) for k in ("cleanup", "continued", "cleanup_done")}
+
+    def test_a_reader_that_goes_away_stops_the_command_through_its_cleanup(self):
+        # M4b-2: was killed by SIGPIPE (SIG_DFL) at the first print, no cleanup.
+        got = self._without_reader("deadpipe:")
+        want = {"cleanup": 1, "continued": False, "cleanup_done": True}
+        assert got == (128 + signal.SIGPIPE, want), got
+
+    def test_a_cleanup_with_nobody_reading_still_runs_to_its_end(self):
+        # The command ended normally; only the cleanup finds the reader gone.
+        got = self._without_reader("quietend:")
+        assert got == (0, {"cleanup": 1, "continued": True, "cleanup_done": True}), got
+
     def test_the_entry_point_installs_the_handler_before_a_command(self):
         path = str(Path(__file__).resolve().parent.parent / "zark")
         loader = importlib.machinery.SourceFileLoader("zark_entry", path)
         spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
         assert spec is not None
         entry = importlib.util.module_from_spec(spec)
-        sigpipe = signal.getsignal(signal.SIGPIPE)
-        try:
-            loader.exec_module(entry)
-        finally:
-            _ = signal.signal(signal.SIGPIPE, sigpipe)
+        loader.exec_module(entry)
         order: list[str] = []
         with (
             patch.object(sys, "argv", ["zark", "prune"]),
             patch("os.geteuid", return_value=0),
+            patch("lib.signals.guard_output", side_effect=lambda *_a: order.append("guard")),
             patch.object(lock_mod, "guard"),
             patch("lib.signals.install", side_effect=lambda *_a: order.append("install")),
             patch.object(prune_mod, "run", side_effect=lambda _a: order.append("prune")),
         ):
             entry.main()
-        assert order == ["install", "prune"], order
+        assert order == ["guard", "install", "prune"], order
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring

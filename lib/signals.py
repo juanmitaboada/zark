@@ -36,9 +36,10 @@ only, and zark passes it on.
 import os
 import signal
 import subprocess
+import sys
 import time
 from types import FrameType
-from typing import NoReturn
+from typing import NoReturn, TextIO, cast
 
 from lib.log import Log
 
@@ -48,6 +49,7 @@ STOP_WAIT_SECONDS = 30.0
 
 _received: list[int] = []
 _log: list[Log] = []
+_teardown: list[bool] = []
 
 
 def received() -> int | None:
@@ -75,11 +77,78 @@ def _on_signal(signum: int, _frame: FrameType | None) -> NoReturn:
 
 
 def install(log: Log | None = None) -> None:
-    """Install the handler for every exit signal (once per process); it
-    reports through ``log`` (a default :class:`Log` when None)."""
-    _log[:] = [log] if log is not None else []
+    """Install the handler for every exit signal, and the guard of stdout and
+    stderr (once per process); both report through ``log`` (a default
+    :class:`Log` when None)."""
+    guard_output(log)
     for sig in EXIT_SIGNALS:
         _ = signal.signal(sig, _on_signal)
+
+
+def guard_output(log: Log | None = None) -> None:
+    """Guard stdout and stderr against a reader that goes away (see
+    :class:`_Guarded`); what that stops reports through ``log``."""
+    _log[:] = [log] if log is not None else []
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        if not isinstance(stream, _Guarded):
+            setattr(sys, name, cast(TextIO, _Guarded(stream)))
+
+
+def teardown() -> None:
+    """The cleanup has started: a dead stdout no longer stops anything."""
+    _teardown[:] = [True]
+
+
+class _Guarded:
+    """A text stream whose reader may go away (V-6 general, M4b-2).
+
+    SIGPIPE stays ignored in zark (Python's default), so a write to a dead
+    pipe raises BrokenPipeError instead of killing zark before its cleanup.
+    The first one ends the command as a hangup does; from then on the stream
+    goes to /dev/null, so neither the cleanup nor the exit flush fails.
+    """
+
+    def __init__(self, stream: TextIO):
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        """Write, or stop the command when the reader is gone."""
+        try:
+            return self._stream.write(text)
+        except BrokenPipeError:
+            _stream_gone(self._stream)
+            return len(text)
+
+    def flush(self) -> None:
+        """Flush, or stop the command when the reader is gone."""
+        try:
+            self._stream.flush()
+        except BrokenPipeError:
+            _stream_gone(self._stream)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
+def _stream_gone(stream: TextIO) -> None:
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, stream.fileno())
+        finally:
+            os.close(devnull)
+    except (OSError, ValueError):
+        pass
+    if _received or _teardown:
+        return  # already stopping, or cleaning up: the rest goes to zark.log only
+    for sig in EXIT_SIGNALS:
+        _ = signal.signal(sig, signal.SIG_IGN)
+    _received.append(signal.SIGPIPE)
+    (_log[0] if _log else Log()).file(
+        "[WARN]    Output closed (its reader went away): stopping, then cleaning up"
+    )
+    raise SystemExit(128 + signal.SIGPIPE)
 
 
 def stop_children(
