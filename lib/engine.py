@@ -1577,7 +1577,8 @@ def _transfer(run: Run, res: Result) -> None:
         failed: set[str] = set()
         again = False
         for p in todo:
-            if blocked_by_parent(p.rel, failed):
+            # Only a NEW child needs its parent on the drive (M2X.1, M4b-12).
+            if p.state is State.NEW and blocked_by_parent(p.rel, failed):
                 res.outcomes[p.rel] = Outcome(p.rel, False, "parent did not reach the point")
                 failed.add(p.rel)
                 continue

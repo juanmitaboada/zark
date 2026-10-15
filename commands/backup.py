@@ -979,6 +979,16 @@ def run(
     mins, secs = divmod(elapsed, 60)
 
     log.step(8, TOTAL_STEPS, f"Verifying {pool_name} is reimportable...")
+    # Written before the export, which a read-back needs (M2X.2, M4b-13).
+    marked = (
+        [
+            "",
+            f"{pool_name} already records {eng.point} as its last backup point (written",
+            "before the export); the registry's last backup was not updated.",
+        ]
+        if res.ok
+        else []
+    )
     if pool_name not in cleanup.exported_pools():
         # H17: an export that failed is a failed backup, never a skipped check.
         log.banner_error(
@@ -987,13 +997,16 @@ def run(
                 f"{pool_name} could not be exported, so it was not read back.",
                 "Do NOT disconnect the drive. Check: zpool status; then",
                 f"  sudo zpool export {pool_name}",
+                *marked,
             ],
         )
         _notify("❌ Backup NOT verified", f"{pool_name} could not be exported")
         raise SystemExit(1)
     rb = zfs.verify_exported_pool_readback(pool_name, device=device)
     if not rb.ok:
-        log.banner_error("BACKUP NOT VERIFIED", [*rb.describe(), "", "Do NOT rely on this backup."])
+        log.banner_error(
+            "BACKUP NOT VERIFIED", [*rb.describe(), "", "Do NOT rely on this backup.", *marked]
+        )
         _notify("❌ Backup NOT verified", f"{pool_name} failed its read-back")
         raise SystemExit(1)
     log.ok(f"{pool_name} verified reimportable (ONLINE)")

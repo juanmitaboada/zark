@@ -197,17 +197,28 @@ def expected(origin: dict[str, Origin]) -> list[str]:
         and not rel.startswith(f"{KEYSTORE}/")
         and o.kind != "volume"
         and rel not in STRUCTURAL
+        and not is_archived(rel)
     )
 
 
 def excluded(origin: dict[str, Origin]) -> list[tuple[str, str]]:
     """(dataset, why) left out on purpose and worth reporting: volumes other
-    than the keystore (which travels apart), and structural containers that
-    hold or could hold data of their own."""
+    than the keystore (which travels apart), structural containers that
+    hold or could hold data of their own, and datasets whose name zark
+    reserves for archived lineages (M2R-13, M4b-7 7b)."""
     out = [
         (rel, "zvol, not backed up")
         for rel, o in origin.items()
         if o.kind == "volume" and rel != KEYSTORE
+    ]
+    out += [
+        (
+            rel,
+            f"its name contains {ARCHIVE_MARK}, which zark reserves for archived lineages: "
+            + "rename it",
+        )
+        for rel, o in origin.items()
+        if is_archived(rel) and o.kind != "volume"
     ]
     for rel in STRUCTURAL:
         o = origin.get(rel)

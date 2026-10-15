@@ -9832,6 +9832,31 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             assert fake.names(ds)[: len(names)] == names
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("111", P1)]  # unchanged
 
+    def test_an_origin_dataset_named_like_an_archive_is_excluded(self) -> None:
+        """M2R-13 (M4b-7 7b): ``.archived-`` in an origin name is reserved:
+        the dataset is EXCLUDED with a reason, never sent, and the run is
+        complete without it."""
+        fake = self._fresh()
+        fake.dataset("rpool/USERDATA/old.archived-2024")
+        fake.snap("rpool/USERDATA/old.archived-2024", "autosnap_x")
+        res = _engine_run(fake, "backup", "111", P1)
+        assert res.ok, res
+        p = next(q for q in res.plans if q.rel == "rpool/USERDATA/old.archived-2024")
+        assert p.state is repl.State.EXCLUDED and "reserves for archived lineages" in p.note
+        assert "backup/rpool/USERDATA/old.archived-2024" not in fake.ds
+        assert not any("old.archived-2024" in c for c in fake.calls if "send" in c)
+
+    def test_an_incremental_child_of_a_failed_parent_is_sent(self) -> None:
+        """M2X.1 (M4b-12): a child the drive already holds needs only its
+        incremental; its parent's failure does not hold it back."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.inject["backup/rpool/var"] = ("interrupt", 0)
+        res = _engine_run(fake, "backup", "111", P2)
+        assert not res.ok and not res.outcomes["rpool/var"].ok
+        assert res.outcomes["rpool/var/lib"].ok
+        assert P2 in fake.names("backup/rpool/var/lib")
+
     def test_child_of_a_failed_new_parent_waits(self) -> None:
         """A NEW child is not attempted when its parent failed."""
         fake = self._fresh()
@@ -11245,6 +11270,24 @@ class TestBackupCommand:
             except SystemExit as e:
                 rc = int(e.code or 0)
         return cfg, rc
+
+    def test_a_failed_read_back_says_the_drive_already_records_the_point(self) -> None:
+        """M2X.2 (M4b-13): the drive's metadata is written before the export,
+        so BACKUP NOT VERIFIED says the drive records the point while the
+        registry's last backup stays as it was."""
+        fake = _fresh_fake()
+        out = StringIO()
+        bad = Readback(imported=True, health="DEGRADED", reexported=True)
+        cfg, rc = self._run(
+            fake,
+            patch.object(ZFS, "verify_exported_pool_readback", return_value=bad),
+            redirect_stdout(out),
+        )
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        text = " ".join(out.getvalue().split())
+        assert rc == 1 and "BACKUP NOT VERIFIED" in text
+        assert f"backup already records {point} as its last backup point" in text
+        assert not cfg.known_drives["backup"].last_backup_at
 
     def test_a_drive_without_its_first_point_gets_it_at_the_next_backup(self) -> None:
         """M3P.25 (M4b-9): a drive whose first point was not recorded (prepared
