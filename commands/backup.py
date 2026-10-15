@@ -319,9 +319,58 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             confirmed_any = True
 
     # Nothing in common (D17). A dataset below one already archived or
-    # destroyed goes with it and is not asked about.
+    # destroyed goes with it and is not asked about. Several are asked
+    # about together first (M3P.27, M4b-11).
+    diverged = _tops(
+        [p.rel for p in plans if p.state is State.DIVERGED and not _under(p.rel, moved)]
+    )
+    skipped: set[str] = set()  # with what is below them, by the joint question
+    if len(diverged) > 1:
+        lineages = [p for p in plans if p.rel in diverged]
+        log.warn(
+            f"{len(lineages)} dataset(s) on {pool_name} have no snapshot in common with origin:"
+        )
+        for p in lineages:
+            log.info(f"  {p.rel}: {p.note}")
+        before = dict(sizes)
+        full = sum(resend(t) for t in diverged)
+        resent, sizes = sizes, before
+        opts = ["skip them this time (the backup will be INCOMPLETE)"]
+        fits = sum(resent.values()) <= avail
+        if fits:
+            opts.append(
+                f"archive the {len(lineages)} old lineages and resend in full ({_gib(full)})"
+            )
+        opts.append(
+            f"destroy the {len(lineages)} on the backup and resend in full "
+            + f"({_gib(sum(p.used for p in lineages))} destroyed)"
+        )
+        opts.append("decide one by one")
+        destroy = len(opts) - 2
+        pick = _ask_confirmed(
+            log,
+            f"{len(lineages)} datasets have diverged:",
+            opts,
+            {
+                destroy: (
+                    "DESTROY",
+                    f"destroy {len(lineages)} dataset(s) on {pool_name} and everything below them",
+                )
+            },
+            {destroy: [line for t in diverged for line in _on_drive(eng, t)]},
+        )
+        if pick == 0:
+            skipped.update(diverged)
+        elif pick < len(opts) - 1:
+            sizes = resent
+            moved.update(diverged)
+            if fits and pick == 1:
+                actions += [partial(eng.archive, p) for p in lineages]
+            else:
+                actions += [partial(eng.destroy, p) for p in lineages]
+                confirmed_any = True
     for p in plans:
-        if p.state is not State.DIVERGED or _under(p.rel, moved):
+        if p.state is not State.DIVERGED or _under(p.rel, moved | skipped):
             continue
         before = dict(sizes)
         full_size = resend(p.rel)

@@ -10958,6 +10958,84 @@ class TestBackupDecide:
         assert res.ok, res
         assert asked == ["rpool/var has diverged:"]
 
+    def _two_diverged(self) -> FakeZfs:
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        for ds in ("rpool/var", "rpool/var/lib", "rpool/var/lib/docker", "rpool/USERDATA/home"):
+            fake.ds[ds].snaps.clear()
+            fake.ds[ds].bookmarks.clear()
+            fake.snap(ds, "autosnap_recreated")
+        return fake
+
+    def _joint(self, fake: FakeZfs, picks: list[int], typed: str = "") -> tuple[list[str], str]:
+        asked: list[str] = []
+
+        def choice(question: str, _opts: list[str], _default: int = 0) -> int:
+            asked.append(question)
+            return picks.pop(0)
+
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            return _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+
+        out = StringIO()
+        with (
+            patch.object(Log, "ask_choice", side_effect=choice),
+            patch.object(Log, "ask_text", return_value=typed),
+            patch_sh(fake),
+            redirect_stdout(out),
+            redirect_stderr(StringIO()),
+        ):
+            eng = engine.Run("backup", "111", Log(), P3, sleep=lambda _s: None)
+            _ = engine.execute(eng, Cleanup(Log()), decide)
+        return asked, out.getvalue()
+
+    def test_several_diverged_are_asked_once_and_skipped_by_default(self) -> None:
+        """M3P.27 (M4b-11): one question for every diverged top; its default
+        skips them all, children included, and changes nothing."""
+        fake = self._two_diverged()
+        tree = ("backup/rpool/var", "backup/rpool/USERDATA/home")
+        before = {d: fake.names(d) for d in fake.ds if d.startswith(tree)}
+        asked, _ = self._joint(fake, [0])
+        assert asked == ["2 datasets have diverged:"]
+        assert {d: fake.names(d) for d in fake.ds if d.startswith(tree)} == before
+
+    def test_several_diverged_archived_together(self) -> None:
+        """Archive all: one rename per top, each resent in full."""
+        fake = self._two_diverged()
+        asked, _ = self._joint(fake, [1])
+        assert asked == ["2 datasets have diverged:"]
+        renames = sorted(c for c in fake.calls if c.startswith("zfs rename backup/"))
+        assert renames == [
+            f"zfs rename backup/rpool/USERDATA/home backup/rpool/USERDATA/home.archived-{TODAY}",
+            f"zfs rename backup/rpool/var backup/rpool/var.archived-{TODAY}",
+        ]
+        assert fake.names("backup/rpool/USERDATA/home") == [P3]
+
+    def test_several_diverged_destroyed_after_listing_what_goes(self) -> None:
+        """Destroy all: every dataset each destroy takes is listed before
+        the typed DESTROY."""
+        fake = self._two_diverged()
+        asked, out = self._joint(fake, [2], typed="DESTROY")
+        assert asked == ["2 datasets have diverged:"]
+        assert "DESTROY takes 4 dataset(s) on the backup:" in out
+        for ds in ("rpool/USERDATA/home", "rpool/var", "rpool/var/lib", "rpool/var/lib/docker"):
+            assert f"backup/{ds}  (" in out
+        assert not any(".archived-" in d for d in fake.ds)
+        assert fake.names("backup/rpool/var/lib/docker") == [P3]
+
+    def test_several_diverged_can_still_be_decided_one_by_one(self) -> None:
+        """The last option asks today's question for each top."""
+        fake = self._two_diverged()
+        asked, _ = self._joint(fake, [3, 0, 1])
+        assert asked == [
+            "2 datasets have diverged:",
+            "rpool/USERDATA/home has diverged:",
+            "rpool/var has diverged:",
+        ]
+        assert [d for d in fake.ds if d.endswith(".archived-" + TODAY)] == [
+            f"backup/rpool/var.archived-{TODAY}"
+        ]
+
     def test_table_names_every_dataset_short_of_the_point(self) -> None:
         """I-D table: failures and exclusions are warnings with their reason."""
         res = engine.Result(
