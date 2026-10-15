@@ -36,7 +36,6 @@ commands that finish with an external (removable) drive still attached:
 """
 
 import atexit
-import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -222,11 +221,15 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self._disabled = False
 
     def register(self):
-        """Install atexit and signal handlers. Call once."""
+        """Run at exit. Call once.
+
+        Signals are not handled here: :mod:`lib.signals` stops the running
+        child and unwinds the command, so this runs once, from ``atexit``,
+        after the command stopped (H12).
+        """
         if self._registered:
             return
         atexit.register(self.run)
-        signal.signal(signal.SIGTERM, lambda *_: self.run())
         self._registered = True
         self._disabled = False
 

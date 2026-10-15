@@ -39,6 +39,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from contextlib import (
     AbstractContextManager,
@@ -8497,6 +8498,83 @@ class TestFixRpoolSignals:  # pylint: disable=missing-function-docstring
         # this case; the teardown's own ignore comes too late. The run ends in
         # its NOT FIXED verdict (exit 1), or dies on SIGPIPE after the teardown.
         self._assert_torn_down("deadpipe:", 1, -signal.SIGPIPE)
+
+
+class TestCommandSignals:  # pylint: disable=missing-function-docstring
+    """H12 (M4b-1): a signal stops the running child first, then the command,
+    and its cleanup runs once, after the child is gone.
+
+    Each case runs tests/signal_harness.py in its own process; the signals are
+    sent from outside it, to it alone, so the children only stop if zark
+    passes them on.
+    """
+
+    @staticmethod
+    def _run(scenario: str) -> tuple[int, dict[str, Any], float]:
+        harness = Path(__file__).parent / "signal_harness.py"
+        with tempfile.TemporaryDirectory() as td:
+            start = time.monotonic()
+            r = subprocess.run(
+                [sys.executable, str(harness), td, scenario],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=90,
+                check=False,
+            )
+            took = time.monotonic() - start
+            path = Path(td, "result.json")
+            result: dict[str, Any] = (
+                json.loads(path.read_text(encoding="ascii")) if path.exists() else {}
+            )
+        return r.returncode, result, took
+
+    def _assert_stopped(self, scenario: str, code: int) -> dict[str, Any]:
+        rc, result, took = self._run(scenario)
+        expected = {"cleanup": 1, "children_alive": [], "continued": False, "cleanup_done": True}
+        got = {k: result.get(k) for k in expected}
+        # The children would run for a minute: stopped, the run ends in seconds.
+        assert (rc, got) == (code, expected) and took < 20, (scenario, rc, result, took)
+        return result
+
+    def test_a_signal_stops_the_pipeline_before_the_cleanup(self):
+        for name in ("TERM", "HUP", "INT"):
+            self._assert_stopped(f"pipe:{name}", 128 + signal.Signals[f"SIG{name}"])
+
+    def test_a_signal_stops_a_plain_command_behind_a_shell(self):
+        # dash keeps `sh -c` as the parent: only the process group reaches sleep.
+        self._assert_stopped("run:TERM", 128 + signal.SIGTERM)
+        self._assert_stopped("run:HUP", 128 + signal.SIGHUP)
+
+    def test_two_signals_pending_together_stop_once(self):
+        # logind's SIGTERM and SIGHUP; CPython runs the lower number first.
+        self._assert_stopped("pipe:TERM,HUP", 128 + signal.SIGHUP)
+        self._assert_stopped("pipe:INT,TERM", 128 + signal.SIGINT)
+
+    def test_a_signal_during_the_cleanup_is_ignored(self):
+        self._assert_stopped("cleanup:TERM,HUP", 128 + signal.SIGTERM)
+        self._assert_stopped("cleanup:INT,TERM", 128 + signal.SIGINT)
+
+    def test_the_entry_point_installs_the_handler_before_a_command(self):
+        path = str(Path(__file__).resolve().parent.parent / "zark")
+        loader = importlib.machinery.SourceFileLoader("zark_entry", path)
+        spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
+        assert spec is not None
+        entry = importlib.util.module_from_spec(spec)
+        sigpipe = signal.getsignal(signal.SIGPIPE)
+        try:
+            loader.exec_module(entry)
+        finally:
+            _ = signal.signal(signal.SIGPIPE, sigpipe)
+        order: list[str] = []
+        with (
+            patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.geteuid", return_value=0),
+            patch.object(lock_mod, "guard"),
+            patch("lib.signals.install", side_effect=lambda *_a: order.append("install")),
+            patch.object(prune_mod, "run", side_effect=lambda _a: order.append("prune")),
+        ):
+            entry.main()
+        assert order == ["install", "prune"], order
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring

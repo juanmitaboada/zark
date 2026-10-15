@@ -19,9 +19,11 @@ No 2>/dev/null anywhere — everything is captured and visible.
 """
 
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 
+from lib import signals
 from lib.log import Log
 
 
@@ -72,7 +74,7 @@ class RunResult:
 # If a future caller passes user-controlled input here, that caller
 # is responsible for validating or escaping it — but no such caller
 # exists today.
-def run(  # pylint: disable=too-many-branches
+def run(  # pylint: disable=too-many-branches,too-many-locals
     cmd: str | list[str],
     check: bool = False,
     input: str | None = None,  # pylint: disable=redefined-builtin
@@ -104,22 +106,18 @@ def run(  # pylint: disable=too-many-branches
     if log:
         log.cmd(cmd_str)
 
+    # A process group of its own: zark passes a signal on to the whole group
+    # (lib.signals), shell included. Without `input`, stdin is /dev/null, so
+    # a child of a background group never stops reading the terminal.
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd_exec,
-            shell=use_shell,  # nosec B602 — see rationale at top of run()# # nosec B602 - rationale
-            capture_output=True,
+            shell=use_shell,  # nosec B602 - see the rationale above run()
+            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            input=input,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return RunResult(
-            returncode=124,
-            stdout="",
-            stderr=f"Command timed out after {timeout}s",
-            command=cmd_str,
+            process_group=0,
         )
     except FileNotFoundError as e:
         return RunResult(
@@ -128,11 +126,28 @@ def run(  # pylint: disable=too-many-branches
             stderr=str(e),
             command=cmd_str,
         )
+    with proc:
+        try:
+            out, err = proc.communicate(input=input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            signals.stop_children([proc], signal.SIGKILL)
+            _ = proc.communicate()
+            return RunResult(
+                returncode=124,
+                stdout="",
+                stderr=f"Command timed out after {timeout}s",
+                command=cmd_str,
+            )
+        except BaseException:
+            # A signal (or anything else) while waiting: the child stops
+            # first, then the exception goes on (H12).
+            signals.stop_children([proc])
+            raise
 
     r = RunResult(
-        returncode=result.returncode,
-        stdout=result.stdout,
-        stderr=result.stderr,
+        returncode=proc.returncode,
+        stdout=out,
+        stderr=err,
         command=cmd_str,
     )
 
@@ -177,27 +192,36 @@ def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
     if log:
         log.cmd(f"{cmd1} | {cmd2}")
 
+    # Each side in a process group of its own, stopped first when a signal
+    # (or anything else) interrupts the wait: a cut `zfs receive -s` keeps
+    # its partial state for the next run (H12).
     with subprocess.Popen(
         cmd1,
         shell=True,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-    ) as p1:  # nosec B602 — see run() rationale; pipelines need shell=True
+        process_group=0,
+    ) as p1:  # nosec B602 - see the rationale above run()
         assert p1.stdout is not None  # guaranteed by stdout=PIPE above
         with subprocess.Popen(
             cmd2,
-            shell=True,  # nosec B602 — see run() rationale; pipelines need shell=True
+            shell=True,  # nosec B602 - see the rationale above run()
             stdin=p1.stdout,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            process_group=0,
         ) as p2:
             p1.stdout.close()  # let p2 receive EOF when p1 finishes
-            stdout, stderr_p2 = p2.communicate()
-
-        # p1 has finished by now (p2.communicate waited for downstream EOF,
-        # which only happens after p1 exits). Wait explicitly to reap it
-        # and capture its stderr.
-        _ = p1.wait()
+            try:
+                stdout, stderr_p2 = p2.communicate()
+                # p1 has finished by now (p2.communicate waited for downstream
+                # EOF, which only happens after p1 exits). Wait explicitly to
+                # reap it and capture its stderr.
+                _ = p1.wait()
+            except BaseException:
+                signals.stop_children([p1, p2])
+                raise
         stderr_p1 = p1.stderr.read() if p1.stderr is not None else b""
 
     # Combine stderr from both sides for transparent error inspection.

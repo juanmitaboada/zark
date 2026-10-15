@@ -24,7 +24,7 @@ import os
 import signal
 import sys
 
-from lib import lock
+from lib import lock, signals
 from lib.config import VERSION, Config
 from lib.log import Log
 
@@ -141,6 +141,9 @@ def main():
     # Two zark runs at once can remove each other's points or prune under a
     # backup: every command that changes state takes the one lock first.
     lock.guard(cmd_name, cmd_args)
+    # One way to stop for every command: the running child first, then the
+    # command's cleanup, once (H12).
+    signals.install()
 
     # Import and run the command. CLI uses kebab-case (e.g. "repair-boot"),
     # Python module names use snake_case (e.g. "repair_boot.py").
@@ -159,9 +162,11 @@ def main():
         mod = __import__(f"commands.{mod_name}", fromlist=[mod_name])
         mod.run(cmd_args)
     except KeyboardInterrupt:
-        print()
-        # Through the log so zark.log records why the run stopped (I19).
-        Log().error("Interrupted by user.")
+        # Through the log so zark.log records why the run stopped (I19);
+        # a Ctrl-C caught by lib.signals has said so already.
+        if signals.received() is None:
+            print()
+            Log().error("Interrupted by user.")
         sys.exit(130)
     except Exception as e:  # pylint: disable=broad-exception-caught
         print(f"\n\033[0;31m[FATAL]\033[0m {e}")
