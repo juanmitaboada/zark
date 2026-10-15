@@ -219,7 +219,7 @@ def run(
         "origin-rpool-guid": rpool_guid,
     }
     if res.ok:
-        fields |= {"last-backup-at": prepared_at, "last-point": eng.point}
+        fields |= {"last-backup-at": prepared_at, "last-point": eng.point, "first-point": eng.point}
     _ = engine.write_metadata(new_pool, fields, log)
 
     # ── Keystore: outside the rpool tree, the last ZFS work before export ─

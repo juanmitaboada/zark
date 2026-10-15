@@ -350,6 +350,7 @@ class Complete:
 
     run: set[str]
     whole: set[str]
+    first: str = ""  # org.zark:first-point: where 1.x history ends (M3P.25)
 
 
 def retention_points(snaps: list[Snap], last_point: str) -> Complete:

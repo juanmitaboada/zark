@@ -238,7 +238,7 @@ def _prune_origin(cfg: Config, log: Log) -> None:
         act()
 
 
-def _legacy_history(dest: dict[str, Dest], pins: dict[str, str]) -> Prune:
+def _legacy_history(dest: dict[str, Dest], pins: dict[str, str], first: str = "") -> Prune:
     """sanoid's and syncoid's snapshots from before the drive's first backup
     point (1.x history, decision 6c), every live dataset's newest kept (I-E)
     and pinned ones left. Backup points are dated by their newest snapshot,
@@ -247,7 +247,7 @@ def _legacy_history(dest: dict[str, Dest], pins: dict[str, str]) -> Prune:
     nothing goes whole, as with the policy (decision 7a): its head would
     keep its data with no snapshot recover could reach."""
     times = point_times(dest)
-    start = first_point_time(times)
+    start = first_point_time(times, first)
     out: list[Removal] = []
     for rel, d in sorted(dest.items()):
         newest = d.newest if is_live(rel, d) else None
@@ -290,7 +290,11 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
         pins = engine.drive_pins(pool, strict=True)
     except engine.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
-    prune = plan_prune(dest, complete.run, policy, now, whole=complete.whole, pinned=pins)
+    prune = plan_prune(
+        dest, complete.run, policy, now, whole=complete.whole, pinned=pins, first=complete.first
+    )
+    for target, why in prune.kept:  # as backup's retention reports them (M3X.5)
+        log.info(f"  kept {pool}/{target}: {why}")
     if not prune.empty:
         freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
         log.info(
@@ -345,7 +349,7 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         if chosen and _typed(log, f"remove the {n} oldest backup point(s) from {pool}"):
             _ = engine.apply_prune(pool, plan, log)
             dest = _reread(pool, log)
-    legacy = _legacy_history(dest, pins)
+    legacy = _legacy_history(dest, pins, complete.first)
     if not legacy.empty:
         tops = [t for t, _ in legacy.datasets]
         freed = engine.reclaim(pool, legacy.snapshots, tops)

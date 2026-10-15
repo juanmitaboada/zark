@@ -151,9 +151,16 @@ def newest_complete(
     return max(done)[2] if done else ""
 
 
-def first_point_time(times: dict[str, int]) -> int | None:
-    """``creation`` of the drive's oldest backup point; None on a drive without one."""
-    return min(times.values()) if times else None
+def first_point_time(times: dict[str, int], recorded: str = "") -> int | None:
+    """Where 1.x history ends: the drive's first backup point as recorded
+    (``org.zark:first-point``, M3P.25), so the boundary stays put when the
+    policy removes the first points; else the ``creation`` of the oldest
+    point still there. None on a drive without either."""
+    found = [*times.values()]
+    if POINT_RE.match(recorded):
+        stamp = datetime.strptime(recorded, "zark_%Y-%m-%d_%H:%M:%SZ").replace(tzinfo=UTC)
+        found.append(int(stamp.timestamp()))
+    return min(found) if found else None
 
 
 def plan_prune(  # pylint: disable=too-many-arguments,too-many-locals
@@ -165,6 +172,7 @@ def plan_prune(  # pylint: disable=too-many-arguments,too-many-locals
     whole: set[str] | None = None,
     pinned: dict[str, str] | None = None,
     protected: set[str] | None = None,
+    first: str = "",
 ) -> Prune:
     """What the policy removes (see the module docstring).
 
@@ -172,12 +180,13 @@ def plan_prune(  # pylint: disable=too-many-arguments,too-many-locals
     ``complete`` the run-complete backup points and ``whole`` those of them
     no dataset skipped (lib.restore_points; None: all of them);
     ``pinned`` maps ``rel@name`` to why ZFS would refuse to destroy it;
-    ``protected`` names ``rel@name`` that must stay for this run.
+    ``protected`` names ``rel@name`` that must stay for this run;
+    ``first`` the drive's recorded first backup point (:func:`first_point_time`).
     """
     pinned = pinned or {}
     protected = protected or set()
     times = point_times(dest)
-    start = first_point_time(times)
+    start = first_point_time(times, first)
     out = Prune()
     if start is None:
         return out  # nothing written by zark 2 yet: 1.x history only

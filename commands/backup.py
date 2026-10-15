@@ -447,7 +447,14 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
     bases |= {p.clone_from for p in plans if p.state is State.NEW and p.clone_from}
     now = int(time.time())
     prune = plan_prune(
-        eng.dest, complete.run, policy, now, whole=complete.whole, pinned=pins, protected=bases
+        eng.dest,
+        complete.run,
+        policy,
+        now,
+        whole=complete.whole,
+        pinned=pins,
+        protected=bases,
+        first=complete.first,
     )
     tops = [t for t, _ in prune.datasets]
     freed = engine.reclaim(pool, prune.snapshots, tops) if not prune.empty else 0
@@ -535,7 +542,13 @@ def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
         log.warn(f"Retention skipped: {e}")
         return 0, 0
     prune = plan_prune(
-        dest, complete.run, policy, int(time.time()), whole=complete.whole, pinned=pins
+        dest,
+        complete.run,
+        policy,
+        int(time.time()),
+        whole=complete.whole,
+        pinned=pins,
+        first=complete.first,
     )
     for target, why in prune.kept:
         log.info(f"  kept {pool}/{target}: {why}")
@@ -874,6 +887,7 @@ def run(
     # refused before anything is asked or written.
     engine.check_drive_owner(pool_name, log)
     _heal_drive_id(cfg, pool_name, device, log)
+    engine.record_first_point(pool_name, log)
 
     # ── Check health ─────────────────────────────────────────────────────
     log.step(3, TOTAL_STEPS, "Checking pool health...")

@@ -47,7 +47,7 @@ import re
 import shlex
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -86,7 +86,7 @@ from lib.restore_points import (
     point_marks,
     retention_points,
 )
-from lib.retention import Prune, Removal
+from lib.retention import Prune, Removal, point_times
 
 SANOID_UNITS = ("sanoid.service", "sanoid-prune.service")
 SANOID_WAIT_SECONDS = 600
@@ -101,6 +101,8 @@ SANOID_MARKER = "/run/zark/sanoid-paused"
 POINT_FOR = "org.zark:point-for"
 # One more try for an anchor that failed (M3R-5); later runs retry it too.
 ANCHOR_RETRY_SECONDS = 2.0
+# Names per grouped `zfs destroy` (M3P.26): keeps each command line short.
+DESTROY_GROUP = 100
 
 
 def _q(word: str) -> str:
@@ -992,6 +994,23 @@ def write_metadata(pool: str, fields: dict[str, str], log: Log) -> bool:
     return r.ok
 
 
+def record_first_point(pool: str, log: Log) -> None:
+    """Record ``org.zark:first-point`` on a drive that lacks it (M3P.25,
+    M4b-9): its oldest backup point still there, before any retention of this
+    run can remove it. prepare records its own point; a drive whose first
+    points were already removed gets the best value left. Nothing is written
+    when the drive cannot be read or holds no point."""
+    try:
+        if read_metadata(pool, strict=True).get("first-point"):
+            return
+        times = point_times(read_dest(pool, strict=True))
+    except ReadError as e:
+        log.warn(f"First backup point not recorded: {e}")
+        return
+    if times:
+        _ = write_metadata(pool, {"first-point": min(times, key=lambda n: times[n])}, log)
+
+
 def read_metadata(pool: str, strict: bool = False) -> dict[str, str]:
     """``org.zark:*`` user properties set on the backup pool's root dataset.
 
@@ -1223,7 +1242,8 @@ def drive_complete(pool: str) -> Complete:
     look incomplete, and the policy remove them, so a failed listing raises
     :class:`ReadError`."""
     meta = read_metadata(pool, strict=True)
-    return retention_points(drive_snapshots(pool, strict=True), meta.get("last-point", ""))
+    complete = retention_points(drive_snapshots(pool, strict=True), meta.get("last-point", ""))
+    return replace(complete, first=meta.get("first-point", ""))
 
 
 def drive_pins(pool: str, strict: bool = False) -> dict[str, str]:
@@ -1290,10 +1310,41 @@ def reclaim(pool: str, removals: list[Removal], tops: list[str] | None = None) -
 
 
 def destroy_snapshots(targets: list[tuple[str, str]], log: Log) -> tuple[int, list[str]]:
-    """Destroy ``(ds@snap, reason)`` one by one, by exact name, each logged
-    with its reason; returns how many went and what could not."""
+    """Destroy ``(ds@snap, reason)`` by exact name, each logged with its
+    reason; returns how many went and what could not (M3P.26, M4b-10).
+
+    The snapshots of one dataset go in one ``zfs destroy ds@a,b,c`` of at
+    most :data:`DESTROY_GROUP` names: the kernel checks them all and destroys
+    none when one fails (zfs-2.4.1 module/zfs/dsl_destroy.c:589-601), and the
+    names of a failed group are then destroyed one by one, so what is kept and
+    what failed stay exact. Never a ``%`` range (redesign §7).
+    """
     count, failed = 0, []
+    groups: dict[str, list[tuple[str, str]]] = {}
+    singles: list[tuple[str, str]] = []
     for target, reason in targets:
+        ds, sep, name = target.partition("@")
+        if sep and "#" not in target:
+            groups.setdefault(ds, []).append((name, reason))
+        else:
+            singles.append((target, reason))
+    for ds, items in groups.items():
+        for i in range(0, len(items), DESTROY_GROUP):
+            chunk = items[i : i + DESTROY_GROUP]
+            if len(chunk) == 1:
+                singles.append((f"{ds}@{chunk[0][0]}", chunk[0][1]))
+                continue
+            for name, reason in chunk:
+                log.file(f"  to remove {ds}@{name}: {reason}")
+            res = sh.run(f"zfs destroy {_q(ds + '@' + ','.join(n for n, _ in chunk))}", log=log)
+            if res.ok:
+                count += len(chunk)
+                for name, reason in chunk:
+                    log.info(f"  removed {ds}@{name}: {reason}")
+                continue
+            log.file(f"  {ds}: {len(chunk)} snapshot(s) not removed together, one by one now")
+            singles += [(f"{ds}@{name}", reason) for name, reason in chunk]
+    for target, reason in singles:
         res = sh.run(f"zfs destroy {_q(target)}", log=log)
         if res.ok:
             count += 1
@@ -1320,9 +1371,9 @@ def subtree_datasets(top: str) -> list[tuple[str, bool]] | None:
 
 
 def apply_prune(pool: str, prune: Prune, log: Log) -> tuple[int, list[str]]:
-    """Destroy what the plan allows, each snapshot by its exact name, one per
-    command, every one logged with its reason (never a % range, redesign
-    §7); a subtree destroyed whole names every snapshot and every dataset
+    """Destroy what the plan allows, each snapshot by its exact name, grouped
+    per dataset (:func:`destroy_snapshots`), every one logged with its reason
+    (never a % range, redesign §7); a subtree destroyed whole names every snapshot and every dataset
     it takes first, from the drive's own listing, and is left alone when
     that listing fails (M3R-11, M3F-8 8a). Returns how many went and what
     could not be destroyed."""

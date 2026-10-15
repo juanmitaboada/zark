@@ -6471,6 +6471,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert not any(n.startswith("prepare_") for n in fake.names("rpool/keystore"))  # I-B
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("777", home[0])]
         assert fake.ds["blue"].props["org.zark:last-point"] == home[0]
+        assert fake.ds["blue"].props["org.zark:first-point"] == home[0]  # M3P.25
         assert _marked(fake, "blue") == {home[0]}
 
     def test_prepare_records_versions_and_that_it_shares_nothing(self):
@@ -9430,6 +9431,12 @@ def _engine_run(
         return engine.execute(eng, cleanup, decide or (lambda _p, _r: True))
 
 
+def _destroyed(cmd: str) -> list[str]:
+    """``ds@name`` for each name of ``zfs destroy ds@a,b,c``."""
+    ds, _, spec = cmd.split()[-1].partition("@")
+    return [f"{ds}@{n}" for n in spec.split(",")]
+
+
 def _origin_points(fake: FakeZfs) -> list[str]:
     return sorted(
         f"{ds}@{s.name}"
@@ -11239,6 +11246,17 @@ class TestBackupCommand:
                 rc = int(e.code or 0)
         return cfg, rc
 
+    def test_a_drive_without_its_first_point_gets_it_at_the_next_backup(self) -> None:
+        """M3P.25 (M4b-9): a drive whose first point was not recorded (prepared
+        before rc5) records its oldest point at the start of the next backup."""
+        fake = _fresh_fake()
+        assert self._run(fake)[1] == 0
+        first = next(n for n in fake.names("backup/rpool/USERDATA/home") if repl.POINT_RE.match(n))
+        assert "org.zark:first-point" not in fake.ds["backup"].props  # no point before that run
+        fake.clock += 3600
+        assert self._run(fake)[1] == 0
+        assert fake.ds["backup"].props["org.zark:first-point"] == first
+
     def test_complete_backup(self) -> None:
         """Every dataset at the point, metadata written, last_backup_at recorded."""
         fake = _fresh_fake()
@@ -11905,6 +11923,14 @@ class TestRetentionPolicy:
         assert f"{self.BE}@{_pt('2026-11-30')}" in gone
         assert f"{self.BE}@{_pt('2026-11-16')}" not in gone  # now November's newest complete
 
+    def test_the_newest_whole_point_is_kept_before_a_newer_partial_one(self) -> None:
+        """M3V-1 (F5d): of the run-complete points, the one kept is the newest
+        whole one; a newer one a rollback left partial does not replace it."""
+        times = {_pt("2026-06-01"): _days_ago(30), _pt("2026-06-02"): _days_ago(29)}
+        complete = set(times)
+        assert ret.newest_complete(times, complete, {_pt("2026-06-01")}) == _pt("2026-06-01")
+        assert ret.newest_complete(times, complete, set()) == _pt("2026-06-02")
+
     def test_newest_complete_point_and_newest_snapshot_stay(self) -> None:
         """Rule 3: even far outside the window and past max_age."""
         dest = _drive(
@@ -11934,6 +11960,21 @@ class TestRetentionPolicy:
         dest = _drive({self.BE: [*old, (_pt("2026-12-01"), _days_ago(45))]})
         assert ret.plan_prune(dest, {_pt("2026-12-01")}, ret.Policy(), NOW).empty
         assert ret.plan_prune(_drive({self.BE: old}), set(), ret.Policy(), NOW).empty
+
+    def test_the_recorded_first_point_keeps_the_history_boundary(self) -> None:
+        """M3P.25 (M4b-9): once the policy removed the drive's first points,
+        a sanoid snapshot after the recorded first point is still under the
+        policy, not 1.x history; one before it stays history."""
+        old = [
+            ("autosnap_2026-03-01_00:00:00_monthly", _days_ago(320)),
+            ("autosnap_2026-11-01_00:00:00_daily", _days_ago(75)),
+        ]
+        dest = _drive({self.BE: [*old, (_pt("2026-12-01"), _days_ago(45))]})
+        complete = {_pt("2026-12-01")}
+        assert ret.plan_prune(dest, complete, ret.Policy(), NOW).empty  # boundary moved
+        first = repl.point_name(datetime.fromtimestamp(_days_ago(80), UTC))
+        gone = _gone(ret.plan_prune(dest, complete, ret.Policy(), NOW, first=first))
+        assert gone == {f"{self.BE}@autosnap_2026-11-01_00:00:00_daily"}
 
     def test_other_names_pinned_and_protected_stay(self) -> None:
         """Manual names, clone origins, holds and this run's bases are never removed."""
@@ -12115,7 +12156,8 @@ class TestRetentionOnDrive:
             )
 
     def test_prune_by_exact_name_keeps_bases_and_marks_true(self) -> None:
-        """Every removal is one `zfs destroy` of one exact name; the next
+        """Every removal is an exact name, one `zfs destroy` per dataset
+        (M3P.26); the next
         backup is still incremental; what is left of a pruned point is not
         complete (M2V-4)."""
         fake = self._drive_with_history()
@@ -12127,8 +12169,10 @@ class TestRetentionOnDrive:
             count, failed = engine.apply_prune("backup", prune, Log())
         destroys = [c for c in fake.calls[before:] if c.startswith("zfs destroy")]
         assert count == len(prune.snapshots) and not failed
-        assert len(destroys) == count
-        assert all("%" not in c and "," not in c and " -r " not in c for c in destroys)
+        assert all("%" not in c and " -r " not in c for c in destroys)
+        named = [_destroyed(c) for c in destroys]
+        assert sorted(t for ts in named for t in ts) == sorted(f"backup/{t}" for t in gone)
+        assert len({ts[0].partition("@")[0] for ts in named}) == len(destroys)  # one per dataset
         for rel in (
             "rpool/ROOT/be",
             "rpool/USERDATA/home",
@@ -12140,6 +12184,58 @@ class TestRetentionOnDrive:
             assert fake.ds[f"backup/{rel}"].snaps, rel  # I-E: every dataset keeps its newest
         assert P1 not in _marked(fake)
         assert _engine_run(fake, "backup", "111", "zark_2026-10-11_10:00:00Z").ok
+
+    def test_the_first_point_is_recorded_once_before_retention(self) -> None:
+        """M3P.25 (M4b-9): a drive without org.zark:first-point gets its
+        oldest backup point; a recorded one is never rewritten."""
+        fake = self._drive_with_history()
+        fake.ds["backup"].props.pop("org.zark:first-point", None)
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            engine.record_first_point("backup", Log())
+            assert fake.ds["backup"].props["org.zark:first-point"] == P1
+            assert engine.drive_complete("backup").first == P1
+            fake.ds["backup"].props["org.zark:first-point"] = P2
+            engine.record_first_point("backup", Log())
+        assert fake.ds["backup"].props["org.zark:first-point"] == P2
+
+    def test_destroys_are_grouped_per_dataset_at_most_100_names(self) -> None:
+        """M3P.26 (M4b-10): 250 snapshots of one dataset and one of another:
+        three commands for the first (100, 100, 50) and one plain one."""
+        fake = FakeZfs()
+        fake.pool("backup")
+        fake.dataset("backup/a")
+        fake.dataset("backup/b")
+        names = [f"s{i:03}" for i in range(250)]
+        for n in names:
+            fake.snap("backup/a", n)
+        fake.snap("backup/b", "only")
+        targets = [(f"backup/a@{n}", "old") for n in names] + [("backup/b@only", "old")]
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            count, failed = engine.destroy_snapshots(targets, Log())
+        destroys = [c for c in fake.calls if c.startswith("zfs destroy")]
+        assert (count, failed) == (251, [])
+        assert [len(_destroyed(c)) for c in destroys] == [100, 100, 50, 1]
+        assert destroys[-1] == "zfs destroy backup/b@only"
+        assert not fake.names("backup/a") and not fake.names("backup/b")
+
+    def test_a_group_that_fails_is_retried_one_by_one(self) -> None:
+        """The kernel destroys none of a group when one name fails; the
+        others then go one by one and only the held one is reported."""
+        fake = FakeZfs()
+        fake.pool("backup")
+        fake.dataset("backup/a")
+        for n in ("x", "y", "z"):
+            fake.snap("backup/a", n)
+        fake.ds["backup/a"].snaps[1].userrefs = 1  # zfs hold
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            count, failed = engine.destroy_snapshots(
+                [(f"backup/a@{n}", "old") for n in ("x", "y", "z")], Log()
+            )
+        assert (count, failed) == (2, ["backup/a@y"])
+        assert fake.names("backup/a") == ["y"]
+        assert "removed backup/a@x: old" in out.getvalue()
+        assert "could not remove backup/a@y" in out.getvalue()
 
     def test_a_dataset_destroyed_on_the_drive_does_not_take_the_history(self) -> None:
         """A DESTROY the user confirmed for one dataset leaves the older points
@@ -12644,7 +12740,8 @@ class TestPruneCommand:
         destroys = [
             c for c in fake.calls[before:] if c.startswith("zfs destroy ") and "-nvp" not in c
         ]
-        assert destroys and all("%" not in c and "," not in c and " -r" not in c for c in destroys)
+        assert destroys and all("%" not in c and " -r" not in c for c in destroys)
+        assert len({_destroyed(c)[0].partition("@")[0] for c in destroys}) == len(destroys)
         assert not any(n.startswith("autosnap_") for n in fake.names("rpool/USERDATA/home"))
         assert fake.bookmarks("rpool/USERDATA/home")
         with patch_sh(fake), redirect_stdout(StringIO()):
@@ -12941,6 +13038,83 @@ class TestPruneCommand:
         assert P2 not in fake.names("backup/rpool/ROOT/be")
         assert P2 in fake.names("backup/rpool/USERDATA/home")
         assert "could not remove" not in out.getvalue()
+
+    def _prune_drive_run(
+        self, fake: FakeZfs, *answers: AbstractContextManager[object]
+    ) -> tuple[str, bool]:
+        """``zark prune`` on the drive ``backup``; its output and whether it
+        stopped (fatal)."""
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        drive = ConnectedDrive("backup", "111", "d", "/dev/sdb", True, False, False, "exported")
+        out = StringIO()
+        with ExitStack() as stack:
+            for cm in (
+                patch_sh(fake),
+                redirect_stdout(out),
+                redirect_stderr(StringIO()),
+                patch.object(ZFS, "import_backup_pool", return_value=True),
+                patch.object(prune_mod, "backup_device", return_value="/dev/sdb1"),
+                patch.object(prune_mod, "prompt_eject_or_attach"),
+                patch.object(Cleanup, "register", lambda _self: None),
+                patch.object(prune_mod.time, "time", return_value=float(NOW)),
+                *answers,
+            ):
+                stack.enter_context(cm)
+            try:
+                prune_mod._prune_drive(cfg, drive, Log())  # pylint: disable=protected-access
+            except SystemExit:
+                return out.getvalue(), True
+        return out.getvalue(), False
+
+    def test_what_the_policy_cannot_remove_is_named(self) -> None:
+        """M3X.5: a held snapshot the policy would remove is reported as kept,
+        with why, as backup's retention does."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            dest = engine.read_dest("backup", strict=True)
+            prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
+        held = prune.snapshots[0]
+        rel, _, name = held.target.partition("@")
+        next(x for x in fake.ds[f"backup/{rel}"].snaps if x.name == name).userrefs = 1
+        out, stopped = self._prune_drive_run(fake, *self._answers([], ["0"], "", False))
+        assert not stopped
+        assert f"kept backup/{held.target}: held (zfs hold)" in out
+
+    def test_prune_reads_the_recorded_first_point(self) -> None:
+        """M3P.25 (M4b-9): with the first point gone from the drive, the sanoid
+        snapshots after the recorded one stay under the policy: removed by
+        it, never offered as 1.x history."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        first = repl.point_name(datetime.fromtimestamp(_days_ago(70), UTC))
+        fake.ds["backup"].props["org.zark:first-point"] = first
+        for ds, d in fake.ds.items():
+            if ds.startswith("backup/"):
+                d.snaps = [x for x in d.snaps if x.name != P1]
+        out, stopped = self._prune_drive_run(fake, *self._answers([], ["0"], "", False))
+        assert not stopped
+        assert "retention removes nothing" not in out  # the policy takes them
+        assert "1.x history" not in out
+
+    def test_a_failed_read_after_the_retention_is_fatal(self) -> None:
+        """M3V-2 (F8c): the drive read again after the retention is applied
+        must be read in full; a failed listing stops prune before the
+        oldest points are offered."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        real = engine.apply_prune
+
+        def apply_then_fail(pool: str, prune: ret.Prune, log: Log) -> tuple[int, list[str]]:
+            r = real(pool, prune, log)
+            fake.fail_cmds.add("zfs list -Hp -t filesystem,volume")
+            return r
+
+        out, stopped = self._prune_drive_run(
+            fake,
+            patch.object(prune_mod.engine, "apply_prune", side_effect=apply_then_fail),
+            *self._answers([], ["1"], "PRUNE", True),
+        )
+        assert stopped and "Cannot read backup" in out
+        assert "Beyond the policy" not in out
 
     def test_prune_is_fatal_when_the_pins_cannot_be_read(self) -> None:
         """M3R-8: zark prune on a drive stops before any removal."""

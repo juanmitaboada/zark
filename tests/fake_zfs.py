@@ -403,7 +403,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         if any(a.startswith("-") and "n" in a for a in args[:-1]):
             return self._destroy_dry(target)
         if "@" in target and "," in target:
-            return _err("fake: zark destroys snapshots one by one")
+            return self._destroy_group(target)
         if "@" in target or "#" in target:
             sep = "@" if "@" in target else "#"
             ds, name = target.split(sep)
@@ -424,6 +424,24 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err("filesystem has children")
         for n in [*kids, target]:
             self.ds.pop(n, None)
+        return _ok()
+
+    def _destroy_group(self, target: str) -> RunResult:
+        """``zfs destroy ds@a,b,c``: a missing name is skipped, and one that
+        cannot go keeps them all (dsl_destroy.c:589-601)."""
+        ds, _, spec = target.partition("@")
+        if ds not in self.ds:
+            return _err("does not exist")
+        names = spec.split(",")
+        hit = [x for x in self.ds[ds].snaps if x.name in names]
+        if not hit:
+            return _err("could not find any snapshots to destroy; check snapshot names.")
+        for x in hit:
+            if x.clones:
+                return _err(f"cannot destroy '{ds}@{x.name}': snapshot has dependent clones")
+            if x.userrefs or f"{ds}@{x.name}" in self.fail_cmds:
+                return _err(f"cannot destroy snapshot {ds}@{x.name}: dataset is busy")
+        self.ds[ds].snaps = [x for x in self.ds[ds].snaps if x not in hit]
         return _ok()
 
     def _destroy_dry(self, target: str) -> RunResult:
