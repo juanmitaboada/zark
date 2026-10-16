@@ -25,11 +25,16 @@ consolidation that preceded them.
   (each child runs in a process group of its own: `sh -c` stays the
   parent of its command, so a signal to the shell alone would not reach
   `zfs`), waits up to 30 seconds and then SIGKILLs what is left, and only
-  then lets the command unwind. The command's cleanup runs once, from
-  `atexit`, with the three signals still ignored. Before, SIGTERM ran the
-  cleanup from inside the handler while the child kept running and the
-  command went on (a backup could export its pool under a running
-  receive), and SIGHUP killed zark with no cleanup at all.
+  then lets the command unwind. The command's cleanup runs once with the
+  three signals ignored, whether a signal stopped the run (then from
+  `atexit`) or the command ended normally and runs it itself; after a
+  normal end the handler is back for what follows (a backup's read-back
+  and eject prompt). The interruption line names what it stops
+  ("Interrupted by SIGTERM: stopping zfs send | zfs receive, then
+  cleaning up"). Before, SIGTERM ran the cleanup from inside the handler
+  while the child kept running and the command went on (a backup could
+  export its pool under a running receive), and SIGHUP killed zark with
+  no cleanup at all.
 - **Output whose reader went away stops the command through its
   cleanup** (V-6, M1P.23, M4b-2). SIGPIPE stays ignored, as Python
   starts. The first write to stdout or stderr that finds no reader ends
@@ -49,10 +54,15 @@ consolidation that preceded them.
   fails, zark unmounts the tree in every other mount namespace that still
   lists it (those of `/proc/*/ns/mnt` and the ones snapd pins in
   `/run/snapd/ns`), with `nsenter --mount=<ns> umount -R`, then retries
-  the export. What still cannot be released is named. Datasets are told
-  from binds by their source, a ZFS mount from one of the pools being
-  released (W-2); the mount table is read again after the unmount, and
-  what is still mounted here is named (R2 11.4a).
+  the export. Only copies of zark's tree are touched there: a ZFS mount
+  from one of the pools being released, or a mount with the same type
+  and source as one the tree had here (a chroot's binds); anything else
+  at those paths, in a namespace with a root of its own, is left alone.
+  What still cannot be released is named with the namespace's process
+  (or the snap whose namespace snapd pins). Datasets are told from binds
+  by their source, a ZFS mount from one of the pools being released
+  (W-2); the mount table is read again after the unmount, and what is
+  still mounted here is named (R2 11.4a).
 - **Anchors whatever the run's ending** (8b, M2R-2, M2P.8, M4b-4). The
   drive's newest snapshot of every rpool dataset keeps a bookmark of that
   drive in the source, however the run ended: at the end of every run
@@ -60,7 +70,9 @@ consolidation that preceded them.
   newest snapshot the drive holds when the source still has it (a
   dataset that reached the point, a `-I` stream cut after a carried
   snapshot). After an interruption the point stays only where a partial
-  receive needs it to resume, or where its anchor failed.
+  receive needs it to resume, or where its anchor failed; zark.log names
+  every point snapshot removed or kept, with its reason, and any destroy
+  that failed.
 - **Every backup point names its drive** (`org.zark:point-for`, set by
   the same `zfs snapshot` that takes it). When a backup of another drive
   or `zark prune` removes a point a run left in the source, it is first
@@ -128,6 +140,23 @@ consolidation that preceded them.
   before its first mount (X-3); the propagation and `clean` real-mount
   tests assert that nothing is left here or in the other namespace (X-1,
   X-2).
+- **The review's fix round (M4bR-1 ... M4bR-8).**
+  - `undo_point` logs every removal of the point and what it keeps, with
+    the reason, and warns when a destroy fails, as every other removal in
+    the source does; it lists the source first and removes the point only
+    where it exists (M4bR-1, M4bF-4 4a).
+  - The normal-end cleanup of a command ignores the three exit signals
+    too, so a Ctrl-C during it no longer cuts it short; the handler is
+    back once it is over (M4bR-2, M4bF-5 5a).
+  - `umount` and `clean` release, in another mount namespace, only copies
+    of zark's tree, told by source and type, never by path alone
+    (M4bR-3, M4bF-6 6a).
+  - The interruption line names the child it stops (M4bR-8, M4bF-7 7a);
+    NOT UNMOUNTED names the process of a namespace that still holds a copy
+    (M4bR-8, M4bF-8 8a).
+  - The stop wait of a child is read when the child is stopped, so the
+    SIGKILL fallback can be tested; a test for each of the review's other
+    survivors (M4bR-7).
 
 #### Known limitations
 
@@ -140,6 +169,12 @@ consolidation that preceded them.
 - A backup of one drive can remove a point that another drive's partial
   receive needs to resume: that drive then discards the partial receive
   and sends the dataset again from its anchor.
+- A backup point that names no drive, such as the one a recover
+  restores, is removed by another drive's verified run as if that drive
+  held it (M4bF-2). The drive the recover read then shares with the
+  source only what recover's monthly base gave it, and its next backup
+  resends the rest in full. M4c anchors what recover restored for the
+  drive it read.
 - On bpool, which takes no bookmarks, a `-I` stream cut after a carried
   snapshot still needs a ROLLBACK at the next run (about 150 MB).
 

@@ -550,9 +550,11 @@ for the canonical end-to-end sequences.
     **prepare_\*** snapshots; yes/no), the backup points left in the source
     by interrupted runs or by a run whose anchor failed (typed **PRUNE**;
     a point names its drive, **org.zark:point-for**, and is anchored for
-    that drive before it goes, so the drive keeps its base; for a point
-    from before 2.0.0-rc5 a drive that received part of it rolls those
-    datasets back at its next backup, after asking; either way a drive
+    that drive before it goes, so the drive keeps its base; a point that
+    names no drive (one from before 2.0.0-rc5, or one a **recover**
+    restored) is removed without an anchor, and a drive that received
+    part of it rolls those datasets back at its next backup, after asking;
+    either way a drive
     whose transfer was interrupted sends it again) and a drive's **bpool** anchors
     (typed **PRUNE**; that drive's next backup then asks to roll those
     datasets back to a shared **sanoid** snapshot, which removes its newest
@@ -688,8 +690,10 @@ for the canonical end-to-end sequences.
     pool. If the export fails because a copy of the tree stays mounted in
     another mount namespace (a service's or a snap's, including those
     **snapd** pins in */run/snapd/ns*), it unmounts the tree there with
-    **nsenter** and tries the export again; what still cannot be released
-    is named, and it exits 1.
+    **nsenter** (only copies of its own tree: a dataset of the pool, or
+    a mount with the same type and source as one the tree had here) and
+    tries the export again; what still cannot be released is named with
+    the namespace's process, and it exits 1.
 
     With the *target* **local** (aliases **system**, **rpool**) it exports
     the installed system's pools mounted by **mount local**, unmounting
@@ -847,12 +851,15 @@ To verify a recovery without rebooting:
     stops the running command first (up to 30 seconds, then SIGKILL),
     ignores further signals, then runs its cleanup once: it exports any
     pools it imported, closes any keystore it opened and starts the
-    **sanoid** timer again if it stopped it. In **chroot** and **simulate**
+    **sanoid** timer again if it stopped it. The cleanup a command runs at
+    its normal end ignores the three signals the same way, and handles
+    them again once it is over. In **chroot** and **simulate**
     a Ctrl-C belongs to the shell or QEMU. A backup interrupted during its
     transfers anchors, for the drive, the newest snapshot the drive holds
     of every dataset, and keeps its point in the source only where a
     partial transfer needs it; the next backup resumes them and removes
-    it.
+    it. The log names every point snapshot removed or kept, with the
+    reason.
 
 # DEPENDENCIES
 
