@@ -10643,6 +10643,71 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         hourly = fake.ds["backup/rpool/USERDATA/home"].snaps[-1].guid
         assert any(b.guid == hourly for b in fake.ds["rpool/USERDATA/home"].bookmarks)
 
+    def _interrupted(self, log_path: str, fail: str = "") -> tuple[FakeZfs, "engine.Run"]:
+        """An interrupted run as above, logging to ``log_path``; ``fail``
+        names a dataset whose point the fake refuses to destroy."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-08_08:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        real_pipe, real_run = fake.mock_run_pipe, fake.mock_run
+
+        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+            r = real_pipe(cmd1, cmd2, log)
+            if "rpool/USERDATA/home" in cmd1 and not r.ok:
+                raise KeyboardInterrupt
+            return r
+
+        def run_(cmd: str, *args: object, **kwargs: object) -> RunResult:
+            if fail and cmd == f"zfs destroy {fail}@{P2}":
+                return RunResult(1, "", "cannot destroy snapshot: dataset is busy\n", cmd)
+            return real_run(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        fake.mock_run = run_  # type: ignore[method-assign]
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            log = Log(log_path)
+            cleanup = Cleanup(log)
+            eng = engine.Run("backup", "111", log, P2, sleep=lambda _s: None)
+            try:
+                _ = engine.execute(eng, cleanup, lambda _p, _r: True)
+            except KeyboardInterrupt:
+                pass
+            cleanup.run()
+        return fake, eng
+
+    def test_an_interrupted_run_logs_every_point_it_removes_and_keeps(self) -> None:
+        """M4bR-1 (M4bF-4 4a): the log names each destroy with its reason,
+        what stays and why, and a destroy that failed; before, the destroys
+        of the point left no line at all (review E4)."""
+        log_path = os.path.join(tempfile.mkdtemp(), "zark.log")
+        fake, eng = self._interrupted(log_path, fail="rpool/var/lib/docker")
+        lines = Path(log_path).read_text(encoding="utf-8").splitlines()
+        reached = [r for r in eng.started if P2 in fake.names(f"backup/{r}") and "bpool" not in r]
+        assert reached
+        for rel in reached:
+            assert any(f"removed {rel}@{P2}: anchored for backup first" in ln for ln in lines), rel
+        not_started = [
+            r for r in engine.expected(eng.origin) if r not in eng.started and "bpool" not in r
+        ]
+        assert not_started
+        for rel in not_started:
+            if rel == "rpool/var/lib/docker":
+                continue
+            assert any(
+                f"removed {rel}@{P2}: not on the backup, nothing to resume" in ln for ln in lines
+            ), rel
+        assert any(
+            f"kept rpool/USERDATA/home@{P2}: partial receive to resume" in ln for ln in lines
+        )
+        assert any(
+            f"could not remove rpool/var/lib/docker@{P2}: cannot destroy snapshot" in ln
+            for ln in lines
+        ), lines
+        assert sorted(_origin_points(fake)) == sorted(
+            [f"rpool/USERDATA/home@{P2}", f"rpool/var/lib/docker@{P2}"]
+        )
+
     def test_every_point_names_its_drive(self) -> None:
         """8b (M4b-4): the point is taken with ``org.zark:point-for`` in the
         same ``zfs snapshot``, so one left in origin says whose it is."""

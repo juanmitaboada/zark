@@ -893,7 +893,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 self.log.warn(f"  could not remove {v.target}: {r.stderr.strip()}")
         return dropped
 
-    def undo_point(self) -> None:
+    def undo_point(self) -> None:  # pylint: disable=too-many-locals
         """Cleanup action for a run that did not end normally (8b, M4b-4).
 
         The backup pool is still imported here. Every dataset the drive holds
@@ -901,7 +901,9 @@ class Run:  # pylint: disable=too-many-instance-attributes
         newest snapshot the drive holds of every other rpool dataset
         (:meth:`anchor_held`). The point then goes wherever no partial receive
         needs it (the next run resumes one), or wherever the drive cannot be
-        read and no receive began (the rule before 8b).
+        read and no receive began (the rule before 8b). Every removal is
+        named and logged with its reason, and so is what stays (M4bR-1,
+        M4bF-4 4a): after an interruption the log is what the user reads.
         """
         try:
             dest = read_dest(self.pool, strict=True)
@@ -909,27 +911,50 @@ class Run:  # pylint: disable=too-many-instance-attributes
             self.log.warn(f"Anchors not checked after the interruption: {e}")
             dest = None
         at_point: list[str] = []
-        partial: set[str] = set()
+        kept: dict[str, str] = {}  # rel -> why the point stays there
         if dest is not None:
             for rel in expected(self.origin):
                 d = dest.get(rel)
                 own = next((s for s in self.origin[rel].snaps if s.name == self.point), None)
                 if d is not None and d.token:
-                    partial.add(rel)
+                    kept[rel] = "partial receive to resume"
                 elif d is not None and own is not None and any(x.guid == own.guid for x in d.snaps):
                     at_point.append(rel)
             # Anchored (renamed on bpool): no longer a point to remove.
             renamed = {rel for rel in at_point if is_bpool(rel)}
             failed = set(self.anchor(at_point))
             _ = self.anchor_held()
-            keep = partial | {rel for rel in failed if not is_bpool(rel)} | (renamed & failed)
+            kept.update((rel, f"could not anchor it for {self.pool}") for rel in failed)
             gone = renamed - failed
+            why = {rel: f"anchored for {self.pool} first" for rel in at_point}
+            other = "not on the backup, nothing to resume"
         else:
-            keep, gone = set(self.started), set()
+            kept = dict.fromkeys(self.started, "the drive could not be read and a receive began")
+            gone = set()
+            why = {}
+            other = "the drive could not be read and no receive began"
+        # Only where the point exists: a run that failed between rpool's
+        # snapshot and bpool's has nothing to remove on bpool.
+        try:
+            origin = read_origin(self.pools, strict=True)
+            present = {
+                rel for rel, o in origin.items() if any(s.name == self.point for s in o.snaps)
+            }
+        except ReadError as e:
+            self.log.warn(f"Could not list the points left in origin: {e}")
+            present = None
         for rel in expected(self.origin):
-            if rel in keep or rel in gone:
+            target = f"{rel}@{self.point}"
+            if rel in gone or (present is not None and rel not in present):
                 continue
-            _ = sh.run(f"zfs destroy {_q(f'{rel}@{self.point}')}")
+            if rel in kept:
+                self.log.info(f"  kept {target}: {kept[rel]}")
+                continue
+            r = sh.run(f"zfs destroy {_q(target)}", log=self.log)
+            if r.ok:
+                self.log.info(f"  removed {target}: {why.get(rel, other)}")
+            else:
+                self.log.warn(f"  could not remove {target}: {r.stderr.strip()}")
         self.resume_sanoid()
 
 
