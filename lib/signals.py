@@ -53,6 +53,7 @@ _log: list[Log] = []
 _teardown: list[bool] = []
 _interactive: list[bool] = []
 _running: list[str] = []
+_installed: list[bool] = []
 
 
 def received() -> int | None:
@@ -88,6 +89,7 @@ def install(log: Log | None = None) -> None:
     guard_output(log)
     for sig in EXIT_SIGNALS:
         _ = signal.signal(sig, _on_signal)
+    _installed[:] = [True]
 
 
 def guard_output(log: Log | None = None) -> None:
@@ -101,8 +103,27 @@ def guard_output(log: Log | None = None) -> None:
 
 
 def teardown() -> None:
-    """The cleanup has started: a dead stdout no longer stops anything."""
+    """The cleanup has started: a dead stdout no longer stops anything, and
+    the three exit signals are ignored (M4bR-2), whether a signal started the
+    stop (the handler ignored them already) or the command ended normally
+    and runs its cleanup itself; so a signal during the cleanup is discarded
+    by the kernel (Linux 7.0 kernel/signal.c:935, 4337-4360) and every step
+    runs. Only when :func:`install` ran: a test's Cleanup leaves its
+    process alone."""
     _teardown[:] = [True]
+    if _installed:
+        for sig in EXIT_SIGNALS:
+            _ = signal.signal(sig, signal.SIG_IGN)
+
+
+def resume() -> None:
+    """The normal-end cleanup is over and the command goes on (a read-back,
+    an eject prompt): the handler is back, and a dead stdout stops the
+    command again. Not called when a signal stopped the run."""
+    _teardown.clear()
+    if _installed:
+        for sig in EXIT_SIGNALS:
+            _ = signal.signal(sig, _on_signal)
 
 
 def running(name: str | None) -> None:

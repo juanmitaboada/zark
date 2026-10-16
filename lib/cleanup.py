@@ -302,13 +302,25 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         """
         return list(self._exported_pools)
 
-    def run(self):  # pylint: disable=too-many-branches,too-many-statements
-        """Execute cleanup. Safe to call multiple times."""
+    def run(self):
+        """Execute cleanup. Safe to call multiple times.
+
+        The three exit signals are ignored while it runs and, when no signal
+        stopped the run, handled again afterwards (M4bR-2, M4bF-5 5a).
+        """
         if getattr(self, "_disabled", False):
             return
         if not (self._mounts or self._keystores or self._pools or self._dirs or self._actions):
             return
         signals.teardown()
+        try:
+            self._run()
+        finally:
+            if signals.received() is None:
+                signals.resume()
+
+    def _run(self):  # pylint: disable=too-many-branches,too-many-statements
+        """Every step, failures reported and the next one still run."""
         self.log.info("Cleaning up...")
 
         self._exported_pools = []

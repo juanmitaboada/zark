@@ -33,6 +33,9 @@ passes it on. Scenarios:
                     terminal runs (lib.signals.run_interactive)
     stubborn:<SIGS> the same as run:, with a child that ignores SIGTERM and a
                     stop wait of half a second (STOP_WAIT_SECONDS patched)
+    normalend:<SIG>[,<SIG>]  the command ends normally and runs cleanup.run()
+                    itself; the first signal arrives while a cleanup step's
+                    child runs, the second (if any) after the cleanup
 
 Writes ``<workdir>/result.json``: ``cleanup`` (how many times it ran),
 ``children_alive`` (children still running when it ran), ``continued``
@@ -81,7 +84,7 @@ def _sender(names: list[str], delay: float, apart: bool = False) -> None:
     _ = subprocess.Popen(["sh", "-c", script], start_new_session=True)  # pylint: disable=consider-using-with
 
 
-def main() -> None:  # pylint: disable=too-many-locals
+def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Run one scenario; exit as zark's main does."""
     work, scenario = sys.argv[1], sys.argv[2]
     kind, _, names = scenario.partition(":")
@@ -117,6 +120,12 @@ def main() -> None:  # pylint: disable=too-many-locals
     cleanup = Cleanup(log)
     cleanup.register()
     cleanup.track_action(action)
+    if kind == "normalend":
+        # Runs before `action` (newest first): the signal lands in its child.
+        def slow() -> None:
+            _ = sh.run("sleep 2")
+
+        cleanup.track_action(slow)
     if kind == "stubborn":
         # The child ignores the stop: half a second, then SIGKILL. The wait
         # is read when stop_children runs, so the module constant counts.
@@ -134,8 +143,17 @@ def main() -> None:  # pylint: disable=too-many-locals
 
         signals.stop_children = recording_stop
     if sigs:
-        _sender(sigs[:1] if kind == "cleanup" else sigs, 0.5, apart=kind == "interactive")
+        one = kind in ("cleanup", "normalend")
+        _sender(sigs[:1] if one else sigs, 0.5, apart=kind == "interactive")
     try:
+        if kind == "normalend":
+            cleanup.run()
+            result["continued"] = True
+            write()
+            if len(sigs) > 1:
+                _sender([sigs[1]], 0.0)
+                time.sleep(3.0)
+            sys.exit(0)
         if kind == "interactive":
             _ = signals.run_interactive(["sh", "-c", f"echo $$ > {pids[0]}; exec sleep 60"])
         elif kind == "quietend":

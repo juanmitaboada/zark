@@ -8767,6 +8767,22 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         self._assert_stopped("cleanup:TERM,HUP", 128 + signal.SIGTERM)
         self._assert_stopped("cleanup:INT,TERM", 128 + signal.SIGINT)
 
+    def test_a_signal_during_the_normal_end_cleanup_stops_nothing(self):
+        # M4bR-2 (M4bF-5 5a): the explicit cleanup.run() of a command that
+        # ended normally ignores the three signals too; every step runs and
+        # the command goes on to its ending.
+        rc, result, took = self._run("normalend:TERM")
+        expected = {"cleanup": 1, "children_alive": [], "continued": True, "cleanup_done": True}
+        got = {k: result.get(k) for k in expected}
+        assert (rc, got) == (0, expected) and took < 20, (rc, result, took)
+        assert result["interrupted"] == [], result["interrupted"]
+
+    def test_after_the_normal_end_cleanup_a_signal_stops_the_command_again(self):
+        # M4bF-5 5a: the handler is back once the cleanup is over (a backup's
+        # read-back and eject prompt still answer a Ctrl-C).
+        rc, result, _ = self._run("normalend:TERM,INT")
+        assert rc == 130 and result.get("continued") is True, (rc, result)
+
     def test_the_interruption_line_names_the_child_it_stops(self):
         # M4bR-8 (M4bF-7 7a): "stopping <child>", by executable and
         # subcommand, both sides of a pipeline; the full command is in the
