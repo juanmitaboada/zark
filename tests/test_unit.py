@@ -87,6 +87,7 @@ import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa:
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.health as health_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.live as live_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
@@ -8713,6 +8714,71 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         ):
             entry.main()
         assert order == ["guard", "install", "prune"], order
+
+
+class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
+    """M4aF-6 (M4b-14): on a live session the installer's probe service is
+    stopped, for this session only, before a command that imports pools."""
+
+    @staticmethod
+    def _mock(live: bool, snap_ok: bool = True) -> MockShell:
+        mock = MockShell()
+        mock.on("cat /proc/cmdline").succeeds(
+            "BOOT_IMAGE=/casper/vmlinuz boot=casper" if live else ""
+        )
+        mock.on("test -d /rofs").returns(0 if live else 1)
+        mock.on("test -d /cow").returns(0 if live else 1)
+        stop = mock.on(f"snap stop {live_mod.PROBE_SERVICE}")
+        if snap_ok:
+            stop.succeeds("")
+        else:
+            stop.fails('error: snap "ubuntu-desktop-bootstrap" not found')
+        return mock
+
+    def test_stopped_before_an_import_on_a_live_session(self) -> None:
+        mock = self._mock(live=True)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert live_mod.stop_installer_probe("recover", Log())
+        assert mock.was_called("snap stop ubuntu-desktop-bootstrap.subiquity-server")
+        assert not mock.was_called("--disable")  # runtime only
+
+    def test_left_alone_on_an_installed_system_or_without_an_import(self) -> None:
+        for live, cmd in ((False, "mount"), (True, "status"), (True, "backup")):
+            mock = self._mock(live=live)
+            with patch_sh(mock), redirect_stdout(StringIO()):
+                assert not live_mod.stop_installer_probe(cmd, Log())
+            assert not mock.was_called("snap stop"), (live, cmd)
+
+    def test_a_missing_snap_is_not_an_error(self) -> None:
+        mock = self._mock(live=True, snap_ok=False)
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            assert not live_mod.stop_installer_probe("clean", Log())
+        assert "ERROR" not in out.getvalue() and "FATAL" not in out.getvalue()
+
+    def test_the_entry_point_stops_it_before_the_command(self) -> None:
+        path = str(Path(__file__).resolve().parent.parent / "zark")
+        loader = importlib.machinery.SourceFileLoader("zark_entry", path)
+        spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
+        assert spec is not None
+        entry = importlib.util.module_from_spec(spec)
+        loader.exec_module(entry)
+        order: list[str] = []
+        with (
+            patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.geteuid", return_value=0),
+            patch("lib.signals.guard_output"),
+            patch.object(lock_mod, "guard"),
+            patch("lib.signals.install"),
+            patch.object(
+                live_mod,
+                "stop_installer_probe",
+                side_effect=lambda c, _l: order.append(f"stop {c}"),
+            ),
+            patch.object(prune_mod, "run", side_effect=lambda _a: order.append("prune")),
+        ):
+            entry.main()
+        assert order == ["stop prune", "prune"], order
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
