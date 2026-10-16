@@ -59,7 +59,37 @@ def _tops(targets: list[str]) -> list[str]:
     return [t for t in targets if not any(t.startswith(f"{o}/") for o in targets if o != t)]
 
 
-def _unmount_tree(root: str, pools: Collection[str]) -> list[str]:
+# A mount as findmnt prints it: (FSTYPE, SOURCE), the source with the bind's
+# root in brackets when it is a subdirectory (util-linux 2.41.3
+# misc-utils/findmnt.c:642-659).
+Mount = tuple[str, str]
+
+
+def _table(cmd: str) -> list[tuple[str, Mount]] | None:
+    """``findmnt -rn -o TARGET,FSTYPE,SOURCE`` (prefixed by ``cmd``) as
+    ``(target, (fstype, source))`` rows; None when it cannot be read."""
+    table = sh.run(f"{cmd} findmnt -rn -o TARGET,FSTYPE,SOURCE".strip())
+    if not table.ok:
+        return None
+    rows: list[tuple[str, Mount]] = []
+    for line in table.lines:
+        rest, _, source = line.rpartition(" ")
+        target, _, fstype = rest.rpartition(" ")
+        rows.append((target, (fstype, source)))
+    return rows
+
+
+def _is_copy(mount: Mount, pools: Collection[str], had: Collection[Mount]) -> bool:
+    """Whether a mount in another namespace is a copy of zark's tree: a ZFS
+    mount from one of the pools being released, or the same filesystem and
+    source as a mount the tree had here (a chroot's binds) (M4bR-3,
+    M4bF-6 6a). The path alone names nothing: in a namespace with a root of
+    its own, the same path can hold an unrelated mount."""
+    fstype, source = mount
+    return (fstype == "zfs" and _pool_of(source) in pools) or mount in had
+
+
+def _unmount_tree(root: str, pools: Collection[str]) -> tuple[list[str], frozenset[Mount]]:
     """``umount -R root``: the ZFS unmounts propagate, the other mounts do not.
 
     Under systemd mounts are shared. Every dataset mounted here has copies in
@@ -73,22 +103,23 @@ def _unmount_tree(root: str, pools: Collection[str]) -> list[str]:
     itself ZFS is a bind like any other (W-2).
 
     Returns what is still mounted at or below ``root`` here afterwards (a
-    process using it), empty when that cannot be read (R2§11.4a).
+    process using it), empty when that cannot be read (R2§11.4a), and the
+    mounts the tree had, by which :func:`release_elsewhere` tells their
+    copies in other namespaces.
     """
-    table = sh.run("findmnt -rn -o TARGET,FSTYPE,SOURCE")
     below: list[tuple[str, bool]] = []
-    for line in table.lines if table.ok else []:
-        rest, _, source = line.rpartition(" ")
-        target, _, fstype = rest.rpartition(" ")
+    had: set[Mount] = set()
+    for target, mount in _table("") or []:
         if target == root or target.startswith(f"{root}/"):
-            below.append((target, fstype == "zfs" and _pool_of(source) in pools))
+            below.append((target, mount[0] == "zfs" and _pool_of(mount[1]) in pools))
+            had.add(mount)
     others = [t for t, dataset in below if not dataset and t != root]
     for top in _tops(others):
         _ = sh.run(f"mount --make-rprivate {top}")
         _ = sh.run(f"umount -R {top}")
     _ = sh.run(f"umount -R {root}")
     after = sh.run("findmnt -rn -o TARGET")
-    return _below(after.lines, root) if after.ok else []
+    return (_below(after.lines, root) if after.ok else []), frozenset(had)
 
 
 def _namespaces(proc: str = "/proc", snapd_ns: str = SNAPD_NS_DIR) -> list[str]:
@@ -97,9 +128,10 @@ def _namespaces(proc: str = "/proc", snapd_ns: str = SNAPD_NS_DIR) -> list[str]:
     no process in it (its id is the file's inode)."""
     seen = {os.readlink("/proc/self/ns/mnt")}
     out: list[str] = []
-    for d in sorted(Path(proc).iterdir(), key=lambda p: p.name):
-        if not d.name.isdigit():
-            continue
+    # In pid order, so the process named for a namespace is its oldest (a
+    # service's main process rather than one of its workers).
+    pids = [d for d in Path(proc).iterdir() if d.name.isdigit()]
+    for d in sorted(pids, key=lambda p: int(p.name)):
         try:
             ns = os.readlink(d / "ns" / "mnt")
         except OSError:
@@ -119,30 +151,67 @@ def _namespaces(proc: str = "/proc", snapd_ns: str = SNAPD_NS_DIR) -> list[str]:
     return out
 
 
-def release_elsewhere(root: str, log: Log, namespaces: list[str] | None = None) -> list[str]:
-    """Unmount what other mount namespaces still hold at or below ``root``
-    (W-1, M4b-3 3b); return what stays, one line per namespace.
+def _ns_label(ns: str) -> str:
+    """A mount namespace and what holds it, for the operator: the oldest
+    process in it (its name from ``/proc/<pid>/comm``), or the snap whose
+    namespace snapd pins (M4bR-8, M4bF-8 8a)."""
+    path = Path(ns)
+    if path.suffix == ".mnt" and str(path.parent) == SNAPD_NS_DIR:
+        return f"mount namespace pinned by snapd for snap {path.stem}"
+    pid = path.parent.parent.name
+    try:
+        comm = Path("/proc", pid, "comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        comm = ""
+    return f"mount namespace {ns}" + (f", process {comm}" if comm else "")
+
+
+def release_elsewhere(
+    root: str,
+    log: Log,
+    pools: Collection[str],
+    had: Collection[Mount],
+    namespaces: list[str] | None = None,
+) -> list[str]:
+    """Unmount the copies other mount namespaces still hold of zark's tree
+    at or below ``root`` (W-1, M4b-3 3b); return what stays, one line per
+    namespace, naming its process.
 
     A non-dataset mount under the tree with a mount of its own below it is
     left out of the propagated unmount, and so are its parents, the dataset
     included (Linux 7.0 fs/pnode.c:565-595). Entered with
     ``nsenter --mount`` (util-linux 2.41.3), the copies there are slaves of
-    this namespace: unmounting them propagates nothing back. Only targets at
-    or below ``root`` are touched.
+    this namespace: unmounting them propagates nothing back. Only copies of
+    the tree are touched (:func:`_is_copy`: ``pools`` being released, ``had``
+    the mounts the tree had here); anything else at those paths is left
+    alone and does not count as holding the pool.
     """
+
+    def copies(enter: str) -> list[str] | None:
+        rows = _table(enter)
+        if rows is None:
+            return None
+        out: list[str] = []
+        for target, mount in rows:
+            if target != root and not target.startswith(f"{root}/"):
+                continue
+            if _is_copy(mount, pools, had):
+                out.append(target)
+            else:
+                log.dbg(f"  left alone in {enter}: {target} ({' '.join(mount)}), not zark's")
+        return out
+
     left: list[str] = []
     for ns in _namespaces() if namespaces is None else namespaces:
         enter = f"nsenter --mount={shlex.quote(ns)}"
-        table = sh.run(f"{enter} findmnt -rn -o TARGET")
-        held = _below(table.lines, root) if table.ok else []
+        held = copies(enter) or []
         for top in _tops(held):
             r = sh.run(f"{enter} umount -R {shlex.quote(top)}", log=log)
             if r.ok:
                 log.info(f"  released {top} in another mount namespace ({ns})")
-        again = sh.run(f"{enter} findmnt -rn -o TARGET") if held else table
-        still = _below(again.lines, root) if again.ok else []
+        still = (copies(enter) or []) if held else []
         if still:
-            left.append(f"{', '.join(still)} (mount namespace {ns})")
+            left.append(f"{', '.join(still)} ({_ns_label(ns)})")
     return left
 
 
@@ -182,7 +251,7 @@ def _umount_local_system(log: Log) -> None:
     # Only the system's tree: `zfs unmount -a` would also unmount a backup
     # mounted with `zark mount` in the same session. zpool export unmounts the rest.
     log.info("Unmounting system datasets...")
-    here = _unmount_tree(altroot, ("rpool", "bpool"))
+    here, had = _unmount_tree(altroot, ("rpool", "bpool"))
 
     # Close the rpool keystore (LUKS over the keystore zvol) BEFORE exporting.
     # Unmounting and `unload-key` do not close the cryptsetup mapping, so
@@ -211,7 +280,7 @@ def _umount_local_system(log: Log) -> None:
     if left:
         # Copies the propagated unmount could not reach (W-1): released where
         # they are, then the export is tried again.
-        elsewhere = release_elsewhere(altroot, log)
+        elsewhere = release_elsewhere(altroot, log, ("rpool", "bpool"), had)
         for pool in list(left):
             if sh.run(f"zpool export {pool}").ok:
                 log.ok(f"Pool {pool} exported ✓")
@@ -291,7 +360,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     # Only this pool's tree: `zfs unmount -a` would also try every dataset
     # of the running system. zpool export unmounts anything left.
     log.info("Unmounting datasets...")
-    here = _unmount_tree(f"{MNT_BASE}/{selected}", (selected,))
+    here, had = _unmount_tree(f"{MNT_BASE}/{selected}", (selected,))
 
     # Close keystore
     log.info("Closing keystore...")
@@ -340,7 +409,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     elsewhere: list[str] = []
     if not exported_ok:
         # Copies the propagated unmount could not reach (W-1).
-        elsewhere = release_elsewhere(f"{MNT_BASE}/{selected}", log)
+        elsewhere = release_elsewhere(f"{MNT_BASE}/{selected}", log, (selected,), had)
         if sh.run(f"zpool export {selected}").ok:
             log.ok(f"Pool {selected} exported ✓")
             exported_ok = True

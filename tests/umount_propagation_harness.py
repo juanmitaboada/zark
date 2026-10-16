@@ -91,10 +91,11 @@ def _below(targets: list[str], root: str) -> list[str]:
 
 
 def _findmnt_as_zfs(real_run: Callable[..., RunResult] = sh.run) -> Callable[..., RunResult]:
-    """sh.run with the tree's tmpfs datasets reported as zfs by findmnt."""
+    """sh.run with the tree's tmpfs datasets reported as zfs by findmnt, here
+    and when read in the other namespace through nsenter."""
 
     def fake(cmd: str, *args: object, **kwargs: object) -> RunResult:
-        if cmd != "findmnt -rn -o TARGET,FSTYPE,SOURCE":
+        if not cmd.endswith("findmnt -rn -o TARGET,FSTYPE,SOURCE"):
             return real_run(cmd, *args, **kwargs)
         r = real_run(cmd)
         rows = []
@@ -167,9 +168,11 @@ def main() -> None:
         if not (_below(here, root) and _below(elsewhere, root) and host_before):
             raise SystemExit(f"setup not as described: {here=} {elsewhere=}")
         with patch.object(umount_mod.sh, "run", side_effect=_findmnt_as_zfs()):
-            _ = umount_mod._unmount_tree(root, (DATASET_SOURCE,))  # pylint: disable=protected-access
+            _, had = umount_mod._unmount_tree(root, (DATASET_SOURCE,))  # pylint: disable=protected-access
             propagated_left = _below(_mount_targets(f"/proc/{other}/mountinfo"), root)
-            _ = umount_mod.release_elsewhere(root, Log(os.devnull), [f"/proc/{other}/ns/mnt"])
+            _ = umount_mod.release_elsewhere(
+                root, Log(os.devnull), (DATASET_SOURCE,), had, [f"/proc/{other}/ns/mnt"]
+            )
 
         here = _mount_targets("/proc/self/mountinfo")
         result = {

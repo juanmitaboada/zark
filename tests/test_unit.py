@@ -2491,7 +2491,9 @@ class TestClean:  # pylint: disable=missing-function-docstring
         # namespaces keep below the trees it unmounted, then exports again.
         ns = "nsenter --mount=/proc/42/ns/mnt"
         mock = MockShell()
-        listing = mock.on(f"{ns} findmnt -rn -o TARGET").succeeds("/\n/mnt/zark/backup/home")
+        listing = mock.on(f"{ns} findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+            "/ overlay overlay\n/mnt/zark/backup/home zfs backup/rpool/USERDATA/home"
+        )
         export = mock.on("zpool export backup").fails("pool is busy")
         mock.on(f"{ns} umount -R /mnt/zark/backup/home").succeeds()
         real = mock.mock_run
@@ -2499,7 +2501,7 @@ class TestClean:  # pylint: disable=missing-function-docstring
         def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
             r = real(cmd, *a, **k)
             if str(cmd).startswith(f"{ns} umount -R"):
-                _ = listing.succeeds("/")
+                _ = listing.succeeds("/ overlay overlay")
                 _ = export.succeeds()
             return r
 
@@ -2509,7 +2511,9 @@ class TestClean:  # pylint: disable=missing-function-docstring
             patch.object(umount_mod, "_namespaces", return_value=["/proc/42/ns/mnt"]),
             redirect_stdout(StringIO()),
         ):
-            clean_mod._export_pools(["backup"], ["/mnt/zark/backup"], make_log())  # pylint: disable=protected-access
+            clean_mod._export_pools(  # pylint: disable=protected-access
+                ["backup"], {"/mnt/zark/backup": frozenset()}, make_log()
+            )
         assert mock.call_count(f"{ns} umount -R /mnt/zark/backup/home") == 1, mock.calls
         assert mock.call_count("zpool export backup") == 2, mock.calls
 
@@ -5183,8 +5187,10 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
             "/mnt/zark/system zfs rpool/ROOT/be\n"
             "/mnt/zark/system/boot zfs bpool/BOOT/be"
         )
-        listing = mock.on(f"{ns} findmnt -rn -o TARGET").succeeds(
-            "/\n/mnt/zark/system\n/mnt/zark/system/boot"
+        listing = mock.on(f"{ns} findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+            "/ overlay overlay\n"
+            "/mnt/zark/system zfs rpool/ROOT/be\n"
+            "/mnt/zark/system/boot zfs bpool/BOOT/be"
         )
         export = mock.on_prefix("zpool export").fails("pool is busy")
         mock.on(f"{ns} umount -R /mnt/zark/system").succeeds()
@@ -5193,7 +5199,7 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
             r = real(cmd, *a, **k)
             if str(cmd) == f"{ns} umount -R /mnt/zark/system":
-                _ = listing.succeeds("/")
+                _ = listing.succeeds("/ overlay overlay")
                 _ = export.succeeds()
             return r
 
@@ -9109,7 +9115,9 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
 
     @staticmethod
     def _umount_backup(
-        export_ok: bool, setup: Callable[[MockShell, str], None] | None = None
+        export_ok: bool,
+        setup: Callable[[MockShell, str], None] | None = None,
+        namespaces: list[str] | None = None,
     ) -> tuple[MockShell, str]:
         mock = MockShell()
         buf = StringIO()
@@ -9125,7 +9133,9 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
                 setup(mock, td)
             with (
                 patch_sh(mock),
-                patch.object(umount_mod, "_namespaces", return_value=["/proc/42/ns/mnt"]),
+                patch.object(
+                    umount_mod, "_namespaces", return_value=namespaces or ["/proc/42/ns/mnt"]
+                ),
                 patch.object(umount_mod, "MNT_BASE", td),
                 patch.object(umount_mod.Config, "load", return_value=make_config()),
                 patch.object(umount_mod, "flush_device_cache"),
@@ -9161,8 +9171,12 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
 
         def setup(mock: MockShell, td: str) -> None:
             tree = seen["tree"] = f"{td}/backup"
-            listing = mock.on(f"{ns} findmnt -rn -o TARGET").succeeds(
-                f"/\n{tree}\n{tree}/run\n{tree}/run/user\n/srv"
+            mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree} zfs backup/rpool/ROOT/be\n{tree}/run tmpfs tmpfs"
+            )
+            listing = mock.on(f"{ns} findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree} zfs backup/rpool/ROOT/be\n{tree}/run tmpfs tmpfs\n"
+                + f"{tree}/run/user tmpfs tmpfs\n/srv zfs data/srv"
             )
             export = mock.on("zpool export backup").fails("pool is busy")
             # Ahead of the helper's own answer: busy until the release.
@@ -9173,7 +9187,7 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
             def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
                 r = real(cmd, *a, **k)
                 if str(cmd) == f"{ns} umount -R {tree}":
-                    _ = listing.succeeds("/\n/srv")
+                    _ = listing.succeeds("/ overlay overlay\n/srv zfs data/srv")
                     _ = export.succeeds()
                 return r
 
@@ -9184,6 +9198,74 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         assert umounts == [f"{ns} umount -R {seen['tree']}"], mock.calls
         assert mock.call_count("zpool export backup") == 2, mock.calls
         assert "BACKUP NOT UNMOUNTED" not in out, out
+
+    def test_an_unrelated_mount_at_the_same_path_elsewhere_is_left_alone(self):
+        # M4bR-3 (M4bF-6 6a, review E3): a namespace with a root of its own
+        # can hold anything at zark's path; only a copy of the tree (a ZFS
+        # mount of the pool, or the same fstype and source as a mount the
+        # tree had here) is released, and only a copy counts as holding it.
+        alien, copy = "nsenter --mount=/proc/42/ns/mnt", "nsenter --mount=/proc/43/ns/mnt"
+        seen: dict[str, str] = {}
+
+        def setup(mock: MockShell, td: str) -> None:
+            tree = seen["tree"] = f"{td}/backup"
+            mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree} zfs backup/rpool/ROOT/be\n{tree}/run tmpfs tmpfs"
+            )
+            mock.on(f"{alien} findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ tmpfs rootfs\n{tree} tmpfs e3-unrelated\n{tree}/run tmpfs othertmp"
+            )
+            listing = mock.on(f"{copy} findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree} zfs backup/rpool/ROOT/be\n{tree}/run tmpfs tmpfs"
+            )
+            export = mock.on("zpool export backup").fails("pool is busy")
+            mock._responses.insert(0, mock._responses.pop())  # pylint: disable=protected-access
+            mock.on(f"{copy} umount -R {tree}").succeeds()
+            real = mock.mock_run
+
+            def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
+                r = real(cmd, *a, **k)
+                if str(cmd) == f"{copy} umount -R {tree}":
+                    _ = listing.succeeds("/ overlay overlay")
+                    _ = export.succeeds()
+                return r
+
+            mock.mock_run = run_hook  # type: ignore[method-assign]
+
+        mock, out = self._umount_backup(
+            export_ok=True, setup=setup, namespaces=["/proc/42/ns/mnt", "/proc/43/ns/mnt"]
+        )
+        tree = seen["tree"]
+        umounts = [c for c in mock.calls if "umount -R" in c and "nsenter" in c]
+        assert umounts == [f"{copy} umount -R {tree}"], mock.calls
+        assert "BACKUP NOT UNMOUNTED" not in out and "still held" not in out, out
+        assert f"left alone in {alien}: {tree} (tmpfs e3-unrelated), not zark's" in out, out
+
+    def test_what_another_namespace_still_holds_names_its_process(self):
+        # M4bR-8 (M4bF-8 8a): the banner names the namespace's process (from
+        # /proc/<pid>/comm) or the snap whose namespace snapd pins.
+        me = f"/proc/{os.getpid()}/ns/mnt"
+        comm = Path("/proc/self/comm").read_text(encoding="utf-8").strip()
+        label = umount_mod._ns_label  # pylint: disable=protected-access
+        assert label(me) == f"mount namespace {me}, process {comm}"
+        assert (
+            label("/run/snapd/ns/firefox.mnt") == "mount namespace pinned by snapd for snap firefox"
+        )
+
+        seen: dict[str, str] = {}
+
+        def setup(mock: MockShell, td: str) -> None:
+            tree = seen["tree"] = f"{td}/backup"
+            mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree} zfs backup/rpool/ROOT/be"
+            )
+            mock.on(f"nsenter --mount={me} findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree} zfs backup/rpool/ROOT/be"
+            )
+            mock.on(f"nsenter --mount={me} umount -R {tree}").fails("target is busy")
+
+        _, out = self._umount_backup(export_ok=False, setup=setup, namespaces=[me])
+        assert f"still held: {seen['tree']} (mount namespace {me}, process {comm})" in out, out
 
     def test_every_other_mount_namespace_is_listed_once(self):
         # Processes share namespaces; snapd pins some with no process in them.

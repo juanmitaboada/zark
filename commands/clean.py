@@ -37,7 +37,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from commands.umount import _unmount_tree, release_elsewhere
+from commands.umount import Mount, _unmount_tree, release_elsewhere
 from lib import engine, sh
 from lib.keystore import KEYSTORE_MOUNT
 from lib.log import Log
@@ -191,13 +191,14 @@ def _export(pool: str, log: Log) -> bool:
     return False
 
 
-def _export_pools(pools: list[str], tops: list[str], log: Log) -> None:
+def _export_pools(pools: list[str], trees: dict[str, frozenset[Mount]], log: Log) -> None:
     """Export each pool; when one is busy, release the copies other mount
-    namespaces keep below the unmounted trees (W-1) and try again."""
+    namespaces keep below the unmounted trees (W-1; ``trees`` maps each top
+    to the mounts it had, by which the copies are told) and try again."""
     busy = [pool for pool in pools if not _export(pool, log)]
     if busy:
-        for top in tops:
-            _ = release_elsewhere(top, log)
+        for top, had in trees.items():
+            _ = release_elsewhere(top, log, pools, had)
         for pool in busy:
             _ = _export(pool, log)
 
@@ -220,15 +221,15 @@ def run(args: list[str]) -> None:
         log.info("Aborted: nothing changed")
         return
 
-    tops = _tops(inv.mounts)
-    for top in tops:
+    trees: dict[str, frozenset[Mount]] = {}
+    for top in _tops(inv.mounts):
         log.info(f"Unmounting {top}...")
-        _ = _unmount_tree(top, inv.pools)
+        _, trees[top] = _unmount_tree(top, inv.pools)
     if inv.keystore_mounted:
         _ = sh.run(f"umount {KEYSTORE_MOUNT}", log=log)
     for name in inv.keystores:
         _ = sh.run(f"cryptsetup close {name}", log=log)
-    _export_pools(inv.pools, tops, log)
+    _export_pools(inv.pools, trees, log)
     if inv.zvol_inhibited and not inventory().pools:
         try:
             _ = Path(ZVOL_INHIBIT).write_text("0\n", encoding="ascii")
