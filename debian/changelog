@@ -1,3 +1,33 @@
+zark (2.0.0~rc5-1) UNRELEASED; urgency=medium
+
+  * Milestone M4b of zark 2 (interrupted runs and the engine's bases). Not
+    for release: nothing is published until the final 2.0.0.
+  * One handler for SIGINT, SIGTERM and SIGHUP: the running child (in a
+    process group of its own) is stopped first, further signals are
+    ignored, and the cleanup runs once from atexit. A reader of stdout
+    that goes away stops the command the same way (exit 141).
+  * chroot and simulate: the interactive child keeps its Ctrl-C; SIGTERM
+    or SIGHUP stop it before the cleanup.
+  * umount and clean: copies of the tree kept in other mount namespaces
+    are unmounted there (nsenter) before the export is retried; datasets
+    are told from binds by their source pool.
+  * Anchors whatever the run's ending; every backup point names its drive
+    (org.zark:point-for) and is anchored for it before it is removed; a
+    failed anchor is retried.
+  * ROLLBACK keeps the drive's newer points in archived lineages (rename,
+    clone -u, promote) and continues from the common snapshot.
+  * recover starts each dataset from its newest monthly before the point.
+  * One question for several diverged datasets; destroys grouped per
+    dataset (at most 100 names); prune names what it keeps;
+    org.zark:first-point records where 1.x history ends.
+  * A failed parent holds back only NEW children; source datasets named
+    like archives are not backed up; BACKUP NOT VERIFIED says what the
+    drive already records.
+  * On a live session the installer's probe service is stopped before a
+    command imports pools.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Fri, 16 Oct 2026 05:53:00 +0200
+
 zark (2.0.0~rc4-1) UNRELEASED; urgency=medium
 
   * Milestone M4a of zark 2 (guards and destructive commands). Not for

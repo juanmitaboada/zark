@@ -263,11 +263,18 @@ for the canonical end-to-end sequences.
       the drive's newest (the first run on a drive written by an older
       **zark**, or a source recovered from an older point): one prompt
       listing the snapshots at stake (three per dataset on the terminal,
-      every one in the log), to abort (the default), archive those
-      datasets and send them again in full, or roll them back;
+      every one in the log), to abort (the default), keep the drive's newer
+      snapshots and continue from the common one (offered when the
+      transfer fits), or roll them back. Keeping them renames each dataset
+      to an archived lineage, puts a clone of its common snapshot in its
+      place and promotes it, and moves its children back under it: nothing
+      is destroyed or sent again in full, and the archive holds only the
+      newer snapshots;
     - a dataset with nothing in common at all: skip it this time (the
       default), archive it and send it again in full, or destroy it and
-      send it again;
+      send it again. Several such datasets are asked about together first:
+      skip them all (the default), archive them all, destroy them all, or
+      decide one by one;
     - datasets written on the drive since their newest snapshot (a
       read-write **mount** does this to every dataset it mounts, even with
       nothing written): one prompt listing them, to skip them this time
@@ -282,7 +289,8 @@ for the canonical end-to-end sequences.
     An archived dataset is renamed to *\<name\>.archived-YYYYMMDD* on the
     drive and keeps all its snapshots; archiving or destroying a dataset
     takes the datasets below it along, which are not asked about and are
-    sent again in full. Before the typed **DESTROY**, every dataset the
+    sent again in full (keeping a rolled-ahead dataset's newer snapshots
+    does not: its children stay). Before the typed **DESTROY**, every dataset the
     destroy takes on the drive is listed, archived lineages and datasets
     kept as only on the drive included.
 
@@ -305,13 +313,17 @@ for the canonical end-to-end sequences.
     than an archived lineage or one kept as only on the drive (the base of
     its next incremental) always stay, and so do a clone's origin, a held
     snapshot, names neither **zark** nor **sanoid** wrote, and history from
-    before the drive's first **zark** 2 backup point (see **prune**). A
+    before the drive's first **zark** 2 backup point (recorded on the drive
+    as **org.zark:first-point**, so it does not move when retention removes
+    the first points; see **prune**). A
     month's point is the newest one no dataset skipped since; with none
     left, its newest point whose run was complete. An
     archived dataset or one kept as only on the drive goes whole once
     nothing of it is kept, also when the space check or **prune** empties
-    it. Each snapshot is destroyed by its exact name,
-    never by a range, and the drive's keys are not needed. **prepare** asks
+    it. Snapshots are destroyed by their exact names, never by a range,
+    grouped per dataset (at most 100 per command; when ZFS refuses a group
+    its names are destroyed one by one), and the drive's keys are not
+    needed. **prepare** asks
     the window and the maximum age; **registry retention** changes them.
 
     **Clones.** A dataset new in the source that is a clone of a snapshot
@@ -324,7 +336,12 @@ for the canonical end-to-end sequences.
     of the transfer when both report one), and the banner lists what is not
     backed up by design.
     Otherwise **BACKUP INCOMPLETE** or **BACKUP NOT VERIFIED**, exit 1, and
-    *last_backup_at* is not updated. A listing of the source or the drive
+    *last_backup_at* is not updated; **BACKUP NOT VERIFIED** after a run
+    that reached the point says the drive already records it, since its
+    metadata is written before the export the read-back needs. A dataset in
+    the source whose name has a component containing *.archived-* is not
+    backed up (the name is reserved for archived lineages) and is listed
+    with the reason. A listing of the source or the drive
     that fails stops the run before the questions, or makes it incomplete
     afterwards, and then nothing is anchored or removed in the source. An
     interrupted transfer resumes at the next **backup**; its partial state
@@ -454,7 +471,13 @@ for the canonical end-to-end sequences.
     lacks the dataset and nothing of it follows); when a backup simply did
     not reach it, its newest earlier snapshot is used and shown with its
     offset. Datasets archived
-    by **backup** serve the points older than the archive. It then shows a table with
+    by **backup** serve the points older than the archive. Each dataset is
+    received from its newest **sanoid** monthly snapshot before the point,
+    then the point incrementally from it, so the recovered system shares
+    that snapshot with every drive in rotation and their next backups
+    continue instead of sending everything again; when those snapshots do
+    not fit on the disk, or a dataset has none, the point alone is
+    restored, and a line says so. It then shows a table with
     the snapshot every dataset will be restored from — never one newer
     than the point — and the mount properties it will get. Only after a
     full pre-flight (sizes of that point, keystore, bpool) and a typed
@@ -525,11 +548,12 @@ for the canonical end-to-end sequences.
     residues (**syncoid_\*** snapshots left by **zark** 1.x on datasets
     where every registered drive has an anchor, and the keystore's
     **prepare_\*** snapshots; yes/no), the backup points left in the source
-    by interrupted runs or by a run whose anchor failed (typed **PRUNE**; a
-    drive that received part of such a point rolls those datasets back at
-    its next backup, after asking, one whose transfer was interrupted sends
-    it again, and one whose run completed but could not be anchored on a
-    dataset rolls that dataset back too) and a drive's **bpool** anchors
+    by interrupted runs or by a run whose anchor failed (typed **PRUNE**;
+    a point names its drive, **org.zark:point-for**, and is anchored for
+    that drive before it goes, so the drive keeps its base; for a point
+    from before 2.0.0-rc5 a drive that received part of it rolls those
+    datasets back at its next backup, after asking; either way a drive
+    whose transfer was interrupted sends it again) and a drive's **bpool** anchors
     (typed **PRUNE**; that drive's next backup then asks to roll those
     datasets back to a shared **sanoid** snapshot, which removes its newest
     backup point on them, or to archive them and resend them in full).
@@ -661,9 +685,11 @@ for the canonical end-to-end sequences.
 **umount** \[*target*\]
 :   Unmount a previously **mount**-ed backup pool. Unmounts only the tree
     under */mnt/zark/<poolname>/*, closes the LUKS keystore and exports the
-    pool. If the export fails (a copy of a dataset can stay mounted in
-    another mount namespace, such as a service's or a snap's), it says so
-    and exits 1; on a live USB, rebooting the live session releases it.
+    pool. If the export fails because a copy of the tree stays mounted in
+    another mount namespace (a service's or a snap's, including those
+    **snapd** pins in */run/snapd/ns*), it unmounts the tree there with
+    **nsenter** and tries the export again; what still cannot be released
+    is named, and it exits 1.
 
     With the *target* **local** (aliases **system**, **rpool**) it exports
     the installed system's pools mounted by **mount local**, unmounting
@@ -689,9 +715,10 @@ for the canonical end-to-end sequences.
     pool of its own is still imported (removing a directory would detach a
     copy mounted there in another mount namespace). Anything that stays (a
     mount in use, or
-    held in another mount namespace) ends **CLEANUP INCOMPLETE** with exit
-    status 1, naming it; a reboot releases a copy held by another
-    namespace. The same rules apply on an installed system and on a live
+    held in another mount namespace that could not be released there) ends
+    **CLEANUP INCOMPLETE** with exit status 1, naming it. When a pool does
+    not export, the copies other mount namespaces keep below the trees it
+    unmounted are unmounted there and the export is tried again. The same rules apply on an installed system and on a live
     session.
 
 # WORKFLOWS
@@ -814,13 +841,18 @@ To verify a recovery without rebooting:
     */run/zark/zark.lock*); the message names it. Run again once it ends.
     Also when the lock file cannot be opened; the message says so.
 
-**130**
-:   The user pressed **Ctrl-C** (SIGINT). **zark** registers a cleanup
-    handler that exports any pools it imported, closes any keystore it
-    opened and starts the **sanoid** timer again if it stopped it. A backup
-    interrupted during its transfers keeps its point in the source on the
-    datasets whose transfer had started; the next backup resumes them and
-    removes it.
+**130**, **143**, **129**, **141**
+:   The run was stopped by **Ctrl-C** (SIGINT), SIGTERM, SIGHUP (a closed
+    terminal), or because the reader of its output went away. **zark**
+    stops the running command first (up to 30 seconds, then SIGKILL),
+    ignores further signals, then runs its cleanup once: it exports any
+    pools it imported, closes any keystore it opened and starts the
+    **sanoid** timer again if it stopped it. In **chroot** and **simulate**
+    a Ctrl-C belongs to the shell or QEMU. A backup interrupted during its
+    transfers anchors, for the drive, the newest snapshot the drive holds
+    of every dataset, and keeps its point in the source only where a
+    partial transfer needs it; the next backup resumes them and removes
+    it.
 
 # DEPENDENCIES
 
@@ -854,7 +886,10 @@ and exporting pools repeatedly on a live USB is known to corrupt the
 overlay filesystem (*/bin/sh* and similar essentials disappear), so
 **zark** keeps such cycles to the minimum required by the recovery
 sequence and writes its log to the pendrive, not to */var/log/*, while in
-this mode.
+this mode. Before a command that imports pools, **zark** stops the
+installer's **ubuntu-desktop-bootstrap.subiquity-server** for the session
+(**snap stop**, nothing changes for the next boot): it probes the disks on
+every change and pops up a crash report after each import.
 
 ## First-boot hostid
 

@@ -10,9 +10,156 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M4a (2.0.0-rc4)** on top of M3 (2.0.0-rc3),
-M2 (2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling consolidation
-that preceded them.
+The tree currently carries **M4b (2.0.0-rc5)** on top of M4a (2.0.0-rc4),
+M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling
+consolidation that preceded them.
+
+### M4b: interrupted runs and the engine's bases (2.0.0-rc5)
+
+#### Changed
+
+- **One way to stop for every command** (H12, R2 8.4, M4b-1). zark
+  installs one handler for SIGINT, SIGTERM and SIGHUP. The first signal
+  ignores all three (logind sends SIGTERM and SIGHUP together when it
+  ends a session), stops the running child and the processes below it
+  (each child runs in a process group of its own: `sh -c` stays the
+  parent of its command, so a signal to the shell alone would not reach
+  `zfs`), waits up to 30 seconds and then SIGKILLs what is left, and only
+  then lets the command unwind. The command's cleanup runs once, from
+  `atexit`, with the three signals still ignored. Before, SIGTERM ran the
+  cleanup from inside the handler while the child kept running and the
+  command went on (a backup could export its pool under a running
+  receive), and SIGHUP killed zark with no cleanup at all.
+- **Output whose reader went away stops the command through its
+  cleanup** (V-6, M1P.23, M4b-2). SIGPIPE stays ignored, as Python
+  starts. The first write to stdout or stderr that finds no reader ends
+  the command as a hangup does (child stopped, cleanup, exit 141); from
+  then on both go to `/dev/null`, so neither the cleanup nor the exit
+  flush fails, and zark.log records why the run stopped. During the
+  cleanup a missing reader only silences the output.
+- **`zark chroot` and `simulate`** run their interactive child (the shell,
+  QEMU) in zark's own process group, so a Ctrl-C is the child's; SIGTERM
+  or SIGHUP stop it (SIGHUP to the shell, SIGTERM to QEMU) and then the
+  cleanup unmounts what it had. A chroot whose terminal closed used to
+  leave its binds mounted.
+- **`umount` and `clean` release the copies other mount namespaces keep**
+  (W-1, M4b-3). The kernel skips a propagated unmount whose mount has a
+  child of its own (Linux 7.0 `fs/pnode.c`), so a systemd service or a
+  snap kept a copy of the tree and the pool stayed busy. When the export
+  fails, zark unmounts the tree in every other mount namespace that still
+  lists it (those of `/proc/*/ns/mnt` and the ones snapd pins in
+  `/run/snapd/ns`), with `nsenter --mount=<ns> umount -R`, then retries
+  the export. What still cannot be released is named. Datasets are told
+  from binds by their source, a ZFS mount from one of the pools being
+  released (W-2); the mount table is read again after the unmount, and
+  what is still mounted here is named (R2 11.4a).
+- **Anchors whatever the run's ending** (8b, M2R-2, M2P.8, M4b-4). The
+  drive's newest snapshot of every rpool dataset keeps a bookmark of that
+  drive in the source, however the run ended: at the end of every run
+  and in the cleanup of one that was interrupted, zark bookmarks the
+  newest snapshot the drive holds when the source still has it (a
+  dataset that reached the point, a `-I` stream cut after a carried
+  snapshot). After an interruption the point stays only where a partial
+  receive needs it to resume, or where its anchor failed.
+- **Every backup point names its drive** (`org.zark:point-for`, set by
+  the same `zfs snapshot` that takes it). When a backup of another drive
+  or `zark prune` removes a point a run left in the source, it is first
+  anchored for the drive it names (a bookmark on rpool, a rename on
+  bpool), so that drive continues without a rollback. A point that cannot
+  be anchored stays. `zark prune`'s warning says what remains: points
+  from before rc5 name no drive, and a partial receive still needs the
+  snapshot itself.
+- **A failed anchor is tried again** after a pause (M3R-5, M2P.7); an
+  anchor already there for the same snapshot (a run stopped between the
+  bookmark and the destroy) counts as made.
+- **ROLLBACK keeps the drive's newer points** (M3R-1, M4b-5). A drive whose
+  newest snapshot the source no longer has, but which shares an older
+  one, used to choose between rolling back (its newer points go) and
+  archiving the lineage to resend it in full. The second option is now
+  "keep the newer snapshots in archived lineages and continue from the
+  common snapshot": the lineage is renamed aside, a clone of its common
+  snapshot takes its place and is promoted, its children go back under
+  it, and the next transfer is the usual incremental. Nothing is
+  destroyed and nothing is resent; the archive holds only the newer
+  snapshots. It works with the keys unloaded (staged on eli).
+- **recover starts each dataset from a shared monthly** (M3P.13, M4b-6).
+  Each restored dataset is received from its newest sanoid monthly before
+  the chosen point (in full), then the point with `-i` from it. The
+  recovered system then shares that monthly with every drive in rotation,
+  and their next backup continues (with the ROLLBACK above) instead of
+  resending everything. The size check counts the extra blocks; when they
+  do not fit, the point alone is restored, as before, with a line saying
+  so, and so is a dataset with no monthly before the point.
+- **One question for several diverged datasets** (M3P.27, M4b-11): skip
+  them all (the default), archive them all (when everything fits),
+  destroy them all (typed DESTROY, after listing every dataset each
+  destroy takes) or decide one by one. A single one keeps its question.
+- **Retention and `zark prune` destroy per dataset** (M3P.26, M4b-10):
+  `zfs destroy <ds>@a,b,c`, at most 100 exact names per command, each
+  logged with its reason first. ZFS destroys none of a group when one
+  fails; that group's names are then destroyed one by one, so what is
+  kept and what failed stay exact. Never a `%` range.
+- **`zark prune` on a drive names what it keeps** (held snapshots, clone
+  origins), as backup's retention does (M3X.5).
+- **Where 1.x history ends is recorded** (`org.zark:first-point`, M3P.25,
+  M4b-9): prepare writes its point; a drive without it gets its oldest
+  backup point at the start of the next backup, before that run's
+  retention. The boundary no longer moves when the policy removes the
+  first points.
+- **A failed parent holds back only NEW children** (M2X.1, M4b-12); a
+  child the drive already holds gets its incremental.
+- **A source dataset named like an archive is not backed up** (M2R-13,
+  M4b-7): a name component containing `.archived-` is reserved for
+  archived lineages; such a dataset is listed as NOT BACKED UP with the
+  reason ("rename it"). Before, it was sent and then ignored on the drive,
+  so no backup could complete.
+- **BACKUP NOT VERIFIED says what the drive already records** (M2X.2,
+  M4b-13): `last-point` and the completion marks are written before the
+  export the read-back needs, so the drive records the point while the
+  registry's last backup is not updated.
+- **The installer's probe service is stopped on a live session** (M4aF-6,
+  M4b-14). Before recover, mount, umount, chroot, repair-boot,
+  fix-rpool-mountpoint, clean, purge, prepare, health and explore, zark
+  runs `snap stop ubuntu-desktop-bootstrap.subiquity-server` (for this
+  session only; nothing changes for the next boot): it probes the disks
+  on every udev event and writes a crash report after each pool zark
+  imports. A missing snap or service is not an error.
+- The propagation harness checks it has a mount namespace of its own
+  before its first mount (X-3); the propagation and `clean` real-mount
+  tests assert that nothing is left here or in the other namespace (X-1,
+  X-2).
+
+#### Known limitations
+
+- A dataset received as a clone keeps its origin snapshot on the drive;
+  retention keeps it, and a destroy or rollback of the origin's dataset
+  fails while the clone exists (M3P.4). Nothing is lost; the run reports
+  it.
+- Mountpoints set locally on drives written by zark 2.0.0-rc1 stay (O2):
+  clearing them needs a `zfs set` with the drive's keystore zvol present.
+- A backup of one drive can remove a point that another drive's partial
+  receive needs to resume: that drive then discards the partial receive
+  and sends the dataset again from its anchor.
+- On bpool, which takes no bookmarks, a `-I` stream cut after a carried
+  snapshot still needs a ROLLBACK at the next run (about 150 MB).
+
+#### Rejected approaches
+
+- **Running the cleanup from the signal handler** (rc4's model): it runs
+  while the child it would undo is still writing, and a second signal
+  interrupts it halfway.
+- **Restoring SIGPIPE to its default**: zark would die at the first print
+  to a closed pipe, before any cleanup.
+- **Leaving copies in other namespaces and telling the user to reboot**
+  (W-1 3a): the busy pool then blocks every later command.
+- **Re-importing the drive read-write after the read-back** to write the
+  metadata only then (M4b-13 13b): another import and export for a mark
+  whose meaning can be stated instead.
+- **Marking archives with a property** instead of reserving the name
+  (M4b-7 7a): it touches the planner, recover, mount and retention, and
+  archives made before rc5 would still need the name.
+- **One `zfs destroy` with a `%` range**: it takes whatever lies between
+  the two names, not only what retention decided.
 
 ### M4a: guards and destructive commands (2.0.0-rc4)
 
@@ -746,7 +893,8 @@ that preceded them.
   parameter on a normal end, an error, Ctrl-C, SIGTERM and SIGHUP (a
   closed terminal), several of them arriving together (logind sends
   SIGTERM and SIGHUP at once when it ends a session), and with stdout on
-  a closed terminal or a dead pipe (`| tee` killed by the same Ctrl-C);
+  a closed terminal or a pipe whose reader went away (a closed terminal
+  with `| tee`; under `sudo` a Ctrl-C does not kill the reader, X-5);
   not on SIGKILL. The first of those signals ignores all three before
   leaving for the teardown; during the teardown SIGINT, SIGTERM, SIGHUP
   and SIGPIPE are ignored, by the `zpool export` child as well. It refuses
@@ -953,9 +1101,11 @@ that preceded them.
   in grub.cfg, and a grub.cfg with invalid UTF-8 ends in a generic fatal
   instead of their verdict. (R2-8)
 - Cleanup's SIGTERM handler runs the cleanup and lets the command go on,
-  SIGHUP is not handled, and with SIGPIPE at SIG_DFL a Ctrl-C on a
-  command piped to `tee` kills it before `atexit` runs, leaving the
-  pools of recover, repair-boot or chroot imported. (hallazgo 12)
+  SIGHUP is not handled, and with SIGPIPE at SIG_DFL a command whose
+  output reader goes away (a closed terminal with `| tee`; under `sudo` a
+  Ctrl-C does not kill the reader, X-5) dies before `atexit` runs, leaving
+  the pools of recover, repair-boot or chroot imported. (hallazgo 12;
+  fixed in M4b)
 - `umount` leaves dataset copies in other mount namespaces (systemd
   services, snaps, the namespaces snapd pins in `/run/snapd/ns`) when a
   non-ZFS mount under the tree has a mount of its own below it: a `zark
