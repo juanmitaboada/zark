@@ -31,11 +31,14 @@ passes it on. Scenarios:
                     went away; only the cleanup prints
     interactive:<SIGS>  signals one second apart while a child that owns the
                     terminal runs (lib.signals.run_interactive)
+    stubborn:<SIGS> the same as run:, with a child that ignores SIGTERM and a
+                    stop wait of half a second (STOP_WAIT_SECONDS patched)
 
 Writes ``<workdir>/result.json``: ``cleanup`` (how many times it ran),
 ``children_alive`` (children still running when it ran), ``continued``
-(whether the command went on after the interrupted wait), and
-``cleanup_done`` (whether the cleanup reached its end).
+(whether the command went on after the interrupted wait), ``cleanup_done``
+(whether the cleanup reached its end) and, for ``stubborn``, ``child_status``
+(the child's wait status: -9 when SIGKILL ended it).
 """
 
 import json
@@ -114,6 +117,22 @@ def main() -> None:  # pylint: disable=too-many-locals
     cleanup = Cleanup(log)
     cleanup.register()
     cleanup.track_action(action)
+    if kind == "stubborn":
+        # The child ignores the stop: half a second, then SIGKILL. The wait
+        # is read when stop_children runs, so the module constant counts.
+        signals.STOP_WAIT_SECONDS = 0.5
+        real_stop = signals.stop_children
+
+        def recording_stop(
+            procs: list[subprocess.Popen[str]] | list[subprocess.Popen[bytes]],
+            sig: int | None = None,
+            wait: float | None = None,
+        ) -> None:
+            real_stop(procs, sig, **({} if wait is None else {"wait": wait}))
+            result["child_status"] = procs[0].returncode
+            write()
+
+        signals.stop_children = recording_stop
     if sigs:
         _sender(sigs[:1] if kind == "cleanup" else sigs, 0.5, apart=kind == "interactive")
     try:
@@ -128,6 +147,9 @@ def main() -> None:  # pylint: disable=too-many-locals
                 time.sleep(0.05)
         elif kind == "run":
             _ = sh.run(f"sh -c 'echo $$ > {pids[0]}; exec sleep 60'")
+        elif kind == "stubborn":
+            # The shell sh.run starts is the one that traps: sleep inherits it.
+            _ = sh.run(f"trap '' TERM; echo $$ > {pids[0]}; exec sleep 60")
         else:
             _ = sh.run_pipe(
                 f"echo $$ > {pids[0]}; exec sleep 60",

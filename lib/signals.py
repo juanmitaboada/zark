@@ -187,16 +187,17 @@ def run_interactive(argv: list[str], stop_with: int = signal.SIGHUP) -> int:
 def stop_children(
     procs: list[subprocess.Popen[str]] | list[subprocess.Popen[bytes]],
     sig: int | None = None,
-    wait: float = STOP_WAIT_SECONDS,
+    wait: float | None = None,
 ) -> None:
     """Stop each child's process group with ``sig`` (default
-    :func:`child_signal`), wait up to ``wait`` seconds for all of them, then
+    :func:`child_signal`), wait up to ``wait`` seconds (default
+    :data:`STOP_WAIT_SECONDS`, read when called) for all of them, then
     SIGKILL what is left. A child that already exited is skipped."""
     sig = child_signal() if sig is None else sig
     for p in procs:
         if p.poll() is None:
             _killpg(p.pid, sig)
-    deadline = time.monotonic() + wait
+    deadline = time.monotonic() + (STOP_WAIT_SECONDS if wait is None else wait)
     for p in procs:
         try:
             _ = p.wait(timeout=max(deadline - time.monotonic(), 0))

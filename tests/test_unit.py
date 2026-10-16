@@ -8753,6 +8753,13 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         self._assert_stopped("cleanup:TERM,HUP", 128 + signal.SIGTERM)
         self._assert_stopped("cleanup:INT,TERM", 128 + signal.SIGINT)
 
+    def test_a_child_that_ignores_the_stop_is_killed_after_the_wait(self):
+        # M4bR-7 (mutation S4): the child traps SIGTERM; the harness shortens
+        # STOP_WAIT_SECONDS, which stop_children reads when it runs, and the
+        # child ends by SIGKILL within seconds instead of running on.
+        result = self._assert_stopped("stubborn:TERM", 128 + signal.SIGTERM)
+        assert result.get("child_status") == -signal.SIGKILL, result
+
     @staticmethod
     def _without_reader(scenario: str) -> tuple[int, dict[str, Any]]:
         """Run a scenario whose stdout reader goes away after the first line."""
