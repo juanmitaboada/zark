@@ -627,6 +627,22 @@ class TestSh:  # pylint: disable=missing-function-docstring
         assert not r.ok
         assert r.returncode == 127
 
+    def test_a_child_reads_dev_null_unless_input_is_given(self):
+        # M4b-1 (mutation H3): a child in its own process group that read the
+        # terminal would stop; stdin is /dev/null, a pipe only with `input`.
+        r_pipe, w_pipe = os.pipe()
+        saved = os.dup(0)
+        try:
+            os.dup2(r_pipe, 0)  # a stdin a child could inherit, not /dev/null
+            inherited = run("readlink /proc/self/fd/0")
+            fed = run("cat", input="from zark")
+        finally:
+            os.dup2(saved, 0)
+            for fd in (saved, r_pipe, w_pipe):
+                os.close(fd)
+        assert inherited.output == "/dev/null", inherited
+        assert fed.output == "from zark", fed
+
 
 class TestShRunPipe:  # pylint: disable=missing-function-docstring
     """Tests for run_pipe() pipeline behavior, especially p1-side failures."""
@@ -2458,6 +2474,33 @@ class TestClean:  # pylint: disable=missing-function-docstring
         assert rc == 1
         assert "CLEANUP INCOMPLETE" in out.getvalue()
         assert "✗ still imported: backup" in out.getvalue()
+
+    def test_a_busy_pool_is_exported_once_the_copies_elsewhere_are_released(self):
+        # W-1 (M4b-3 3b; mutation K1): clean, like umount, releases what other
+        # namespaces keep below the trees it unmounted, then exports again.
+        ns = "nsenter --mount=/proc/42/ns/mnt"
+        mock = MockShell()
+        listing = mock.on(f"{ns} findmnt -rn -o TARGET").succeeds("/\n/mnt/zark/backup/home")
+        export = mock.on("zpool export backup").fails("pool is busy")
+        mock.on(f"{ns} umount -R /mnt/zark/backup/home").succeeds()
+        real = mock.mock_run
+
+        def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
+            r = real(cmd, *a, **k)
+            if str(cmd).startswith(f"{ns} umount -R"):
+                _ = listing.succeeds("/")
+                _ = export.succeeds()
+            return r
+
+        mock.mock_run = run_hook  # type: ignore[method-assign]
+        with (
+            patch_sh(mock),
+            patch.object(umount_mod, "_namespaces", return_value=["/proc/42/ns/mnt"]),
+            redirect_stdout(StringIO()),
+        ):
+            clean_mod._export_pools(["backup"], ["/mnt/zark/backup"], make_log())  # pylint: disable=protected-access
+        assert mock.call_count(f"{ns} umount -R /mnt/zark/backup/home") == 1, mock.calls
+        assert mock.call_count("zpool export backup") == 2, mock.calls
 
     def test_no_directory_is_removed_while_a_zark_pool_stays(self):
         # M4aR-6 (M4aF-7): rmdir would detach copies held in other namespaces,
@@ -5116,6 +5159,47 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         assert "SYSTEM NOT UNMOUNTED" in out and "still imported: bpool, rpool" in out
         assert "exported cleanly" not in out
 
+    def test_copies_held_elsewhere_are_released_then_the_system_export_retried(self):
+        # W-1 (M4b-3 3b; mutation U7): umount local, like umount of a backup,
+        # releases the copies another namespace keeps and exports again.
+        ns = "nsenter --mount=/proc/42/ns/mnt"
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool get -H -o value altroot rpool").succeeds("/mnt/zark/system")
+        mock.on("zpool list bpool").succeeds("bpool")
+        mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+            "/ overlay overlay\n"
+            "/mnt/zark/system zfs rpool/ROOT/be\n"
+            "/mnt/zark/system/boot zfs bpool/BOOT/be"
+        )
+        listing = mock.on(f"{ns} findmnt -rn -o TARGET").succeeds(
+            "/\n/mnt/zark/system\n/mnt/zark/system/boot"
+        )
+        export = mock.on_prefix("zpool export").fails("pool is busy")
+        mock.on(f"{ns} umount -R /mnt/zark/system").succeeds()
+        real = mock.mock_run
+
+        def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
+            r = real(cmd, *a, **k)
+            if str(cmd) == f"{ns} umount -R /mnt/zark/system":
+                _ = listing.succeeds("/")
+                _ = export.succeeds()
+            return r
+
+        mock.mock_run = run_hook  # type: ignore[method-assign]
+        buf = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(umount_mod, "_namespaces", return_value=["/proc/42/ns/mnt"]),
+            patch.object(umount_mod, "flush_device_cache"),
+            redirect_stdout(buf),
+        ):
+            _umount_local_system(make_log())
+        assert mock.call_count(f"{ns} umount -R /mnt/zark/system") == 1, mock.calls
+        assert mock.call_count("zpool export bpool") == 2, mock.calls
+        assert mock.call_count("zpool export rpool") == 2, mock.calls
+        assert "SYSTEM UNMOUNTED" in buf.getvalue() and "NOT UNMOUNTED" not in buf.getvalue()
+
     def test_refuses_an_altroot_that_climbs_out_of_mnt_zark(self):
         # V-7: a prefix match on the stored string let "/mnt/zark/../.." through.
         mock = MockShell()
@@ -7407,6 +7491,15 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
         assert monthly_base(row, [archived, point]) is None
         live = Snap(rel, self.MONTHLY, "1", 2, 2)
         assert monthly_base(row, [live, point]) == live
+
+    def test_a_point_that_is_itself_a_monthly_gets_no_base(self):
+        # 6a (M4b-6; mutation R6): a monthly chosen as the point is already
+        # what every drive carried; an older monthly would only add blocks.
+        rel = "rpool/ROOT/x"
+        older = Snap(rel, "autosnap_2026-08-01_00:00:00_monthly", "1", 2, 2)
+        chosen = Snap(rel, self.MONTHLY, "2", 6, 6)
+        monthly_base = recover_mod._monthly_base  # pylint: disable=protected-access
+        assert monthly_base(RestoreRow(rel, chosen), [older, chosen]) is None
 
     def test_bases_that_do_not_fit_are_dropped_before_refusing(self):
         snap = Snap("rpool/ROOT/x", "a", "1", 1, 1)
@@ -10579,6 +10672,50 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             assert engine.release_point(f"rpool/USERDATA/home@{P2}", "222", Log())
         assert P2 not in fake.names("rpool/USERDATA/home")
 
+    def test_a_point_whose_anchor_cannot_be_made_stays(self) -> None:
+        """8b (M4b-4; mutation E9): a point that cannot be anchored for its
+        drive is kept, since removing it would cost that drive a rollback."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.snap("rpool/USERDATA/home", P2)
+        real = fake.mock_run
+
+        def no_bookmarks(cmd: str, *args: object, **kwargs: object) -> RunResult:
+            if cmd.startswith("zfs bookmark"):
+                return RunResult(
+                    1, "", "cannot create bookmark: pool I/O is currently suspended\n", cmd
+                )
+            return real(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        fake.mock_run = no_bookmarks  # type: ignore[method-assign]
+        before = len(fake.calls)
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert not engine.release_point(f"rpool/USERDATA/home@{P2}", "222", Log())
+        assert P2 in fake.names("rpool/USERDATA/home")
+        assert not [c for c in fake.calls[before:] if c.startswith("zfs destroy")], fake.calls[
+            before:
+        ]
+
+    def test_a_snapshot_already_anchored_is_not_bookmarked_again(self) -> None:
+        """M4b-4 (mutation E6): the drive's newest snapshot already marked by
+        a bookmark of this drive, under another name, gets no second one."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "h1")
+        be = "rpool/ROOT/be"
+        h1 = fake.ds[be].snaps[-1]
+        # Carried to the drive after P1: its newest there, still in origin.
+        fake.ds[f"backup/{be}"].snaps.append(FSnap(h1.name, h1.guid, fake._dtxg(), h1.creation))  # pylint: disable=protected-access
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert fake.mock_run(
+                f"zfs bookmark {be}@{h1.name} {be}#zark_111_2026-10-07_11:00:00Z"
+            ).ok
+            before = len(fake.calls)
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            assert be not in eng.anchor_held()
+        marks = [c for c in fake.calls[before:] if c.startswith("zfs bookmark") and be in c]
+        assert marks == [], marks
+
 
 class TestCleanupActions:
     """Cleanup.track_action: undo steps run first, newest first, failures reported."""
@@ -11033,6 +11170,16 @@ class TestBackupDecide:
         assert not any(
             c.startswith(("zfs destroy backup/rpool/var", "zfs rollback")) for c in calls
         )
+
+    def test_the_kept_lineage_is_cloned_without_mounting(self) -> None:
+        """I-G on the ROLLBACK keep path (mutation E15): the clone that takes
+        the lineage's place is made with ``-u``; nothing mounts outside a
+        command that asked for it."""
+        fake = self._var_tree_rolled_ahead()
+        before = len(fake.calls)
+        assert self._run_with_answers(fake, [1]).ok
+        clones = [c for c in fake.calls[before:] if c.startswith("zfs clone")]
+        assert clones and all(c.startswith("zfs clone -u ") for c in clones), clones
 
     def test_diverged_children_of_an_archived_top_are_not_asked(self) -> None:
         """One question for a diverged subtree; the children go with their parent."""
