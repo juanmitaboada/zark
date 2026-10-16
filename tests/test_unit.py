@@ -94,6 +94,7 @@ import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noq
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
+import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -626,6 +627,16 @@ class TestSh:  # pylint: disable=missing-function-docstring
         r = run("totally_nonexistent_command_zzz")
         assert not r.ok
         assert r.returncode == 127
+
+    def test_the_child_is_named_by_executable_and_subcommand(self):
+        # M4bF-7 7a: what the interruption line says it is stopping.
+        name = _signals.child_name
+        assert name("zfs send -w -I 'rpool/x@a' 'rpool/x@b'") == "zfs send"
+        assert name("zpool export backup") == "zpool export"
+        assert name("sh -c 'echo $$ > p; exec sleep 60'") == "sh"
+        assert name("dd if=/dev/zero of=/dev/sdx bs=1M") == "dd"
+        assert name("chroot /mnt/zark/chroot /bin/bash --login") == "chroot"
+        assert name("") == ""
 
     def test_a_child_reads_dev_null_unless_input_is_given(self):
         # M4b-1 (mutation H3): a child in its own process group that read the
@@ -8725,6 +8736,9 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
             result: dict[str, Any] = (
                 json.loads(path.read_text(encoding="ascii")) if path.exists() else {}
             )
+            log = Path(td, "zark.log")
+            lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+            result["interrupted"] = [ln for ln in lines if "Interrupted by" in ln]
         return r.returncode, result, took
 
     def _assert_stopped(self, scenario: str, code: int) -> dict[str, Any]:
@@ -8752,6 +8766,19 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
     def test_a_signal_during_the_cleanup_is_ignored(self):
         self._assert_stopped("cleanup:TERM,HUP", 128 + signal.SIGTERM)
         self._assert_stopped("cleanup:INT,TERM", 128 + signal.SIGINT)
+
+    def test_the_interruption_line_names_the_child_it_stops(self):
+        # M4bR-8 (M4bF-7 7a): "stopping <child>", by executable and
+        # subcommand, both sides of a pipeline; the full command is in the
+        # log already.
+        result = self._assert_stopped("pipe:TERM", 128 + signal.SIGTERM)
+        assert any(
+            "stopping echo | echo, then cleaning up" in ln for ln in result["interrupted"]
+        ), result["interrupted"]
+        result = self._assert_stopped("run:HUP", 128 + signal.SIGHUP)
+        assert any("stopping sh, then cleaning up" in ln for ln in result["interrupted"]), result[
+            "interrupted"
+        ]
 
     def test_a_child_that_ignores_the_stop_is_killed_after_the_wait(self):
         # M4bR-7 (mutation S4): the child traps SIGTERM; the harness shortens

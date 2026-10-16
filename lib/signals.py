@@ -34,6 +34,7 @@ only, and zark passes it on.
 """
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -51,6 +52,7 @@ _received: list[int] = []
 _log: list[Log] = []
 _teardown: list[bool] = []
 _interactive: list[bool] = []
+_running: list[str] = []
 
 
 def received() -> int | None:
@@ -70,9 +72,9 @@ def _on_signal(signum: int, _frame: FrameType | None) -> None:
     for sig in EXIT_SIGNALS:
         _ = signal.signal(sig, signal.SIG_IGN)
     _received.append(signum)
+    doing = f"stopping {_running[0]}, then cleaning up" if _running else "cleaning up"
     (_log[0] if _log else Log()).warn(
-        f"Interrupted by {signal.Signals(signum).name}: stopping the running command, "
-        + "then cleaning up (further signals are ignored)"
+        f"Interrupted by {signal.Signals(signum).name}: {doing} (further signals are ignored)"
     )
     if signum == signal.SIGINT:
         raise KeyboardInterrupt
@@ -101,6 +103,22 @@ def guard_output(log: Log | None = None) -> None:
 def teardown() -> None:
     """The cleanup has started: a dead stdout no longer stops anything."""
     _teardown[:] = [True]
+
+
+def running(name: str | None) -> None:
+    """What zark is waiting for now, named in the interruption line
+    (:func:`child_name`); None once the wait is over."""
+    _running[:] = [name] if name else []
+
+
+def child_name(cmd: str) -> str:
+    """The executable and its subcommand of a command line, for a message:
+    ``zfs send`` from ``zfs send -w rpool/x@p``, ``sh`` from ``sh -c '...'``
+    (a second word is kept only when it is a plain word)."""
+    words = cmd.split()
+    if len(words) > 1 and re.fullmatch(r"[a-z][a-z0-9-]*", words[1]):
+        return f"{words[0]} {words[1]}"
+    return words[0] if words else ""
 
 
 class _Guarded:
@@ -167,6 +185,7 @@ def run_interactive(argv: list[str], stop_with: int = signal.SIGHUP) -> int:
     """
     proc = subprocess.Popen(argv)  # pylint: disable=consider-using-with
     _interactive[:] = [True]
+    running(child_name(" ".join(argv)))
     try:
         return proc.wait()
     except BaseException:
@@ -182,6 +201,7 @@ def run_interactive(argv: list[str], stop_with: int = signal.SIGHUP) -> int:
         raise
     finally:
         _interactive.clear()
+        running(None)
 
 
 def stop_children(

@@ -126,6 +126,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
             stderr=str(e),
             command=cmd_str,
         )
+    signals.running(signals.child_name(cmd_str))
     with proc:
         try:
             out, err = proc.communicate(input=input, timeout=timeout)
@@ -143,6 +144,8 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
             # first, then the exception goes on (H12).
             signals.stop_children([proc])
             raise
+        finally:
+            signals.running(None)
 
     r = RunResult(
         returncode=proc.returncode,
@@ -195,6 +198,7 @@ def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
     # Each side in a process group of its own, stopped first when a signal
     # (or anything else) interrupts the wait: a cut `zfs receive -s` keeps
     # its partial state for the next run (H12).
+    signals.running(f"{signals.child_name(cmd1)} | {signals.child_name(cmd2)}")
     with subprocess.Popen(
         cmd1,
         shell=True,
@@ -222,6 +226,8 @@ def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
             except BaseException:
                 signals.stop_children([p1, p2])
                 raise
+            finally:
+                signals.running(None)
         stderr_p1 = p1.stderr.read() if p1.stderr is not None else b""
 
     # Combine stderr from both sides for transparent error inspection.
