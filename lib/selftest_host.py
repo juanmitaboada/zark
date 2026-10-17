@@ -163,7 +163,8 @@ umount -R $M
 )
 def mnt_03(b: Bench) -> None:
     """``umount -R`` unmounts children first and stops at a busy child,
-    leaving the parent ("target is busy", exit 32); ``findmnt -rn -o
+    leaving the parent (exit 32; its message is not read: util-linux
+    translates it, po/es.po:8303-8304); ``findmnt -rn -o
     TARGET,FSTYPE,SOURCE`` prints a bind of a subdirectory as
     ``<source>[/<sub>]`` and a space as ``\\x20``. util-linux
     sys-utils/umount.c:304-344, :158-190; misc-utils/findmnt.c:642-662;
@@ -180,9 +181,9 @@ def mnt_03(b: Bench) -> None:
         "the bind's SOURCE zarkt[/src/sub]",
         " ".join(bind) or "not listed",
     )
-    vals = dict(ln.split(" ", 1) for ln in out.splitlines() if ln[:4] in ("RC 3", "ROOT", "BUSY"))
+    marks = ("RC ", "ROOT ", "BUSY ")
+    vals = dict(ln.split(" ", 1) for ln in out.splitlines() if ln.startswith(marks))
     expect(vals.get("RC") == "32", "umount -R exit 32", vals.get("RC", "?"))
-    expect("target is busy" in out, "'target is busy'", out.strip()[-200:])
     expect(
         vals.get("ROOT") == "1" and vals.get("BUSY") == "1", "parent and busy child kept", str(vals)
     )
