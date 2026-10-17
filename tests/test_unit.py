@@ -13584,6 +13584,35 @@ class TestPruneCommand:
         assert "retention removes nothing" not in out  # the policy takes them
         assert "1.x history" not in out
 
+    def test_history_before_the_first_point_is_named_by_its_date_not_its_writer(self) -> None:
+        """M4bF-12 (eli F2.4): a sanoid snapshot older than the drive's first
+        backup point is offered as what it is, history from before that
+        point, whoever wrote the drive; a 2.x drive gets one when a dataset
+        arrives with older snapshots. "1.x" is said nowhere."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        for ds, d in fake.ds.items():
+            if ds.startswith("backup/"):
+                for snap in d.snaps:
+                    if snap.name == "autosnap_2026-10-02_08:00:00_hourly":
+                        snap.creation = _days_ago(80)  # before P1, 70 days ago
+        typed: list[str] = []
+
+        def ask_text(_self: Log, prompt: str, **_kw: object) -> str:
+            typed.append(prompt)
+            return "PRUNE"
+
+        answers = self._answers([], ["0"], "", False)
+        answers[2] = patch.object(Log, "ask_text", ask_text)
+        out, stopped = self._prune_drive_run(fake, *answers)
+        assert not stopped
+        assert "from before its first backup point" in out
+        assert "older than the drive's first backup point, removed by hand" in out
+        assert typed == [
+            "    Type PRUNE to remove the history from before backup's first backup point: "
+        ]
+        assert "1.x" not in out
+        assert "autosnap_2026-10-02_08:00:00_hourly" not in fake.names("backup/rpool/ROOT/be")
+
     def test_a_failed_read_after_the_retention_is_fatal(self) -> None:
         """M3V-2 (F8c): the drive read again after the retention is applied
         must be read in full; a failed listing stops prune before the

@@ -166,6 +166,10 @@ consolidation that preceded them.
     and `canmount` is not inherited). The properties are set by the kernel
     with the clone, as `receive -o` sets them, never by `zfs set`
     (M4bR-4, M4bF-9 9a).
+  - `prune` and the retention's "kept" lines call a snapshot from before
+    the drive's first backup point by its date, not "1.x history": the same
+    rule catches a dataset that reaches a zark 2 drive with older sanoid
+    snapshots (eli F2.4; M4bF-12 12a).
 
 #### Known limitations
 

@@ -28,7 +28,8 @@ Policy, per drive (M3 decision 1):
 
 What the policy never touches:
   * history from before the drive's first backup point (a drive written by
-    zark 1.x; M3 decision 6c), and snapshots whose names neither zark nor
+    zark 1.x, or a dataset that came with older snapshots; M3 decision 6c,
+    M4bF-12), and snapshots whose names neither zark nor
     sanoid wrote;
   * a snapshot that is the origin of a clone or carries a hold (ZFS refuses
     to destroy either: module/zfs/dsl_destroy.c:79-86), given as ``pinned``;
@@ -234,7 +235,7 @@ def _keep_reason(  # pylint: disable=too-many-arguments,too-many-positional-argu
     if kind == "other":
         return "not written by zark or sanoid"
     if when < start:
-        return "from before the drive's first backup point (1.x history)"
+        return "from before the drive's first backup point"
     if newest is not None and s.guid == newest.guid:
         return "newest snapshot of a live dataset (I-E)"
     if s.name == keep_point:

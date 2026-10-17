@@ -66,8 +66,9 @@ from lib.retention import (
 from lib.zfs import ZFS
 
 WORD = "PRUNE"
-# What zark 1.x left on a drive: sanoid's snapshots and syncoid's.
+# What zark 1.x, or sanoid, writes to a dataset: zark 2 moves only its points.
 LEGACY_NAME = re.compile(r"^(autosnap|syncoid)_")
+HISTORY_WHY = "older than the drive's first backup point, removed by hand"
 
 
 def _gib(n: int) -> str:
@@ -240,7 +241,8 @@ def _prune_origin(cfg: Config, log: Log) -> None:
 
 def _legacy_history(dest: dict[str, Dest], pins: dict[str, str], first: str = "") -> Prune:
     """sanoid's and syncoid's snapshots from before the drive's first backup
-    point (1.x history, decision 6c), every live dataset's newest kept (I-E)
+    point (decision 6c: a drive written by zark 1.x, or a dataset that came
+    with older snapshots, M4bF-12), every live dataset's newest kept (I-E)
     and pinned ones left. Backup points are dated by their newest snapshot,
     as the policy does, so no part of the first point is taken for history;
     other names are left. An archived lineage or kept orphan left with
@@ -257,7 +259,7 @@ def _legacy_history(dest: dict[str, Dest], pins: dict[str, str], first: str = ""
             if f"{rel}@{s.name}" in pins:
                 continue
             if start is None or s.creation < start:
-                out.append(Removal(rel, s.name, "1.x history, removed by hand"))
+                out.append(Removal(rel, s.name, HISTORY_WHY))
     return Prune(snapshots=out, datasets=whole_datasets(dest, out))
 
 
@@ -322,7 +324,8 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     prune: Prune,
     log: Log,
 ) -> None:
-    """The oldest monthly points, then the 1.x history, each on a typed PRUNE."""
+    """The oldest monthly points, then the history from before the first
+    point, each on a typed PRUNE."""
     # A point none of whose snapshots can go (I-E, pins) frees nothing: not
     # offered, as backup's space plan already skips it (M3 decision 6a).
     names = [
@@ -355,10 +358,10 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         freed = engine.reclaim(pool, legacy.snapshots, tops)
         whole = f", and {len(tops)} archived or kept dataset(s) left empty" if tops else ""
         log.info(
-            f"{pool} holds {len(legacy.snapshots)} snapshot(s) from before its first zark 2 "
-            + f"backup point (1.x history){whole}; removing them frees {_gib(freed)}"
+            f"{pool} holds {len(legacy.snapshots)} snapshot(s) from before its first backup "
+            + f"point{whole}; removing them frees {_gib(freed)}"
         )
-        if _typed(log, f"remove the 1.x history from {pool}"):
+        if _typed(log, f"remove the history from before {pool}'s first backup point"):
             _ = engine.apply_prune(pool, legacy, log)
 
 
