@@ -254,6 +254,8 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     DatasetInfo,
     PoolInfo,
     Readback,
+    create_command as zfs_create_command,
+    drive_compatibility as zfs_drive_compatibility,
     fix_grub_bpool_uuid,
     parse_damage,
 )
@@ -14432,6 +14434,34 @@ class TestZfsFeatures:  # pylint: disable=missing-function-docstring
         assert src.index("zfs_features.check_drive(pool_name, device, log)") < src.index(
             "if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid)"
         )
+
+
+class TestPrepareCompatibility:  # pylint: disable=missing-function-docstring
+    """M4s-10: new drives get compatibility=openzfs-2.2 unless origin needs more."""
+
+    def test_the_create_command(self):
+        cmd = zfs_create_command("backup3", "/dev/disk/by-id/usb-X-0:0", "/run/zark/altroot/b", "")
+        assert cmd == (
+            "zpool create -f -o ashift=12 -O atime=off -O xattr=sa -O dnodesize=auto "
+            + "-O normalization=formD -m none -R /run/zark/altroot/b backup3 "
+            + "/dev/disk/by-id/usb-X-0:0"
+        )
+        cmd = zfs_create_command("b", "/d", "/r", "openzfs-2.2")
+        assert "-o ashift=12 -o compatibility=openzfs-2.2 -O atime=off" in cmd
+
+    def test_the_compatibility_chosen(self):
+        plain, longname = MockShell(), MockShell()
+        longname.on("zpool get -H -o value feature@longname rpool").succeeds("active\n")
+        for mock in (plain, longname):
+            mock.on_prefix("zpool get -H -o value feature@").succeeds("enabled\n")
+        with tempfile.TemporaryDirectory() as td, patch("lib.zfs.COMPAT_DIRS", (td,)):
+            with patch_sh(plain), redirect_stdout(StringIO()):
+                assert zfs_drive_compatibility(("rpool", "bpool"), make_log()) == ""
+            Path(td, "openzfs-2.2").write_text("lz4_compress\n", encoding="ascii")
+            with patch_sh(plain):
+                assert zfs_drive_compatibility(("rpool", "bpool"), make_log()) == "openzfs-2.2"
+            with patch_sh(longname), redirect_stdout(StringIO()):
+                assert zfs_drive_compatibility(("rpool", "bpool"), make_log()) == ""
 
 
 def _run_one(name: str, method: Callable[[], object]) -> str:

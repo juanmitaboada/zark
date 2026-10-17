@@ -649,6 +649,51 @@ def backup_altroot(pool: str) -> str:
     return f"{BACKUP_ALTROOT_BASE}/{pool}"
 
 
+# Where `zpool create -o compatibility=<name>` looks, in order (OpenZFS 2.4.1
+# lib/libzfs/libzfs_pool.c:5170-5375).
+COMPAT_DIRS = ("/etc/zfs/compatibility.d", "/usr/share/zfs/compatibility.d")
+DRIVE_COMPATIBILITY = "openzfs-2.2"
+# Features a raw stream needs on the drive when origin has them active and
+# openzfs-2.2 lacks (module/zfs/dmu_recv.c:599, :614; dmu_send.c:2018-2030).
+_BEYOND_DRIVE_COMPAT = ("longname", "large_microzap")
+
+
+def create_command(pool: str, device: str, altroot: str, compatibility: str) -> str:
+    """``zpool create`` of a backup drive (prepare; the self-test's level 2).
+
+    -R: the pool never enters zpool.cache and nothing it will hold can mount
+    over the running system (I-G). The vdev is named by its by-id so later
+    imports never depend on /dev/sdX (I16). ``compatibility`` keeps the
+    drive readable by older lives (M4s-10); "" leaves every feature on.
+    """
+    compat = f"-o compatibility={compatibility} " if compatibility else ""
+    return (
+        f"zpool create -f -o ashift=12 {compat}-O atime=off -O xattr=sa "
+        + f"-O dnodesize=auto -O normalization=formD -m none -R {altroot} "
+        + f"{pool} {device}"
+    )
+
+
+def drive_compatibility(origin_pools: tuple[str, ...], log: Log) -> str:
+    """The ``compatibility`` a new drive gets: openzfs-2.2, so that Ubuntu
+    24.04's live (OpenZFS 2.2) and later can read it and dynamic_gang_header
+    (2.4) never activates on it; "" when that set is not installed here, or
+    when origin has a feature active that it lacks and zark's streams would
+    carry (M4s-10)."""
+    if not any(Path(d, DRIVE_COMPATIBILITY).is_file() for d in COMPAT_DIRS):
+        log.warn(f"No {DRIVE_COMPATIBILITY} feature set installed: the drive gets every feature")
+        return ""
+    for pool in origin_pools:
+        for feature in _BEYOND_DRIVE_COMPAT:
+            if run(f"zpool get -H -o value feature@{feature} {pool}").output == "active":
+                log.warn(
+                    f"{pool} uses {feature}, which {DRIVE_COMPATIBILITY} lacks: the drive "
+                    + "gets every feature and needs a live with this OpenZFS or later to read it"
+                )
+                return ""
+    return DRIVE_COMPATIBILITY
+
+
 # ── grub.cfg helpers ─────────────────────────────────────────────────────
 
 # In Ubuntu ZFS systems, every `search --no-floppy --fs-uuid --set=NAME HEX`

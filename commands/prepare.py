@@ -35,7 +35,7 @@ from lib.log import Log
 from lib.mount import warn_rpool_mountpoint_lost
 from lib.replication import DatasetPlan, Ref, State, point_name
 from lib.retention import Policy
-from lib.zfs import ZFS, backup_altroot
+from lib.zfs import ZFS, backup_altroot, create_command, drive_compatibility
 
 
 def run(
@@ -168,21 +168,14 @@ def run(
     # ── Create pool ──────────────────────────────────────────────────────
     log.step(1, 4, f"Creating ZFS pool '{new_pool}'...")
 
-    # -R: the new pool never enters zpool.cache and nothing it will hold can
-    # mount over the running system (I-G). The vdev is named by its by-id so
-    # later imports and `zpool status` never depend on /dev/sdX (I16).
     altroot = backup_altroot(new_pool)
     _ = sh.run(f"mkdir -p {altroot}")
-    r = sh.run(
-        "zpool create -f -o ashift=12 -O atime=off -O xattr=sa "
-        + f"-O dnodesize=auto -O normalization=formD -m none -R {altroot} "
-        + f"{new_pool} {ident.by_id_path}",
-        log=log,
-    )
+    compat = drive_compatibility(("rpool", "bpool"), log)
+    r = sh.run(create_command(new_pool, ident.by_id_path, altroot, compat), log=log)
     if not r.ok:
         log.fatal(f"Failed to create pool: {r.stderr.strip()}")
     cleanup.track_pool(new_pool)
-    log.ok(f"Pool '{new_pool}' created")
+    log.ok(f"Pool '{new_pool}' created" + (f" (compatibility={compat})" if compat else ""))
 
     # ── Initial send: the backup point only (decision 2) ─────────────────
     log.step(2, 4, f"Sending a backup point of rpool and bpool → {new_pool}...")
