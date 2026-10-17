@@ -52,6 +52,7 @@ COMMANDS = {
     "status": "Source pools' fill level and each drive's backup age",
     "alerts": "Install or remove the MOTD and timer for status alerts",
     "fix-rpool-mountpoint": "Give a restored rpool back mountpoint=/ (live USB)",
+    "selftest": "Check that this platform behaves as zark relies on",
 }
 
 

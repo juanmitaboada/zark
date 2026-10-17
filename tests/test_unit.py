@@ -82,6 +82,7 @@ import commands.purge as purge_mod  # pylint: disable=wrong-import-position # no
 import commands.recover as recover_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.registry as registry_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.repair_boot as repair_boot_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.selftest as selftest_cmd  # pylint: disable=wrong-import-position # noqa: E402
 import commands.setup as setup_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.status as status_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -14533,6 +14534,16 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
             assert Path(td, "k", "file").exists()
 
 
+class TestSelftestLock:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M4s-16: run and warnings take the lock; status, report, certificate do not."""
+
+    def test_the_lock_by_subcommand(self):
+        for args in ([], ["run"], ["--stick", "/dev/sdz"], ["warnings", "on"]):
+            assert lock_mod.needs_lock("selftest", args), args
+        for args in (["status"], ["report"], ["certificate", "x.json"]):
+            assert not lock_mod.needs_lock("selftest", args), args
+
+
 def _facts(**over: Any) -> pfacts.Facts:
     series = {
         "ubuntu": "26.04",
@@ -14868,6 +14879,177 @@ class TestPrepareCompatibility:  # pylint: disable=missing-function-docstring
                 assert zfs_drive_compatibility(("rpool", "bpool"), make_log()) == "openzfs-2.2"
             with patch_sh(longname), redirect_stdout(StringIO()):
                 assert zfs_drive_compatibility(("rpool", "bpool"), make_log()) == ""
+
+
+class TestSelftestCommand:  # pylint: disable=missing-function-docstring,protected-access
+    """M4s-1, M4s-4: options, the stick's protections, the exit status."""
+
+    def test_options(self):
+        assert selftest_cmd._parse_run(
+            ["--stick", "/dev/sdz", "--only", "pool-01,DSK-01"], make_log()
+        ) == (
+            "/dev/sdz",
+            ["POOL-01", "DSK-01"],
+        )
+        for bad in (["--bogus"], ["--stick"]):
+            try:
+                _ = selftest_cmd._parse_run(bad, make_log())
+            except SystemExit as e:
+                assert e.code == 2
+            else:
+                raise AssertionError(bad)
+
+    def test_only_and_levels(self):
+        l1 = selftest_cmd._select([], "", make_log())
+        assert {c.level for c in l1} == {1}
+        both = selftest_cmd._select([], "/dev/sdz", make_log())
+        assert {c.level for c in both} == {1, 2}
+        assert [c.cid for c in selftest_cmd._select(["SND-04"], "", make_log())] == ["SND-04"]
+        for only, stick in ((["NOPE-01"], ""), (["DSK-01"], "")):
+            try:
+                _ = selftest_cmd._select(only, stick, make_log())
+            except SystemExit as e:
+                assert e.code == 2
+            else:
+                raise AssertionError(only)
+
+    def _ident(self) -> DiskIdentity:
+        return DiskIdentity(
+            disk="/dev/sdz",
+            by_id="usb-Scratch_1-0:0",
+            model="Scratch",
+            serial="S1",
+            size="1G",
+            transport="usb",
+            aliases=("usb-Scratch_1-0:0",),
+        )
+
+    def _refused(self, mock: MockShell, cfg: Config, answer: str = "sdz") -> str:
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            redirect_stdout(out),
+            patch("commands.selftest.validate_external_block_device", return_value=self._ident()),
+            patch("commands.selftest.Config.load", return_value=cfg),
+            patch("builtins.input", return_value=answer),
+        ):
+            try:
+                _ = selftest_cmd._stick_identity("/dev/sdz", make_log())
+            except SystemExit:
+                return out.getvalue()
+        raise AssertionError("not refused")
+
+    def test_a_registered_drive_is_refused(self):
+        cfg = make_config()
+        cfg.known_drives = {"backup": DriveInfo("backup", "1", "usb-Scratch_1-0:0")}
+        assert "registered backup drive backup" in self._refused(MockShell(), cfg)
+
+    def test_a_disk_that_is_not_blank_is_refused(self):
+        mock = MockShell()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\nsdz1 part\n")
+        mock.on("blkid -p /dev/sdz").returns(0, 'PTTYPE="gpt"')
+        assert "is not blank" in self._refused(mock, make_config())
+        mock = MockShell()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
+        mock.on("blkid -p /dev/sdz").returns(0, 'TYPE="vfat"')
+        assert "is not blank" in self._refused(mock, make_config())
+
+    def test_the_kernel_name_must_be_typed(self):
+        mock = MockShell()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
+        mock.on("blkid -p /dev/sdz").returns(2)
+        assert "Aborted: nothing was touched" in self._refused(mock, make_config(), "yes")
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            redirect_stdout(out),
+            patch("commands.selftest.validate_external_block_device", return_value=self._ident()),
+            patch("commands.selftest.Config.load", return_value=make_config()),
+            patch("builtins.input", return_value="sdz"),
+        ):
+            assert selftest_cmd._stick_identity("/dev/sdz", make_log()).disk == "/dev/sdz"
+
+    def _run_with(self, fn: Callable[[stest.Bench], None], td: str) -> tuple[int, str]:
+        check = stest.Check("T-01", 1, 1, "t", ("zark",), False, fn)
+        out = StringIO()
+        code = 0
+        write = certs.write_report
+        with (
+            redirect_stdout(out),
+            patch("commands.selftest.all_checks", return_value=[check]),
+            patch("lib.platform_facts.read", return_value=_facts()),
+            patch("commands.selftest.Bench.setup"),
+            patch("commands.selftest.Bench.teardown"),
+            patch("commands.selftest._system_pools", return_value=[]),
+            patch("lib.certificates.RECORD_DIR", td),
+            patch("lib.certificates.write_report", side_effect=lambda r: write(r, td)),
+        ):
+            try:
+                selftest_cmd.run([])
+            except SystemExit as e:
+                code = int(e.code or 0)
+        return code, out.getvalue()
+
+    def test_the_exit_status_and_the_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            code, out = self._run_with(lambda _b: None, td)
+            assert code == 0 and "SELF-TEST PASSED" in out
+            code, out = self._run_with(lambda _b: (_ for _ in ()).throw(stest.Fail("a", "b")), td)
+            assert code == 1 and "T-01.1" in out
+            rec = certs.read_record(Path(td, "record.json"))
+            assert rec[-1]["failed"] == [{"id": "T-01.1", "depends": ["zark"]}]
+
+    def test_a_stopped_run_records_that_it_covers_nothing(self):
+        def stop(_b: stest.Bench) -> None:
+            raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                _ = self._run_with(stop, td)
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("the interrupt was swallowed")
+            data = json.loads(sorted(Path(td).glob("report-*.json"))[-1].read_text("utf-8"))
+            assert data["certificate"]["partial"] and data["certificate"]["stopped"]
+
+    def test_certificate_merges_into_a_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            rep = Path(td, "r.json")
+            rep.write_text(json.dumps(_report([stest.Result("POOL-01.1", "PASS")])), "utf-8")
+            target = Path(td, "selftest.json")
+            target.write_text("[]\n", "utf-8")
+            with redirect_stdout(StringIO()):
+                selftest_cmd.run(["certificate", "--into", str(target), str(rep), str(rep)])
+            data = json.loads(target.read_text("utf-8"))
+            assert len(data) == 1 and data[0]["checks"] == {"POOL-01.1": "PASS"}
+            partial = Path(td, "p.json")
+            partial.write_text(json.dumps(_report([], partial=True)), "utf-8")
+            with redirect_stdout(StringIO()):
+                try:
+                    selftest_cmd.run(["certificate", str(partial)])
+                except SystemExit as e:
+                    assert e.code == 1
+                else:
+                    raise AssertionError("a partial run certified")
+
+    def test_warnings_on_and_off(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td, "settings.json")
+            with (
+                patch("lib.certificates.settings_path", return_value=p),
+                redirect_stdout(StringIO()),
+            ):
+                selftest_cmd.run(["warnings", "on"])
+                assert certs.subscribed(path=p)
+                selftest_cmd.run(["warnings", "off"])
+                assert not certs.subscribed(path=p)
+
+    def test_the_shipped_certificates_file_is_valid(self):
+        data = json.loads(certs.certificates_file().read_text("utf-8"))
+        assert isinstance(data, list)
+        for e in data:
+            assert certs.certificate_entry({"format": 1, "certificate": e})
 
 
 class TestSelftestStick:  # pylint: disable=missing-function-docstring,too-few-public-methods

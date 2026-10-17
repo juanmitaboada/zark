@@ -23,8 +23,9 @@ only for the refusal message. ``/run`` is shared by the installed zark and a
 copy run from a stick, so both see the same lock.
 
 Read-only commands run without it: ``status`` (the alerts timer runs it
-hourly), ``explore``, ``monitor`` (watches a running backup) and
-``registry`` with no subcommand or ``list``.
+hourly), ``explore``, ``monitor`` (watches a running backup),
+``registry`` with no subcommand or ``list``, and ``selftest status``,
+``report`` and ``certificate`` (M4s-16).
 """
 
 import fcntl
@@ -51,6 +52,8 @@ def needs_lock(command: str, args: list[str]) -> bool:
         return False
     if command == "registry":
         return bool(args) and args[0] != "list"
+    if command == "selftest":
+        return not args or args[0] not in ("status", "report", "certificate")
     return True
 
 
