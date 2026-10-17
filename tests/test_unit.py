@@ -96,6 +96,7 @@ import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E40
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
+import lib.zfs_features as zfeat  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
     _decide,
@@ -14325,6 +14326,112 @@ class TestRunner:
             else:
                 raise AssertionError("main() swallowed the interrupt")
         assert re.search(r"\d+ passed, 1 failed", out.getvalue())
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  M4s: zark selftest (lib/selftest*.py, lib/certificates.py,
+#  lib/platform_facts.py, lib/zfs_features.py, commands/selftest.py)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class TestZfsFeatures:  # pylint: disable=missing-function-docstring
+    """M4s-11 and the feature table."""
+
+    LISTING = (
+        "  pool: backup\n    id: 16224517364757996670\n state: UNAVAIL\n"
+        + "status: The pool uses the following feature(s) not supported on this system:\n"
+        + "\tcom.klarasystems:dynamic_gang_header (Variable on-disk size of gang headers.)\n"
+        + "\tcom.example:future\n"
+        + "action: The pool cannot be imported. Access the pool on a system that supports\n"
+        + "\tthe required feature(s), or recreate the pool from backup.\n"
+        + " config:\n\n\tbackup  UNAVAIL  unsupported feature(s)\n"
+    )
+
+    def test_the_table(self):
+        assert len(zfeat.FEATURES) == 47
+        assert zfeat.BY_GUID["com.klarasystems:dynamic_gang_header"].since == (2, 4)
+        assert "dynamic_gang_header" not in zfeat.COMPAT_2_2
+        assert "head_errlog" in zfeat.COMPAT_2_2 and "longname" not in zfeat.COMPAT_2_2
+        assert zfeat.release_tuple("zfs-kmod-2.3.4-1ubuntu2") == (2, 3)
+        assert zfeat.release_tuple("?") == (0, 0)
+
+    def test_parse_upgrade_v(self):
+        text = (
+            "This system supports ZFS pool feature flags.\n\n"
+            + "The following features are supported:\n\nFEAT DESCRIPTION\n"
+            + "-------------------------------------------------------------\n"
+            + "async_destroy                         (read-only compatible)\n"
+            + "     Destroy filesystems asynchronously.\n"
+            + "dynamic_gang_header\n     Variable on-disk size of gang headers.\n\n"
+            + "The following legacy versions are also supported:\n\nVER  DESCRIPTION\n"
+            + " 1   Initial ZFS version\n"
+        )
+        assert zfeat.parse_upgrade_v(text) == ["async_destroy", "dynamic_gang_header"]
+
+    def test_parse_unsupported_for_read_and_for_write(self):
+        found = zfeat.parse_unsupported(self.LISTING)
+        assert found == [
+            zfeat.Unsupported(
+                "backup", True, ("com.klarasystems:dynamic_gang_header", "com.example:future")
+            )
+        ]
+        write = self.LISTING.replace(
+            "The pool uses the following feature(s) not supported on this system:",
+            "The pool can only be accessed in read-only mode on this system. It\n"
+            + "\tcannot be accessed in read-write mode because it uses the following\n"
+            + "\tfeature(s) not supported on this system:",
+        )
+        assert not zfeat.parse_unsupported(write)[0].read
+        assert not zfeat.parse_unsupported("  pool: backup\n    id: 1\n state: ONLINE\n")
+
+    def test_names_and_releases(self):
+        assert zfeat.describe("com.klarasystems:dynamic_gang_header") == (
+            "dynamic_gang_header (OpenZFS 2.4)"
+        )
+        assert "newer than OpenZFS 2.4" in zfeat.describe("com.example:future")
+        assert zfeat.needed_release(("org.zfsonlinux:longname",)) == "OpenZFS 2.3"
+        assert zfeat.needed_release(("com.example:future",)) == "a release newer than OpenZFS 2.4"
+
+    def test_recover_stops_before_importing_an_unreadable_drive(self):
+        mock = MockShell()
+        dev = "/dev/disk/by-id/usb-X-0:0-part1"
+        mock.on(f"zpool import -d {dev}").succeeds(self.LISTING)
+        mock.on("zfs version").succeeds("zfs-2.2.2-0ubuntu9\nzfs-kmod-2.2.2-0ubuntu9\n")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out), patch("builtins.input", return_value=""):
+            try:
+                zfeat.check_drive("backup", dev, make_log())
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("no FATAL")
+        text = out.getvalue()
+        assert "dynamic_gang_header (OpenZFS 2.4)" in text
+        assert "zfs-2.2.2-0ubuntu9" in text and "Nothing was imported" in text
+        assert not any(c.startswith("zpool import -N") for c in mock.calls)
+
+    def test_recover_goes_on_for_a_write_only_gap_or_none(self):
+        mock = MockShell()
+        write = self.LISTING.replace(
+            "The pool uses the following feature(s) not supported on this system:",
+            "The pool can only be accessed in read-only mode on this system. It\n"
+            + "\tcannot be accessed in read-write mode because it uses the following\n"
+            + "\tfeature(s) not supported on this system:",
+        )
+        mock.on("zpool import -d /dev/x").succeeds(write)
+        mock.on("zpool import -d /dev/y").succeeds("  pool: backup\n    id: 1\n state: ONLINE\n")
+        mock.on("zpool import -d /dev/z").fails("no pools available to import")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            for dev in ("/dev/x", "/dev/y", "/dev/z"):
+                zfeat.check_drive("backup", dev, make_log())
+        assert "recover imports it read-only" in out.getvalue()
+
+    def test_recover_checks_the_drive_before_its_first_import(self):
+        src = Path(recover_mod.__file__).read_text(encoding="utf-8")
+        assert src.index("zfs_features.check_drive(pool_name, device, log)") < src.index(
+            "if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid)"
+        )
 
 
 def _run_one(name: str, method: Callable[[], object]) -> str:

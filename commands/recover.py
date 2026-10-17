@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
-from lib import apt_guard, engine, grub_guard, sh
+from lib import apt_guard, engine, grub_guard, sh, zfs_features
 from lib.backup_layout import (
     find_be as _find_be,
     list_datasets as _list_datasets,
@@ -1379,6 +1379,8 @@ def run(
 
     # ── 2. Import (read-only) and unlock backup pool ─────────────────────
     log.step(2, TOTAL_STEPS, f"Importing pool {pool_name} read-only...")
+    # A drive using features this live's ZFS lacks is named before any import (M4s-11).
+    zfs_features.check_drive(pool_name, device, log)
     if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
