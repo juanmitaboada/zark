@@ -93,6 +93,8 @@ import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa:
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
+import lib.selftest as stest  # pylint: disable=wrong-import-position # noqa: E402
+import lib.selftest_l2 as st_l2  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
@@ -247,6 +249,9 @@ from lib.sanoid_retention import (  # pylint: disable=wrong-import-position # no
     _guaranteed_days_of_template,
     guaranteed_lives,
     guaranteed_overlap_days,
+)
+from lib.selftest import (  # pylint: disable=wrong-import-position # noqa: E402
+    all_checks as all_selftest_checks,
 )
 from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -14336,6 +14341,194 @@ class TestRunner:
 # ═════════════════════════════════════════════════════════════════════════
 
 
+class _FakeBench(stest.Bench):
+    """The level-1 bench on tests/fake_zfs.py: pools a and b in the model,
+    writes grow ``written``, a cut stream is the fake's injected interrupt."""
+
+    def __init__(self, fake: FakeZfs):
+        log = make_log()
+        super().__init__(log, Cleanup(log), root="/nonexistent")
+        self.fake = fake
+        self.key = "/nonexistent/key"
+
+    def setup(self) -> None:
+        self.fake.pool(self.a)
+        self.fake.pool(self.b)
+
+    def write(self, ds: str, kib: int = 256) -> None:
+        self.fake.ds[ds].written += kib * 1024
+
+    def cut(self, send: str, recv: str, keep: int) -> _sh.RunResult:
+        self.fake.inject[recv.split()[-1]] = ("interrupt", 0)
+        r = self.pipe(send, recv)
+        assert not r.ok, "the fake did not cut the stream"
+        return r
+
+    def teardown(self) -> None:
+        pass
+
+
+class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M4s-12: every check marked fake runs against tests/fake_zfs.py and
+    passes; a check the fake fails names a divergence from OpenZFS."""
+
+    def test_every_fake_check_passes_on_the_fake(self):
+        checks = [c for c in all_selftest_checks() if c.fake]
+        assert len(checks) == 19
+        failed: list[str] = []
+        for c in checks:
+            fake = FakeZfs()
+            with patch_sh(fake):
+                bench = _FakeBench(fake)
+                bench.setup()
+                res = stest.run_one(c, bench)
+            if res.result != "PASS":
+                failed.append(f"{c.key}: {res.expected} / {res.came}")
+        assert not failed, failed
+
+
+class TestSelftestFramework:  # pylint: disable=missing-function-docstring
+    """M4s-1, M4s-2, M4s-3: the registry, a check's result, the bench."""
+
+    def test_the_registry_has_the_planned_checks(self):
+        checks = all_selftest_checks()
+        assert len([c for c in checks if c.level == 1]) == 43
+        assert len([c for c in checks if c.level == 2]) == 8
+        assert len({c.cid for c in checks}) == len(checks)
+        for c in checks:
+            assert re.fullmatch(r"[A-Z]{3,4}-\d\d", c.cid), c.cid
+            assert c.rev == 1 and c.depends, c.cid
+            doc = c.fn.__doc__ or ""
+            assert re.search(r"\.(c|py|rules\.in|rules|md|8):\d+", doc) or "sanoid:" in doc, c.cid
+        assert [c.level for c in checks] == sorted(c.level for c in checks)
+
+    def test_a_check_gives_pass_fail_skip_or_its_exception(self):
+        def fn_pass(_b: stest.Bench) -> None:
+            pass
+
+        def fn_fail(_b: stest.Bench) -> None:
+            raise stest.Fail("x", "y")
+
+        def fn_skip(_b: stest.Bench) -> None:
+            raise stest.Skip("no tool")
+
+        def fn_boom(_b: stest.Bench) -> None:
+            raise RuntimeError("boom")
+
+        bench = stest.Bench(make_log(), Cleanup(make_log()))
+        got = {}
+        for fn in (fn_pass, fn_fail, fn_skip, fn_boom):
+            c = stest.Check("T-01", 1, 1, "t", ("zark",), False, fn)
+            got[fn.__name__] = stest.run_one(c, bench)
+        assert got["fn_pass"].result == "PASS"
+        assert (got["fn_fail"].result, got["fn_fail"].expected, got["fn_fail"].came) == (
+            "FAIL",
+            "x",
+            "y",
+        )
+        assert got["fn_fail"].depends == ("zark",)
+        assert (got["fn_skip"].result, got["fn_skip"].reason) == ("SKIP", "no tool")
+        assert got["fn_boom"].result == "FAIL" and "RuntimeError: boom" in got["fn_boom"].came
+
+    def test_a_signal_is_not_turned_into_a_fail(self):
+        def fn(_b: stest.Bench) -> None:
+            raise KeyboardInterrupt
+
+        c = stest.Check("T-01", 1, 1, "t", ("zark",), False, fn)
+        state = stest.RunState()
+        try:
+            _ = stest.run_checks(
+                [c], stest.Bench(make_log(), Cleanup(make_log())), make_log(), state
+            )
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("the interrupt was swallowed")
+        assert not state.results and state.current == "T-01.1"
+
+    def test_teardown_destroys_only_the_pool_with_its_guid(self):
+        mock = MockShell()
+        with tempfile.TemporaryDirectory() as td, patch_sh(mock):
+            bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+            os.makedirs(bench.dir)
+            bench.guids = {bench.a: "111", bench.b: "222"}
+            mock.on(f"zpool get -Hp -o value guid {bench.a}").succeeds("111\n")
+            mock.on(f"zpool get -Hp -o value guid {bench.b}").succeeds("999\n")
+            mock.on(f"zpool get -H -o value readonly {bench.a}").succeeds("off\n")
+            mock.on(f"zpool destroy {bench.a}").succeeds()
+            mock.on(f"zpool list -H -o name {bench.a}").fails()
+            mock.on(f"zpool list -H -o name {bench.b}").succeeds(bench.b)
+            mock.on("zpool list -vHP").succeeds("rpool\t1T\n\t/dev/sda3\n")
+            mock.on_prefix("rm -rf").succeeds()
+            bench.teardown()
+            assert mock.was_called(f"zpool destroy {bench.a}")
+            assert mock.was_not_called(f"zpool destroy {bench.b}")
+            assert mock.was_not_called(f"zpool destroy -f {bench.b}")
+            assert mock.was_called(f"rm -rf {bench.dir}")
+
+    def test_a_read_only_pool_is_reimported_read_write_before_its_destroy(self):
+        mock = MockShell()
+        with tempfile.TemporaryDirectory() as td, patch_sh(mock):
+            bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+            os.makedirs(bench.dir)
+            Path(bench.vdev(bench.a)).touch()
+            bench.guids = {bench.a: "111"}
+            mock.on(f"zpool get -Hp -o value guid {bench.a}").succeeds("111\n")
+            mock.on(f"zpool get -H -o value readonly {bench.a}").succeeds("on\n")
+            mock.on(f"zpool export {bench.a}").succeeds()
+            mock.on_prefix(f"zpool import -d {bench.vdev(bench.a)} -N -R").succeeds()
+            mock.on(f"zpool destroy {bench.a}").succeeds()
+            mock.on(f"zpool list -H -o name {bench.a}").fails()
+            mock.on("zpool list -vHP").succeeds("")
+            mock.on_prefix("rm -rf").succeeds()
+            bench.teardown()
+            calls = mock.calls
+            exp = calls.index(f"zpool export {bench.a}")
+            imp = next(i for i, c in enumerate(calls) if c.startswith("zpool import -d"))
+            assert exp < imp < calls.index(f"zpool destroy {bench.a}")
+
+    def test_the_directory_stays_while_an_imported_pool_uses_it(self):
+        mock = MockShell()
+        with tempfile.TemporaryDirectory() as td, patch_sh(mock):
+            bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+            os.makedirs(bench.dir)
+            mock.on("zpool list -vHP").succeeds(f"zstx\t1G\n\t{bench.dir}/zstx.img\n")
+            bench.teardown()
+            assert os.path.isdir(bench.dir)
+            assert not any(c.startswith("rm -rf") for c in mock.calls)
+
+    def test_setup_refuses_without_space_or_memory(self):
+        bench = stest.Bench(make_log(), Cleanup(make_log()))
+        small = os.statvfs_result((4096, 4096, 10, 10, 10, 10, 10, 10, 0, 255))
+        with patch("lib.selftest.os.statvfs", return_value=small):
+            try:
+                bench.setup()
+            except stest.SetupError as e:
+                assert "MiB free" in str(e)
+            else:
+                raise AssertionError("no refusal")
+        big = os.statvfs_result((4096, 4096, 10**7, 10**7, 10**7, 10, 10, 10, 0, 255))
+        with (
+            patch("lib.selftest.os.statvfs", return_value=big),
+            patch("lib.selftest._mem_available", return_value=512 * 1024**2),
+        ):
+            try:
+                bench.setup()
+            except stest.SetupError as e:
+                assert "memory" in str(e)
+            else:
+                raise AssertionError("no refusal")
+
+    def test_remove_empty_dirs_keeps_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "a", "b").mkdir(parents=True)
+            Path(td, "k", "c").mkdir(parents=True)
+            Path(td, "k", "file").write_text("x", encoding="ascii")
+            stest.remove_empty_dirs(td)
+            assert os.path.isdir(td) and not Path(td, "a").exists()
+            assert Path(td, "k", "file").exists()
+
+
 class TestZfsFeatures:  # pylint: disable=missing-function-docstring
     """M4s-11 and the feature table."""
 
@@ -14462,6 +14655,26 @@ class TestPrepareCompatibility:  # pylint: disable=missing-function-docstring
                 assert zfs_drive_compatibility(("rpool", "bpool"), make_log()) == "openzfs-2.2"
             with patch_sh(longname), redirect_stdout(StringIO()):
                 assert zfs_drive_compatibility(("rpool", "bpool"), make_log()) == ""
+
+
+class TestSelftestStick:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M4s-4: the level-2 teardown wipes only the disk it began with."""
+
+    def test_the_stick_is_wiped_only_when_it_is_the_same_disk(self):
+        ident = DiskIdentity(disk="/dev/sdz", by_id="usb-S_1-0:0", serial="S1")
+        mock = MockShell()
+        mock.on_prefix("blkid -p").returns(2)
+        with patch_sh(mock):
+            bench = st_l2.StickBench(make_log(), Cleanup(make_log()), ident)
+            other = DiskIdentity(disk="/dev/sdy", by_id="usb-S_1-0:0", serial="S1")
+            with patch("lib.identity.resolve_disk", return_value=other):
+                bench.teardown()
+            assert mock.was_not_called("wipefs -a /dev/sdz")
+            bench._torn_down = False  # pylint: disable=protected-access
+            with patch("lib.identity.resolve_disk", return_value=ident):
+                bench.teardown()
+            assert mock.was_called("wipefs -a /dev/sdz")
+            assert mock.was_called("sgdisk --zap-all /dev/sdz")
 
 
 def _run_one(name: str, method: Callable[[], object]) -> str:
