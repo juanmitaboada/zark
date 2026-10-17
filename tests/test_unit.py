@@ -8919,6 +8919,9 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
             assert live_mod.stop_installer_probe("recover", Log())
         assert mock.was_called("snap stop ubuntu-desktop-bootstrap.subiquity-server")
         assert not mock.was_called("--disable")  # runtime only
+        mock = self._mock(live=True)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert live_mod.stop_installer_probe("selftest", Log())
 
     def test_left_alone_on_an_installed_system_or_without_an_import(self) -> None:
         for live, cmd in ((False, "mount"), (True, "status"), (True, "backup")):

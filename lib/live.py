@@ -43,6 +43,8 @@ IMPORTING = frozenset(
         "prepare",
         "health",
         "explore",
+        # Its pools, zvols and the level-2 stick's partitions are udev events too (eli E1).
+        "selftest",
     }
 )
 
