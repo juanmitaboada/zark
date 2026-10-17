@@ -1,0 +1,31 @@
+name: Self-test report
+description: Share the result of `zark selftest` (zark itself sends nothing)
+title: "selftest: "
+labels: ["selftest"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `sudo zark selftest report` prints a link that opens this form with
+        the report filled in. When the report is too long for a link, it
+        prints the report file's path instead: paste its content below.
+
+        The report names no pool, disk, serial, GUID or host: zark replaces
+        them before writing it. Read it before submitting anyway.
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Report
+      description: The JSON report written by `zark selftest`.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything about the machine or the run worth knowing (optional).
+    validations:
+      required: false
