@@ -64,6 +64,7 @@ zark automates the entire process:
 | `status`           | Source pools' fill level and each drive's backup age         |
 | `alerts`           | Install or remove the status MOTD and hourly timer           |
 | `registry`         | List, forget or fix drives; set each drive's retention       |
+| `selftest`         | Check that this platform's ZFS and tools behave as zark relies on |
 
 ---
 
@@ -282,6 +283,8 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 - **Cross-host recovery** — backups are portable across machines: a backup taken on machine A can be restored onto machine B with a different drive layout / firmware. zark rewrites every `--fs-uuid` reference in `grub.cfg` (including those carrying `--hint-bios` / `--hint-efi` / `--hint-baremetal` options) so the recovered system boots regardless of where its disks land in the new BIOS enumeration.
 - **ZFS encryption** — AES-256-GCM with `keyformat=raw`, encryption key on a LUKS-encrypted zvol (the keystore).
 - **bpool features** — restricted to the GRUB-readable subset documented in `/usr/share/zfs/compatibility.d/grub2`. zark explicitly does not enable `head_errlog` or `vdev_zaps_v2` on bpool: even GRUB 2.14 (Ubuntu 26.04) cannot read either, and activating them produces an unbootable system. rpool is unaffected and uses whatever features the running ZFS supports.
+- **Platform self-test** - `sudo zark selftest` checks, on file-backed pools that touch no disk, every ZFS, util-linux, systemd, kernel and Python behaviour zark relies on (`--stick <device>` adds the checks that need a real disk, on a scratch stick it erases). Each release ships the results certified on the maintainer's machine; `zark selftest status` says whether they cover yours, and `zark selftest report` prints a link to share yours.
+- **Drives readable by older live sessions** - `prepare` creates new drives with `compatibility=openzfs-2.2`, so an Ubuntu 24.04 live (OpenZFS 2.2) can read them; `recover` names, before importing anything, any feature of a drive the live's ZFS cannot read.
 - **Secure Boot** — full compliance via signed GRUB chain (shimx64 → grubx64.signed → kernel).
 - **Hardware tested:**
   - MINISFORUM UM890 (Ubuntu 24.04 + 25.10 + 26.04) — primary development system.

@@ -10,9 +10,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M4b (2.0.0-rc5)** on top of M4a (2.0.0-rc4),
-M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling
-consolidation that preceded them.
+The tree currently carries **M4s (2.0.0-rc6)** on top of M4b (2.0.0-rc5),
+M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1 (2.0.0-rc1) and the
+development-tooling consolidation that preceded them.
+
+### M4s: platform self-test (2.0.0-rc6)
+
+#### Added
+
+- **`zark selftest`** (M4s-1, M4s-2, M4s-3). Level 1 checks, on pools
+  backed by sparse files in `/dev/shm` with random names no other pool
+  has, every behaviour of OpenZFS, util-linux, systemd, the kernel, CPython
+  and sanoid that zark relies on (43 checks: pools, snapshots, send and
+  receive, destroy, clone, keys, mounts and namespaces, signals and locks,
+  systemd units, sanoid's pruning). Nothing it runs touches a disk or a
+  system pool, nor sets a mount property (the chase.c:648 rule). Level 2,
+  with `--stick <device>`, checks on a blank scratch stick what needs a
+  real disk (8 checks: prepare's pool on a whole disk, udev's partition
+  re-read and the lock that holds it off, purge's wipe); the stick must
+  be external, unregistered and blank, its kernel name is typed, and it is
+  left blank. Each check has an ID and a revision; a FAIL prints what was
+  expected, what came and what in zark depends on it. A signal stops the
+  run like any command: its pools are destroyed (only the ones whose GUID
+  it recorded), its directory removed, and the run recorded as stopped.
+- **Reports, record and certificates** (M4s-5 to M4s-9, M4s-14). Every run
+  writes a JSON report under `/var/lib/zark/selftest/` with the platform's
+  exact versions, the series they belong to (Ubuntu, kernel, OpenZFS,
+  util-linux, systemd; installed or live, and the live's ISO) and each
+  check's result; the run's own names, the hostname, GUIDs, serials and
+  by-id names are replaced before it is written. `zark selftest report`
+  prints a link to a GitHub issue form (`.github/ISSUE_TEMPLATE/selftest.yml`)
+  with the report filled in; zark sends nothing. `zark selftest status`
+  shows the coverage of this platform by the certificates shipped with zark
+  (`certificates/selftest.json`, filled at each rc from the maintainer's
+  machine) and by this machine's own runs.
+- **Warnings by subscription** (M4s-15). `zark selftest warnings on` adds a
+  line at the start of `setup`, `backup` and `recover` and to the MOTD
+  when no certificate covers this platform, when a check failed here, or
+  when the loaded ZFS module and its tools are different releases (Ubuntu's
+  revision ignored, M4s-8). Off by default; stored in `settings.json` next
+  to `known_drives.json`.
+
+#### Changed
+
+- **`prepare` creates new drives with `compatibility=openzfs-2.2`**
+  (M4s-10). A drive prepared with every feature of OpenZFS 2.4 could not
+  be read by an older live session once `dynamic_gang_header` activated
+  on it (a ganged write on a nearly full drive); with 2.2's set, Ubuntu
+  24.04's live and later read it. When that set is not installed, or the
+  source pools use `longname` or `large_microzap` (which zark's streams
+  would carry), the drive gets every feature and prepare says so. Drives
+  prepared before are unchanged.
+- **`recover` names what a live session cannot read before importing
+  anything** (M4s-11). It lists the drive with `zpool import -d`; when the
+  drive uses features this ZFS lacks for reading, it stops with each
+  feature's name, the OpenZFS release that has it and the one running;
+  features it lacks only for writing are one line (recover imports
+  read-only).
+- **The test model of ZFS follows OpenZFS where it did not** (M4s-12):
+  `written` is a number on every filesystem, a `zfs set` naming several
+  targets applies to the ones it can open, `zfs destroy -r ds@s` takes
+  that name on every descendant, a held snapshot's refusal says so, a
+  clone sent from its origin is attached to that origin by GUID, and a
+  resume token whose snapshot was recreated is "no longer the same
+  snapshot".
 
 ### M4b: interrupted runs and the engine's bases (2.0.0-rc5)
 

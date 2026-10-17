@@ -1,3 +1,23 @@
+zark (2.0.0~rc6-1) UNRELEASED; urgency=medium
+
+  * Milestone M4s of zark 2 (platform self-test). Not for release: nothing
+    is published until the final 2.0.0.
+  * New command selftest: level 1 checks every ZFS, util-linux, systemd,
+    kernel and Python behaviour zark relies on, on file-backed pools that
+    touch no disk; level 2 (--stick) checks the disk-level ones on a blank
+    scratch stick it erases. Each check has an ID and a revision; a FAIL
+    names what in zark depends on it.
+  * Reports with no host, pool, disk, serial or GUID in them, a local
+    record, certificates shipped per platform series, a link to a GitHub
+    issue form (zark sends nothing), and warnings by subscription at the
+    start of setup, backup and recover and in the MOTD (off by default).
+  * prepare creates new drives with compatibility=openzfs-2.2, so lives
+    with OpenZFS 2.2 or later can read them.
+  * recover names the features of a drive the live's ZFS cannot read
+    before importing anything.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Sat, 17 Oct 2026 21:00:00 +0200
+
 zark (2.0.0~rc5-1) UNRELEASED; urgency=medium
 
   * Milestone M4b of zark 2 (interrupted runs and the engine's bases). Not

@@ -132,6 +132,38 @@ for the canonical end-to-end sequences.
     obfuscate serials/GUIDs. See the enclosure notes in **docs/HARDWARE.md**.
     The read-only check also runs at the start of **prepare**.
 
+**selftest** \[**run**\] \[**--stick** *device*\] \[**--only** *ID*\[,*ID*...\]\] | **status** | **report** \[*file*\] | **certificate** \[**--into** *file*\] *file*... | **warnings** **on**|**off**
+:   Check that this machine's ZFS, util-linux, systemd, kernel and Python
+    behave as **zark** relies on. **run** (the default) runs the level-1
+    checks on pools backed by sparse files in */dev/shm*, with random names
+    no other pool has, imported under */run/zark/altroot* and never written
+    to */etc/zfs/zpool.cache*; no disk is touched and no system pool is
+    imported, changed or exported. It needs 1 GiB free in */dev/shm* and
+    1.5 GiB of available memory. With **--stick**, it then runs the level-2
+    checks on that whole disk, which it erases: the disk must be external,
+    unregistered and blank (**purge** wipes one), and its kernel name must
+    be typed to go on; it is left blank. **--only** repeats some checks; such
+    a run certifies nothing. Each check has an ID and a revision
+    (*POOL-01.1*); a FAIL says what was expected, what came and what in
+    **zark** depends on it. A signal stops the run like any command, its
+    pools destroyed and its directory removed, and the run is recorded as
+    stopped. Exit status 0 when no check failed (a check that cannot run
+    here, a missing tool, is a SKIP), 1 otherwise.
+
+    Every run writes a JSON report (*/var/lib/zark/selftest/*): the
+    platform's versions and the result of each check, with no host, pool,
+    disk, serial or GUID in it. **report** prints a link that opens a GitHub
+    issue form with the report filled in; **zark** sends nothing itself.
+    **status** shows how much of the current checklist is covered on this
+    platform (same Ubuntu, kernel, ZFS, util-linux and systemd series, and
+    the same installed or live session) by the certificates shipped with
+    **zark** and by this machine's own runs. **warnings on** adds one line at
+    the start of **setup**, **backup** and **recover**, and to the MOTD,
+    when no certificate covers this platform, when a check failed here, or
+    when the loaded ZFS module and its tools are different releases;
+    **warnings off** (the default) removes them. **certificate** turns
+    reports into entries of the certificates file (for the maintainer).
+
 ## Backup workflow
 
 **setup**
@@ -171,6 +203,13 @@ for the canonical end-to-end sequences.
     the drive's metadata (see **backup**). A drive without a by-id name is
     refused rather than registered as *\<unknown\>*; registry entries left
     for the same drive are offered for replacement.
+
+    The pool is created with **compatibility=openzfs-2.2**, so that a live
+    session with OpenZFS 2.2 (Ubuntu 24.04) or later can read the drive and
+    no feature newer than that ever activates on it; without that feature
+    set installed, or when the source pools use **longname** or
+    **large_microzap** (which zark's streams would carry), it is created
+    with every feature, and **prepare** says so.
 
     Before doing any work, **prepare** runs the same non-destructive risk
     check as **health** and, when the bridge is on the known-problematic
@@ -457,8 +496,11 @@ for the canonical end-to-end sequences.
     a backup drive. Must be run from an Ubuntu Live USB with the backup
     drive connected.
 
-    The procedure scans for backup drives, imports the chosen pool
-    read-only by its exact device, prompts for the rpool passphrase (when
+    The procedure scans for backup drives and, before importing anything,
+    lists the chosen drive with **zpool import -d**: when it uses features
+    the live session's ZFS cannot read, **recover** stops, naming each
+    feature, the OpenZFS release that has it and the one running. It then
+    imports the chosen pool read-only by its exact device, prompts for the rpool passphrase (when
     the drive holds several boot environments, a menu lists each with its
     newest snapshot's time, the newest the default) and
     offers the restore points found on the drive, ordered by snapshot
@@ -792,6 +834,19 @@ To verify a recovery without rebooting:
 */run/zark/status.motd*, */etc/update-motd.d/97-zark-status*, */etc/systemd/system/zark-status.service*, */etc/systemd/system/zark-status.timer*
 :   The status alerts; see **alerts**.
 
+*/var/lib/zark/selftest/*
+:   **selftest**'s reports (the last ten, *report-\<UTC\>.json*) and
+    *record.json*, this machine's newest complete and partial result per
+    level and session type.
+
+*settings.json*
+:   Next to *known_drives.json*: **selftest_warnings** (true or false),
+    set by **selftest warnings**.
+
+*/usr/share/zark/certificates/selftest.json*
+:   The self-test results certified for each platform series, shipped with
+    **zark** (next to *lib/* in a portable copy).
+
 */var/log/zark.log*
 :   Log file for system installs. Portable installs write
     *zark.log* alongside the entry-point script instead, so the log
@@ -803,8 +858,9 @@ To verify a recovery without rebooting:
 
 */run/zark/zark.lock*
 :   The lock every command that changes state takes with **flock**(2)
-    before it starts; **status**, **explore**, **monitor** and **registry**
-    (list) run without it. The kernel releases it when the run ends, however
+    before it starts; **status**, **explore**, **monitor**, **registry**
+    (list) and **selftest** (**status**, **report**, **certificate**) run
+    without it. The kernel releases it when the run ends, however
     it ends. Its content (command, pid, start time) is only for the refusal
     message.
 
