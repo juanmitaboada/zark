@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import engine, forensics, sh, status
+from lib import certificates, engine, forensics, sh, status
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -801,6 +801,7 @@ def run(
     cleanup.register()
 
     log.banner("ZFS BACKUP", f"Source: {cfg.source_pool}")
+    certificates.show_warnings(log)
     started = time.time()
 
     # ── Refuse live USB ──────────────────────────────────────────────────

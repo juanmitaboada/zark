@@ -36,10 +36,12 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from collections.abc import Callable, Iterator
 from contextlib import (
     AbstractContextManager,
@@ -84,6 +86,7 @@ import commands.setup as setup_mod  # pylint: disable=wrong-import-position # no
 import commands.status as status_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.certificates as certs  # pylint: disable=wrong-import-position # noqa: E402
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.health as health_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -91,6 +94,7 @@ import lib.live as live_mod  # pylint: disable=wrong-import-position # noqa: E40
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
+import lib.platform_facts as pfacts  # pylint: disable=wrong-import-position # noqa: E402
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.selftest as stest  # pylint: disable=wrong-import-position # noqa: E402
@@ -14527,6 +14531,215 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
             stest.remove_empty_dirs(td)
             assert os.path.isdir(td) and not Path(td, "a").exists()
             assert Path(td, "k", "file").exists()
+
+
+def _facts(**over: Any) -> pfacts.Facts:
+    series = {
+        "ubuntu": "26.04",
+        "kernel": "7.0",
+        "zfs": "2.4.1",
+        "zfs_kmod": "2.4.1",
+        "util_linux": "2.41",
+        "systemd": "259",
+    }
+    series.update(over.pop("series", {}))
+    return pfacts.Facts(
+        exact={"zfs": "zfs-2.4.1-1ubuntu5.1"},
+        series=series,
+        where=over.pop("where", "installed"),
+        iso=over.pop("iso", None),
+    )
+
+
+def _report(
+    results: list[stest.Result], facts: pfacts.Facts | None = None, **info: Any
+) -> dict[str, Any]:
+    return certs.build_report(
+        facts or _facts(),
+        certs.RunInfo(info.get("level", 1), info.get("partial", False)),
+        results,
+        info.get("masks", {}),
+    )
+
+
+class TestCertificates:  # pylint: disable=missing-function-docstring
+    """M4s-5, M4s-6, M4s-9, M4s-15: report, record, coverage, warnings, link."""
+
+    def test_nothing_that_names_the_machine_reaches_the_report(self):
+        host = socket.gethostname()
+        planted = (
+            f"zdb: name: 'zstdeadbeefa' hostname: '{host}' pool_guid: 16224517364757996670 "
+            + "serial 408D5C15CFA5E961091D0CCA /dev/disk/by-id/usb-Kingston_DT_408D5C15-0:0 "
+            + "machine 7e57000000000000000000000000beef in /dev/shm/zark-selftest-x"
+        )
+        res = [stest.Result("POOL-07.1", "FAIL", expected=planted, came=planted, depends=("x",))]
+        masks = {"/dev/shm/zark-selftest-x": "<run>", "zstdeadbeefa": "<pool-a>"}
+        text = json.dumps(_report(res, masks=masks))
+        for secret in (
+            host,
+            "16224517364757996670",
+            "408D5C15CFA5E961091D0CCA",
+            "usb-Kingston",
+            "7e57000000000000000000000000beef",
+            "zstdeadbeefa",
+            "zark-selftest-x",
+        ):
+            assert secret not in text, secret
+        assert "<pool-a>" in text and "<run>" in text
+
+    def test_the_record_keeps_a_complete_run_beside_a_partial_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            _ = certs.write_report(_report([stest.Result("POOL-01.1", "PASS")]), td)
+            _ = certs.write_report(_report([stest.Result("POOL-02.1", "FAIL")], partial=True), td)
+            rec = certs.read_record(Path(td, "record.json"))
+            assert sorted(bool(e["partial"]) for e in rec) == [False, True]
+            assert certs.covered(_facts(), rec) == {"POOL-01.1"}
+
+    def test_reports_beyond_ten_are_removed(self):
+        with tempfile.TemporaryDirectory() as td:
+            for i in range(12):
+                Path(td, f"report-2026010{i:02d}.json").write_text("{}", encoding="ascii")
+            _ = certs.write_report(_report([stest.Result("POOL-01.1", "PASS")]), td)
+            assert len(list(Path(td).glob("report-*.json"))) == certs.REPORTS_KEPT
+
+    def test_coverage_needs_the_same_series_and_where(self):
+        entry = _report([stest.Result("POOL-01.1", "PASS"), stest.Result("POOL-02.1", "FAIL")])
+        cert = entry["certificate"]
+        assert certs.covered(_facts(), [cert]) == {"POOL-01.1"}
+        assert certs.covered(_facts(where="live"), [cert]) == set()
+        assert certs.covered(_facts(series={"zfs": "2.4.2"}), [cert]) == set()
+        assert certs.covered(_facts(), [{**cert, "partial": True}]) == set()
+
+    def test_warning_lines(self):
+        checks = all_selftest_checks()
+        l1 = [c for c in checks if c.level == 1]
+        all_pass = _report([stest.Result(c.key, "PASS") for c in l1])["certificate"]
+        assert not certs.warning_lines(_facts(), checks, [], [all_pass])
+        lines = certs.warning_lines(_facts(), checks, [], [])
+        assert lines == [
+            f"self-test: no certificate covers this platform ({len(l1)} of {len(l1)} "
+            + "checks): run sudo zark selftest"
+        ]
+        failed = {
+            **all_pass,
+            "date": "2026-10-18",
+            "failed": [
+                {"id": "SND-04.1", "depends": ["the MODIFIED state"]},
+                {"id": "X", "depends": []},
+            ],
+        }
+        lines = certs.warning_lines(_facts(), checks, [failed], [all_pass])
+        assert lines == [
+            "self-test: SND-04.1 and 1 more failed on this machine on 2026-10-18: "
+            + "the MODIFIED state"
+        ]
+        mixed = _facts(series={"zfs_kmod": "2.3.4"})
+        lines = certs.warning_lines(mixed, checks, [], [])
+        assert lines[-1] == (
+            "self-test: the ZFS module (2.3.4) and its tools (2.4.1) differ: "
+            + "reboot after updating ZFS"
+        )
+
+    def test_the_subscription(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td, "settings.json")
+            assert not certs.subscribed(path=p)
+            _ = certs.set_subscribed(True, p)
+            assert certs.subscribed(path=p)
+            _ = certs.set_subscribed(False, p)
+            assert not certs.subscribed(path=p)
+            p.write_text("{not json", encoding="ascii")
+            assert not certs.subscribed(make_log(), path=p)
+            p.write_text('{"selftest_warnings": "yes", "other": 1}', encoding="ascii")
+            assert not certs.subscribed(make_log(), path=p)
+            _ = certs.set_subscribed(True, p)
+            assert json.loads(p.read_text(encoding="ascii"))["other"] == 1
+
+    def test_warnings_need_the_subscription(self):
+        with patch("lib.certificates.subscribed", return_value=False):
+            assert not certs.warnings(make_log())
+        with (
+            patch("lib.certificates.subscribed", return_value=True),
+            patch("lib.platform_facts.read", return_value=_facts()),
+            patch("lib.certificates.read_record", return_value=[]),
+            patch("lib.certificates.read_certificates", return_value=[]),
+        ):
+            assert certs.warnings(make_log())[0].startswith("self-test: no certificate")
+
+    def test_the_motd_carries_the_lines(self):
+        stt = status_lib.Status(selftest=["self-test: x"])
+        assert "zark:\033[0m self-test: x" in status_lib.motd_text(stt)
+
+    def test_the_issue_link(self):
+        rep = _report([stest.Result("POOL-01.1", "PASS")])
+        link, whole = certs.issue_link(rep)
+        assert whole and link.startswith(certs.ISSUE_URL + "?template=selftest.yml&title=")
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
+        assert json.loads(q["report"][0]) == rep
+        assert q["title"][0] == "selftest: zark " + rep["certificate"]["zark"] + (
+            " on Ubuntu 26.04 (installed), 0 FAIL"
+        )
+        big = _report(
+            [
+                stest.Result(f"X-{i:02d}.1", "FAIL", expected="e" * 50, came="c" * 50)
+                for i in range(80)
+            ]
+        )
+        link, whole = certs.issue_link(big)
+        assert not whole and "report=" not in link and len(link) < certs.URL_MAX
+
+    def test_a_certificate_entry_comes_only_from_a_complete_run(self):
+        rep = _report([stest.Result("POOL-01.1", "PASS")])
+        assert certs.certificate_entry(rep)["checks"] == {"POOL-01.1": "PASS"}
+        for bad in ({"format": 9}, _report([], partial=True), {"format": 1}):
+            try:
+                _ = certs.certificate_entry(bad)
+            except ValueError:
+                continue
+            raise AssertionError(f"accepted {bad}")
+
+
+class TestPlatformFacts:  # pylint: disable=missing-function-docstring
+    """M4s-8, M4s-14: exact versions, series, where."""
+
+    def _mock(self) -> MockShell:
+        mock = MockShell()
+        mock.on("zfs version").succeeds("zfs-2.4.1-1ubuntu5.1\nzfs-kmod-2.4.1-1ubuntu4\n")
+        mock.on("findmnt --version").succeeds("findmnt from util-linux 2.41.3\n")
+        mock.on("systemctl --version").succeeds("systemd 259 (259.5-0ubuntu3.4)\n+PAM\n")
+        mock.on("sgdisk --version").succeeds("GPT fdisk (sgdisk) version 1.0.10\n")
+        return mock
+
+    def test_series_drop_the_ubuntu_revision(self):
+        mock = self._mock()
+        mock.on("cat /proc/cmdline").succeeds("BOOT_IMAGE=/vmlinuz root=ZFS=rpool")
+        mock.on("test -d /rofs").fails()
+        mock.on("test -d /cow").fails()
+        with tempfile.TemporaryDirectory() as td, patch_sh(mock):
+            osr = Path(td, "os-release")
+            osr.write_text(
+                'VERSION_ID="26.04"\nVERSION="26.04.1 LTS (Resolute Raccoon)"\n', "utf-8"
+            )
+            with patch("lib.platform_facts.OS_RELEASE", str(osr)):
+                f = pfacts.read()
+        assert f.series["zfs"] == f.series["zfs_kmod"] == "2.4.1"
+        assert not f.zfs_mismatch
+        assert f.series["util_linux"] == "2.41" and f.series["systemd"] == "259"
+        assert f.series["ubuntu"] == "26.04" and f.where == "installed" and f.iso is None
+        assert f.exact["zfs_kmod"] == "zfs-kmod-2.4.1-1ubuntu4"
+
+    def test_a_live_session_reads_its_iso(self):
+        mock = self._mock()
+        mock.on("cat /proc/cmdline").succeeds("boot=casper quiet")
+        with tempfile.TemporaryDirectory() as td, patch_sh(mock):
+            info = Path(td, "info")
+            info.write_text('Ubuntu 26.04 LTS "Resolute Raccoon" - Release amd64\n', "utf-8")
+            with patch("lib.platform_facts.CDROM_INFO", str(info)):
+                f = pfacts.read()
+        assert f.where == "live" and f.iso and f.iso.startswith("Ubuntu 26.04")
+
+    def test_a_different_release_is_a_mismatch(self):
+        assert _facts(series={"zfs_kmod": "2.3.4"}).zfs_mismatch
 
 
 class TestZfsFeatures:  # pylint: disable=missing-function-docstring

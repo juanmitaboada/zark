@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
-from lib import apt_guard, engine, grub_guard, sh, zfs_features
+from lib import apt_guard, certificates, engine, grub_guard, sh, zfs_features
 from lib.backup_layout import (
     find_be as _find_be,
     list_datasets as _list_datasets,
@@ -1345,6 +1345,7 @@ def run(
         f"FULL SYSTEM RECOVERY v{VERSION}",
         "Run from Ubuntu live USB with backup drive connected",
     )
+    certificates.show_warnings(log)
 
     uptime = sh.run("uptime -p").output or sh.run("cat /proc/uptime").output
     log.info(f"System uptime: {uptime}")

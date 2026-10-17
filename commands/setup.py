@@ -38,7 +38,7 @@ future is automatically covered the next time setup runs.
 from pathlib import Path
 from typing import TypedDict
 
-from lib import alerts, apt_guard, grub_guard, sh
+from lib import alerts, apt_guard, certificates, grub_guard, sh
 from lib.engine import bookmark_feature
 
 # from lib.config import Config
@@ -709,6 +709,7 @@ def run(
     zfs = ZFS(log)
 
     log.banner("BACKUP SYSTEM SETUP", "Install dependencies and configure sanoid")
+    certificates.show_warnings(log)
 
     # ── 1. Dependencies ──────────────────────────────────────────────────
     log.step(1, 6, "Checking dependencies...")

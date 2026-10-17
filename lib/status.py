@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import engine, sh
+from lib import certificates, engine, sh
 from lib.config import Config
 from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
@@ -67,11 +67,13 @@ class Status:
     shared: list[str] = field(default_factory=list)  # hallazgo 21 lines
     residues: int = 0
     read_error: str = ""  # origin could not be read: nothing is said about anchors (M3R-2)
+    selftest: list[str] = field(default_factory=list)  # the subscribed self-test lines (M4s-15)
 
 
 def gather(cfg: Config, log: Log) -> Status:
     """Read the pools, the registry and origin's anchors."""
     st = Status()
+    st.selftest = certificates.warnings(log)
     pools = engine.source_pools()
     for pool in pools:
         r = sh.run(f"zpool list -Hp -o capacity {pool}")
@@ -135,6 +137,7 @@ def motd_text(st: Status) -> str:
         lines.append(
             f"zark: {st.residues} legacy snapshot(s) in origin no drive needs: sudo zark prune"
         )
+    lines += [f"{yellow}zark:{plain} {line}" for line in st.selftest]
     return "\n".join(lines) + "\n" if lines else ""
 
 
