@@ -8764,6 +8764,22 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         self._assert_stopped("run:TERM", 128 + signal.SIGTERM)
         self._assert_stopped("run:HUP", 128 + signal.SIGHUP)
 
+    def test_a_ctrl_c_reaches_the_child_as_sigint(self):
+        # Mutation S10: the child gets the signal the user sent, SIGINT for a
+        # Ctrl-C and SIGTERM for anything else (its wait status says which).
+        result = self._assert_stopped("run:INT", 128 + signal.SIGINT)
+        assert result.get("child_status") == -signal.SIGINT, result
+        result = self._assert_stopped("run:HUP", 128 + signal.SIGHUP)
+        assert result.get("child_status") == -signal.SIGTERM, result
+
+    def test_a_grandchild_that_ignores_the_stop_is_killed_too(self):
+        # M4bF-10 10a: the shell between zark and its command dies with the
+        # signal; the command behind it ignores it. The stop waits for the
+        # whole process group and SIGKILLs what is left, so the cleanup never
+        # runs under a child that is still working.
+        result = self._assert_stopped("orphan:TERM", 128 + signal.SIGTERM)
+        assert result.get("child_status") == -signal.SIGTERM, result
+
     def test_two_signals_pending_together_stop_once(self):
         # logind's SIGTERM and SIGHUP; CPython runs the lower number first.
         self._assert_stopped("pipe:TERM,HUP", 128 + signal.SIGHUP)

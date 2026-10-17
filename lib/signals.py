@@ -233,7 +233,12 @@ def stop_children(
     """Stop each child's process group with ``sig`` (default
     :func:`child_signal`), wait up to ``wait`` seconds (default
     :data:`STOP_WAIT_SECONDS`, read when called) for all of them, then
-    SIGKILL what is left. A child that already exited is skipped."""
+    SIGKILL what is left. A child that already exited is skipped.
+
+    The wait covers the whole group, not only the child zark started
+    (M4bF-10 10a): ``sh -c`` dies with the signal while the command behind
+    it may ignore it, and the cleanup must not run under a child that is
+    still writing."""
     sig = child_signal() if sig is None else sig
     for p in procs:
         if p.poll() is None:
@@ -245,6 +250,24 @@ def stop_children(
         except subprocess.TimeoutExpired:
             _killpg(p.pid, signal.SIGKILL)
             _ = p.wait()
+        if not _group_gone(p.pid, deadline):
+            _killpg(p.pid, signal.SIGKILL)
+            _ = _group_gone(p.pid, time.monotonic() + 1.0)
+
+
+def _group_gone(pgid: int, deadline: float) -> bool:
+    """Whether process group ``pgid`` has no member left by ``deadline``
+    (``killpg(pgid, 0)`` fails with ESRCH once it is empty)."""
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass  # a member we cannot signal is still a member
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
 
 
 def _killpg(pgid: int, sig: int) -> None:

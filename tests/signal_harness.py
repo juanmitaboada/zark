@@ -33,6 +33,8 @@ passes it on. Scenarios:
                     terminal runs (lib.signals.run_interactive)
     stubborn:<SIGS> the same as run:, with a child that ignores SIGTERM and a
                     stop wait of half a second (STOP_WAIT_SECONDS patched)
+    orphan:<SIGS>   the same, but the shell sh.run starts dies with the signal
+                    and only its command (a grandchild) ignores it
     normalend:<SIG>[,<SIG>]  the command ends normally and runs cleanup.run()
                     itself; the first signal arrives while a cleanup step's
                     child runs, the second (if any) after the cleanup
@@ -40,8 +42,9 @@ passes it on. Scenarios:
 Writes ``<workdir>/result.json``: ``cleanup`` (how many times it ran),
 ``children_alive`` (children still running when it ran), ``continued``
 (whether the command went on after the interrupted wait), ``cleanup_done``
-(whether the cleanup reached its end) and, for ``stubborn``, ``child_status``
-(the child's wait status: -9 when SIGKILL ended it).
+(whether the cleanup reached its end) and, for ``run``, ``stubborn`` and
+``orphan``, ``child_status`` (the wait status of the child zark started: -9
+when SIGKILL ended it, -2 for SIGINT, -15 for SIGTERM).
 """
 
 import json
@@ -126,10 +129,7 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-man
             _ = sh.run("sleep 2")
 
         cleanup.track_action(slow)
-    if kind == "stubborn":
-        # The child ignores the stop: half a second, then SIGKILL. The wait
-        # is read when stop_children runs, so the module constant counts.
-        signals.STOP_WAIT_SECONDS = 0.5
+    if kind in ("run", "stubborn", "orphan"):
         real_stop = signals.stop_children
 
         def recording_stop(
@@ -142,6 +142,10 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-man
             write()
 
         signals.stop_children = recording_stop
+    if kind in ("stubborn", "orphan"):
+        # Something ignores the stop: half a second, then SIGKILL. The wait
+        # is read when stop_children runs, so the module constant counts.
+        signals.STOP_WAIT_SECONDS = 0.5
     if sigs:
         one = kind in ("cleanup", "normalend")
         _sender(sigs[:1] if one else sigs, 0.5, apart=kind == "interactive")
@@ -168,6 +172,9 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-man
         elif kind == "stubborn":
             # The shell sh.run starts is the one that traps: sleep inherits it.
             _ = sh.run(f"trap '' TERM; echo $$ > {pids[0]}; exec sleep 60")
+        elif kind == "orphan":
+            # The outer shell dies with the signal; only the inner one traps.
+            _ = sh.run(f"sh -c 'trap \"\" TERM; echo $$ > {pids[0]}; exec sleep 60'")
         else:
             _ = sh.run_pipe(
                 f"echo $$ > {pids[0]}; exec sleep 60",
