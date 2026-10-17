@@ -156,7 +156,16 @@ consolidation that preceded them.
     (M4bR-8, M4bF-8 8a).
   - The stop wait of a child is read when the child is stopped, so the
     SIGKILL fallback can be tested; a test for each of the review's other
-    survivors (M4bR-7).
+    survivors (M4bR-7). A stop waits for the child's whole process group
+    and SIGKILLs what is left of it, so a command that ignores the signal
+    behind a shell that did not never outlives the cleanup (M4bF-10 10a).
+  - The clone that takes a kept lineage's place is made with
+    `canmount=noauto` and the `org.zark:canmount` / `org.zark:mountpoint`
+    marks (eli F1.6 showed it with `canmount=on`, the default, and no
+    marks until its next receive: a clone has a property set of its own,
+    and `canmount` is not inherited). The properties are set by the kernel
+    with the clone, as `receive -o` sets them, never by `zfs set`
+    (M4bR-4, M4bF-9 9a).
 
 #### Known limitations
 

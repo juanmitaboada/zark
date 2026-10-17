@@ -11008,7 +11008,7 @@ class TestSetupBookmarkV2:
         assert not ok
 
 
-class TestBackupDecide:
+class TestBackupDecide:  # pylint: disable=too-many-public-methods
     """backup's questions before the first byte (decisions 7, 8, 18)."""
 
     def _plans(self, fake: FakeZfs) -> tuple[list[repl.DatasetPlan], engine.Run]:
@@ -11383,6 +11383,25 @@ class TestBackupDecide:
         assert not any(
             c.startswith(("zfs destroy backup/rpool/var", "zfs rollback")) for c in calls
         )
+
+    def test_the_clone_that_takes_the_lineages_place_carries_the_marks(self) -> None:
+        """M4bR-4 (M4bF-9 9a, eli F1.6): a clone has a property set of its
+        own, so the live dataset would sit with canmount=on and no org.zark
+        marks until its next receive; the clone is made with them."""
+        fake = self._var_tree_rolled_ahead()
+        fake.inject["backup/rpool/var"] = ("interrupt", 0)  # the incremental never completes
+        before = len(fake.calls)
+        assert not self._run_with_answers(fake, [1]).ok
+        clones = [c for c in fake.calls[before:] if c.startswith("zfs clone")]
+        assert clones and all(
+            " -o canmount=noauto -o org.zark:canmount=" in c and " -o org.zark:mountpoint=" in c
+            for c in clones
+        ), clones
+        live = fake.ds["backup/rpool/var"].props
+        assert live.get("canmount") == "noauto", live
+        assert (
+            live.get("org.zark:canmount") == "off" and live.get("org.zark:mountpoint") == "/var"
+        ), live
 
     def test_the_kept_lineage_is_cloned_without_mounting(self) -> None:
         """I-G on the ROLLBACK keep path (mutation E15): the clone that takes

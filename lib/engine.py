@@ -571,7 +571,17 @@ class Run:  # pylint: disable=too-many-instance-attributes
         if not new:
             return False
         live, kept = self._dst(p.rel), self._dst(new)
-        for cmd in (f"zfs clone -u {_q(kept + p.common)} {_q(live)}", f"zfs promote {_q(live)}"):
+        # A clone gets a property set of its own (canmount is not inherited,
+        # and defaults to on): the at-rest protection and the marks go in
+        # with the clone, set by the kernel in the same ioctl as `receive -o`
+        # (zfs_ioctl.c:3775-3781), never by `zfs set` (M4bR-4, M4bF-9 9a).
+        o = self.origin[p.rel]
+        marks = (
+            f"-o canmount=noauto -o org.zark:canmount={_q(o.canmount)} "
+            + f"-o org.zark:mountpoint={_q(o.mountpoint)}"
+        )
+        clone = f"zfs clone -u {marks} {_q(kept + p.common)} {_q(live)}"
+        for cmd in (clone, f"zfs promote {_q(live)}"):
             r = sh.run(cmd, log=self.log)
             if not r.ok:
                 self.log.error(f"  {p.rel}: {cmd} failed: {r.stderr.strip()}")
