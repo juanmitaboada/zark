@@ -27,7 +27,8 @@
 # `make dist` ships only git-tracked files, so every untracked file
 # that normally lives in a developer's tree must be listed here: tool
 # caches, the dev venv, local config (etc/known_drives.json holds real
-# drive GUIDs) and session notes. Anything untracked and NOT listed makes
+# drive GUIDs, etc/settings.json the self-test's warnings setting) and
+# session notes. Anything untracked and NOT listed makes
 # dpkg-source abort; that is deliberate (fail closed instead of leaking
 # it into the .orig): delete it, commit it, or add it here. Note that .git/ and .github/ are deliberately NOT listed:
 # .git/ is excluded from the tarball but never appears in working-tree
@@ -47,6 +48,7 @@ tar-ignore = .venv
 tar-ignore = .python-version
 tar-ignore = PROJECT-NOTES.md
 tar-ignore = "etc/known_drives.json"
+tar-ignore = "etc/settings.json"
 
 extend-diff-ignore = "(^|/)(\.mypy_cache|\.pytest_cache|\.ruff_cache|\.tox|__pycache__|.+\.pyc|\.DS_Store|zark\.log)(/|$)"
-extend-diff-ignore = "^(\.venv|\.python-version|PROJECT-NOTES\.md|etc/known_drives\.json)(/|$)"
+extend-diff-ignore = "^(\.venv|\.python-version|PROJECT-NOTES\.md|etc/known_drives\.json|etc/settings\.json)(/|$)"

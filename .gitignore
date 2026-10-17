@@ -209,6 +209,10 @@ __marimo__/
 # template that the package and onboarding flow rely on.
 etc/known_drives.json
 
+# selftest's warnings setting (settings.json, next to known_drives.json in a
+# portable copy): a per-machine choice, never committed.
+etc/settings.json
+
 # pyenv local Python version pin (used by `pyenv local 3.12 3.13 3.14`
 # to drive `make tox`). Not committed: each developer's setup may differ.
 .python-version
