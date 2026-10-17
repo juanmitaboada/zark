@@ -35,6 +35,13 @@ rather than command strings. It keeps the kernel rules the engine relies on
 
 Failures can be injected per destination dataset: ``interrupt`` (after N
 snapshots, leaving a resume token) or ``enospc``.
+
+The self-test's checks marked ``fake`` run against this model too (M4s-12),
+which is what keeps it honest: where it disagreed with OpenZFS 2.4.1 it
+was fixed to the real rule (``written`` numeric on every filesystem, a
+multi-target ``zfs set`` applied to what it can open, ``destroy -r ds@s``
+on every descendant, a held snapshot's text, a clone's origin found by
+GUID, "is no longer the same snapshot").
 """
 
 import shlex
@@ -171,6 +178,11 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zpool", "import"): self._zpool_import_list,
             ("zpool", "create"): self._zpool_create,
             ("zfs", "unload-key"): lambda _a: _ok(),
+            ("zfs", "load-key"): lambda _a: _ok(),  # keys are not modelled
+            ("zfs", "change-key"): lambda _a: _ok(),
+            ("zfs", "hold"): self._hold(1),
+            ("zfs", "release"): self._hold(-1),
+            ("zpool", "sync"): lambda _a: _ok(),
             ("systemctl", "is-active"): self._is_active,
             ("systemctl", "stop"): self._unit_set("inactive"),
             ("systemctl", "start"): self._unit_set("active"),
@@ -221,25 +233,58 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return _ok(self.features[pool] + "\n") if prop == "feature@bookmark_v2" else _err("?")
 
     def _get(self, args: list[str]) -> RunResult:
-        """``zfs get -H [-s local] -o value|property,value <prop|all> <ds>``, and
-        ``zfs get -H -p -r -s local -t snapshot -o name,value <prop> <root>``."""
+        """``zfs get -H [-p] [-s local] -o value|source|property,value <prop|all>
+        <target>...``, and ``zfs get -H -p -r -s local -t snapshot -o
+        name,value <prop> <root>``."""
+        if "-r" in args and "snapshot" in args:
+            ds, prop = args[-1], args[-2]
+            if ds not in self.ds:
+                return _err("does not exist")
+            return self._get_snapshots(ds, prop, local="local" in args)
+        field_ = args[args.index("-o") + 1] if "-o" in args else "value"
         named = [a for a in args if "@" in a or "#" in a]
-        if named and "-r" not in args:
-            return self._get_named(args[args.index(named[0]) - 1], named)
+        if named:
+            return self._get_named(args[args.index(named[0]) - 1], named, field_)
         ds, prop = args[-1], args[-2]
         if ds not in self.ds:
             return _err("does not exist")
-        if "-r" in args and "snapshot" in args:
-            return self._get_snapshots(ds, prop, local="local" in args)
         props = self.ds[ds].props
         if prop == "all":
             return _ok("".join(f"{k}\t{v}\n" for k, v in sorted(props.items()) if ":" in k))
-        return _ok(props.get(prop, "-") + "\n")
+        value, source = self._value(ds, None, prop)
+        return _ok((source if field_ == "source" else value) + "\n")
 
-    def _get_named(self, prop: str, names: list[str]) -> RunResult:
-        """``zfs get -Hp -o value guid <ds@snap|ds#bookmark>...``: one line each."""
-        if prop != "guid":
-            return _err(f"fake zfs get: {prop} of a snapshot or bookmark is not modelled")
+    def _value(self, name: str, s: FSnap | None, prop: str) -> tuple[str, str]:
+        """(value, source) of one property of a dataset or snapshot, as zfs get
+        shows them (OpenZFS 2.4.1 cmd/zfs/zfs_main.c:2124-2146)."""
+        d = self.ds[name]
+        computed = {
+            "guid": s.guid if s else "",
+            "creation": str(s.creation) if s else "",
+            "createtxg": str(s.txg) if s else "",
+            # Every filesystem descends from $ORIGIN, so written is always a
+            # number (module/zfs/dsl_dataset.c:1186-1187, :2862-2867).
+            "written": "0" if s else str(d.written),
+            "receive_resume_token": "-" if s else d.token or "-",
+            "mounted": "-" if s else "no",
+            "origin": "-" if s else d.origin or d.props.get("origin", "-"),
+        }
+        if computed.get(prop):
+            return computed[prop], "-"
+        own = s.props if s is not None else d.props
+        if prop in own:
+            return own[prop], "local"
+        parts = name.split("/")
+        for i in range(len(parts) - (0 if s is not None else 1), 0, -1):
+            up = "/".join(parts[:i])
+            inheritable = ":" in prop or prop == "mountpoint"
+            if up in self.ds and prop in self.ds[up].props and inheritable:
+                return self.ds[up].props[prop], f"inherited from {up}"
+        return "-", "-"
+
+    def _get_named(self, prop: str, names: list[str], field_: str = "value") -> RunResult:
+        """``zfs get -Hp -o value|source <prop> <ds@snap|ds#bookmark>...``:
+        one line each."""
         out: list[str] = []
         for n in names:
             sep = "@" if "@" in n else "#"
@@ -249,7 +294,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             s = next((x for x in lst if x.name == short), None)
             if s is None:
                 return _err(f"cannot open '{n}': dataset does not exist")
-            out.append(f"{s.guid}\n")
+            value, source = self._value(ds, s, prop)
+            out.append(f"{source if field_ == 'source' else value}\n")
         return _ok("".join(out))
 
     def _get_snapshots(self, root: str, prop: str, local: bool) -> RunResult:
@@ -345,7 +391,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             elif f == "used" and s is not None:
                 vals.append(str(s.used))
             elif f == "written" and s is None:
-                vals.append(str(d.written) if d.snaps else "-")
+                vals.append(str(d.written))
             elif ":" in f:
                 vals.append(self._inherited(name.split("@")[0].split("#")[0], s, f))
             else:
@@ -363,6 +409,13 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             for i, a in enumerate(args)
             if not a.startswith("-") and (i == 0 or args[i - 1] != "-o")
         ]
+        if "-r" in args:
+            names = [
+                f"{n}@{name.split('@')[1]}"
+                for name in names
+                for n in sorted(self.ds)
+                if n == name.split("@")[0] or n.startswith(name.split("@")[0] + "/")
+            ]
         pools = {n.split("/")[0].split("@")[0] for n in names}
         if len(pools) != 1:
             return _err("cannot create snapshots: cross-device link (EXDEV)")
@@ -378,6 +431,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             self.ds[ds].snaps.append(
                 FSnap(snap, str(self.guid), self.txg, self.clock, props=dict(props))
             )
+            self.ds[ds].written = 0  # written counts from the newest snapshot
         return _ok()
 
     def _bookmark(self, args: list[str]) -> RunResult:
@@ -395,7 +449,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         self.ds[ds].bookmarks.append(FSnap(bm, s.guid, s.txg, s.creation, ivset))
         return _ok()
 
-    def _destroy(self, args: list[str]) -> RunResult:  # pylint: disable=too-many-return-statements
+    def _destroy(self, args: list[str]) -> RunResult:  # pylint: disable=too-many-return-statements,too-many-branches
         recursive = "-r" in args
         target = args[-1]
         if "%" in target:
@@ -404,6 +458,20 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return self._destroy_dry(target)
         if "@" in target and "," in target:
             return self._destroy_group(target)
+        if "@" in target and recursive:
+            # `zfs destroy -r ds@s` takes that name on every descendant
+            # (cmd/zfs/zfs_main.c:1604-1622).
+            top, _, snap = target.partition("@")
+            owners = [
+                n
+                for n in self.ds
+                if (n == top or n.startswith(top + "/")) and snap in self.names(n)
+            ]
+            if not owners:
+                return _err(f"could not find any snapshots to destroy: {target}")
+            for n in owners:
+                self.ds[n].snaps = [x for x in self.ds[n].snaps if x.name != snap]
+            return _ok()
         if "@" in target or "#" in target:
             sep = "@" if "@" in target else "#"
             ds, name = target.split(sep)
@@ -414,9 +482,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             if not hit:
                 return _err(f"could not find any snapshots to destroy: {target}")
             if hit[0].clones:
-                return _err(f"cannot destroy '{target}': snapshot has dependent clones")
+                return _err(f"cannot destroy '{target}': {target} has dependent clones")
             if hit[0].userrefs:
-                return _err(f"cannot destroy snapshot {target}: dataset is busy")
+                return _err(f"cannot destroy snapshot {target}: it's being held.")
             lst.remove(hit[0])
             return _ok()
         kids = [n for n in self.ds if n.startswith(target + "/")]
@@ -439,7 +507,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         for x in hit:
             if x.clones:
                 return _err(f"cannot destroy '{ds}@{x.name}': snapshot has dependent clones")
-            if x.userrefs or f"{ds}@{x.name}" in self.fail_cmds:
+            if x.userrefs:
+                return _err(f"cannot destroy snapshot {ds}@{x.name}: it's being held.")
+            if f"{ds}@{x.name}" in self.fail_cmds:
                 return _err(f"cannot destroy snapshot {ds}@{x.name}: dataset is busy")
         self.ds[ds].snaps = [x for x in self.ds[ds].snaps if x not in hit]
         return _ok()
@@ -452,7 +522,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err("does not exist")
         names = spec.split(",")
         hit = [x for x in self.ds[ds].snaps if x.name in names]
-        if len(hit) != len(set(names)):
+        if not hit:
+            # A missing exact name is skipped; only all missing fails
+            # (lib/libzfs/libzfs_iter.c:473-475; cmd/zfs/zfs_main.c:1633-1634).
             return _err("could not find any snapshots to destroy; check snapshot names.")
         lines = [f"destroy\t{ds}@{x.name}\n" for x in hit]
         return _ok("".join(lines) + f"reclaim\t{sum(x.used for x in hit)}\n")
@@ -514,7 +586,9 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err("does not exist")
         later = names[names.index(name) + 1 :]
         if later and "-r" not in args:
-            return _err("more recent snapshots exist")
+            return _err(
+                f"cannot rollback to '{args[-1]}': more recent snapshots or bookmarks exist"
+            )
         self.ds[ds].snaps = self.ds[ds].snaps[: names.index(name) + 1]
         self.ds[ds].written = 0
         return _ok()
@@ -534,24 +608,37 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return _ok()
 
     def _set(self, args: list[str]) -> RunResult:
-        """``zfs set k=v [k=v]… <dataset|snapshot>…``."""
+        """``zfs set k=v [k=v]... <dataset|snapshot>...``: every target that opens
+        gets the values, and one that does not makes the exit non-zero
+        (cmd/zfs/zfs_iter.c:524-536)."""
         kvs = [a.split("=", 1) for a in args if "=" in a]
         targets = [a for a in args if "=" not in a]
         if not targets:
             return _err("missing dataset name(s)")
+        errors: list[str] = []
         for t in targets:
             ds, _, snap = t.partition("@")
             if ds not in self.ds or (snap and snap not in self.names(ds)):
-                return _err(f"cannot open '{t}': dataset does not exist")
-        for t in targets:
-            ds, _, snap = t.partition("@")
+                errors.append(f"cannot open '{t}': dataset does not exist")
+                continue
             if snap:
                 props = next(x for x in self.ds[ds].snaps if x.name == snap).props
             else:
                 props = self.ds[ds].props
             for k, v in kvs:
                 props[k] = v
-        return _ok()
+        return _err("\n".join(errors)) if errors else _ok()
+
+    def _hold(self, delta: int):
+        def _do(args: list[str]) -> RunResult:
+            ds, _, name = args[-1].partition("@")
+            s = next((x for x in self.ds.get(ds, FDataset()).snaps if x.name == name), None)
+            if s is None:
+                return _err(f"cannot hold '{args[-1]}': dataset does not exist")
+            s.userrefs = max(0, s.userrefs + delta)
+            return _ok()
+
+        return _do
 
     def _inherit(self, args: list[str]) -> RunResult:
         ds = args[-1]
@@ -566,12 +653,18 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
     def _resume_check(self, token: str) -> str:
         """libzfs's checks before a resumed stream starts, dry run included
         (lib/libzfs/libzfs_sendrecv.c:1857-1890): "" when it can resume."""
-        src_ds, snapname, frm = token.split("|")[1:]
+        src_ds, snapname, frm, toguid = (token.split("|")[1:] + [""])[:4]
         d = self.ds.get(src_ds, FDataset())
         if snapname not in self.names(src_ds):
             return (
                 "cannot resume send: "
                 + f"'{src_ds}@{snapname}' used in the initial send no longer exists"
+            )
+        now = next(x for x in d.snaps if x.name == snapname)
+        if toguid and now.guid != toguid:
+            return (
+                "cannot resume send: "
+                + f"'{src_ds}@{snapname}' is no longer the same snapshot used in the initial send"
             )
         if frm.startswith("#"):
             gone = frm[1:] not in [b.name for b in d.bookmarks]
@@ -640,19 +733,28 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                     f"cannot receive resume stream: destination {dst} has been modified\n"
                     "since most recent snapshot"
                 )
-            src_ds, snapname, _frm = token.split("|")[1:]
+            src_ds, snapname = token.split("|")[1:3]
             src = next(s for s in self.ds[src_ds].snaps if s.name == snapname)
             d.snaps.append(FSnap(src.name, src.guid, self._dtxg(), src.creation))
             d.token = ""
             return _ok()
         src_ds = to.split("@")[0]
         origin = self.ds[src_ds]
+        for j, a in enumerate(recv[:-1]):
+            prop = recv[j + 1].split("=")[0]
+            if raw and a in ("-o", "-x") and prop in ("encryption", "keyformat", "pbkdf2iters"):
+                return _err(
+                    "cannot receive new filesystem stream: encryption property "
+                    + f"'{prop}' cannot be set or excluded for raw streams."
+                )
         if src_ds.startswith("rpool") and origin.props.get("encryption") != "off" and not raw:
             return _err("encrypted dataset: raw send (-w) required")
         to_snap = next(s for s in origin.snaps if s.name == to.split("@")[1])
         d = self.ds.get(dst)
         if d is not None and d.token:
-            return _err("destination contains partially-complete state (ZFS_ERR_RESUME_EXISTS)")
+            return _err(
+                f'destination {dst} contains partially-complete state from "zfs receive -s".'
+            )
         clone_src = frm.split("@")[0] if mode == "I" and "@" in frm else src_ds
         if clone_src != src_ds:
             # A clone sent from its origin (fromorigin) into a new dataset,
@@ -709,7 +811,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                     frm = stream[k - 1].name
                 else:
                     frm = "" if mode == "full" else frm.split("@")[-1] if "@" in frm else frm
-                d.token = f"tok|{src_ds}|{s.name}|{frm}"
+                d.token = f"tok|{src_ds}|{s.name}|{frm}|{s.guid}"
                 return _err("cannot receive: connection reset (stream truncated)")
             d.snaps.append(FSnap(s.name, s.guid, self._dtxg(), s.creation))
         self._apply_props(d, recv)
@@ -718,21 +820,31 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
     def _clone_stream(
         self, src_ds: str, frm: str, to_snap: FSnap, dst: str, recv: list[str]
     ) -> list[FSnap] | RunResult:
+        """A clone sent with ``-I <origin>`` is a compound stream: the receive
+        finds the origin on the destination's pool by GUID, whatever ``-o
+        origin=`` names (lib/libzfs/libzfs_sendrecv.c:4615-4631)."""
+        del recv
         if dst in self.ds:
             return _err(f"destination '{dst}' exists")
-        if self.ds[src_ds].props.get("origin") != frm:
+        if (self.ds[src_ds].origin or self.ds[src_ds].props.get("origin")) != frm:
             return _err("incremental source must be in same filesystem")
-        target = next((a.split("=", 1)[1] for a in recv if a.startswith("origin=")), "")
         fds, fname = frm.split("@")
         base = next((x for x in self.ds[fds].snaps if x.name == fname), None)
-        tds, _, tname = target.partition("@")
-        held = next((x for x in self.ds.get(tds, FDataset()).snaps if x.name == tname), None)
-        if base is None or held is None:
-            return _err(f"cannot receive: local origin for clone {dst} does not exist")
-        if held.guid != base.guid:
-            return _err("cannot receive: most recent snapshot does not match incremental source")
+        pool = dst.split("/")[0]
+        held, target = None, ""
+        for n in sorted(self.ds):
+            if n.split("/")[0] != pool or base is None:
+                continue
+            hit = next((x for x in self.ds[n].snaps if x.guid == base.guid), None)
+            if hit is not None:
+                held, target = hit, f"{n}@{hit.name}"
+                break
+        if held is None:
+            return _err(
+                f"cannot receive: local origin for clone {dst}@{to_snap.name} does not exist"
+            )
         held.clones = dst
-        self.ds[dst] = FDataset(kind=self.ds[src_ds].kind, props={"origin": target})
+        self.ds[dst] = FDataset(kind=self.ds[src_ds].kind, props={"origin": target}, origin=target)
         return [x for x in self.ds[src_ds].snaps if x.txg <= to_snap.txg]
 
     def _apply_props(self, d: FDataset, recv: list[str]) -> None:
