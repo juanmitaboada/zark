@@ -106,6 +106,15 @@ def _stick_identity(dev: str, log: Log) -> DiskIdentity:
     """The stick, refused unless it is a safe external disk, unregistered and
     blank, and the operator types its kernel name (M4s-4)."""
     ident = validate_external_block_device(dev, log, command="selftest run --stick")
+    if not ident.by_id:
+        log.fatal(
+            f"{dev} has no stable /dev/disk/by-id name",
+            causes=["zark checks the stick by that name before every write"],
+            solutions=[
+                "Use a stick or enclosure that exposes a by-id name",
+                "Check: ls -l /dev/disk/by-id/",
+            ],
+        )
     cfg = Config.load()
     names = match_registry(ident, cfg.known_drives)
     if names:
@@ -124,7 +133,7 @@ def _stick_identity(dev: str, log: Log) -> DiskIdentity:
         )
     log.info("Level 2 erases this disk:")
     log.info(f"  {ident.disk}  {ident.model}  {ident.size}  serial {ident.serial or '?'}")
-    log.info(f"  {ident.by_id_path or '(no by-id name)'}")
+    log.info(f"  {ident.by_id_path}")
     answer = log.ask_text(f"  Type {ident.name} to erase it: ", accept=(ident.name,))
     if answer != ident.name:
         log.info("Aborted: nothing was touched")

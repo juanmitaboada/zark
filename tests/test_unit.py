@@ -15074,6 +15074,28 @@ class TestSelftestCommand:  # pylint: disable=missing-function-docstring,protect
         mock.on("blkid -p /dev/sdz").returns(0, 'TYPE="vfat"')
         assert "is not blank" in self._refused(mock, make_config())
 
+    def test_a_stick_without_a_by_id_name_is_refused_before_the_question(self):
+        out = StringIO()
+        ident = DiskIdentity(disk="/dev/sdz", by_id="", model="NoName", size="1G")
+        mock = MockShell()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
+        mock.on("blkid -p /dev/sdz").returns(2)
+        with (
+            patch_sh(mock),
+            redirect_stdout(out),
+            patch("commands.selftest.validate_external_block_device", return_value=ident),
+            patch("commands.selftest.Config.load", return_value=make_config()),
+            patch("builtins.input", return_value="sdz") as asked,
+        ):
+            try:
+                _ = selftest_cmd._stick_identity("/dev/sdz", make_log())
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("accepted")
+        assert "has no stable /dev/disk/by-id name" in out.getvalue()
+        assert not [c for c in asked.call_args_list if "Type sdz" in str(c)]
+
     def test_the_kernel_name_must_be_typed(self):
         mock = MockShell()
         mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
