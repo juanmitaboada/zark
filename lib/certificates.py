@@ -159,9 +159,20 @@ def _write_atomic(path: Path, text: str) -> None:
 def _add_to_record(report: dict[str, Any], path: Path) -> None:
     """The record keeps the newest entry per where, level and completeness
     (a partial or stopped run never replaces a complete one): the
-    certificate plus the IDs that failed and what depends on them."""
+    certificate plus the IDs that failed and what depends on them. A check
+    this run passed leaves the failures of every complete entry of the same
+    where and series, at any level (M4sR-4); coverage is not changed."""
     record = read_record(path)
     cert = report["certificate"]
+    passed = {r["id"] for r in report["results"] if r["result"] == "PASS"}
+    for e in record:
+        if (
+            not e.get("partial")
+            and e.get("where") == cert["where"]
+            and e.get("series") == cert["series"]
+            and isinstance(e.get("failed"), list)
+        ):
+            e["failed"] = [f for f in e["failed"] if f.get("id") not in passed]
     failed = [
         {"id": r["id"], "depends": r.get("depends", [])}
         for r in report["results"]

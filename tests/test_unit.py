@@ -14726,6 +14726,45 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
             assert sorted(bool(e["partial"]) for e in rec) == [False, True]
             assert certs.covered(_facts(), rec) == {"POOL-01.1"}
 
+    def test_a_later_pass_clears_the_failure_line(self):
+        # M4sR-4 (the review's E4 b): a complete run with a FAIL, then --only
+        # that check passing; and the same across levels.
+        checks = [c for c in all_selftest_checks() if c.level == 1]
+        one_fail = [
+            stest.Result(c.key, "FAIL" if c.cid == "SND-04" else "PASS", depends=c.depends)
+            for c in checks
+        ]
+        for level in (1, 2):
+            with tempfile.TemporaryDirectory() as td:
+                _ = certs.write_report(_report(one_fail, level=level), td)
+                rec = certs.read_record(Path(td, "record.json"))
+                assert any(
+                    "failed on this machine" in ln
+                    for ln in certs.warning_lines(_facts(), checks, rec, [])
+                )
+                _ = certs.write_report(
+                    _report([stest.Result("SND-04.1", "PASS")], partial=True), td
+                )
+                rec = certs.read_record(Path(td, "record.json"))
+                lines = certs.warning_lines(_facts(), checks, rec, [])
+                assert not any("failed on this machine" in ln for ln in lines), (level, lines)
+                # coverage unchanged: a partial run still covers nothing
+                assert certs.uncovered(_facts(), checks, rec) == [
+                    c for c in checks if c.cid == "SND-04"
+                ]
+
+    def test_a_pass_on_another_series_leaves_the_failure(self):
+        checks = [c for c in all_selftest_checks() if c.level == 1]
+        with tempfile.TemporaryDirectory() as td:
+            _ = certs.write_report(_report([stest.Result("SND-04.1", "FAIL")]), td)
+            other = _facts(series={"kernel": "7.1"})
+            _ = certs.write_report(
+                _report([stest.Result("SND-04.1", "PASS")], other, partial=True), td
+            )
+            rec = certs.read_record(Path(td, "record.json"))
+            lines = certs.warning_lines(_facts(), checks, rec, [])
+            assert any("SND-04.1 failed on this machine" in ln for ln in lines), lines
+
     def test_reports_beyond_ten_are_removed(self):
         with tempfile.TemporaryDirectory() as td:
             for i in range(12):
