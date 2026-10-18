@@ -26,7 +26,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import drive_marks, engine, registry, sh, survey
+from lib import anchors, drive_marks, engine, registry, sh, survey
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso
 from lib.drives import record_backup, validate_external_block_device
@@ -231,7 +231,7 @@ def run(
     if not complete:
         # H16: a drive whose data or keystore did not land is never registered,
         # so the anchors its datasets got would belong to no entry (M2R-6).
-        left = engine.drop_anchors_of(new_guid, log)
+        left = anchors.drop_anchors_of(new_guid, log)
         log.banner_error(
             "DRIVE NOT REGISTERED",
             [
@@ -250,7 +250,7 @@ def run(
         lines = (
             rb.describe() if rb else [f"{new_pool} could not be exported, so it was not read back."]
         )
-        left = engine.drop_anchors_of(new_guid, log)
+        left = anchors.drop_anchors_of(new_guid, log)
         log.banner_error(
             "DRIVE NOT VERIFIED",
             [*lines, "", "The drive has NOT been registered.", *([left] if left else [])],
@@ -260,7 +260,7 @@ def run(
 
     for name in replace:
         # The same disk, now blank: the replaced pool's anchors are useless.
-        left = engine.drop_anchors_of(cfg.known_drives[name].guid, log)
+        left = anchors.drop_anchors_of(cfg.known_drives[name].guid, log)
         if left:
             log.warn(left)
         del cfg.known_drives[name]

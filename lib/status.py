@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import certificates, engine, sh, survey
+from lib import anchors, certificates, sh, survey
 from lib.config import Config
 from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
@@ -89,7 +89,7 @@ def gather(cfg: Config, log: Log) -> Status:
         # unanchored and the MOTD would promise full resends (M3R-2).
         st.read_error = f"could not read the source pools: {e}"
         return st
-    anchored = engine.anchored_disks(origin)
+    anchored = anchors.anchored_disks(origin)
     unanchored = [info for info in cfg.known_drives.values() if info.guid not in anchored]
     st.shared = no_anchor_lines(unanchored, origin, log)
     drives = {info.guid: name for name, info in cfg.known_drives.items()}

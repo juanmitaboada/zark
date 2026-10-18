@@ -151,6 +151,7 @@ from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E
     _umount_local_system,
 )
 from lib import (  # pylint: disable=wrong-import-position # noqa: E402
+    anchors,
     apt_guard,
     backup_layout,
     drive_marks,
@@ -6230,7 +6231,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
             patch.object(Config, "default_config_dir", return_value=cfg_dir),
             patch.object(purge_mod, "validate_external_block_device", return_value=ident),
             patch.object(purge_mod.forensics, "capture", return_value=""),
-            patch.object(purge_mod.engine, "drop_anchors_of", return_value="") as drop,
+            patch.object(purge_mod.anchors, "drop_anchors_of", return_value="") as drop,
             # Only part1's presence: a global os.path.exists patch also hides the
             # registry from Path.exists on Python 3.14.
             patch.object(
@@ -10661,7 +10662,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "black", "1", P1).ok
         assert _engine_run(fake, "blue", "2", P2).ok
         with patch_sh(fake), redirect_stdout(StringIO()):
-            n, failed = engine.drop_disk_anchors("1", ["rpool", "bpool"], Log())
+            n, failed = anchors.drop_disk_anchors("1", ["rpool", "bpool"], Log())
         assert n > 0 and not failed
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("2", P2)]
         assert repl.anchor_name("1", P1) not in fake.names("bpool/BOOT/be")
@@ -10692,7 +10693,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "blue", "2", P2).ok
         assert _engine_run(fake, "black", "1", P3).ok
         with patch_sh(fake), redirect_stdout(StringIO()):
-            assert engine.drop_disk_anchors("2", ["rpool", "bpool"], Log())[0] > 0
+            assert anchors.drop_disk_anchors("2", ["rpool", "bpool"], Log())[0] > 0
         destroys = [
             c
             for c in fake.calls
@@ -10835,7 +10836,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert not _engine_run(fake, "backup", "111", P2).ok
         assert _origin_points(fake) == [f"rpool/USERDATA/home@{P2}"]
         with patch_sh(fake):
-            assert engine.point_owners(["rpool", "bpool"]) == {f"rpool/USERDATA/home@{P2}": "111"}
+            assert anchors.point_owners(["rpool", "bpool"]) == {f"rpool/USERDATA/home@{P2}": "111"}
         takes = [c for c in fake.calls if c.startswith("zfs snapshot") and P2 in c]
         assert takes and all(c.startswith("zfs snapshot -o org.zark:point-for=111 ") for c in takes)
 
@@ -10902,7 +10903,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             assert fake.mock_run(
                 f"zfs bookmark rpool/USERDATA/home@{P2} rpool/USERDATA/home#zark_222_{P2[5:]}"
             ).ok
-            assert engine.release_point(f"rpool/USERDATA/home@{P2}", "222", Log())
+            assert anchors.release_point(f"rpool/USERDATA/home@{P2}", "222", Log())
         assert P2 not in fake.names("rpool/USERDATA/home")
 
     def test_a_point_whose_anchor_cannot_be_made_stays(self) -> None:
@@ -10923,7 +10924,7 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         fake.mock_run = no_bookmarks  # type: ignore[method-assign]
         before = len(fake.calls)
         with patch_sh(fake), redirect_stdout(StringIO()):
-            assert not engine.release_point(f"rpool/USERDATA/home@{P2}", "222", Log())
+            assert not anchors.release_point(f"rpool/USERDATA/home@{P2}", "222", Log())
         assert P2 in fake.names("rpool/USERDATA/home")
         assert not [c for c in fake.calls[before:] if c.startswith("zfs destroy")], fake.calls[
             before:

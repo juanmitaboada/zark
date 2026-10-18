@@ -28,7 +28,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import NamedTuple
 
-from lib import engine, forensics, sh
+from lib import anchors, forensics, sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
@@ -336,7 +336,7 @@ def run(
     # The wiped pool's anchors in origin (M2R-6): nothing can use them now.
     anchors_left = ""
     if ident.label and ident.label.name not in SYSTEM_POOLS:
-        anchors_left = engine.drop_anchors_of(ident.label.guid, log)
+        anchors_left = anchors.drop_anchors_of(ident.label.guid, log)
 
     # Remove every registry entry that described this disk
     if matched:

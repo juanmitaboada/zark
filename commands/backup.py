@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import certificates, drive_marks, engine, forensics, sh, status, survey
+from lib import anchors, certificates, drive_marks, engine, forensics, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -1053,7 +1053,7 @@ def run(
     origin: dict[str, Origin] = {}
     try:
         origin = survey.read_origin(survey.source_pools(), strict=True)
-        anchored: set[str] | None = engine.anchored_disks(origin)
+        anchored: set[str] | None = anchors.anchored_disks(origin)
     except survey.ReadError as e:
         # Not an empty origin: the report would call every other drive
         # unanchored and promise full resends (M3R-2). Ages only.

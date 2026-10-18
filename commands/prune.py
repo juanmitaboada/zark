@@ -42,7 +42,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import drive_marks, engine, sh, status, survey
+from lib import anchors, drive_marks, engine, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -155,7 +155,7 @@ def _residues(inv: Inventory, log: Log) -> None:
 
 def _points(inv: Inventory, log: Log) -> None:
     try:
-        owners = engine.point_owners(survey.source_pools())
+        owners = anchors.point_owners(survey.source_pools())
     except survey.ReadError as e:
         log.warn(f"Could not read which drive each point is for: {e}")
         owners = {}
@@ -174,7 +174,7 @@ def _points(inv: Inventory, log: Log) -> None:
     )
     if _typed(log, f"remove {len(inv.points)} backup point(s)"):
         named = [i for i in inv.points if owners.get(i.target)]
-        gone = sum(engine.release_point(i.target, owners[i.target], log) for i in named)
+        gone = sum(anchors.release_point(i.target, owners[i.target], log) for i in named)
         if named:
             log.ok(f"{gone} point snapshot(s) anchored for their drive and taken out")
         rest = [i for i in inv.points if not owners.get(i.target)]
