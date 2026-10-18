@@ -190,6 +190,14 @@ for the canonical end-to-end sequences.
     pool whose *compatibility* property does not list the feature is left
     as it is. **backup** and **prepare** refuse to run without it.
 
+    **setup --remove** removes what **setup** installed besides **sanoid**'s
+    configuration and timer: the status alerts, the apt guard (its hook,
+    its APT config and its MOTD reminder) and the update-grub guard. A file
+    is removed only when it is **zark**'s (this **zark**'s content, or an
+    older **zark**'s copy with its "Installed by zark" line), and the APT
+    config before the hook it names; anything else is left, named, and the
+    command exits 1. It takes no lock. Removing the Debian package runs it.
+
 **prepare** \[*device*\]
 :   Initialise a brand-new external drive as a **zark** backup target. The
     drive may be specified as a positional argument (for example
@@ -644,8 +652,8 @@ for the canonical end-to-end sequences.
     which prints */run/zark/status.motd* at login (nothing is computed
     then), and **zark-status.timer**, which runs **status --refresh
     --notify** every hour and two minutes after boot, with the **zark**
-    that installed it. **setup** installs them; removing the Debian package
-    removes them.
+    that installed it. **setup** installs them; **setup --remove** and
+    removing the Debian package remove them.
 
 **clean** releases it first.
 

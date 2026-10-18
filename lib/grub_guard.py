@@ -115,6 +115,26 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> None:
     log.ok("Grub guard installed (09_zfs_backup_guard) ✓")
 
 
+def remove(target_root: str, log: Log) -> list[str]:
+    """Remove the guard :func:`install` wrote under ``target_root``: this
+    zark's script, or an older zark's (its header and "Installed by zark");
+    return the path when it is left because it is not zark's (M3P.2)."""
+    root = target_root.rstrip("/")
+    path = Path(f"{root}/{GUARD_RELATIVE_PATH}") if root else Path(f"/{GUARD_RELATIVE_PATH}")
+    if not path.exists():
+        log.ok("Grub guard removed (0 file(s))")
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    if text == GUARD_SCRIPT or ("# 09_zfs_backup_guard -" in text and "Installed by zark" in text):
+        path.unlink()
+        log.ok("Grub guard removed (1 file(s))")
+        return []
+    return [str(path)]
+
+
 def is_current(target_root: str = "") -> bool:
     """True when the guard under ``target_root`` holds this zark's script and
     is executable (what :func:`install` would leave; M4c-10)."""

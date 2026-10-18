@@ -244,8 +244,12 @@ Standard apt:
 
 ```sh
 sudo apt remove zark        # keeps /etc/zark/known_drives.json
-sudo apt purge zark         # also removes /etc/zark/
+sudo apt purge zark         # also removes the example; known_drives.json stays
 ```
+
+Both run `zark setup --remove` first (prerm): the status alerts, the APT
+guard and the update-grub guard go, each only when it is zark's.
+sanoid's configuration and timer stay.
 
 `/var/log/zark.log` is **not** managed by the package and is left in
 place on uninstall - it may contain forensic information the user

@@ -1,14 +1,17 @@
 #!/bin/sh
-# zark prerm - on removal, disable and remove the status alerts that
-# `zark setup` installed (MOTD script, zark-status.timer and its service).
-# Not on upgrade: the new version keeps them.
+# zark prerm - on removal, remove what `zark setup` installed besides
+# sanoid's configuration: the status alerts (MOTD script, zark-status.timer
+# and its service), the APT guard (hook, its apt.conf and MOTD reminder) and
+# the update-grub guard. It runs before dpkg deletes zark's files, so zark
+# itself does it. Not on upgrade: the new version keeps them.
 
 set -e
 
 case "$1" in
     remove)
         if [ -x /usr/share/zark/zark ]; then
-            /usr/share/zark/zark alerts remove || true
+            # A file that is not zark's is left and named; removal goes on.
+            /usr/share/zark/zark setup --remove || echo "zark: see the files left above" >&2
         fi
         ;;
     upgrade|deconfigure|failed-upgrade)

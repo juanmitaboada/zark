@@ -284,6 +284,68 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> None:
         log.ok("APT backup guard already current ✓")
 
 
+def _ours(path: Path, canonical: str, header: str) -> bool:
+    """Whether ``path`` is one of zark's files: this zark's content, or an
+    older zark's copy (its header line and the "Installed by zark" mark)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return text == canonical or (header in text and "Installed by zark" in text)
+
+
+def remove(target_root: str, log: Log) -> list[str]:
+    """Remove the hook, its APT config and the MOTD script that
+    :func:`install` wrote under ``target_root``; return the paths left
+    because they are not zark's (M3P.2).
+
+    The APT config goes first, and the hook only once the config naming it
+    is gone: APT runs each Pre-Install-Pkgs entry and fails the whole
+    transaction when it cannot (apt 3.2.0 apt-pkg/deb/dpkgpm.cc:477-482,
+    :520-521), so a config left pointing at a removed hook would break every
+    later install.
+    """
+    root = target_root.rstrip("/")
+    base = f"{root}/" if root else "/"
+    hook = Path(f"{base}{HOOK_RELATIVE_PATH}")
+    conf = Path(f"{base}{APT_CONF_RELATIVE_PATH}")
+    motd = Path(f"{base}{MOTD_RELATIVE_PATH}")
+    left: list[str] = []
+    removed = 0
+    if conf.exists():
+        try:
+            lines = [
+                ln.strip()
+                for ln in conf.read_text(encoding="utf-8").splitlines()
+                if ln.strip() and not ln.strip().startswith(("//", "#"))
+            ]
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        if lines == [APT_CONF.strip()]:
+            conf.unlink()
+            removed += 1
+        else:
+            left.append(str(conf))
+    if hook.exists():
+        if not conf.exists() and _ours(hook, HOOK_SCRIPT, "# apt-zfs-backup-guard -"):
+            hook.unlink()
+            removed += 1
+            try:
+                hook.parent.rmdir()  # only when nothing else is there
+            except OSError:
+                pass
+        else:
+            left.append(str(hook))
+    if motd.exists():
+        if _ours(motd, MOTD_SCRIPT, "# 99-zark-external-pool -"):
+            motd.unlink()
+            removed += 1
+        else:
+            left.append(str(motd))
+    log.ok(f"APT backup guard removed ({removed} file(s))")
+    return left
+
+
 def is_current(target_root: str = "") -> bool:
     """True when the hook, its APT config and the MOTD script under
     ``target_root`` hold this zark's content and are executable (what

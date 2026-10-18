@@ -38,7 +38,7 @@ COMMANDS = {
     "simulate": "Boot recovered system in QEMU/KVM (test without rebooting)",
     "prepare": "Prepare a new blank drive for backup",
     "purge": "Securely wipe a managed backup drive",
-    "setup": "Install dependencies, configure sanoid snapshots",
+    "setup": "Install dependencies, configure sanoid snapshots (--remove: undo the guards, alerts)",
     "finish": "Post-recovery finalization (run from recovered system)",
     "mount": "Mount a backup pool for inspection / chroot / recovery",
     "umount": "Unmount a previously mounted backup pool",

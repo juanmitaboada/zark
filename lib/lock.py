@@ -52,6 +52,10 @@ def needs_lock(command: str, args: list[str]) -> bool:
         return False
     if command == "registry":
         return bool(args) and args[0] != "list"
+    if command == "setup" and args == ["--remove"]:
+        # It touches no pool, and the package's prerm runs it (M3P.2): a
+        # backup holding the lock must not leave the guards behind.
+        return False
     if command == "selftest":
         return not args or args[0] not in ("status", "report", "certificate")
     return True

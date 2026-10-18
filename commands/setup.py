@@ -718,12 +718,31 @@ def _install_guards(log: Log) -> None:
     grub_guard.install(target_root="", log=log)
 
 
+def remove_installed(log: Log, root: str = "") -> int:
+    """`zark setup --remove`: remove what setup installed besides sanoid's
+    configuration (the alerts, the APT guard, the grub guard), as the
+    package's prerm does on removal (M3P.2). A file that is not zark's is
+    left and named. Returns 1 when something was left, else 0."""
+    log.banner("REMOVE ZARK'S GUARDS AND ALERTS", "What setup installed besides sanoid")
+    alerts.remove(log, root or "/")
+    left = apt_guard.remove(root, log) + grub_guard.remove(root, log)
+    lines = [f"Left, not zark's: {path}" for path in left]
+    lines.append("sanoid's configuration and timer stay: they are your snapshot policy.")
+    if left:
+        log.banner_error("GUARDS AND ALERTS PARTLY REMOVED", lines)
+        return 1
+    log.banner_ok("GUARDS AND ALERTS REMOVED", lines)
+    return 0
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
-    """Run the setup process to install dependencies and configure sanoid."""
-    del args  # Unused
+    """Run the setup process to install dependencies and configure sanoid;
+    ``--remove`` removes the guards and alerts instead."""
     log = Log()
+    if args == ["--remove"]:
+        raise SystemExit(remove_installed(log))
     # cfg = Config.load()
     zfs = ZFS(log)
 

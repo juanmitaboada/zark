@@ -2681,6 +2681,9 @@ class TestLock:  # pylint: disable=missing-function-docstring,protected-access
         for cmd in ("backup", "prune", "prepare", "purge", "recover", "clean", "health"):
             assert lock_mod.needs_lock(cmd, []), cmd
         assert lock_mod.needs_lock("registry", ["forget", "x"])
+        # M3P.2: the package's prerm runs it; it touches no pool.
+        assert not lock_mod.needs_lock("setup", ["--remove"])
+        assert lock_mod.needs_lock("setup", [])
 
     def test_a_second_run_is_refused_while_the_first_holds_it(self):
         with tempfile.TemporaryDirectory() as td:
@@ -5700,6 +5703,41 @@ class TestAptGuard:  # pylint: disable=missing-function-docstring
     testing, not CI; here it is covered by content assertions on the script.
     """
 
+    def test_remove_takes_its_files_the_config_first(self):
+        """M3P.2: the three go, and /usr/local/lib/zark when it is left empty."""
+        with tempfile.TemporaryDirectory() as td:
+            apt_guard.install(target_root=td, log=make_log())
+            hook = Path(td) / apt_guard.HOOK_RELATIVE_PATH
+            assert not apt_guard.remove(td, make_log())
+            for rel in (
+                apt_guard.HOOK_RELATIVE_PATH,
+                apt_guard.APT_CONF_RELATIVE_PATH,
+                apt_guard.MOTD_RELATIVE_PATH,
+            ):
+                assert not (Path(td) / rel).exists(), rel
+            assert not hook.parent.exists()
+
+    def test_remove_takes_an_older_zarks_copy_and_leaves_the_rest(self):
+        """An older zark's hook (its header and mark) goes; an edited APT
+        config stays, and so does the hook it names (APT would fail on a
+        missing hook); a MOTD script that is not zark's stays."""
+        with tempfile.TemporaryDirectory() as td:
+            apt_guard.install(target_root=td, log=make_log())
+            hook = Path(td) / apt_guard.HOOK_RELATIVE_PATH
+            conf = Path(td) / apt_guard.APT_CONF_RELATIVE_PATH
+            motd = Path(td) / apt_guard.MOTD_RELATIVE_PATH
+            _ = hook.write_text(
+                "#!/bin/sh\n# apt-zfs-backup-guard - an older text\n# Installed by zark.\n",
+                encoding="utf-8",
+            )
+            _ = conf.write_text(apt_guard.APT_CONF + 'APT::Other "1";\n', encoding="utf-8")
+            _ = motd.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+            left = apt_guard.remove(td, make_log())
+            assert left == [str(conf), str(hook), str(motd)], left
+            _ = conf.write_text("// zark\n" + apt_guard.APT_CONF, encoding="utf-8")
+            assert apt_guard.remove(td, make_log()) == [str(motd)]
+            assert not hook.exists() and not conf.exists()
+
     def test_install_writes_three_files(self):
         with tempfile.TemporaryDirectory() as td:
             apt_guard.install(target_root=td, log=make_log())
@@ -5800,6 +5838,22 @@ class TestSetupInstallsBothGuards:  # pylint: disable=missing-function-docstring
             setup_mod._install_guards(make_log())  # pylint: disable=protected-access
         apt.assert_called_once_with(target_root="", log=ANY)
         grub.assert_called_once_with(target_root="", log=ANY)
+
+    def test_grub_guard_remove_takes_only_zarks_guard(self):
+        """M3P.2: this zark's guard and an older zark's go; another script at
+        the same path stays and is named."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / grub_guard.GUARD_RELATIVE_PATH
+            grub_guard.install(td, make_log())
+            assert not grub_guard.remove(td, make_log()) and not path.exists()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _ = path.write_text(
+                "#!/bin/sh\n# 09_zfs_backup_guard - older\n# Installed by zark.\n",
+                encoding="utf-8",
+            )
+            assert not grub_guard.remove(td, make_log()) and not path.exists()
+            _ = path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            assert grub_guard.remove(td, make_log()) == [str(path)] and path.exists()
 
     def test_grub_guard_rewrites_a_stale_copy_and_leaves_a_current_one(self):
         with tempfile.TemporaryDirectory() as td:
@@ -15385,12 +15439,27 @@ class TestAlerts:
             assert other.exists() and run_dir.is_dir()
 
     def test_the_debian_package_removes_them(self) -> None:
-        """prerm runs `zark alerts remove` on remove, not on upgrade."""
+        """prerm runs `zark setup --remove` on remove, not on upgrade (M3P.2)."""
         prerm = (Path(__file__).resolve().parent.parent / "debian/prerm").read_text(
             encoding="utf-8"
         )
-        assert "remove)" in prerm and "/usr/share/zark/zark alerts remove" in prerm
+        assert "remove)" in prerm and "/usr/share/zark/zark setup --remove" in prerm
         assert "upgrade)" not in prerm.split("remove)")[0]
+        assert "alerts remove" not in prerm
+
+    def test_setup_remove_takes_what_setup_installed(self) -> None:
+        """M3P.2 (M4d-7 7c): the alerts, the apt guard and the grub guard go;
+        nothing of zark's is left; it ends 0."""
+        mock = MockShell()
+        mock.on_prefix("systemctl").succeeds("")
+        with tempfile.TemporaryDirectory() as root, patch_sh(mock), redirect_stdout(StringIO()):
+            apt_guard.install(target_root=root, log=make_log())
+            grub_guard.install(target_root=root, log=make_log())
+            alerts_mod.install(make_log(), root, "/opt/zark/zark")
+            assert setup_mod.remove_installed(make_log(), root) == 0
+            left = [str(p.relative_to(root)) for p in Path(root).rglob("*") if p.is_file()]
+        assert left == [], left
+        assert "systemctl disable --now zark-status.timer" in mock.calls
 
 
 class TestCompletePoints:
