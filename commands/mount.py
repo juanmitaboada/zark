@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark mount — Mount a backup pool for inspection.
+zark mount - Mount a backup pool for inspection.
 
 Imports the pool once under the altroot /mnt/zark/<pool> (``-N -R``, plus
 ``readonly=on`` in read-only mode), unlocks its keystore and loads the keys.
@@ -145,7 +145,7 @@ def _mount_origin_layout(  # pylint: disable=too-many-locals
         if f.is_file():
             cache.update(parse_list_cache(f.read_text(encoding="utf-8")))
     if not cache:
-        log.warn("No zfs-list.cache in the backup — mountpoints come from the Ubuntu layout")
+        log.warn("No zfs-list.cache in the backup - mountpoints come from the Ubuntu layout")
 
     mounted = 1
     skipped: list[LayoutMount] = []
@@ -182,18 +182,18 @@ def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
     """
     if zfs.pool_exists("rpool"):
         log.fatal(
-            "rpool is already imported — this looks like the running system.\n"
+            "rpool is already imported - this looks like the running system.\n"
             "  Boot a live USB to inspect the installed system's pools.",
         )
     if not sh.is_live_usb():
         log.warn("This does not look like a live USB session.")
         if not log.ask("Continue anyway?", default=False):
-            log.fatal("Aborted — boot a live USB and retry.")
+            log.fatal("Aborted - boot a live USB and retry.")
 
     mode_idx = log.ask_choice(
         "Mount mode:",
         [
-            f"Read-only  {log.G}(recommended — safe){log.N}",
+            f"Read-only  {log.G}(recommended - safe){log.N}",
             f"Read-write {log.R}(can modify the system){log.N}",
         ],
     )
@@ -208,7 +208,7 @@ def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
         readonly=readonly,
     )
     if result is None:
-        log.fatal("Could not mount the system — see messages above.")
+        log.fatal("Could not mount the system - see messages above.")
     root_path, ubuntu_name = result
 
     log.banner_ok(
@@ -249,7 +249,7 @@ def run(
 
     # Local/system target: mount the installed system's pools (live USB),
     # not a removable backup drive. Kept as an explicit keyword so the
-    # default (no-arg) behaviour — scan backup drives — is unchanged.
+    # default (no-arg) behaviour - scan backup drives - is unchanged.
     target = next((a for a in args if not a.startswith("-")), None)
     if target in SYSTEM_TARGETS:
         log.banner("MOUNT SYSTEM", "Mount the installed ZFS system (live USB)")
@@ -283,7 +283,7 @@ def run(
     mode_idx = log.ask_choice(
         "Mount mode:",
         [
-            f"Read-only  {log.G}(recommended — safe){log.N}",
+            f"Read-only  {log.G}(recommended - safe){log.N}",
             f"Read-write {log.R}(can modify backup data){log.N}",
         ],
     )
@@ -316,7 +316,7 @@ def run(
     mounted, skipped = _mount_origin_layout(pool_name, mnt_point, log, readonly=readonly)
     archived = [item.rel for item in skipped if item.reason.startswith("archived lineage")]
     for item in skipped:
-        log.dbg(f"Not mounted: {item.rel} — {item.reason}")
+        log.dbg(f"Not mounted: {item.rel} - {item.reason}")
 
     log.ok(f"Mounted {mounted} datasets")
     if not readonly:

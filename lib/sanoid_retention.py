@@ -95,7 +95,7 @@ def _templates_in_use(log: Log | None, conf_path: Path) -> list[dict[str, str]] 
     if not conf_path.exists():
         if log is not None:
             log.warn(
-                f"sanoid.conf missing at {conf_path} — staleness detection disabled. "
+                f"sanoid.conf missing at {conf_path} - staleness detection disabled. "
                 "Run 'sudo ./zark setup' to generate it.",
             )
         return None
@@ -105,7 +105,7 @@ def _templates_in_use(log: Log | None, conf_path: Path) -> list[dict[str, str]] 
         parser.read(conf_path, encoding="utf-8")
     except (configparser.Error, OSError) as e:
         if log is not None:
-            log.warn(f"Could not parse {conf_path}: {e} — staleness detection disabled")
+            log.warn(f"Could not parse {conf_path}: {e} - staleness detection disabled")
         return None
 
     templates: dict[str, dict[str, str]] = {

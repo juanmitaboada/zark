@@ -16,7 +16,7 @@ Configuration for zark.
 
 known_drives.json location search order:
   1. $ZARK_CONFIG_DIR/known_drives.json  (env override)
-  2. <zark_root>/etc/known_drives.json   (portable — USB drive)
+  2. <zark_root>/etc/known_drives.json   (portable - USB drive)
   3. /etc/zark/known_drives.json         (system install)
 
 If none found, all drives are treated as unknown and the user is
@@ -187,7 +187,7 @@ class Config:
             return
         if fatal:
             log.fatal(
-                "known_drives.json is malformed — refusing to continue",
+                "known_drives.json is malformed - refusing to continue",
                 causes=[self._load_error],
                 solutions=[
                     f"Fix the file by hand, then check it: python3 -m json.tool "
@@ -236,7 +236,7 @@ class Config:
         """Whether ``pool`` opts into the timed eject prompt.
 
         False for unregistered pools (recover/mount on a drive not in the
-        registry) and for registered drives that did not enable it — the
+        registry) and for registered drives that did not enable it - the
         eject prompt then waits for the operator, as it always has.
         """
         info = self.known_drives.get(pool)

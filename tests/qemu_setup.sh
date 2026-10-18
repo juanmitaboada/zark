@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# qemu_setup.sh — Prepare QEMU Ubuntu Live environment for zark testing.
+# qemu_setup.sh - Prepare QEMU Ubuntu Live environment for zark testing.
 #
 # Run from the QEMU console after boot:
 #   sudo mkdir -p /mnt/zark && sudo mount /dev/sr1 /mnt/zark && sudo bash /mnt/zark/tests/qemu_setup.sh
@@ -94,7 +94,7 @@ fi
 if mountpoint -q "$ZARK_MNT" 2>/dev/null; then
     ok "zark mounted at $ZARK_MNT"
 else
-    echo -e "${Y}[WARN]${N}  Could not mount zark ISO — mount manually: sudo mount /dev/sr1 /mnt/zark"
+    echo -e "${Y}[WARN]${N}  Could not mount zark ISO - mount manually: sudo mount /dev/sr1 /mnt/zark"
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────
@@ -102,7 +102,7 @@ fi
 
 echo ""
 echo -e "${G}${B}╔══════════════════════════════════════════════════════════╗${N}"
-echo -e "${G}${B}║  ✅ READY — Connect via SSH from your host:              ║${N}"
+echo -e "${G}${B}║  ✅ READY - Connect via SSH from your host:              ║${N}"
 echo -e "${G}${B}║                                                          ║${N}"
 echo -e "${G}${B}║  ssh -o StrictHostKeyChecking=no -o                      ║${N}"
 echo -e "${G}${B}║    UserKnownHostsFile=/dev/null -p 2222 ubuntu@localhost  ║${N}"
@@ -114,7 +114,7 @@ echo ""
 echo -ne "  ${Y}?${N} Disable desktop to free RAM? (recommended, this terminal will close) [Y/n]: "
 read -r DISABLE_DESKTOP
 if [ -z "$DISABLE_DESKTOP" ] || echo "$DISABLE_DESKTOP" | grep -qi "^y"; then
-    info "Disabling desktop — connect via SSH to continue..."
+    info "Disabling desktop - connect via SSH to continue..."
     sleep 1
     systemctl isolate multi-user.target 2>/dev/null || true
 fi

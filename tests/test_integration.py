@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark integration test — Full backup → recover → boot in QEMU.
+zark integration test - Full backup → recover → boot in QEMU.
 
 Everything runs inside QEMU. Nothing touches the host system
 except creating disk image files in the work directory.
@@ -24,16 +24,16 @@ REQUIREMENTS:
   - KVM access (/dev/kvm)
 
 WORKFLOW:
-  Phase 1 — CREATE + BACKUP (inside QEMU)
+  Phase 1 - CREATE + BACKUP (inside QEMU)
     Boot QEMU with live ISO + source.img + backup.img + zark ISO.
     Run create_test_system.sh to build a minimal encrypted ZFS system,
     then zark prepare + zark backup.
 
-  Phase 2 — RECOVER (inside QEMU)
+  Phase 2 - RECOVER (inside QEMU)
     Boot QEMU with live ISO + backup.img + target.img + zark ISO.
     Run zark recover from backup to target.
 
-  Phase 3 — VERIFY BOOT (inside QEMU)
+  Phase 3 - VERIFY BOOT (inside QEMU)
     Boot QEMU from target.img alone.
     User verifies system boots and data is intact.
 
@@ -223,7 +223,7 @@ def launch_qemu(ovmf_code, ovmf_vars, drives, boot="d"):
                         )
                         warn("Close other applications or reduce RAM with --ram flag")
                         if not ask_yn("Launch anyway? (risk of freeze)", default=False):
-                            fail("Aborted — not enough RAM")
+                            fail("Aborted - not enough RAM")
                     else:
                         ok(f"RAM check: {avail_mb}MB available, QEMU will use {QEMU_RAM_MB}MB")
                     break
@@ -270,7 +270,7 @@ def launch_qemu(ovmf_code, ovmf_vars, drives, boot="d"):
 
 def phase_1(workdir, iso_path):
     """Boot QEMU, create minimal ZFS system, prepare + backup."""
-    banner("PHASE 1 — CREATE + BACKUP (inside QEMU)")
+    banner("PHASE 1 - CREATE + BACKUP (inside QEMU)")
 
     source_img = os.path.join(workdir, SOURCE_IMG)
     backup_img = os.path.join(workdir, BACKUP_IMG)
@@ -328,7 +328,7 @@ def phase_1(workdir, iso_path):
 
     ok("QEMU session ended")
     if ask_yn("Did Phase 1 complete successfully (create + prepare + backup)?"):
-        ok("Phase 1 complete — backup image ready")
+        ok("Phase 1 complete - backup image ready")
     else:
         warn("Phase 1 reported as failed. Re-run with --phase 1 to retry.")
         sys.exit(1)
@@ -341,7 +341,7 @@ def phase_1(workdir, iso_path):
 
 def phase_2(workdir, iso_path):
     """Boot QEMU with backup + empty target, user runs recover."""
-    banner("PHASE 2 — RECOVER (inside QEMU)")
+    banner("PHASE 2 - RECOVER (inside QEMU)")
 
     backup_img = os.path.join(workdir, BACKUP_IMG)
     target_img = os.path.join(workdir, TARGET_IMG)
@@ -402,7 +402,7 @@ def phase_2(workdir, iso_path):
 
     ok("QEMU session ended")
     if ask_yn("Did recovery complete successfully?"):
-        ok("Phase 2 complete — target disk ready for boot test")
+        ok("Phase 2 complete - target disk ready for boot test")
     else:
         warn("Recovery reported as failed. Re-run with --phase 2 to retry.")
         sys.exit(1)
@@ -415,7 +415,7 @@ def phase_2(workdir, iso_path):
 
 def phase_3(workdir):
     """Boot the recovered target disk in QEMU, user verifies."""
-    banner("PHASE 3 — VERIFY BOOT")
+    banner("PHASE 3 - VERIFY BOOT")
 
     target_img = os.path.join(workdir, TARGET_IMG)
     if not os.path.exists(target_img):
@@ -572,13 +572,13 @@ def main():
     """
     global QEMU_RAM_MB  # pylint: disable=global-statement
     parser = argparse.ArgumentParser(
-        description="zark integration test — full cycle in QEMU (nothing touches host)",
+        description="zark integration test - full cycle in QEMU (nothing touches host)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Phases (all run inside QEMU):
-  1  CREATE + BACKUP  — Build minimal ZFS system, prepare + backup
-  2  RECOVER          — Recover from backup to empty target disk
-  3  VERIFY           — Boot recovered disk, confirm it works
+  1  CREATE + BACKUP  - Build minimal ZFS system, prepare + backup
+  2  RECOVER          - Recover from backup to empty target disk
+  3  VERIFY           - Boot recovered disk, confirm it works
 
 Examples:
   sudo python3 tests/test_integration.py --iso ubuntu.iso         # all phases

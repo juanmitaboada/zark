@@ -108,7 +108,7 @@ def check_retention(value: Any, where: str) -> None:
             raise RegistryError(f"{where}: unknown retention setting {key!r}")
         lo, hi = RETENTION_LIMITS[key]
         if not isinstance(n, int) or isinstance(n, bool) or not lo <= n <= hi:
-            raise RegistryError(f"{where}: retention {key!r} must be a whole number {lo}–{hi}")
+            raise RegistryError(f"{where}: retention {key!r} must be a whole number {lo}-{hi}")
     window = value.get("window_days", Policy().window_days)
     max_age = value.get("max_age_days", 0)
     if 0 < max_age <= window:

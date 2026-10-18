@@ -19,14 +19,14 @@ values outside ``rpool/ROOT/<be>`` (e.g. ``canmount=on`` on containers
 that are ``off`` in origin), so recover never copies them from the
 destination. Sources, highest priority first:
 
-  1. ``zark``     — ``org.zark:canmount`` / ``org.zark:mountpoint`` user
+  1. ``zark``     - ``org.zark:canmount`` / ``org.zark:mountpoint`` user
                     properties on the destination (written by M2 backups).
-  2. ``cache``    — origin's ``/etc/zfs/zfs-list.cache/<pool>`` as found in
+  2. ``cache``    - origin's ``/etc/zfs/zfs-list.cache/<pool>`` as found in
                     the boot environment's snapshot at the restore point
                     (OpenZFS zedlet; enabled on Ubuntu 26.04).
-  3. ``ubuntu``   — the Ubuntu installer layout for the boot environment,
+  3. ``ubuntu``   - the Ubuntu installer layout for the boot environment,
                     its known children, ``home_*``/``root_*`` and bpool.
-  4. ``inferred`` — structure of the snapshot itself: a dataset whose root
+  4. ``inferred`` - structure of the snapshot itself: a dataset whose root
                     directory is empty and that has children was never
                     mounted, so ``canmount=off``; otherwise ``on``. A
                     first-level dataset gets ``mountpoint=/<name>``,
@@ -38,7 +38,7 @@ with ``zfs set`` while a pool with zvols is imported.
 
 from dataclasses import dataclass
 
-# Ubuntu installer layout under rpool/ROOT/<be>/ (24.04 – 26.04).
+# Ubuntu installer layout under rpool/ROOT/<be>/ (24.04 - 26.04).
 UBUNTU_ROOT_CHILDREN_OFF = frozenset({"usr", "var"})
 UBUNTU_ROOT_CHILDREN_ON = frozenset(
     {

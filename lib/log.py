@@ -14,7 +14,7 @@
 """
 Logging and terminal output for zark.
 
-Always verbose — no silent mode. Every operation is logged to both
+Always verbose - no silent mode. Every operation is logged to both
 terminal and log file for full traceability.
 """
 
@@ -54,7 +54,7 @@ class Log:
     def default_file(cls) -> str:
         """Where a Log without an explicit file writes."""
         if cls._is_live_usb():
-            # Live USB: log next to the script (on the pendrive — survives reboot)
+            # Live USB: log next to the script (on the pendrive - survives reboot)
             zark_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
             return os.path.join(zark_root, "zark.log")
         return "/var/log/zark.log"
@@ -124,7 +124,7 @@ class Log:
         self._emit(f"{self.R}[ERROR]{self.N}   {msg}")
 
     def dbg(self, msg: str):
-        """Debug/verbose — always shown (we're always verbose)."""
+        """Debug/verbose - always shown (we're always verbose)."""
         self._emit(f"  {self.C}[DBG]{self.N}   {msg}")
 
     def step(self, num: int, total: int, msg: str):
@@ -240,7 +240,7 @@ class Log:
         same session), the bridge stays powered on and the drive
         remains visible in ``/dev``. This banner makes that state
         explicit so the operator knows the kernel-side flush is done
-        but a physical unplug right now is *not* recommended — they
+        but a physical unplug right now is *not* recommended - they
         should run ``zark umount`` (or accept the eject in a later
         command) first.
 
@@ -321,7 +321,7 @@ class Log:
         submits during the countdown IS the answer (empty line = the default,
         like a normal prompt); the countdown then stops. With no interactive
         stdin (cron, systemd timer, scripted run) the default is applied
-        immediately — there is nobody to watch a countdown.
+        immediately - there is nobody to watch a countdown.
 
         Returns the boolean decision (True = yes/eject).
         """
@@ -345,7 +345,7 @@ class Log:
             sys.stdout.flush()
             ready, _, _ = select.select([sys.stdin], [], [], 1)
             if ready:
-                # The operator typed something — that line IS the answer.
+                # The operator typed something - that line IS the answer.
                 # Do not re-prompt or redraw the banner; just interpret it.
                 answer = sys.stdin.readline().strip().lower()
                 sys.stdout.write("\n")
@@ -357,7 +357,7 @@ class Log:
         # Timed out: clear the countdown line and apply the default.
         sys.stdout.write("\r" + " " * 70 + "\r")
         sys.stdout.flush()
-        self.info(f"No response — applying default ({default_word}).")
+        self.info(f"No response - applying default ({default_word}).")
         self._answer_to_file(question, f"<timeout> ({default_word})")
         return default
 
@@ -439,7 +439,7 @@ class Log:
             except EOFError:
                 # No operator (stdin closed): never loop forever, never guess.
                 self._answer_to_file(question, "<EOF>")
-                self.error("No input available (stdin closed) — aborting")
+                self.error("No input available (stdin closed) - aborting")
                 raise SystemExit(1) from None
             if not raw:
                 self._answer_to_file(question, f"<default> {options[default]}")
@@ -448,7 +448,7 @@ class Log:
                 sel = int(raw) - 1
                 self._answer_to_file(question, f"{raw} {options[sel]}")
                 return sel
-            print(f"    {self.R}Invalid selection — try again{self.N}")
+            print(f"    {self.R}Invalid selection - try again{self.N}")
 
     # ── Fatal (stops execution) ──────────────────────────────────────────
 

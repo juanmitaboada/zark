@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark repair-boot — Fix boot issues from a live USB.
+zark repair-boot - Fix boot issues from a live USB.
 
 Imports rpool/bpool, mounts the system, regenerates grub.cfg and initrd.
 Use when grub.cfg is corrupted (e.g., update-grub ran with backup drive connected).
@@ -57,14 +57,14 @@ def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
     """Main entry point for zark repair-boot command."""
-    del args  # Unused — no args expected for repair-boot
+    del args  # Unused - no args expected for repair-boot
     log = Log()
     zfs = ZFS(log)
     cleanup = Cleanup(log)
     # Register atexit/SIGTERM handlers up front. This is the load-bearing
     # fix for the "boot still needs -f" problem the operator hit: every exit
-    # path — including log.fatal() mid-operation, after a pool has already
-    # been (possibly force-) imported — now runs Cleanup.run(), which exports
+    # path - including log.fatal() mid-operation, after a pool has already
+    # been (possibly force-) imported - now runs Cleanup.run(), which exports
     # both pools cleanly and flushes the device. Without this, an early fatal
     # left rpool/bpool imported and marked in-use, so the next real boot's
     # initramfs import (which carries no -f) failed. A clean export here is
@@ -86,7 +86,7 @@ def run(
         log.info("repair-boot is meant to run from live media; on the running")
         log.info("installed system use 'sudo ./zark finish' instead.")
         if not log.ask("Continue anyway?", default=False):
-            log.fatal("Aborted — boot a live USB and retry, or use 'zark finish'.")
+            log.fatal("Aborted - boot a live USB and retry, or use 'zark finish'.")
 
     # ── 1. Check for external pools ───────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Checking for external ZFS pools...")
@@ -104,7 +104,7 @@ def run(
             accept=("y", "yes", "n", "no"),
         ).lower()
         if answer != "y":
-            log.fatal("Aborted — disconnect external drives and retry.")
+            log.fatal("Aborted - disconnect external drives and retry.")
 
     # ── 2-4. Import rpool + bpool, unlock, mount (all tracked by Cleanup) ──
     # mount_system_pools imports under the altroot (clean first, then -f for
@@ -118,7 +118,7 @@ def run(
     log.step(4, TOTAL_STEPS, "Mounting system...")
     result = mount_system_pools(REPAIR_MNT, None, log, zfs, Keystore(log), cleanup)
     if result is None:
-        log.fatal("Could not import and mount the system — see messages above.")
+        log.fatal("Could not import and mount the system - see messages above.")
     _, ubuntu_name = result
     log.ok(f"Boot environment: {ubuntu_name}")
     # The zpool.cache written below records the vdev paths the import used.
@@ -128,7 +128,7 @@ def run(
     if kernels:
         log.ok(f"System mounted at {REPAIR_MNT} ({len(kernels)} kernel(s))")
     else:
-        log.fatal(f"No kernels found in {REPAIR_MNT}/boot — bpool may not be mounted")
+        log.fatal(f"No kernels found in {REPAIR_MNT}/boot - bpool may not be mounted")
 
     # ── 5. Chroot setup, grub guard, initrd ──────────────────────────────
     # Before update-grub: 10_linux_zfs only lists kernels that have an
@@ -149,7 +149,7 @@ def run(
         if sh.run(f"mount {efi_part} {REPAIR_MNT}/boot/efi", log=log).ok:
             cleanup.track_mount(f"{REPAIR_MNT}/boot/efi")
     else:
-        log.warn("No EFI System Partition found on rpool's disk — /boot/efi not mounted")
+        log.warn("No EFI System Partition found on rpool's disk - /boot/efi not mounted")
 
     _ = sh.run(f"mkdir -p {REPAIR_MNT}/sys/firmware/efi/efivars")
     _ = sh.run(
@@ -198,7 +198,7 @@ def run(
         *(["initrd regenerated ✓"] if not initrd_failures else []),
         *(f"✗ {f}" for f in initrd_failures),
         *(["Pools exported cleanly ✓"] if not still else []),
-        *(f"✗ {p} is still imported — run: sudo zpool export {p}" for p in still),
+        *(f"✗ {p} is still imported - run: sudo zpool export {p}" for p in still),
         *([f"✗ vdevs recorded by kernel names: {', '.join(kernel_named)}"] if kernel_named else []),
         "",
         "Next: remove live USB and reboot.",

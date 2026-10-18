@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark umount — Unmount a previously mounted backup pool.
+zark umount - Unmount a previously mounted backup pool.
 
 Safely unmounts all datasets, closes keystore, exports pool.
 """
@@ -96,7 +96,7 @@ def _unmount_tree(root: str, pools: Collection[str]) -> tuple[list[str], frozens
     other mount namespaces (systemd services, snaps, the namespaces snapd pins
     in /run/snapd/ns) that only a propagated unmount releases; made private,
     they stay and keep the pool busy (eli, K6). A bind of a host directory
-    under ``root`` (a chroot's /run, /dev…) would instead carry the unmount to
+    under ``root`` (a chroot's /run, /dev...) would instead carry the unmount to
     whatever the host mounted there since, so each non-dataset mount is made
     private and unmounted first. A dataset is a ZFS mount whose source is in
     one of ``pools``, the pools being released; a bound host directory that is
@@ -230,11 +230,11 @@ def _umount_local_system(log: Log) -> None:
     Safety discriminator: zark always imports the system under an altroot
     beneath ``/mnt/zark`` (see mount_system_pools). The *running* system's
     rpool has no altroot (``altroot = -``). We refuse to export anything
-    whose altroot is not under ``/mnt/zark`` — that is the guard against
+    whose altroot is not under ``/mnt/zark`` - that is the guard against
     pulling the live root out from under a running machine.
     """
     if not sh.run("zpool list rpool").ok:
-        log.warn("rpool is not imported — nothing to unmount.")
+        log.warn("rpool is not imported - nothing to unmount.")
         return
 
     stored = sh.run("zpool get -H -o value altroot rpool").output.strip()
@@ -244,7 +244,7 @@ def _umount_local_system(log: Log) -> None:
         log.fatal(
             "rpool was not imported by zark under an altroot "
             f"(altroot={stored or '-'}).\n"
-            "  Refusing to export — this looks like the running system, not a\n"
+            "  Refusing to export - this looks like the running system, not a\n"
             "  live-USB inspection mount.",
         )
 
@@ -368,13 +368,13 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     ks.attach_to_pool(selected)
     ks.umount()
 
-    # Resolve the underlying device path BEFORE exporting — once the
+    # Resolve the underlying device path BEFORE exporting - once the
     # pool is gone we can no longer ask zpool which device backed it.
     # known_drives.json drives a stable by-id path; pools imported via
     # `zark mount` without registration fall back to parsing
     # `zpool status` for the first /dev/ entry. Either way this is
     # best-effort: if no device is resolved, flush_and_eject still
-    # runs sync but skips eject (no power-down) — durable but the
+    # runs sync but skips eject (no power-down) - durable but the
     # operator should pause a couple of seconds before unplugging.
     device_for_eject: str | None = None
     info = cfg.known_drives.get(selected)
@@ -417,7 +417,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     if exported_ok:
         flush_device_cache(log)
 
-    # Clean up mount directories — only once the pool is gone: with it still
+    # Clean up mount directories - only once the pool is gone: with it still
     # imported, find would delete empty directories inside the backup itself.
     mnt_dir = Path(f"{MNT_BASE}/{selected}")
     if not exported_ok:

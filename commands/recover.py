@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark recover — Full bare-metal system recovery from backup drive.
+zark recover - Full bare-metal system recovery from backup drive.
 
 Must run from Ubuntu live USB with backup drive connected.
 
@@ -40,8 +40,8 @@ Recovery order:
   10.    Load keys from saved system.key; restore encryptionroot
   11.    bootfs
   12.    Reimport backup pool (read-only):
-           12a. Restore bpool content  (NO zvols on rpool yet — safe)
-           12b. Restore keystore zvol  (adds zvol — LAST zfs operation)
+           12a. Restore bpool content  (NO zvols on rpool yet - safe)
+           12b. Restore keystore zvol  (adds zvol - LAST zfs operation)
          Export backup pool, verified.
   13.    Mount system, write EFI/crypttab/fstab
   14.    Restore hostid to target
@@ -126,7 +126,7 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
     Two unsafe fallbacks were considered and deliberately rejected:
 
       (b) Embed system.key in the target rootfs (e.g. /etc/zfs/system.key).
-          Trivial to implement but degrades the security model — the raw key
+          Trivial to implement but degrades the security model - the raw key
           ends up readable in the initrd, defeating the LUKS layer.
 
       (c) Switch rpool to keylocation=prompt with `zfs change-key`. Viable
@@ -153,7 +153,7 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
         "no_snapshot": [
             f"The '{pool_name}/keystore' dataset exists but has no snapshots.",
             "Without a snapshot there is nothing to send/receive.",
-            "This is unusual — `zark prepare` always creates an initial snapshot.",
+            "This is unusual - `zark prepare` always creates an initial snapshot.",
         ],
         "send_failed": [
             f"`zfs send {pool_name}/keystore@... | zfs receive rpool/keystore` failed.",
@@ -164,7 +164,7 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
     causes = causes_by_reason.get(reason, [f"Unknown failure mode: {reason}"])
 
     log.banner_error(
-        "RECOVERY ABORTED — KEYSTORE MISSING FROM BACKUP",
+        "RECOVERY ABORTED - KEYSTORE MISSING FROM BACKUP",
         [
             f"{log.Y}Why this is fatal:{log.N}",
             "  The rpool is raw-encrypted with a key stored inside a LUKS-",
@@ -228,7 +228,7 @@ def _stable_vdev(disk: str, n: int, log: Log) -> str:
     path = f"{BY_ID_DIR}/{by_id}-part{n}" if by_id else ""
     if path and Path(path).exists():
         return path
-    log.warn(f"No /dev/disk/by-id name for {sh.part(disk, n)} — the pool will record a kernel name")
+    log.warn(f"No /dev/disk/by-id name for {sh.part(disk, n)} - the pool will record a kernel name")
     return sh.part(disk, n)
 
 
@@ -249,7 +249,7 @@ def _check_sizes(plan: RestorePlan, target_disk: str, log: Log) -> None:
     disk_bytes = _disk_size_bytes(target_disk)
     if unknown or disk_bytes <= 0:
         log.fatal(
-            "Cannot measure the restore size — refusing to erase the disk",
+            "Cannot measure the restore size - refusing to erase the disk",
             causes=[
                 *(f"referenced unknown for {u}" for u in unknown),
                 *([f"size of {target_disk} unknown"] if disk_bytes <= 0 else []),
@@ -368,7 +368,7 @@ def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
         _abort_missing_keystore("no_snapshot", plan.pool, log)
     bpool_row = plan.row(f"bpool/BOOT/{plan.be}")
     if bpool_row is None or not bpool_row.restored:
-        log.warn("No bpool snapshot at this point — kernels will need reinstallation")
+        log.warn("No bpool snapshot at this point - kernels will need reinstallation")
     _check_sizes(plan, target_disk, log)
 
 
@@ -415,11 +415,11 @@ def _export_verified(pool: str, log: Log) -> None:
     still = sh.run(f"zpool list {pool}").ok or sh.run(f"test -e /dev/zvol/{pool}").ok
     if still:
         log.fatal(
-            f"{pool} could not be exported — refusing to continue",
+            f"{pool} could not be exported - refusing to continue",
             causes=["Its keystore zvol would stay present during the next steps"],
             solutions=[f"Check: zpool status {pool}; fuser -vm /dev/zvol/{pool}/keystore"],
         )
-    log.ok(f"{pool} exported — its zvols are gone")
+    log.ok(f"{pool} exported - its zvols are gone")
 
 
 def _restore_encryption_root(log: Log) -> list[str]:
@@ -524,7 +524,7 @@ def run(
     _ = ks.load_pool_keys(f"{pool_name}/rpool")
     log.ok("Encryption key loaded ✓")
 
-    # Save system.key to temp — survives pool exports, used throughout recovery.
+    # Save system.key to temp - survives pool exports, used throughout recovery.
     # Private from creation, in a directory Cleanup removes on every exit it handles.
     key_dir = tempfile.mkdtemp(prefix="zark_syskey_")
     cleanup.track_dir(key_dir)
@@ -555,7 +555,7 @@ def run(
         _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
         log.ok(f"Hostid set to: {sh.run('hostid').output}")
     else:
-        log.warn("No /etc/hostid in the backup — generating a new one")
+        log.warn("No /etc/hostid in the backup - generating a new one")
         _ = sh.run("zgenhostid -f")
 
     # ── 5. Select internal disk + pre-flight ─────────────────────────────
@@ -700,11 +700,11 @@ def run(
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
         bpool_received = _receive_row(pool_name, bpool_row, raw=False, log=log)
         if not bpool_received:
-            errors.append("bpool: receive failed — kernels need reinstallation")
+            errors.append("bpool: receive failed - kernels need reinstallation")
     else:
-        errors.append("bpool: not in backup at this point — kernels need reinstallation")
+        errors.append("bpool: not in backup at this point - kernels need reinstallation")
 
-    # ── 12b. Keystore zvol (LAST zfs op — adds zvol to rpool)
+    # ── 12b. Keystore zvol (LAST zfs op - adds zvol to rpool)
     #
     # If anything goes wrong here the recovered system would boot without
     # a way to load its encryption key. Continuing silently in that state
@@ -741,8 +741,8 @@ def run(
     _ = sh.run(f"mount {sh.part(internal_disk, 1)} {RECOVER_MNT}/boot/efi")
     cleanup.track_mount(f"{RECOVER_MNT}/boot/efi")
 
-    # crypttab — preserve existing lines, update swap only.
-    # NOTE: keystore-rpool is NOT in crypttab — it's handled by the dracut
+    # crypttab - preserve existing lines, update swap only.
+    # NOTE: keystore-rpool is NOT in crypttab - it's handled by the dracut
     # 89keystore module which opens it AFTER ZFS import (correct ordering).
     # A crypttab entry would fail because the zvol doesn't exist yet when
     # systemd-cryptsetup runs (before ZFS import).
@@ -774,7 +774,7 @@ def run(
             if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists()
             else "initramfs-tools hook"
         )
-        log.ok(f"crypttab written (swap only — keystore handled by {ks_handler})")
+        log.ok(f"crypttab written (swap only - keystore handled by {ks_handler})")
 
     # fstab EFI UUID
     efi_uuid = sh.run(f"blkid -s UUID -o value {sh.part(internal_disk, 1)}").output
@@ -819,7 +819,7 @@ def run(
     ]
     if plan.skipped:
         summary += ["", f"{log.Y}Not restored:{log.N}"]
-        summary += [f"  • {r.rel} — {r.note}" for r in plan.skipped]
+        summary += [f"  • {r.rel} - {r.note}" for r in plan.skipped]
     if errors:
         summary += ["", f"{log.R}Errors:{log.N}"]
         summary += [f"  • {e}" for e in errors]
@@ -828,7 +828,7 @@ def run(
         f"{log.W}Next steps:{log.N}",
         "  1. Remove the live USB",
         f"  2. {log.Y}Disconnect the backup drive{log.N}",
-        "  3. Reboot — enter your rpool passphrase at the prompt",
+        "  3. Reboot - enter your rpool passphrase at the prompt",
         f"  {log.Y}⚠  If it drops to emergency shell on first boot:{log.N}",
         f"     {log.W}zpool import rpool && exit{log.N}",
         f"  4. Run: {log.W}sudo ./zark finish{log.N}  (it also regenerates grub.cfg)",

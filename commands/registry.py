@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark registry — inspect and repair known_drives.json without hand edits.
+zark registry - inspect and repair known_drives.json without hand edits.
 
   zark registry list            every entry, whether its disk is connected,
                                 and whether the pool GUID on that disk matches;
@@ -78,7 +78,7 @@ def _list(cfg: Config, log: Log) -> None:
         last = f"{info.last_backup_at} ({age} day(s) ago)" if age is not None else "never"
         part1 = Path(f"{BY_ID_DIR}/{info.drive_id}-part1")
         if info.drive_id == "<unknown>":
-            state = f"{log.Y}drive_id unknown — run: zark registry fix {name}{log.N}"
+            state = f"{log.Y}drive_id unknown - run: zark registry fix {name}{log.N}"
         elif not part1.exists():
             state = "not connected"
         else:
@@ -251,7 +251,7 @@ def _fix(cfg: Config, log: Log, only: str | None) -> None:
         info = cfg.known_drives[name]
         by_id = _connected_by_id_for_guid(info.guid, cfg, log)
         if not by_id:
-            log.info(f"{name}: pool GUID {info.guid} not found on any connected disk — skipped")
+            log.info(f"{name}: pool GUID {info.guid} not found on any connected disk - skipped")
             continue
         if by_id == info.drive_id:
             log.ok(f"{name}: drive_id already correct ({by_id})")

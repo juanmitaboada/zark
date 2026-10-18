@@ -30,8 +30,8 @@ with a unique name, so its snapshots are grouped by that name instead (two
 backups a minute apart are two points). A run spans several seconds for sanoid and
 many minutes for a syncoid replication. A new point starts when a
 dataset reappears more than ``REPEAT_GAP`` seconds after its first
-snapshot in the current point, or — except for syncoid, which snapshots
-one dataset at a time — when ``REPEAT_GAP`` seconds pass with no snapshot
+snapshot in the current point, or - except for syncoid, which snapshots
+one dataset at a time - when ``REPEAT_GAP`` seconds pass with no snapshot
 (so a dataset created between two sanoid runs is not filed into the
 earlier one).
 Only runs that include the boot environment root are offered.
@@ -82,7 +82,7 @@ _ARCHIVED = re.compile(r"\.archived-[^/]*")
 
 
 def logical(rel: str) -> str:
-    """Dataset name with any ``.archived-…`` suffix removed from its components."""
+    """Dataset name with any ``.archived-...`` suffix removed from its components."""
     return _ARCHIVED.sub("", rel)
 
 

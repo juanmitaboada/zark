@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark backup — Back up this system to a connected, registered drive.
+zark backup - Back up this system to a connected, registered drive.
 
 Imports the drive under I-G, takes one backup point ``zark_<UTC>`` of every
 replicated dataset and brings each of them to it with zark's own send/receive
@@ -147,7 +147,7 @@ def _check_target_space(
     if 0 < dst_info.size_bytes < src_info.size_bytes:
         log.warn(
             f"Target {pool_name} ({dst_info.size}) is smaller than source "
-            f"{source_pool} ({src_info.size}) — backup may eventually fail",
+            f"{source_pool} ({src_info.size}) - backup may eventually fail",
         )
 
 
@@ -173,7 +173,7 @@ def _gib(n: int) -> str:
 
 
 def _space(info: PoolInfo | None) -> str:
-    """``used=… (N%)  available=…`` from the pool root's byte counts."""
+    """``used=... (N%)  available=...`` from the pool root's byte counts."""
     if info is None or info.size_bytes <= 0:
         return "used=?  available=?"
     return f"used={_gib(info.used_bytes)} ({info.pct_used}%)  available={_gib(info.avail_bytes)}"
@@ -286,7 +286,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             names = [n.lstrip("@") for n in p.newer]
             more = len(names) - 3
             shown = ", ".join(names[:3]) + (
-                f" …and {more} more (full list in zark.log)" if more > 0 else ""
+                f" ...and {more} more (full list in zark.log)" if more > 0 else ""
             )
             log.info(f"  {p.rel}: common {p.common.lstrip('@')}; newer on the backup: {shown}")
             if more > 0:
@@ -585,9 +585,9 @@ def _on_drive(eng: engine.Run, top: str) -> list[str]:
             continue
         mark = ""
         if is_archived(rel):
-            mark = "  — archived lineage"
+            mark = "  - archived lineage"
         elif d.orphan.startswith("kept@"):
-            mark = "  — kept, only on the backup"
+            mark = "  - kept, only on the backup"
         lines.append(f"    {eng.pool}/{rel}  ({len(d.snaps)} snapshot(s)){mark}")
     return lines
 
@@ -635,7 +635,7 @@ def _ask_confirmed(
                 log.warn(line)
         if _typed(log, *confirm[pick]):
             return pick
-        log.info(f"Not confirmed ({confirm[pick][0]} was not typed) — choose again")
+        log.info(f"Not confirmed ({confirm[pick][0]} was not typed) - choose again")
 
 
 def _show_table(res: engine.Result, point: str, log: Log) -> None:
@@ -710,7 +710,7 @@ def _incomplete_lines(res: engine.Result, point: str) -> tuple[list[str], int]:
         lines += [f"    {rel}" for rel in names]
         shown += len(names)
         if len(names) < len(rels):
-            lines.append(f"    …and {len(rels) - len(names)} more (see the table above)")
+            lines.append(f"    ...and {len(rels) - len(names)} more (see the table above)")
     lines += ["", "Run backup again: each group above says what it will do."]
     return lines, len(missing)
 
@@ -807,7 +807,7 @@ def run(
     # ── Refuse live USB ──────────────────────────────────────────────────
     if _detect_live_usb():
         log.fatal(
-            "Live USB detected — backup blocked",
+            "Live USB detected - backup blocked",
             causes=[
                 "Running backup from live USB would back up the wrong system",
                 "It corrupts ZFS mountpoints on the backup drive",

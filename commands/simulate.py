@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark simulate — Boot a recovered (or arbitrary) disk in QEMU/KVM.
+zark simulate - Boot a recovered (or arbitrary) disk in QEMU/KVM.
 
 Tests the boot chain without physically rebooting. Uses OVMF (UEFI
 firmware) so the EFI boot path is exercised identically to real hardware.
@@ -45,7 +45,7 @@ Safety model (in order of precedence):
 
   4. --rw is opt-in and noisy. It prints a large banner naming the disk
      and asks the operator to type the disk path verbatim to confirm
-     (typing 'YES' is not enough — re-typing the path forces re-reading
+     (typing 'YES' is not enough - re-typing the path forces re-reading
      it).
 
 Requirements:
@@ -104,7 +104,7 @@ def _find_file(candidates: list[str]) -> str | None:
 #   1. The QEMU build must include `virtio-vga-gl`. Most distros do,
 #      but minimal/server qemu builds may strip it.
 #   2. A render node must exist (/dev/dri/renderD128). Without it
-#      virgl cannot get a GPU context — virtio-vga-gl is built but
+#      virgl cannot get a GPU context - virtio-vga-gl is built but
 #      QEMU will refuse to instantiate it.
 #   3. Mesa userland must be present so the GTK frontend can talk to
 #      the GPU. Almost always true on a desktop Ubuntu, but not
@@ -123,7 +123,7 @@ def _detect_gl() -> tuple[bool, str]:
     """
     # Render node must exist. /dev/dri/renderD128 is the canonical
     # primary GPU render node on Linux; subsequent GPUs get D129+.
-    # We accept any renderD12N entry — virgl just needs at least one.
+    # We accept any renderD12N entry - virgl just needs at least one.
     dri = Path("/dev/dri")
     if not dri.is_dir() or not any(p.name.startswith("renderD") for p in dri.iterdir()):
         return False, "no /dev/dri/renderD* node (no GPU available to virgl)"
@@ -150,14 +150,14 @@ def _root_disk() -> str:
     """Return the whole-disk device backing the live '/' filesystem.
 
     Examples: /dev/nvme0n1 (when / is on nvme0n1p3), /dev/sda (when /
-    is on sda1). Returns "" if it cannot be determined — the caller
+    is on sda1). Returns "" if it cannot be determined - the caller
     should treat that as "unknown, be conservative".
     """
     r = sh.run("findmnt -no SOURCE /")
     src = r.output.strip() if r.ok else ""
     if not src:
         return ""
-    # ZFS root: SOURCE looks like 'rpool/ROOT/ubuntu_xxx' — convert
+    # ZFS root: SOURCE looks like 'rpool/ROOT/ubuntu_xxx' - convert
     # the imported pool to its backing disk via zpool status.
     if "/" in src and not src.startswith("/dev/"):
         pool = src.split("/", 1)[0]
@@ -289,7 +289,7 @@ def _list_candidate_disks() -> list[tuple[str, str]]:
 
     Description is the lsblk line (size + model) so the operator has
     enough context to choose. Disks whose state is uncertain are kept
-    out of the list — better fewer choices than a wrong one.
+    out of the list - better fewer choices than a wrong one.
     """
     r = sh.run("lsblk -dn -o NAME,SIZE,MODEL")
     if not r.ok:
@@ -344,7 +344,7 @@ def _parse_display(spec: str) -> tuple[int, int]:
     w, h = int(w_s), int(h_s)
     if w <= 0 or h <= 0:
         raise ValueError(f"Display dimensions must be positive: {spec!r}")
-    # Coherence bounds — virtio-vga refuses obscene values and the
+    # Coherence bounds - virtio-vga refuses obscene values and the
     # operator probably typo'd if they reach here.
     if w > 7680 or h > 4320:
         raise ValueError(f"Display dimensions exceed 8K (7680x4320): {spec!r}")
@@ -361,7 +361,7 @@ def _parse_args(args: list[str]) -> SimulateArgs:
                       (read-only is the default now, --ro is a no-op)
       --display WxH   QEMU virtio-vga resolution (default 2560x1440)
 
-    Unknown flags are ignored — defensive against future additions and
+    Unknown flags are ignored - defensive against future additions and
     consistent with the rest of the codebase which never argparses
     rigidly.
     """
@@ -376,7 +376,7 @@ def _parse_args(args: list[str]) -> SimulateArgs:
             try:
                 parsed.display_w, parsed.display_h = _parse_display(args[i + 1])
             except ValueError as e:
-                # Caller (run()) will surface this — we keep the
+                # Caller (run()) will surface this - we keep the
                 # parser pure of side effects (no logging here).
                 raise ValueError(f"Invalid --display: {e}") from e
             break
@@ -390,7 +390,7 @@ def _parse_args(args: list[str]) -> SimulateArgs:
 def _confirm_rw_or_abort(disk: str, log: Log) -> None:
     """Print a loud warning and require the operator to retype the disk path.
 
-    Typing 'YES' would be too cheap — by re-typing the actual /dev path,
+    Typing 'YES' would be too cheap - by re-typing the actual /dev path,
     the operator is forced to read it again. If the disk was wrong, this
     is the moment they notice.
     """
@@ -411,7 +411,7 @@ def _confirm_rw_or_abort(disk: str, log: Log) -> None:
         typed = ""
     if typed != disk:
         log.fatal(
-            "Aborted — typed path did not match the target disk",
+            "Aborted - typed path did not match the target disk",
             causes=[f"You typed: {typed!r}", f"Expected:  {disk!r}"],
             solutions=[
                 "Re-run and type the path exactly, or omit --rw to use",
@@ -430,7 +430,7 @@ def _install_deps(log: Log):
     parent's terminal stdin. Otherwise apt's interactive prompt
     machinery (or any leftover from non-interactive runs) leaves the
     parent shell's stdin in a state where the next input() call
-    immediately receives EOF — making the disk-selection prompt
+    immediately receives EOF - making the disk-selection prompt
     silently abort with "invalid selection".
     """
     log.info("Installing qemu-system-x86 and ovmf...")
@@ -443,9 +443,9 @@ def _install_deps(log: Log):
             check=False,
         )
     except FileNotFoundError:
-        log.fatal("apt-get not found — install QEMU and OVMF manually")
+        log.fatal("apt-get not found - install QEMU and OVMF manually")
     if result.returncode != 0:
-        log.fatal("Failed to install QEMU/OVMF — install manually and retry")
+        log.fatal("Failed to install QEMU/OVMF - install manually and retry")
 
 
 def run(
@@ -485,13 +485,13 @@ def run(
             _install_deps(log)
         else:
             log.fatal(
-                "QEMU is required for simulate — install with: apt install qemu-system-x86 ovmf",
+                "QEMU is required for simulate - install with: apt install qemu-system-x86 ovmf",
             )
 
     # ── Check for KVM ────────────────────────────────────────────────────
     kvm_ok = Path("/dev/kvm").exists() and os.access("/dev/kvm", os.R_OK | os.W_OK)
     if not kvm_ok:
-        log.warn("KVM not available — simulation will be slow (no hardware acceleration)")
+        log.warn("KVM not available - simulation will be slow (no hardware acceleration)")
         log.warn("Check: ls -la /dev/kvm  and  modprobe kvm_intel or kvm_amd")
 
     # ── Detect GL acceleration (virtio-vga-gl) ───────────────────────────
@@ -502,9 +502,9 @@ def run(
     # corner of the window.
     gl_ok, gl_reason = _detect_gl()
     if gl_ok:
-        log.ok("GL acceleration available — using virtio-vga-gl + gtk,gl=on")
+        log.ok("GL acceleration available - using virtio-vga-gl + gtk,gl=on")
     else:
-        log.warn(f"GL acceleration unavailable — falling back to software rendering ({gl_reason})")
+        log.warn(f"GL acceleration unavailable - falling back to software rendering ({gl_reason})")
 
     # ── Find OVMF firmware ───────────────────────────────────────────────
     ovmf_code = _find_file(OVMF_CODE_CANDIDATES)
@@ -542,7 +542,7 @@ def run(
         reasons = _disk_in_use_reasons(disk_arg)
         if reasons:
             log.fatal(
-                f"Refusing to simulate against {disk_arg} — disk is in use",
+                f"Refusing to simulate against {disk_arg} - disk is in use",
                 causes=reasons,
                 solutions=[
                     "Use a different disk (a recovered USB, a target.img,",
@@ -575,7 +575,7 @@ def run(
         except EOFError:
             sel = ""
         if not sel.isdigit() or not 1 <= int(sel) <= len(candidates):
-            log.fatal("Aborted — invalid selection")
+            log.fatal("Aborted - invalid selection")
         target_disk = candidates[int(sel) - 1][0]
 
     log.ok(f"Target disk: {target_disk}")
@@ -652,7 +652,7 @@ def run(
         # Boot menu (F12 to open, shows EFI boot entries)
         "-boot",
         "menu=on",
-        # Serial console to a file — see serial_log comment above
+        # Serial console to a file - see serial_log comment above
         "-serial",
         f"file:{serial_log}",
     ]

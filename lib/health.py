@@ -16,7 +16,7 @@ Non-destructive drive health checks.
 
 This module inspects kernel/sysfs state for *risk factors* that are known
 to threaten ZFS backup integrity on removable drives. It does NOT write to
-the device and therefore cannot, by construction, prove a drive is safe —
+the device and therefore cannot, by construction, prove a drive is safe -
 the lethal property (a USB-SATA bridge that lies about FUA cache flushing)
 only manifests when metadata is written under load and read back. What these
 checks do is flag the conditions correlated with that failure so the
@@ -59,12 +59,12 @@ from lib.zfs import backup_altroot, parse_damage
 # entry when a bridge is confirmed problematic, with a short note.
 KNOWN_BAD_BRIDGES: dict[str, str] = {
     "0634:5604": (
-        "Micron CT2000X10PROSSD9 USB-SATA enclosure — ignores FUA, can "
+        "Micron CT2000X10PROSSD9 USB-SATA enclosure - ignores FUA, can "
         "corrupt pools under write load (spacemap loss -> metaslab_init "
         "error 52). Use a usb-storage quirk to disable UAS."
     ),
     "0634:5607": (
-        "Micron CT2000X10SSD9 USB-SATA enclosure — same vendor as 0634:5604, "
+        "Micron CT2000X10SSD9 USB-SATA enclosure - same vendor as 0634:5604, "
         "also reports no FUA and defaults to UAS; shows DID_ERROR on the "
         "disconnect cache flush. Treat as corruption-prone under write load; "
         "use a usb-storage quirk to disable UAS."
@@ -145,7 +145,7 @@ def _check_transport(base: str) -> Finding | None:
     """Report the USB storage transport (UAS vs usb-storage).
 
     UAS is faster but, on bridges that mishandle it, stalls under load with
-    SCSI aborts/resets — the path that corrupts. usb-storage is the
+    SCSI aborts/resets - the path that corrupts. usb-storage is the
     conservative transport (e.g. forced by a modprobe quirk). We only emit a
     finding for USB devices; SATA/NVMe are silent here.
     """
@@ -186,7 +186,7 @@ def _check_known_bridge(base: str) -> Finding | None:
         return Finding(
             level=INFO,
             title="USB bridge",
-            detail=f"Bridge {key} — not in the known-problematic list.",
+            detail=f"Bridge {key} - not in the known-problematic list.",
         )
     return Finding(
         level=WARN,
@@ -333,7 +333,7 @@ class TestResult:  # pylint: disable=too-many-instance-attributes
     detail: str = ""
     # Kernel transport errors (DID_ERROR, UAS aborts/resets, failed cache
     # flushes) observed on the device *during* the test. A test can pass the
-    # data read-back yet still log these — the signature of a bridge that
+    # data read-back yet still log these - the signature of a bridge that
     # happened to persist this time but is failing at the bus level and may
     # corrupt on another run. Non-empty means "passed, but the enclosure is
     # not trustworthy".
@@ -407,7 +407,7 @@ def _write_churn(  # pylint: disable=too-many-locals
     """Write incompressible data with transaction churn under ``mountpoint``.
 
     Returns total bytes written. Each cycle writes files up to a fraction of
-    the target, syncs, then deletes half before the next cycle — exercising
+    the target, syncs, then deletes half before the next cycle - exercising
     spacemap allocation and free, the pattern that exposes the FUA lie. Stops
     early if writes start failing (a corrupting bridge may error out).
     """
@@ -443,7 +443,7 @@ def _write_churn(  # pylint: disable=too-many-locals
 
 
 # Kernel log patterns that signal a transport-level failure on a USB-SATA
-# bridge — distinct from a data-integrity failure. These can appear even when
+# bridge - distinct from a data-integrity failure. These can appear even when
 # the pool reads back ONLINE (the bridge persisted this time but the bus
 # stalled), so they are reported as a strong caution rather than a hard fail.
 _TRANSPORT_ERROR_PATTERNS = (
@@ -488,7 +488,7 @@ def _transport_errors_since(base: str, since_ts: float) -> list[str]:
         if base not in line and "scsi host" not in line and "uas" not in line:
             continue
         # A failed cache flush with DID_NO_CONNECT is the harmless "device
-        # already unplugged" case, not a transport fault — never flag it.
+        # already unplugged" case, not a transport fault - never flag it.
         if "DID_NO_CONNECT" in line:
             continue
         if any(p in line for p in _TRANSPORT_ERROR_PATTERNS):
@@ -515,7 +515,7 @@ def run_destructive_test(
     cold: bool,
     log: Log,
     *,
-    zfs,  # lib.zfs.ZFS — typed loosely to avoid an import cycle
+    zfs,  # lib.zfs.ZFS - typed loosely to avoid an import cycle
     wait_for_reconnect=None,  # callable() invoked at the cold-reconnect pause
     write_mb_s: float = 0.0,
 ) -> TestResult:
@@ -645,7 +645,7 @@ def run_destructive_test(
         passed = health == "ONLINE"
         detail = "ONLINE" if passed else f"health={health}"
         if passed and terrs:
-            # Data survived this time, but the bus stumbled — flag it loudly.
+            # Data survived this time, but the bus stumbled - flag it loudly.
             detail = (
                 "ONLINE, but transport errors were logged during the test "
                 "(the bridge persisted this run but is failing at the bus "
@@ -768,7 +768,7 @@ def generate_report(  # pylint: disable=too-many-locals
     ).output
 
     lines = [
-        f"ZARK HEALTH REPORT — {ts}",
+        f"ZARK HEALTH REPORT - {ts}",
         "=" * 60,
         "",
         "## Environment",
@@ -828,7 +828,7 @@ def generate_report(  # pylint: disable=too-many-locals
         lines += [
             "",
             "(Note: this report may contain a drive serial. Redact it before",
-            "sharing if you prefer — re-run and choose to obfuscate.)",
+            "sharing if you prefer - re-run and choose to obfuscate.)",
         ]
     return "\n".join(lines)
 

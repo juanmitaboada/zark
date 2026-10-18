@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark — ZFS backup suite for external drives.
+zark - ZFS backup suite for external drives.
 
 Portable: run from any location (USB drive, /opt, ~/bin, etc.)
 Usage:    sudo ./zark <command> [options]
@@ -149,7 +149,7 @@ def main():
         # zark's own recovery and setup operations import the backup pool
         # and/or run apt deliberately; mark them internal so the apt guard
         # hook (installed on recovered/productive systems) does not block
-        # them — e.g. setup's own dependency install must not be refused by
+        # them - e.g. setup's own dependency install must not be refused by
         # a guard a previous setup installed. Routine operations (backup,
         # mount, chroot, prepare) are intentionally left unmarked so the
         # guard still protects against an accidental kernel/GRUB upgrade

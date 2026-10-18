@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark health — interactive drive analysis and debugging tool.
+zark health - interactive drive analysis and debugging tool.
 
 Two modes, both chosen interactively:
 
@@ -21,7 +21,7 @@ Two modes, both chosen interactively:
     of any pool on the drive, without importing it. Writes nothing; flags
     risk, cannot prove a drive safe.
 
-  * destructive — creates a throwaway pool, writes with transaction churn,
+  * destructive - creates a throwaway pool, writes with transaction churn,
     and verifies the pool re-imports. This reproduces the USB-SATA FUA-lie
     failure under load. Optionally adds a cold pass: power the device down,
     wait for the operator to physically reconnect, then re-import (the only
@@ -97,7 +97,7 @@ def _select_device(args: list[str], log: Log) -> str:
     """Resolve the device to analyse, interactively if needed.
 
     Combines pool/registry drives with bare connected USB disks, so a blank
-    enclosure (which has no pool and is not registered) can still be picked —
+    enclosure (which has no pool and is not registered) can still be picked -
     that is exactly the device a destructive evaluation targets.
     """
     if args and not args[0].startswith("-"):
@@ -175,7 +175,7 @@ def run(args: list[str]) -> None:
         sigs = sh.run(f"blkid {dev}").output
         if parts or sigs:
             log.fatal(
-                "Drive is NOT empty — destructive test needs a blank drive",
+                "Drive is NOT empty - destructive test needs a blank drive",
                 solutions=[f"Wipe first: sudo ./zark purge {dev}"],
             )
         # Confirm destruction BEFORE writing anything (incl. the speed probe).
@@ -197,13 +197,13 @@ def run(args: list[str]) -> None:
             eta = _fmt_duration(estimate_seconds(p, dev, write_mb_s))
             if p == PROFILE_SURFACE:
                 opts.append(
-                    f"surface — whole disk (~{size // 1024**3} GB), {eta}  "
+                    f"surface - whole disk (~{size // 1024**3} GB), {eta}  "
                     "[tests the MEDIUM, not the bridge; slow]",
                 )
             elif p == PROFILE_FAST:
-                opts.append(f"fast — ~2 GB churn, {eta}")
+                opts.append(f"fast - ~2 GB churn, {eta}")
             else:
-                opts.append(f"medium — ~15 GB churn, {eta}")
+                opts.append(f"medium - ~15 GB churn, {eta}")
         profile = _PROFILES[log.ask_choice("Test profile?", opts, default=0)]
 
         cold = log.ask(
@@ -243,7 +243,7 @@ def run(args: list[str]) -> None:
         if test.passed and not test.transport_errors:
             log.ok(f"Destructive test PASSED ({test.detail})")
         elif test.passed and test.transport_errors:
-            # Data survived, but the bus logged errors — a strong caution.
+            # Data survived, but the bus logged errors - a strong caution.
             log.warn(f"Destructive test PASSED WITH TRANSPORT ERRORS: {test.detail}")
             for line in test.transport_errors[:5]:
                 log.warn(f"  {line}")

@@ -36,10 +36,10 @@ from lib.zfs import ZFS, fix_grub_bpool_uuid
 # (the features GRUB2's built-in ZFS reader supports). GRUB reads bpool to
 # load the kernel during boot. If bpool has features GRUB doesn't recognize,
 # GRUB rejects the entire filesystem as unreadable and boot fails with
-# "file '/BOOT/.../vmlinuz-...' not found" — even though Linux can read the
+# "file '/BOOT/.../vmlinuz-...' not found" - even though Linux can read the
 # pool fine.
 #
-# Specifically excluded: head_errlog, vdev_zaps_v2 — both unsupported by
+# Specifically excluded: head_errlog, vdev_zaps_v2 - both unsupported by
 # GRUB up to and including 2.14 (the version shipped in Ubuntu 26.04).
 # rpool is unaffected by this restriction since rpool is read by the
 # kernel's full ZFS module, never by GRUB.
@@ -83,7 +83,7 @@ def _force_latest_signed_alternative(
         log: logger.
     """
     if not Path(f"{chroot_path}{latest_path}").exists():
-        log.dbg(f"  {name}: no .latest variant in chroot — using default alternative")
+        log.dbg(f"  {name}: no .latest variant in chroot - using default alternative")
         return
     r = sh.run(
         f"chroot {chroot_path} update-alternatives --set {name} {latest_path}",
@@ -101,7 +101,7 @@ def _install_keystore_dracut(recover_mnt: str, ubuntu_name: str, log: Log):
     ks_mod_dir.mkdir(parents=True, exist_ok=True)
 
     _ = (ks_mod_dir / "module-setup.sh").write_text("""#!/bin/bash
-# dracut module: 89keystore — unlock ZFS keystore zvol
+# dracut module: 89keystore - unlock ZFS keystore zvol
 
 check() { require_binaries cryptsetup || return 1; return 0; }
 depends() { echo "zfs crypt"; }
@@ -140,7 +140,7 @@ fi
 
 [ -z "$ZVOL_DEV" ] && exit 0
 
-# Open LUKS — password prompt via systemd-ask-password (integrates with plymouth)
+# Open LUKS - password prompt via systemd-ask-password (integrates with plymouth)
 if [ ! -b "/dev/mapper/$MAPPER_NAME" ]; then
     info "zark: Opening ZFS keystore ($ZVOL_DEV)..."
     PW="$(systemd-ask-password 'Passphrase for ZFS keystore:')"
@@ -158,7 +158,7 @@ fi
 
 if [ -f "$KEYSTORE_MNT/system.key" ]; then
     info "zark: system.key available"
-    # Load ZFS encryption keys — try stored keylocation first, then explicit path
+    # Load ZFS encryption keys - try stored keylocation first, then explicit path
     if ! zfs load-key -a 2>/dev/null; then
         for ds in $(zfs list -H -o name,encryptionroot -r rpool 2>/dev/null | \\
                      awk '$2 != "-" && $1 == $2 {{{{print $1}}}}'); do
@@ -236,7 +236,7 @@ fi
 
 [ -z "$ZVOL_DEV" ] && exit 0
 
-# Open LUKS — password prompt via askpass (integrates with plymouth)
+# Open LUKS - password prompt via askpass (integrates with plymouth)
 if [ ! -b "/dev/mapper/$MAPPER_NAME" ]; then
     log_begin_msg "zark: Opening ZFS keystore ($ZVOL_DEV)"
     if [ -x /lib/cryptsetup/askpass ]; then
@@ -265,7 +265,7 @@ fi
 
 if [ -f "$KEYSTORE_MNT/system.key" ]; then
     log_success_msg "zark: system.key available"
-    # Load ZFS encryption keys — try stored keylocation first, then explicit path
+    # Load ZFS encryption keys - try stored keylocation first, then explicit path
     if ! zfs load-key -a 2>/dev/null; then
         for ds in $(zfs list -H -o name,encryptionroot -r rpool 2>/dev/null | \
                      awk '$2 != "-" && $1 == $2 {{print $1}}'); do
@@ -332,25 +332,25 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     _ = sh.run(f"mount -t efivarfs efivarfs {RECOVER_MNT}/sys/firmware/efi/efivars")
     cleanup.track_mount(f"{RECOVER_MNT}/sys/firmware/efi/efivars")
 
-    # zpool.cache — required so grub and initrd can locate both pools
+    # zpool.cache - required so grub and initrd can locate both pools
     cache_path = f"{RECOVER_MNT}/etc/zfs/zpool.cache"
     zfs.write_zpool_cache(cache_path, ["rpool", "bpool"])
     log.ok("zpool.cache written")
 
-    # Fix bpool GUID in grub.cfg (bpool was created fresh — new GUID)
+    # Fix bpool GUID in grub.cfg (bpool was created fresh - new GUID)
     bpool_guid = zfs.pool_guid("bpool")
     if bpool_guid:
         bpool_hex = format(int(bpool_guid), "016x")
         _ = fix_grub_bpool_uuid(Path(f"{RECOVER_MNT}/boot/grub/grub.cfg"), bpool_hex, log)
     else:
-        log.warn("Cannot read bpool GUID — grub.cfg may have stale UUID")
+        log.warn("Cannot read bpool GUID - grub.cfg may have stale UUID")
 
     # ── Install GRUB bootloader (standard Ubuntu procedure) ─────────────
     # Replicate exactly what Ubuntu does on every grub package update:
     #   1. grub-install → GRUB modules + bootstrap grub.cfg + EFI binary
     #   2. reinstall grub-efi-amd64-signed + shim-signed → signed EFI binaries
     #   3. update-grub → regenerate main /boot/grub/grub.cfg
-    # This is 100% standard — future apt upgrades work identically.
+    # This is 100% standard - future apt upgrades work identically.
 
     # Step 1: grub-install (modules + bootstrap grub.cfg on EFI partition)
     log.info("Running grub-install...")
@@ -400,7 +400,7 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
         )
         log.dbg(f"debconf grub-efi/install_devices → {new_efi_byid}")
     elif new_efi_part:
-        # No by-id link (e.g. virtio) — use raw device
+        # No by-id link (e.g. virtio) - use raw device
         _ = sh.run(
             f"chroot {RECOVER_MNT} bash -c "
             + f"\"echo 'grub-efi/install_devices string {new_efi_part}' | debconf-set-selections\"",
@@ -435,7 +435,7 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     if r.ok:
         log.ok("grub-efi-amd64-signed configured ✓")
     else:
-        log.warn("grub-efi-amd64-signed configure failed — manual copy as fallback")
+        log.warn("grub-efi-amd64-signed configure failed - manual copy as fallback")
         # Fallback: copy signed binaries manually
         efi_ubuntu = Path(f"{RECOVER_MNT}/boot/efi/EFI/ubuntu")
         grub_signed = Path(f"{RECOVER_MNT}/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed")
@@ -449,13 +449,13 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     if r.ok:
         log.ok("shim-signed configured ✓")
     else:
-        log.warn("shim-signed configure failed — manual copy as fallback")
+        log.warn("shim-signed configure failed - manual copy as fallback")
         efi_ubuntu = Path(f"{RECOVER_MNT}/boot/efi/EFI/ubuntu")
         shim_src = Path(f"{RECOVER_MNT}/usr/lib/shim/shimx64.efi.signed")
         if shim_src.exists():
             _ = sh.run(f"cp {shim_src} {efi_ubuntu}/shimx64.efi")
 
-    # Step 3: grub.cfg — we keep the backup's original grub.cfg (bpool UUID
+    # Step 3: grub.cfg - we keep the backup's original grub.cfg (bpool UUID
     # already fixed above).  update-grub cannot run in a chroot with ZFS
     # altroot because 10_linux_zfs fails to mount encrypted datasets
     # ("encryption key not loaded").  The backup grub.cfg is valid: it
@@ -469,11 +469,11 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     if shim_ok and grub_ok:
         log.ok("Secure Boot chain present (shim + grub) ✓")
     elif grub_ok:
-        log.warn("grubx64.efi present but shimx64.efi missing — Secure Boot may fail")
+        log.warn("grubx64.efi present but shimx64.efi missing - Secure Boot may fail")
     else:
-        log.warn("EFI binaries not found — boot may fail")
+        log.warn("EFI binaries not found - boot may fail")
 
-    # Install keystore boot module — opens LUKS keystore zvol AFTER ZFS import
+    # Install keystore boot module - opens LUKS keystore zvol AFTER ZFS import
     # but BEFORE dataset mounting, so /run/keystore/rpool/system.key is available.
     # This is needed because systemd-cryptsetup runs BEFORE ZFS import (the zvol
     # device doesn't exist yet), creating a chicken-and-egg problem.
@@ -490,10 +490,10 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     else:
         _install_keystore_initramfs(RECOVER_MNT, ubuntu_name, log)
 
-    # Install grub guard — prevents update-grub from running with external
+    # Install grub guard - prevents update-grub from running with external
     # ZFS pools connected (which corrupts grub.cfg with no kernel entries)
     grub_guard.install(target_root=RECOVER_MNT, log=log)
 
-    # Install the apt guard — stops a later kernel/GRUB/ZFS upgrade on the
+    # Install the apt guard - stops a later kernel/GRUB/ZFS upgrade on the
     # recovered system from half-applying while a backup drive is connected.
     apt_guard.install(target_root=RECOVER_MNT, log=log)

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark explore — Scan for ZFS pools and show their status.
+zark explore - Scan for ZFS pools and show their status.
 
 Non-destructive. Shows:
   - Known drives (green): registered and GUID matches
@@ -78,7 +78,7 @@ def run(
         elif d.guid_changed:
             unknown_count += 1
             log.raw(f"  {log.Y}⚠ GUID CHANGED{log.N}  {log.W}{d.name}{log.N}  [{d.state}]")
-            log.raw("           Drive was re-prepared — GUID changed")
+            log.raw("           Drive was re-prepared - GUID changed")
             known = cfg.known_drives.get(d.name)
             if known:
                 log.raw(f"           Old GUID: {known.guid}")
@@ -95,7 +95,7 @@ def run(
             # Find old name
             for info in cfg.known_drives.values():
                 if info.guid == d.guid:
-                    log.raw(f"           Was registered as '{info.name}' — pool renamed")
+                    log.raw(f"           Was registered as '{info.name}' - pool renamed")
                     break
             log.raw("           Update known_drives.json:")
             log.raw(f"           {log.W}{d.registration_json}{log.N}")
@@ -108,7 +108,7 @@ def run(
             )
             if d.model:
                 log.raw(f"           {d.model} {d.size} ({d.transport})")
-            log.raw("           Not in known_drives.json — to register, add:")
+            log.raw("           Not in known_drives.json - to register, add:")
             log.raw(f"           {log.W}{d.registration_json}{log.N}")
 
         log.blank()
@@ -142,7 +142,7 @@ def run(
                 stale = [n for n in names if n != real_name]
                 if stale:
                     log.info(
-                        f"  Pool on disk is '{real_name}' — "
+                        f"  Pool on disk is '{real_name}' - "
                         + f"'{', '.join(stale)}' appear to be stale entries",
                     )
                     if log.ask(f"Remove stale entries ({', '.join(stale)})?", default=True):
@@ -157,7 +157,7 @@ def run(
         saved = 0
         for d in unknowns:
             if d.drive_id == "<unknown>":
-                log.warn(f"{d.name}: no stable by-id name — not registered")
+                log.warn(f"{d.name}: no stable by-id name - not registered")
                 continue
             cfg.known_drives[d.name] = DriveInfo(name=d.name, guid=d.guid, drive_id=d.drive_id)
             saved += 1

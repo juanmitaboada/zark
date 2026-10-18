@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Mock framework for sh.run — the backbone of zark unit testing.
+Mock framework for sh.run - the backbone of zark unit testing.
 
 Almost every operation in zark goes through sh.run(). By mocking it,
 we can test all command logic without ZFS, root, or real disks.

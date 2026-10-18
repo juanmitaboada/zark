@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# create_test_system.sh — Create a REAL minimal Ubuntu ZFS encrypted system.
+# create_test_system.sh - Create a REAL minimal Ubuntu ZFS encrypted system.
 #
 # Run INSIDE QEMU Phase 1 after qemu_setup.sh.
 # Creates a full Ubuntu system with debootstrap on /dev/vda, then
@@ -38,7 +38,7 @@ fail() {
 
 echo ""
 echo -e "${B}╔══════════════════════════════════════════════════════════╗${N}"
-echo -e "${B}║  CREATE TEST SYSTEM — Real Ubuntu ZFS (encrypted)       ║${N}"
+echo -e "${B}║  CREATE TEST SYSTEM - Real Ubuntu ZFS (encrypted)       ║${N}"
 echo -e "${B}║  Using debootstrap for a fully bootable system          ║${N}"
 echo -e "${B}╚══════════════════════════════════════════════════════════╝${N}"
 echo ""
@@ -165,7 +165,7 @@ ok "bpool created"
 #  5. Debootstrap real Ubuntu system
 # ═══════════════════════════════════════════════════════════════════
 
-info "Running debootstrap ($SUITE) — this takes a few minutes..."
+info "Running debootstrap ($SUITE) - this takes a few minutes..."
 debootstrap --variant=minbase "$SUITE" "$MNT" http://archive.ubuntu.com/ubuntu
 ok "Debootstrap complete"
 
@@ -340,7 +340,7 @@ mkdir -p "$MNT/boot/grub"
 #
 # Real Ubuntu's `update-grub` (10_linux_zfs) handles this through internal
 # ${kernel}/${initrd} variables that resolve the dataset path correctly.
-# This test fixture is ad-hoc — it just needs paths that GRUB can resolve
+# This test fixture is ad-hoc - it just needs paths that GRUB can resolve
 # so QEMU can boot. Recover doesn't depend on this exact format; it only
 # parses `fs-uuid --set=...` to fix the bpool UUID.
 cat >"$MNT/boot/grub/grub.cfg" <<EOF
@@ -364,7 +364,7 @@ chroot "$MNT" bash -c "
 if [ -f "$MNT/boot/initrd.img-$KVER" ]; then
     ok "initrd generated: initrd.img-$KVER"
 else
-    warn "initrd not found — recover will regenerate it"
+    warn "initrd not found - recover will regenerate it"
 fi
 
 # ═══════════════════════════════════════════════════════════════════

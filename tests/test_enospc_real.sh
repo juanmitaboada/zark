@@ -1,12 +1,12 @@
 #!/bin/bash
-# zark — Level B ENOSPC test (REAL ZFS, REAL kernel)
+# zark - Level B ENOSPC test (REAL ZFS, REAL kernel)
 #
 # This script provokes a real out-of-space condition during a `zfs send |
 # zfs receive` on top of two loop-backed pools, captures the kernel's
 # stderr, and verifies that lib/sh.py's is_enospc() helper would catch
 # it. It exists to *empirically calibrate* the markers in
 # lib.sh._ENOSPC_MARKERS against the actual ZFS version installed on
-# this machine — not as a per-commit gate.
+# this machine - not as a per-commit gate.
 #
 # WHEN TO RUN:
 #   - After upgrading openzfs-related packages (zfsutils-linux).
@@ -20,7 +20,7 @@
 #   - Requires root (ZFS ioctls are privileged).
 #   - Creates loop-backed pools on /tmp; disk image files and pool
 #     names are uniquely tagged with our PID + a random suffix to make
-#     collision with real pools (rpool, bpool, backup, …) impossible.
+#     collision with real pools (rpool, bpool, backup, ...) impossible.
 #   - Pools are created with `cachefile=none` so they never enter
 #     /etc/zfs/zpool.cache and never auto-import on boot.
 #   - A hard pre-flight check refuses to run if any leftovers from a
@@ -36,7 +36,7 @@
 #                  read any zark config, or interact with the user's
 #                  rpool/bpool in any way.
 #
-# Author: zark project — see CONTRIBUTING.md
+# Author: zark project - see CONTRIBUTING.md
 # License: GPL-3.0 (matches the project)
 
 set -u  # Treat unset variables as errors. We deliberately do NOT use
@@ -88,7 +88,7 @@ preflight_check_leftovers() {
     if [ -n "$leftover_pools" ]; then
         echo "  Refusing to run: leftover pools from a previous run are still imported:"
         # Indent each line by four spaces. Use bash parameter expansion
-        # rather than `sed` (shellcheck SC2001) — it's both faster and
+        # rather than `sed` (shellcheck SC2001) - it's both faster and
         # avoids spawning an extra process.
         echo "    ${leftover_pools//$'\n'/$'\n    '}"
         echo ""
@@ -116,7 +116,7 @@ DST_LOOP=""
 # shellcheck disable=SC2317,SC2329
 # Both SC2317 ("command appears to be unreachable") and SC2329
 # ("function is never invoked") fire because shellcheck cannot
-# statically prove this function is invoked — it is, via
+# statically prove this function is invoked - it is, via
 # `trap cleanup EXIT INT TERM` below. Different shellcheck versions
 # emit one rule or the other for the same indirection, so we silence
 # both.
@@ -147,7 +147,7 @@ cleanup() {
     rm -f "$SRC_IMG" "$DST_IMG"
 
     if [ "$rc" -eq 0 ]; then
-        echo "  Cleanup done — host left untouched."
+        echo "  Cleanup done - host left untouched."
     else
         echo "  Cleanup done (script exited with rc=$rc)."
         echo "  Verify nothing leaked:"
@@ -159,7 +159,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ── Main ─────────────────────────────────────────────────────────────────
-echo "  zark — Level B real-ENOSPC test"
+echo "  zark - Level B real-ENOSPC test"
 echo "  PID=$PID  RAND=$RAND"
 echo "  Source pool : $SRC_POOL  (image: $SRC_IMG, ${SRC_IMG_SIZE_MB} MiB)"
 echo "  Target pool : $DST_POOL  (image: $DST_IMG, ${DST_IMG_SIZE_MB} MiB)"
@@ -203,12 +203,12 @@ echo "    wrote ${PAYLOAD_MB} MiB to $SRC_POOL/data"
 echo "  [4/6] Snapshotting source..."
 zfs snapshot "$SRC_POOL/data@s1" || { echo "  snapshot failed"; exit 1; }
 
-# ── Step 5: send | receive — capture stderr ──────────────────────────────
+# ── Step 5: send | receive - capture stderr ──────────────────────────────
 echo "  [5/6] zfs send | zfs receive (expecting ENOSPC)..."
 STDERR_FILE="/tmp/zark_enospc_${TAG}_stderr.log"
 # Run send|receive with stderr captured. We don't care about stdout (it's
 # raw zfs stream binary going through the pipe). We DO care about each
-# side's stderr — capture both via the pipefail-aware idiom: redirect each
+# side's stderr - capture both via the pipefail-aware idiom: redirect each
 # end's stderr to the same file (append on second), so the unified buffer
 # matches what lib/sh.py's run_pipe() would build for is_enospc().
 {
@@ -226,7 +226,7 @@ sed 's/^/      | /' "$STDERR_FILE"
 # Receive is expected to fail. If it succeeded, our payload sizing is off
 # and the test isn't actually exercising ENOSPC.
 if [ "$RC" -eq 0 ]; then
-    echo "  FAIL: receive succeeded — payload did not overflow target."
+    echo "  FAIL: receive succeeded - payload did not overflow target."
     echo "        Increase PAYLOAD_MB or shrink DST_IMG_SIZE_MB."
     exit 1
 fi

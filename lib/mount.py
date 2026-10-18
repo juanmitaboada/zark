@@ -76,16 +76,16 @@ def mount_system_pools(
       * Both pools are imported with ``-R altroot -N`` via
         :meth:`ZFS.pool_import`, inheriting its clean-then-``-f`` fallback so a
         pool left in use by an unclean shutdown still imports. The forced state
-        is transient — the caller's ``Cleanup`` exports cleanly on exit.
+        is transient - the caller's ``Cleanup`` exports cleanly on exit.
       * Datasets mount at ``altroot`` + their *stored* mountpoint via plain
         ``zfs mount``; this function NEVER runs ``zfs set mountpoint``. That
         honours the absolute project rule against mountpoint changes while the
-        keystore zvol is imported — the altroot import is the sanctioned
+        keystore zvol is imported - the altroot import is the sanctioned
         mitigation, and ``zfs mount <ds>`` mounts ``canmount=noauto`` boot
         environments without touching properties.
       * ``readonly=True`` applies a VFS-level ``mount -o remount,ro`` to each
         mountpoint after mounting (ZFS still needs rw to create mountpoint
-        directories first), leaving ZFS properties untouched — same technique
+        directories first), leaving ZFS properties untouched - same technique
         as ``zark mount``'s read-only inspection mode.
 
     Returns ``(root_path, ubuntu_name)`` on success (``root_path`` is the
@@ -103,7 +103,7 @@ def mount_system_pools(
             return None
         cleanup.track_pool("rpool")
     else:
-        log.warn("rpool is already imported — using it as-is (not re-importing with altroot)")
+        log.warn("rpool is already imported - using it as-is (not re-importing with altroot)")
 
     # ── Unlock keystore + load keys ───────────────────────────────────────
     # passphrase=None prompts here, re-asking on a typo (I9).
@@ -113,7 +113,7 @@ def mount_system_pools(
         else keystore.mount("rpool", passphrase)
     )
     if not opened:
-        log.error("Cannot open keystore — check passphrase")
+        log.error("Cannot open keystore - check passphrase")
         return None
     cleanup.track_keystore(keystore)
     loaded = keystore.load_pool_keys("rpool")
@@ -153,7 +153,7 @@ def mount_system_pools(
         if zfs.pool_import("bpool", altroot=altroot, no_mount=True):
             cleanup.track_pool("bpool")
         else:
-            log.warn("Could not import bpool — /boot will be unavailable in the chroot")
+            log.warn("Could not import bpool - /boot will be unavailable in the chroot")
     bpool_boot = f"bpool/BOOT/{ubuntu_name}"
     if zfs.dataset_exists(bpool_boot) and run(f"zfs mount {bpool_boot}", log=log).ok:
         bp_mp = zfs.get_property(bpool_boot, "mountpoint")

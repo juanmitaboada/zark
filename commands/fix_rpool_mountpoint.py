@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark fix-rpool-mountpoint — give a restored rpool back the installer's mountpoint=/.
+zark fix-rpool-mountpoint - give a restored rpool back the installer's mountpoint=/.
 
 zark recover up to 1.0.12 created rpool with mountpoint=none, where the
 Ubuntu installer uses / (with canmount=off). Datasets created later directly
@@ -115,9 +115,9 @@ def _decide_canmount_on(log: Log, dataset: str, canmount: str, target: str) -> b
     choice = log.ask_choice(
         f"What should happen to {dataset}?",
         [
-            f"Keep canmount={canmount} — it mounts at {target}",
-            "Set canmount=off — it never mounts",
-            "Abort — change nothing",
+            f"Keep canmount={canmount} - it mounts at {target}",
+            "Set canmount=off - it never mounts",
+            "Abort - change nothing",
         ],
         default=2,
     )
@@ -164,11 +164,11 @@ def _fix(zfs: ZFS, log: Log, turned_off: list[str]) -> bool:
     set, so the verdict lists them even when the mountpoint then fails.
     """
     if not zfs.pool_import("rpool", altroot=ALTROOT, no_mount=True):
-        log.fatal("Cannot import rpool — see messages above")
+        log.fatal("Cannot import rpool - see messages above")
     zvols = sorted(glob.glob("/dev/zd*"))
     if zvols:
         log.fatal(
-            "zvol devices exist although zvol_inhibit_dev=1 — refusing to change a mountpoint",
+            "zvol devices exist although zvol_inhibit_dev=1 - refusing to change a mountpoint",
             causes=[f"{', '.join(zvols)} (chase.c:648 risk)"],
             solutions=["Reboot the live USB and run this command before anything else"],
         )
@@ -181,13 +181,13 @@ def _fix(zfs: ZFS, log: Log, turned_off: list[str]) -> bool:
         return mountpoint == UBUNTU_RPOOL_MOUNTPOINT
     if props.get("canmount", ("", ""))[0] != "off" or not zfs.dataset_exists("rpool/ROOT"):
         log.fatal(
-            "rpool does not have the Ubuntu layout (canmount=off, rpool/ROOT) — not touching it",
+            "rpool does not have the Ubuntu layout (canmount=off, rpool/ROOT) - not touching it",
         )
 
     log.info(f"rpool: mountpoint none → {UBUNTU_RPOOL_MOUNTPOINT} (canmount stays off)")
     turn_off = _review_inheritors(log)
     if turn_off is None:
-        log.info("Aborted — nothing changed")
+        log.info("Aborted - nothing changed")
         return False
 
     answer = log.ask_text(
@@ -196,14 +196,14 @@ def _fix(zfs: ZFS, log: Log, turned_off: list[str]) -> bool:
         label=f"Type YES to set rpool mountpoint={UBUNTU_RPOOL_MOUNTPOINT}",
     )
     if answer != "YES":
-        log.info("Aborted — nothing changed")
+        log.info("Aborted - nothing changed")
         return False
 
     # Before the mountpoint: once it is set, libzfs tries to mount canmount=on inheritors.
     for ds in turn_off:
         _ = sh.run(f"zfs set canmount=off {ds}", log=log)
         if _props(ds).get("canmount", ("", ""))[0] != "off":
-            log.error(f"{ds} is not canmount=off — rpool's mountpoint left unchanged")
+            log.error(f"{ds} is not canmount=off - rpool's mountpoint left unchanged")
             return False
         turned_off.append(ds)
         log.ok(f"{ds} canmount=off ✓")
@@ -216,7 +216,7 @@ def _fix(zfs: ZFS, log: Log, turned_off: list[str]) -> bool:
         log.error(f"rpool mountpoint is {after[0]} ({after[1]}): {r.stderr.strip()}")
         return False
     if not r.ok:
-        log.warn(f"zfs set reported: {r.stderr.strip()} — the property was stored anyway")
+        log.warn(f"zfs set reported: {r.stderr.strip()} - the property was stored anyway")
     log.ok(f"rpool mountpoint={UBUNTU_RPOOL_MOUNTPOINT} ✓")
     return True
 
@@ -235,7 +235,7 @@ def run(args: list[str]) -> None:
         )
     if zfs.pool_exists("rpool"):
         log.fatal(
-            "rpool is already imported — refusing to start",
+            "rpool is already imported - refusing to start",
             solutions=[
                 "Mounted with 'zark mount local': sudo ./zark umount local",
                 "Otherwise: sudo zpool export rpool",
@@ -243,12 +243,12 @@ def run(args: list[str]) -> None:
         )
     _ = sh.run("modprobe zfs")
     if not ZVOL_INHIBIT.exists():
-        log.fatal(f"{ZVOL_INHIBIT} not found — is the zfs module loaded?")
+        log.fatal(f"{ZVOL_INHIBIT} not found - is the zfs module loaded?")
     zvols = sorted(glob.glob("/dev/zd*"))
     if zvols:
         pools = _pools_with_zvols()
         log.fatal(
-            "zvol devices exist before rpool is imported — refusing to start",
+            "zvol devices exist before rpool is imported - refusing to start",
             causes=[f"{', '.join(zvols)} of imported pool(s): {', '.join(pools) or 'unknown'}"],
             solutions=[
                 "A backup mounted with 'zark mount': sudo ./zark umount",
@@ -290,7 +290,7 @@ def run(args: list[str]) -> None:
     export_line = (
         "rpool exported ✓"
         if exported
-        else "✗ rpool is still imported — run: sudo zpool export rpool"
+        else "✗ rpool is still imported - run: sudo zpool export rpool"
     )
     lines = [
         mp_line,

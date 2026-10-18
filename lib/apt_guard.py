@@ -12,26 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-APT guard installer — single source of truth for the apt/dpkg backup guard.
+APT guard installer - single source of truth for the apt/dpkg backup guard.
 
 This module deposits three small, self-contained files onto a target system:
 
-  * ``/usr/local/lib/zark/apt-zfs-backup-guard`` — a POSIX ``sh`` script wired
+  * ``/usr/local/lib/zark/apt-zfs-backup-guard`` - a POSIX ``sh`` script wired
     in as a ``DPkg::Pre-Install-Pkgs`` hook. APT runs it *before* dpkg unpacks
     anything; a non-zero exit aborts the whole transaction. The script refuses
     boot-critical package operations (kernel / GRUB / shim / ZFS) while an
-    external (non rpool/bpool) ZFS pool is connected — the exact situation that
+    external (non rpool/bpool) ZFS pool is connected - the exact situation that
     half-applies a kernel upgrade (new kernel unpacked, ``update-grub`` blocked
     by the grub guard, old kernel autoremoved) and leaves an unbootable system.
-  * ``/etc/apt/apt.conf.d/09zark-zfs-backup-guard`` — the one-line APT config
+  * ``/etc/apt/apt.conf.d/09zark-zfs-backup-guard`` - the one-line APT config
     that registers the hook (Version 1 protocol: ``.deb`` paths on stdin).
-  * ``/etc/update-motd.d/99-zark-external-pool`` — a login-time reminder that
+  * ``/etc/update-motd.d/99-zark-external-pool`` - a login-time reminder that
     an external pool is attached and boot updates are therefore blocked.
 
 Crucially, all three are **standalone**: they detect pools with ``zpool``
 directly and never call ``zark``. The recovered system runs without zark
 present, so a zark-dependent guard would be inert exactly where it matters.
-This mirrors ``lib/grub_guard.py`` — the script body lives here as the single
+This mirrors ``lib/grub_guard.py`` - the script body lives here as the single
 source of truth, while ``recover`` / ``finish`` / ``setup`` deposit identical
 copies via :func:`install`.
 
@@ -86,16 +86,16 @@ _APT_CONF_ABS = f"/{APT_CONF_RELATIVE_PATH}"
 _SENSITIVE_CASE = "|".join(SENSITIVE_GLOBS)
 
 # ── Hook script ──────────────────────────────────────────────────────────
-# NOTE: not an f-string — the script contains ${VAR:-} expansions whose braces
+# NOTE: not an f-string - the script contains ${VAR:-} expansions whose braces
 # would collide with str.format/f-string. The one dynamic part (the case
 # pattern) is substituted via .replace() below.
 _HOOK_TEMPLATE = """\
 #!/bin/sh
-# apt-zfs-backup-guard — Abort apt/dpkg kernel & boot package operations while
+# apt-zfs-backup-guard - Abort apt/dpkg kernel & boot package operations while
 # an external (non rpool/bpool) ZFS pool is connected.
 #
 # Why: a kernel / GRUB / shim / ZFS upgrade run with a zark backup drive
-# attached can half-apply — the new kernel is unpacked into /boot and the old
+# attached can half-apply - the new kernel is unpacked into /boot and the old
 # one autoremoved, while the kernel postinst's update-grub is aborted by the
 # grub guard (10_linux_zfs would otherwise brick grub.cfg). The result is a
 # grub.cfg pointing at a kernel that no longer exists: an unbootable system.
@@ -162,7 +162,7 @@ done
 [ -n "$extra" ] || exit 0
 
 # External pool + boot-critical package(s): refuse the transaction.
-echo "ERROR: zark apt guard — external ZFS pool(s) detected:$extra" >&2
+echo "ERROR: zark apt guard - external ZFS pool(s) detected:$extra" >&2
 echo "" >&2
 echo "  Refusing boot-critical package operation(s):$sensitive" >&2
 echo "" >&2
@@ -186,14 +186,14 @@ HOOK_SCRIPT = (
 
 # ── APT config snippet ───────────────────────────────────────────────────
 # Version 1 (the default): APT passes the .deb file paths on the hook's stdin.
-# We deliberately do NOT request Version 2/3 — the file list is all the hook
+# We deliberately do NOT request Version 2/3 - the file list is all the hook
 # needs, and Version 1 keeps the parsing trivial.
 APT_CONF = f'DPkg::Pre-Install-Pkgs {{ "{_HOOK_ABS}"; }};\n'
 
 # ── MOTD reminder (login-time, secondary defence) ────────────────────────
 MOTD_SCRIPT = """\
 #!/bin/sh
-# 99-zark-external-pool — Login-time reminder that an external ZFS pool is
+# 99-zark-external-pool - Login-time reminder that an external ZFS pool is
 # connected, which blocks kernel/GRUB/ZFS upgrades (see the zark apt guard).
 #
 # Installed by zark. Safe to remove if you don't use zark.
@@ -230,7 +230,7 @@ def _write(path: Path, content: str, *, overwrite: bool) -> bool:
     """Write `content` to `path` (0755). Return True only if it changed.
 
     No-op (returns False) when the file already holds the canonical content
-    with the executable bit set — so re-running ``install`` on an up-to-date
+    with the executable bit set - so re-running ``install`` on an up-to-date
     system touches nothing. Also a no-op when the file exists and `overwrite`
     is False, regardless of content.
     """
@@ -242,7 +242,7 @@ def _write(path: Path, content: str, *, overwrite: bool) -> bool:
         except (OSError, UnicodeDecodeError):
             current = None
         if current == content and (path.stat().st_mode & 0o111):
-            return False  # already current — leave mtime untouched
+            return False  # already current - leave mtime untouched
     path.parent.mkdir(parents=True, exist_ok=True)
     _ = path.write_text(content, encoding="utf-8")
     path.chmod(0o755)

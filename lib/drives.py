@@ -402,7 +402,7 @@ def drive_staleness_days(info: DriveInfo, *, now: datetime | None = None) -> int
 
     Returns ``None`` when the drive has no recorded backup, so callers
     can distinguish "we don't know" from "we know it's recent". A
-    malformed ``last_backup_at`` value is also treated as ``None`` —
+    malformed ``last_backup_at`` value is also treated as ``None`` -
     we'd rather skip the check than fatal on a typo. ``now`` is exposed
     only so tests can pass a fixed clock.
     """
@@ -426,7 +426,7 @@ def is_drive_stale(
     """True when the drive's last backup is older than ``threshold_days``.
 
     Drives without a ``last_backup_at`` (older entries, freshly
-    prepared drives) return False — see module docstring for the
+    prepared drives) return False - see module docstring for the
     rationale.
     """
     age = drive_staleness_days(info, now=now)

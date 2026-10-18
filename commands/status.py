@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark status — how full the source pools are and how old each drive's
+zark status - how full the source pools are and how old each drive's
 backup is (M3 decisions 12 and 13). Read-only.
 
   zark status                     the report

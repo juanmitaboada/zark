@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark chroot — Open an interactive chroot into the installed ZFS system.
+zark chroot - Open an interactive chroot into the installed ZFS system.
 
 Designed for the live-USB recovery workflow: from a live session where the
 system's rpool/bpool are NOT imported, this command imports them under an
@@ -91,7 +91,7 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
     if zfs.pool_exists("rpool"):
         log.fatal(
             "rpool is already imported.\n"
-            "  If this is your running system, you are already inside it —\n"
+            "  If this is your running system, you are already inside it -\n"
             "  no chroot is needed. If it is a leftover from a previous run,\n"
             "  run 'sudo ./zark clean' first, then retry from a live USB.",
         )
@@ -101,7 +101,7 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
         log.info("zark chroot is meant to run from live media. Chrooting the")
         log.info("installed system from itself is not supported.")
         if not log.ask("Continue anyway?", default=False):
-            log.fatal("Aborted — boot a live USB and retry.")
+            log.fatal("Aborted - boot a live USB and retry.")
 
     # ── External-pool guard (do not pull a backup drive into the chroot) ──
     available = [
@@ -126,7 +126,7 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
         device=device,
     )
     if result is None:
-        log.fatal("Could not mount the system — see messages above.")
+        log.fatal("Could not mount the system - see messages above.")
     root_path, ubuntu_name = result
 
     _setup_bind_mounts(root_path, cleanup, log)
@@ -144,7 +144,7 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
             "",
             "Type 'exit' (or Ctrl-D) to leave. On exit, zark unmounts",
             "everything and exports rpool/bpool cleanly. If a later boot",
-            "ever asks to force-import a pool, that is benign — boot",
+            "ever asks to force-import a pool, that is benign - boot",
             "through and, if needed, run 'zark repair-boot'.",
         ],
     )

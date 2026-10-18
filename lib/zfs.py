@@ -308,7 +308,7 @@ class ZFS:
                 problem = "read-only" if is_ro else "read-write"
             if problem:
                 self.log.error(
-                    f"Pool {name} is already imported {problem} — "
+                    f"Pool {name} is already imported {problem} - "
                     + f"export it first: sudo zpool export {name}",
                 )
                 return False
@@ -370,13 +370,13 @@ class ZFS:
         whose data never reached NAND. The symptom is a pool whose labels and
         uberblocks persisted but whose spacemaps did not, so a later import
         fails deep in ``vdev_load`` with ``metaslab_init failed [error=52]``
-        (EBADE / "Invalid exchange") — discovered only when the backup is
+        (EBADE / "Invalid exchange") - discovered only when the backup is
         finally needed.
 
         The check, in order:
           1. ``sync`` then drop the kernel page cache, so the read-back comes
              from the device (NAND) and not from RAM still holding the data
-             we just wrote — without this we would "verify" against cache and
+             we just wrote - without this we would "verify" against cache and
              a silently-corrupt pool would pass.
           2. Re-import read-only, no-mount, by the exact device, under an
              altroot (I-G).
@@ -385,7 +385,7 @@ class ZFS:
              verification too (I12).
 
         The caller MUST treat a result that is not ``ok`` as "the backup is
-        not trustworthy — do not tell the operator it is safe to disconnect".
+        not trustworthy - do not tell the operator it is safe to disconnect".
 
         Note: this performs one extra import/export cycle. That is fine for
         backup targets; the "no rapid export/import cycles" rule applies only
@@ -428,7 +428,7 @@ class ZFS:
         if reexported:
             self.log.ok(f"Read-back of {name}: exported again")
         else:
-            self.log.error(f"Read-back of {name}: could NOT export it again — still imported")
+            self.log.error(f"Read-back of {name}: could NOT export it again - still imported")
         return Readback(imported=True, health=health, status=status, reexported=reexported)
 
     def pool_guid(self, name: str) -> str:
@@ -622,7 +622,7 @@ class ZFS:
         r = run("zpool import")
         if not r.ok:
             return []
-        # Parse output — simplistic but functional
+        # Parse output - simplistic but functional
         pools: list[dict[str, str]] = []
         current: dict[str, str] = {}
         for line in r.stdout.splitlines():
@@ -698,7 +698,7 @@ def drive_compatibility(origin_pools: tuple[str, ...], log: Log) -> str:
 
 # In Ubuntu ZFS systems, every `search --no-floppy --fs-uuid --set=NAME HEX`
 # line in /boot/grub/grub.cfg points to the bpool: rpool is referenced via
-# the `root=ZFS=...` kernel param, ESP via /etc/fstab — neither uses fs-uuid
+# the `root=ZFS=...` kernel param, ESP via /etc/fstab - neither uses fs-uuid
 # in grub. So replacing all such hex values with the new bpool GUID is safe.
 #
 # `update-grub` (10_linux_zfs) emits `--set=root` on real Ubuntu hardware.
@@ -712,7 +712,7 @@ def drive_compatibility(origin_pools: tuple[str, ...], log: Log) -> str:
 # This caused the recovered system to keep stale (source) UUIDs in the
 # `if`-branch of every menu entry, producing `error: no such device:
 # <old-uuid>` followed by `disk 'hdN,gptN' not found` and
-# `you need to load the kernel first` at boot — but only on machines
+# `you need to load the kernel first` at boot - but only on machines
 # where the source disk's BIOS index didn't happen to match the new
 # machine's, so the bug stayed hidden until a recovery between hosts
 # with different drive enumeration.
@@ -733,13 +733,13 @@ def fix_grub_bpool_uuid(grub_cfg: Path, new_bpool_hex: str, log: Log) -> bool:
     correct); False if grub.cfg was missing.
     """
     if not grub_cfg.exists():
-        log.warn(f"{grub_cfg} not found — bpool content was not restored")
+        log.warn(f"{grub_cfg} not found - bpool content was not restored")
         return False
 
     content = grub_cfg.read_text()
     matches = _GRUB_FS_UUID_RE.findall(content)
     if not matches:
-        log.warn(f"No fs-uuid --set= references in {grub_cfg.name} — bpool UUID not updated")
+        log.warn(f"No fs-uuid --set= references in {grub_cfg.name} - bpool UUID not updated")
         return True
 
     old_uuids = {hex_ for _, hex_ in matches if hex_ != new_bpool_hex}

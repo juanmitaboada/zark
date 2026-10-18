@@ -26,9 +26,9 @@ Model (redesign §4, M2 decisions):
     receive never uses ``-F``: for a raw stream the kernel then refuses any
     other base; a plain stream (bpool) needs only an unmodified destination,
     and the engine always sends from the newest.
-  * Anything else — an older common snapshot only (ROLLBACK), nothing in
+  * Anything else - an older common snapshot only (ROLLBACK), nothing in
     common (DIVERGED), a dataset that origin no longer has (ORPHAN), a
-    destination written since its newest snapshot (MODIFIED) — is a user
+    destination written since its newest snapshot (MODIFIED) - is a user
     decision, never an automatic destroy (invariant I-A).
   * Anchors: rpool datasets get a bookmark per disk
     ``#zark_<pool GUID>_<UTC>``; bpool never gets bookmarks (I-F) and keeps

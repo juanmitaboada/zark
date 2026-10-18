@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-GRUB guard installer — single source of truth for /etc/grub.d/09_zfs_backup_guard.
+GRUB guard installer - single source of truth for /etc/grub.d/09_zfs_backup_guard.
 
 The guard is a small shell script dropped into /etc/grub.d that runs as part
 of `update-grub`. Its purpose is to abort the run when external ZFS pools are
 visible to the system: Ubuntu's `10_linux_zfs` auto-imports every visible pool
 and tries to mount their encrypted datasets, fails, and leaves grub.cfg with
-no kernel entries — a hard-to-debug brick.
+no kernel entries - a hard-to-debug brick.
 
 This module centralises both the script body and the install logic so all
 three callers (`zark recover`, `zark repair-boot`, `zark finish`) deposit the same
@@ -34,7 +34,7 @@ GUARD_RELATIVE_PATH = "etc/grub.d/09_zfs_backup_guard"
 
 GUARD_SCRIPT = """\
 #!/bin/sh
-# 09_zfs_backup_guard — Prevent update-grub from running when external
+# 09_zfs_backup_guard - Prevent update-grub from running when external
 # ZFS backup pools are connected.  10_linux_zfs auto-imports ALL visible
 # pools and tries to mount their (encrypted) datasets.  When it fails,
 # the bootlist parsing breaks and grub.cfg ends up with NO kernel entries.
@@ -43,7 +43,7 @@ GUARD_SCRIPT = """\
 
 set -e
 
-# Pools that should be importable — only rpool and bpool
+# Pools that should be importable - only rpool and bpool
 ALLOWED_POOLS="rpool bpool"
 
 # List pools available for import (exported or on connected drives)

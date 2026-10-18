@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark prune — reclaim space in origin or on a connected backup drive.
+zark prune - reclaim space in origin or on a connected backup drive.
 
 Interactive; nothing goes without a confirmation, every snapshot is
 destroyed by its exact name (never a % range) and logged with its reason.
 
-Origin (rpool, bpool; M3 decisions 9a–11a): what each kind of snapshot
+Origin (rpool, bpool; M3 decisions 9a-11a): what each kind of snapshot
 holds and what removing it frees, then
   * sanoid's snapshots older than N days (typed PRUNE); sanoid.conf is not
     changed, so sanoid keeps taking and pruning by its own policy;
@@ -84,7 +84,7 @@ def _typed(log: Log, what: str) -> bool:
         f"    Type {WORD} to {what}: ", accept=(WORD,), label=f"Type {WORD} to {what}"
     )
     if answer != WORD:
-        log.info(f"Not confirmed ({WORD} was not typed) — nothing removed")
+        log.info(f"Not confirmed ({WORD} was not typed) - nothing removed")
     return answer == WORD
 
 
@@ -127,7 +127,7 @@ def _remove(items: list[Item], why: str, log: Log) -> None:
 def _by_age(inv: Inventory, log: Log) -> None:
     raw = log.ask_input("Keep sanoid snapshots of how many days?", "30")
     if not raw.isdigit():
-        log.warn("Not a number of days — nothing removed")
+        log.warn("Not a number of days - nothing removed")
         return
     items = older_than(inv, int(time.time()) - int(raw) * DAY)
     if not items:

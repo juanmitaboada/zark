@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark alerts — install or remove the space and backup-age alerts.
+zark alerts - install or remove the space and backup-age alerts.
 
   zark alerts install   the MOTD script and the hourly zark-status.timer
                         (zark setup does this)

@@ -16,23 +16,23 @@ zark's replication executor: the shell side of :mod:`lib.replication`.
 
 One run against one backup pool (already imported under I-G by the caller):
 
-  1. ``pause_sanoid`` — stop ``sanoid.timer`` and wait for a running take
+  1. ``pause_sanoid`` - stop ``sanoid.timer`` and wait for a running take
      or prune, so nothing inside a ``-I`` range is pruned mid-send.
-  2. ``take_point`` — ``zfs snapshot`` of every expected dataset, one call
+  2. ``take_point`` - ``zfs snapshot`` of every expected dataset, one call
      per pool (one txg each; a call cannot span pools).
-  3. ``survey`` — read origin and destination, plan every dataset.
+  3. ``survey`` - read origin and destination, plan every dataset.
   4. Decisions the caller asked the user about: ``rollback``, ``archive``,
      ``destroy``, ``keep_orphan``, ``follow_rename``; then ``survey`` runs
      again, the "kept" mark of an orphan origin has again is cleared
      (``clear_orphan_marks``) and the structural containers are created on
      the destination where missing (``ensure_containers``).
   5. ``transfer`` for each transferable dataset, parents first:
-     ``zfs send [-w] … | zfs receive -s -u -o canmount=noauto -x mountpoint
-     -o org.zark:canmount=… -o org.zark:mountpoint=… <dest>``, never ``-F``.
+     ``zfs send [-w] ... | zfs receive -s -u -o canmount=noauto -x mountpoint
+     -o org.zark:canmount=... -o org.zark:mountpoint=... <dest>``, never ``-F``.
   6. ``survey`` again: success iff every expected dataset is at the point.
-  7. ``anchor`` — per dataset at the point: a bookmark on rpool, the point
+  7. ``anchor`` - per dataset at the point: a bookmark on rpool, the point
      renamed to the disk's anchor on bpool.
-  8. ``drop_check`` / ``drop`` — every candidate for removal in origin (this
+  8. ``drop_check`` / ``drop`` - every candidate for removal in origin (this
      run's point, points left by earlier runs, this disk's older anchors) is
      checked against a fresh read of both sides: it goes only when the
      dataset is verified on the backup at the new point, by guid, and its new
@@ -808,7 +808,7 @@ MAX_ROUNDS = 3
 
 def replicate(run: Run, decide: Decide) -> Result:
     """Survey, let ``decide`` apply the user's decisions, transfer, verify,
-    anchor and drop the points (steps 3–8 of the module docstring)."""
+    anchor and drop the points (steps 3-8 of the module docstring)."""
     res = Result()
     try:
         plans = run.survey()

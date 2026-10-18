@@ -298,7 +298,7 @@ def build_plan(  # pylint: disable=too-many-locals,too-many-branches
             if target in claimed:
                 # e.g. a second home_* from a reinstall: never stack two
                 # datasets on one mountpoint by guesswork.
-                log.warn(f"{ds}: {target} already taken by {claimed[target]} — noauto")
+                log.warn(f"{ds}: {target} already taken by {claimed[target]} - noauto")
                 row.props = MountProps("noauto", row.props.mountpoint, row.props.source)
             else:
                 claimed[target] = ds
@@ -413,7 +413,7 @@ def show_plan(plan: RestorePlan, log: Log, drives: dict[str, str] | None = None)
     )
     for r in plan.rows:
         if not r.restored:
-            log.raw(f"  {log.Y}{r.rel:44} NOT RESTORED — {r.note}{log.N}")
+            log.raw(f"  {log.Y}{r.rel:44} NOT RESTORED - {r.note}{log.N}")
             continue
         assert r.snap is not None and r.props is not None
         delta = _fmt_delta(r.snap.creation - plan.point.label)

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-What `zark prune` can remove in origin, by kind (M3 decisions 9a–11a).
+What `zark prune` can remove in origin, by kind (M3 decisions 9a-11a).
 
 Pure functions over the origin listing (no shell). There is no floor
 imposed by the backups: rpool's anchors are bookmarks, which no snapshot

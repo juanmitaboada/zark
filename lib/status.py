@@ -170,7 +170,7 @@ def due_notifications(
         level = cap_level(pct)
         key = f"{pool} {level} {day}"
         if level and key not in sent:
-            out.append((key, f"{pool} is {pct}% full — free space with: sudo zark prune"))
+            out.append((key, f"{pool} is {pct}% full - free space with: sudo zark prune"))
     return out
 
 

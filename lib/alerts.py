@@ -34,7 +34,7 @@ TIMER = "zark-status.timer"
 
 MOTD_SCRIPT = f"""\
 #!/bin/sh
-# 97-zark-status — zark's space and backup-age lines, written hourly by
+# 97-zark-status - zark's space and backup-age lines, written hourly by
 # zark-status.timer (`zark status --refresh`). Nothing is computed at login.
 #
 # Installed by zark; `sudo zark alerts remove` removes it.

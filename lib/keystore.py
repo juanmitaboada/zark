@@ -49,7 +49,7 @@ class KeystoreLike(Protocol):
 
     ``lib.mount.mount_system_pools`` unlocks the keystore and loads the
     pool keys, then hands the object to ``Cleanup.track_keystore``, which
-    calls ``umount()`` on exit — so ``umount`` belongs in this protocol
+    calls ``umount()`` on exit - so ``umount`` belongs in this protocol
     even though mount_system_pools never calls it itself.
     """
 
@@ -94,7 +94,7 @@ class Keystore:
         """
         Prepare this Keystore instance to operate on an already-open keystore
         belonging to `pool`. Use when `umount()` needs to be called without a
-        prior `mount()` in this process — e.g. cleaning up after a previous
+        prior `mount()` in this process - e.g. cleaning up after a previous
         zark run that left the LUKS device open, or closing a keystore opened
         by an earlier `zark mount`/`zark mount local` invocation.
 
@@ -171,7 +171,7 @@ class Keystore:
         # cryptsetup exits 2 for "no permission (bad passphrase)".
         self.bad_passphrase = r.returncode == 2
         if not r.ok:
-            self.log.error(f"Cannot open keystore LUKS on {zd_dev} — wrong passphrase?")
+            self.log.error(f"Cannot open keystore LUKS on {zd_dev} - wrong passphrase?")
             self.log.dbg(f"cryptsetup stderr: {r.stderr.strip()}")
             return False
 
@@ -218,7 +218,7 @@ class Keystore:
     def load_pool_keys(self, pool_root: str) -> int:
         """Load encryption keys for all datasets under pool_root using system.key."""
         if not self.is_mounted:
-            self.log.error("Keystore not mounted — cannot load keys")
+            self.log.error("Keystore not mounted - cannot load keys")
             return 0
 
         # Lazy import to avoid a circular dependency between zfs ↔ keystore

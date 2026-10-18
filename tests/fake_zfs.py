@@ -16,7 +16,7 @@ An in-memory model of the zfs/zpool commands the replication engine runs.
 
 Unlike :class:`tests.mock_sh.MockShell`, which replays scripted answers,
 this interprets each command against a model of two sides (origin pools and
-a backup pool), so tests check outcomes — which snapshots exist where —
+a backup pool), so tests check outcomes - which snapshots exist where -
 rather than command strings. It keeps the kernel rules the engine relies on
 (OpenZFS 2.4.1, M2 plan §2):
 
@@ -192,7 +192,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return handler(argv[2:])
 
     def mock_run_pipe(self, cmd1, cmd2, log=None) -> RunResult:  # pylint: disable=unused-argument
-        """Interpret ``zfs send … | zfs receive …``."""
+        """Interpret ``zfs send ... | zfs receive ...``."""
         self._calls.append(f"{cmd1} | {cmd2}")
         return self._pipe(shlex.split(cmd1)[2:], shlex.split(cmd2)[2:])
 
@@ -515,7 +515,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return _ok()
 
     def _destroy_dry(self, target: str) -> RunResult:
-        """``zfs destroy -nvp ds@a,b,…``: what it would free
+        """``zfs destroy -nvp ds@a,b,...``: what it would free
         (cmd/zfs/zfs_main.c:1756-1779), the list split on commas."""
         ds, _, spec = target.partition("@")
         if ds not in self.ds or not spec:

@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark prepare — Prepare a new blank drive for backup.
+zark prepare - Prepare a new blank drive for backup.
 
-Asks every question first, creates the pool (no encryption of its own —
+Asks every question first, creates the pool (no encryption of its own -
 the raw send brings rpool's), brings every replicated dataset to one backup
 point with zark's engine (point only, no history), sends the keystore,
 reads the pool back and only then registers the drive. Leaves nothing in
@@ -90,9 +90,9 @@ def run(
     report = check_device(target_dev)
     render_report(report, log)
     if report.has_risk and not log.ask(
-        "Risk factors detected — proceed with preparation anyway?",
+        "Risk factors detected - proceed with preparation anyway?",
     ):
-        log.info("Aborted — see docs/HARDWARE.md")
+        log.info("Aborted - see docs/HARDWARE.md")
         return
 
     # ── Check drive is empty ─────────────────────────────────────────────
@@ -100,7 +100,7 @@ def run(
     sigs = sh.run(f"blkid {target_dev}").output
     if existing_parts or sigs:
         log.fatal(
-            "Drive is NOT empty — has partitions or signatures",
+            "Drive is NOT empty - has partitions or signatures",
             solutions=[f"Wipe first: sudo ./zark purge {target_dev}"],
         )
 
@@ -130,7 +130,7 @@ def run(
     new_pool = log.ask_input("Pool name for this backup drive", default_pool)
     if not new_pool.isidentifier():
         # Not echoed: a mistyped answer here may be a passphrase.
-        log.fatal("Invalid pool name — letters, digits and _ only, not starting with a digit")
+        log.fatal("Invalid pool name - letters, digits and _ only, not starting with a digit")
     if new_pool in cfg.known_drives and new_pool not in replace:
         other = cfg.known_drives[new_pool].drive_id
         log.fatal(
@@ -333,7 +333,7 @@ def _ask_retention(log: Log) -> dict[str, int]:
         try:
             registry.check_retention(values, "retention")
         except registry.RegistryError as e:
-            log.warn(f"{e} — asked again")
+            log.warn(f"{e} - asked again")
             continue
         return values
 

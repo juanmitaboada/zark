@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark purge — Securely wipe a managed backup drive.
+zark purge - Securely wipe a managed backup drive.
 
 Destroys ZFS pool, overwrites start/end with random data,
 wipes signatures, destroys partition table, then verifies the disk is blank
@@ -363,7 +363,7 @@ def run(
     )
 
     # Default to ejecting: a purged drive is, by definition, being
-    # retired or repurposed — the operator is most likely about to
+    # retired or repurposed - the operator is most likely about to
     # disconnect it. Answering "n" is the escape hatch for the rarer
     # case of preparing a freshly-purged drive in the same session.
     prompt_eject_or_attach(

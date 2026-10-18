@@ -15,7 +15,7 @@
 Shell command execution with full logging.
 
 Every command is logged before and after execution.
-No 2>/dev/null anywhere — everything is captured and visible.
+No 2>/dev/null anywhere - everything is captured and visible.
 """
 
 import shlex
@@ -62,7 +62,7 @@ class RunResult:
 # zark's threat model:
 #
 #   1. zark always runs as root. An attacker with root access does
-#      not need to inject through zark — they have a shell already.
+#      not need to inject through zark - they have a shell already.
 #   2. Commands are built from string literals or interpolated with
 #      values that come from controlled sources only: pool names
 #      and GUIDs registered in known_drives.json, drive paths from
@@ -72,7 +72,7 @@ class RunResult:
 #      and shell features that the rest of zark relies on.
 #
 # If a future caller passes user-controlled input here, that caller
-# is responsible for validating or escaping it — but no such caller
+# is responsible for validating or escaping it - but no such caller
 # exists today.
 def run(  # pylint: disable=too-many-branches,too-many-locals
     cmd: str | list[str],
@@ -158,7 +158,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
         for line in r.stderr.strip().splitlines():
             log.dbg(f"  stderr: {line}")
 
-    # When a command fails, also surface stdout — many tools (syncoid, zfs,
+    # When a command fails, also surface stdout - many tools (syncoid, zfs,
     # zpool) emit error messages to stdout rather than stderr. Without this,
     # fatal errors disappear into the void and the user sees a generic
     # "check log" message with nothing useful in the log.
@@ -266,7 +266,7 @@ def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
 #   "cannot receive new filesystem stream: out of space"
 #   "write: No space left on device"
 #   "ENOSPC" (kernel-level, occasionally surfaces verbatim)
-# "disk quota exceeded" is included defensively — it is technically
+# "disk quota exceeded" is included defensively - it is technically
 # EDQUOT, not ENOSPC, but for backup/recover purposes the user-visible
 # remediation is the same (free space) and treating it as ENOSPC avoids
 # falling through to a generic "syncoid failed" message.
@@ -342,7 +342,7 @@ def is_live_usb() -> bool:
     and ``repair-boot`` both consult it to refuse operating on the *running*
     installed system, where the supported path is ``zark finish`` instead.
     Note that an installed ZFS-on-root Ubuntu is **not** live media, so this
-    returns False there — which is exactly the signal those commands want.
+    returns False there - which is exactly the signal those commands want.
     """
     r = run("cat /proc/cmdline")
     if r.ok and any(k in r.output for k in ("boot=casper", "boot=live", "live-media")):

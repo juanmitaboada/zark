@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark monitor — Live progress monitor for backup operations.
+zark monitor - Live progress monitor for backup operations.
 
 Run in a separate terminal while backup is running.
 Shows pool health, sync progress, snapshot counts.
@@ -154,7 +154,7 @@ def run(args: list[str]):  # pylint: disable=too-many-statements, too-many-local
                 ),
             )
             print(f"{log.BOLD}{log.C}║{clear_eol}{log.N}")
-            print(f"{log.BOLD}{log.C}║{clear_eol}{log.N}  Refreshing every 5s — Ctrl+C to exit")
+            print(f"{log.BOLD}{log.C}║{clear_eol}{log.N}  Refreshing every 5s - Ctrl+C to exit")
             print(f"{log.BOLD}{log.C}╚{'═' * 58}╝{clear_eol}{log.N}")
 
             time.sleep(5)

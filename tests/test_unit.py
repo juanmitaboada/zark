@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Unit tests for zark — all modules and command logic.
+Unit tests for zark - all modules and command logic.
 
 Run:  python3 -m pytest tests/test_unit.py -v
   or: python3 tests/test_unit.py
@@ -24,7 +24,7 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 # Rationale: this is the single-file unit suite by design. A `main()` runner
 # at the bottom of this file lets developers run tests without pytest, and
 # splitting per-class would scatter that contract. The agreement is that
-# only test code lives here — production modules stay under the standard
+# only test code lives here - production modules stay under the standard
 # line limit.
 
 import atexit
@@ -611,7 +611,7 @@ class TestLog:
         out = buf.getvalue()
         assert "still attached" in out
         assert "blue" in out
-        # Distinct from the safe-to-unplug banner — operators must not
+        # Distinct from the safe-to-unplug banner - operators must not
         # confuse the two states.
         assert "Safe to unplug" not in out
 
@@ -716,7 +716,7 @@ class TestShRunPipe:  # pylint: disable=missing-function-docstring
 
     def test_pipe_p2_takes_precedence_when_both_fail(self):
         # If both sides fail, the downstream (p2) returncode is what
-        # the caller usually cares about — it's the more direct symptom.
+        # the caller usually cares about - it's the more direct symptom.
         r = _sh.run_pipe(
             "sh -c 'echo data; exit 5'",
             "sh -c 'cat >/dev/null; exit 9'",
@@ -791,7 +791,7 @@ class TestShHumanizeBytes:  # pylint: disable=missing-function-docstring
 
     def test_gib(self):
         assert _sh.humanize_bytes(1024**3) == "1.0G"
-        # 10 GiB — typical "1% of 1 TB" backup margin from our preventive
+        # 10 GiB - typical "1% of 1 TB" backup margin from our preventive
         # ENOSPC guard. Coherence-checks the formatting at that scale.
         assert _sh.humanize_bytes(10 * 1024**3) == "10.0G"
 
@@ -1184,7 +1184,7 @@ class TestCleanup:
 
     def test_forced_export_also_flushes(self):
         """Both export paths (success and forced) must trigger the flush.
-        Forced export was historically unprotected — the regression that
+        Forced export was historically unprotected - the regression that
         motivated the device-flush window."""
         mock = MockShell()
         log = make_log()
@@ -1204,7 +1204,7 @@ class TestCleanup:
         assert mock.was_called("sync")
 
     def test_cleanup_never_ejects(self):
-        """Cleanup is intentionally device-agnostic — it never issues
+        """Cleanup is intentionally device-agnostic - it never issues
         `eject`. The eject decision is the calling command's, made
         interactively after the success banner."""
         mock = MockShell()
@@ -1224,7 +1224,7 @@ class TestCleanup:
         assert mock.was_not_called("eject")
 
     def test_failed_export_no_flush(self):
-        """If both export attempts fail, no flush is issued — the pool
+        """If both export attempts fail, no flush is issued - the pool
         is still alive and may have dirty in-flight writes that must not
         be interrupted by a power-down."""
         mock = MockShell()
@@ -1247,7 +1247,7 @@ class TestCleanup:
 
     def test_exported_pools_query(self):
         """exported_pools() reports drives that were successfully exported
-        — used by callers to know which pools were flushed."""
+        - used by callers to know which pools were flushed."""
         mock = MockShell()
         log = make_log()
         cleanup = Cleanup(log)
@@ -1283,7 +1283,7 @@ class TestFlushAndEjectHelpers:
         assert mock.was_called("sync")
 
     def test_flush_device_cache_does_not_eject(self):
-        """flush_device_cache() never ejects — that's eject_device's job.
+        """flush_device_cache() never ejects - that's eject_device's job.
         Splitting the two is what lets commands like prepare leave the
         drive attached for the followup backup."""
         mock = MockShell()
@@ -1634,7 +1634,7 @@ class TestDrives:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/backup.py — live USB detection
+#  commands/backup.py - live USB detection
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -1729,7 +1729,7 @@ class TestBackupCheckTargetSpace:  # pylint: disable=missing-function-docstring
         _check_target_space(src, dst, "backup", "rpool", log)
 
     def test_warns_when_target_smaller(self):
-        """Target smaller than source warns (not fatal) — operator override."""
+        """Target smaller than source warns (not fatal) - operator override."""
         # Source 2 TiB, target 1 TiB. Avail still > threshold → no fatal,
         # only the coherence warn fires.
         src = self._make_pool_info("rpool", used_bytes=100 * 1024**3, avail_bytes=2 * 1024**4)
@@ -1747,14 +1747,14 @@ class TestBackupCheckTargetSpace:  # pylint: disable=missing-function-docstring
         assert "smaller than source" in out, f"Expected coherence warn, got: {out!r}"
 
     def test_silent_when_src_info_none(self):
-        """If we cannot measure source, defer to the reactive handler — no fatal."""
+        """If we cannot measure source, defer to the reactive handler - no fatal."""
         dst = self._make_pool_info("backup", used_bytes=10 * 1024**3, avail_bytes=1024**2)  # 1 MiB
         log = make_log()
         # Even with a near-empty target, no fatal: src_info is None
         _check_target_space(None, dst, "backup", "rpool", log)
 
     def test_silent_when_dst_info_none(self):
-        """If we cannot measure target, defer to the reactive handler — no fatal."""
+        """If we cannot measure target, defer to the reactive handler - no fatal."""
         src = self._make_pool_info("rpool", used_bytes=1024**4, avail_bytes=200 * 1024**3)
         log = make_log()
         _check_target_space(src, None, "backup", "rpool", log)
@@ -1768,7 +1768,7 @@ class TestBackupCheckTargetSpace:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/backup.py — argument parsing
+#  commands/backup.py - argument parsing
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -1776,7 +1776,7 @@ class TestBackupParseArgs:  # pylint: disable=missing-function-docstring
     """Tests for backup's lightweight argument parser.
 
     Default behaviour: take_snapshots=True (sanoid runs before syncoid).
-    --no-snapshot is the only way to opt out — for cron/automation that
+    --no-snapshot is the only way to opt out - for cron/automation that
     has already taken snapshots by other means, or for re-runs after
     a transient failure where extra snapshots are unwanted.
     """
@@ -1795,7 +1795,7 @@ class TestBackupParseArgs:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/drives.py — validate_external_block_device (shared by prepare/purge)
+#  lib/drives.py - validate_external_block_device (shared by prepare/purge)
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -1868,7 +1868,7 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
                             )
                             raise AssertionError("Should have called fatal")
                         except SystemExit:
-                            pass  # Expected — fatal raises SystemExit
+                            pass  # Expected - fatal raises SystemExit
 
     def test_refuses_nonexistent(self):
         """Refuses non-existent devices."""
@@ -1888,7 +1888,7 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/simulate.py — OVMF detection
+#  commands/simulate.py - OVMF detection
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -1944,7 +1944,7 @@ class TestSimulateArgs:  # pylint: disable=missing-function-docstring
         assert opts.display_h == 2160
 
     def test_display_uppercase_x(self):
-        # Common typo — the parser should accept either x or X
+        # Common typo - the parser should accept either x or X
         opts = _parse_args(["--display", "1920X1080"])
         assert opts.display_w == 1920
         assert opts.display_h == 1080
@@ -1971,7 +1971,7 @@ class TestSimulateArgs:  # pylint: disable=missing-function-docstring
         raise AssertionError("Expected ValueError for zero dimension")
 
     def test_display_too_large(self):
-        # 16K is sci-fi territory — reject as a probable typo
+        # 16K is sci-fi territory - reject as a probable typo
         try:
             _parse_args(["--display", "15360x8640"])
         except ValueError:
@@ -1986,7 +1986,7 @@ class TestSimulateArgs:  # pylint: disable=missing-function-docstring
 
 
 class TestSimulateInUseDetection:  # pylint: disable=missing-function-docstring
-    """Tests for _disk_in_use_reasons() — the safety-layer-1 detector."""
+    """Tests for _disk_in_use_reasons() - the safety-layer-1 detector."""
 
     def test_disk_with_zfs_root_pool(self):
         """A disk hosting the imported root ZFS pool is reported as in use."""
@@ -2083,7 +2083,7 @@ class TestSimulateInUseDetection:  # pylint: disable=missing-function-docstring
 
 
 class TestSimulateCandidateList:  # pylint: disable=missing-function-docstring
-    """Tests for _list_candidate_disks() — only eligible disks must be listed."""
+    """Tests for _list_candidate_disks() - only eligible disks must be listed."""
 
     @staticmethod
     def _patch_devices_exist():
@@ -2123,7 +2123,7 @@ class TestSimulateCandidateList:  # pylint: disable=missing-function-docstring
         names = [d for d, _ in cands]
         assert "/dev/sdz" in names
         assert "/dev/nvme0n1" not in names, (
-            "In-use disk leaked into candidate list — safety layer 2 broken"
+            "In-use disk leaked into candidate list - safety layer 2 broken"
         )
 
     def test_skips_loop_and_zd(self):
@@ -2147,7 +2147,7 @@ class TestSimulateCandidateList:  # pylint: disable=missing-function-docstring
 
 
 class TestSimulateGLDetection:  # pylint: disable=missing-function-docstring
-    """Tests for _detect_gl() — host capability probe for virtio-vga-gl."""
+    """Tests for _detect_gl() - host capability probe for virtio-vga-gl."""
 
     # Minimal fake `qemu-system-x86_64 -device help` output. Real output
     # is hundreds of lines; we keep just enough to exercise the substring
@@ -2207,7 +2207,7 @@ class TestSimulateGLDetection:  # pylint: disable=missing-function-docstring
     def test_gl_unavailable_no_dri_directory(self):
         """No /dev/dri at all (e.g. headless/container host)."""
         mock = MockShell()
-        # qemu probe should not even be reached — dri is checked first
+        # qemu probe should not even be reached - dri is checked first
         is_dir_p, iterdir_p = self._patch_dri(present=False)
         with patch_sh(mock), is_dir_p, iterdir_p:
             ok, reason = _detect_gl()
@@ -2245,7 +2245,7 @@ class TestSimulateGLDetection:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/clean.py — patterns
+#  commands/clean.py - patterns
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -2757,7 +2757,7 @@ class TestCleanOnRealMounts:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/monitor.py — progress bar
+#  commands/monitor.py - progress bar
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -2850,7 +2850,7 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/zfs.py — fix_grub_bpool_uuid helper
+#  lib/zfs.py - fix_grub_bpool_uuid helper
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -2921,7 +2921,7 @@ class TestFixGrubBpoolUuid:
         )
         p = self._write(original)
         # mtime_before = p.stat().st_mtime_ns
-        # Sleep is unnecessary — we compare contents, not just mtime.
+        # Sleep is unnecessary - we compare contents, not just mtime.
         assert fix_grub_bpool_uuid(p, self.NEW_HEX, make_log()) is True
         assert p.read_text(encoding="utf-8") == original
         os.unlink(p)
@@ -2942,7 +2942,7 @@ class TestFixGrubBpoolUuid:
     def test_does_not_touch_unrelated_hex(self):
         """
         Hex strings that look like GUIDs but appear outside `fs-uuid --set=...`
-        must NOT be replaced — e.g., a comment, a UUID in a different context.
+        must NOT be replaced - e.g., a comment, a UUID in a different context.
         """
         unrelated = "deadbeefcafebabe"
         p = self._write(
@@ -2978,7 +2978,7 @@ class TestFixGrubBpoolUuid:
         `--hint-baremetal` between `--set=<name>` and the UUID. Earlier
         versions of the regex required only whitespace there and silently
         skipped these lines, leaving the source machine's stale UUID intact
-        — which broke boot whenever the recovered system's drive enumeration
+        - which broke boot whenever the recovered system's drive enumeration
         differed from the original (i.e. cross-host recovery).
         """
         p = self._write(
@@ -2997,7 +2997,7 @@ class TestFixGrubBpoolUuid:
         assert fix_grub_bpool_uuid(p, self.NEW_HEX, make_log()) is True
         new = p.read_text(encoding="utf-8")
         # Both occurrences (if-branch with hints AND else-branch without)
-        # must be rewritten — regex must accept the hints in between.
+        # must be rewritten - regex must accept the hints in between.
         assert new.count(self.NEW_HEX) == 2
         assert self.OLD_HEX not in new
         # The hints themselves must remain (we only replace the UUID,
@@ -3032,7 +3032,7 @@ class TestFixGrubBpoolUuid:
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/recover.py — _abort_missing_keystore
+#  commands/recover.py - _abort_missing_keystore
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -3058,7 +3058,7 @@ class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
                 _abort_missing_keystore(reason, pool, log)
             except SystemExit as exc:
                 return int(exc.code or 0), buf.getvalue()
-        # Should never reach here — _abort_missing_keystore is NoReturn
+        # Should never reach here - _abort_missing_keystore is NoReturn
         raise AssertionError("_abort_missing_keystore did not raise SystemExit")
 
     def test_no_dataset_aborts_with_exit_1(self):
@@ -3089,7 +3089,7 @@ class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
 
     def test_unknown_reason_still_aborts(self):
         # Forward-compat: a future caller passing a new reason string
-        # must not crash with KeyError — the abort must still happen.
+        # must not crash with KeyError - the abort must still happen.
         code, output = self._capture_abort("totally_new_reason", "backup")
         assert code == 1
         assert "totally_new_reason" in output
@@ -3105,7 +3105,7 @@ class TestAbortMissingKeystore:  # pylint: disable=missing-function-docstring
         """Regression guard: the old behaviour was a misleading WARN.
 
         v1.0.4 emitted '[WARN] system.key will be embedded in initrd' and
-        continued silently. v1.0.5 must abort instead — verified here by
+        continued silently. v1.0.5 must abort instead - verified here by
         checking SystemExit is raised (not just logged).
         """
         log = make_log()
@@ -3173,7 +3173,7 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
         assert rule["recursive"] is True
 
     def test_bpool_boot_is_production_recursive(self):
-        """bpool/BOOT holds kernels and grub config — same retention horizon
+        """bpool/BOOT holds kernels and grub config - same retention horizon
         as user data so the user can roll back ~3 months after a bad update."""
         rule = _classified("bpool/BOOT", self.UBUNTU)
         assert rule["template"] == "production"
@@ -3230,7 +3230,7 @@ class TestSanoidClassification:  # pylint: disable=missing-function-docstring
 
     def test_other_boot_environment_is_skipped(self):
         """If the user has an alternate BE (e.g. rpool/ROOT/ubuntu_old),
-        we should NOT generate a rule for it — the named ubuntu_* rule
+        we should NOT generate a rule for it - the named ubuntu_* rule
         only covers the live one."""
         rule = _classify(self._ds("rpool/ROOT/ubuntu_old"), self.UBUNTU)
         assert rule is None
@@ -3483,7 +3483,7 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
 
     def test_generated_with_no_manual_omits_preserve_section(self):
         """When there are no manual sections, the output must NOT contain the
-        '# Preserved user sections' header — keep the file clean."""
+        '# Preserved user sections' header - keep the file clean."""
         text = _generate_sanoid_conf(self._planned(), preserve_manual=None)
         assert "Preserved user sections" not in text
 
@@ -3540,7 +3540,7 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
         the manuals must still be preserved in the new file."""
         manual = [("tank/games", {"use_template": "production", "recursive": "yes"})]
         # First version: only base planned rules. Verify the manual section
-        # is present here too — preservation must work regardless of what
+        # is present here too - preservation must work regardless of what
         # zark's own rule set looks like.
         v1 = _generate_sanoid_conf(self._planned(), preserve_manual=manual)
         parsed_v1 = _parse_sanoid_conf(v1)
@@ -3558,7 +3558,7 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/boot_chain.py — Secure Boot .latest variant pinning
+#  lib/boot_chain.py - Secure Boot .latest variant pinning
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -3569,12 +3569,12 @@ class TestForceLatestSignedAlternative:  # pylint: disable=missing-function-docs
     the older shim/grub variant to the recovered system's ESP. Two
     behaviors must be guaranteed: (1) when the .latest variant exists
     in the chroot, run update-alternatives --set; (2) when it does not,
-    do nothing — so older Ubuntu releases without the split keep working.
+    do nothing - so older Ubuntu releases without the split keep working.
     """
 
     def test_no_op_when_latest_does_not_exist(self):
         """Older Ubuntu releases (or unusual chroots) without a .latest
-        variant must not trigger update-alternatives — the function
+        variant must not trigger update-alternatives - the function
         silently returns and lets the default behavior run."""
         mock = MockShell()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3611,7 +3611,7 @@ class TestForceLatestSignedAlternative:  # pylint: disable=missing-function-docs
 
     def test_logs_warning_but_continues_on_command_failure(self):
         """If update-alternatives itself fails (rare), the function logs
-        a warning but does not raise — the subsequent dpkg-reconfigure
+        a warning but does not raise - the subsequent dpkg-reconfigure
         will still run and use whatever default is configured."""
         mock = MockShell()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3633,7 +3633,7 @@ class TestForceLatestSignedAlternative:  # pylint: disable=missing-function-docs
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/setup.py — Secure Boot alternatives status
+#  commands/setup.py - Secure Boot alternatives status
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -3667,7 +3667,7 @@ class TestSignedAlternativeStatus:  # pylint: disable=missing-function-docstring
     def test_latest_is_none_when_query_does_not_list_signed_latest(self):
         """If update-alternatives succeeds but returns no alternative
         path ending in '.signed.latest', the helper's latest field is
-        None — meaning this Ubuntu release doesn't ship the split."""
+        None - meaning this Ubuntu release doesn't ship the split."""
         mock = MockShell()
         mock.on(
             "update-alternatives --query nonexistent.alternative.zark.test",
@@ -3690,18 +3690,18 @@ class TestSignedAlternativeStatus:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/config.py — UTC timestamps
+#  lib/config.py - UTC timestamps
 # ═════════════════════════════════════════════════════════════════════════
 
 
 class TestConfigTimestamps:  # pylint: disable=missing-function-docstring
-    """``now_utc_iso`` / ``parse_utc_iso`` — the single source of truth
+    """``now_utc_iso`` / ``parse_utc_iso`` - the single source of truth
     for the timestamp written to ``last_backup_at``."""
 
     def test_now_utc_iso_shape(self):
         """Z-suffix, second precision, ISO-8601, no microseconds."""
         s = now_utc_iso()
-        # YYYY-MM-DDTHH:MM:SSZ — exactly 20 characters.
+        # YYYY-MM-DDTHH:MM:SSZ - exactly 20 characters.
         assert len(s) == 20, f"expected 20 chars, got {len(s)}: {s!r}"
         assert s.endswith("Z"), f"missing Z suffix: {s!r}"
         assert s[4] == "-" and s[7] == "-" and s[10] == "T"
@@ -3721,7 +3721,7 @@ class TestConfigTimestamps:  # pylint: disable=missing-function-docstring
         assert dt.hour == 15 and dt.minute == 5 and dt.second == 57
 
     def test_parse_accepts_explicit_offset(self):
-        """``datetime.isoformat()`` emits ``+00:00`` rather than ``Z`` —
+        """``datetime.isoformat()`` emits ``+00:00`` rather than ``Z`` -
         the parser must accept both for robustness."""
         dt = parse_utc_iso("2026-05-08T15:05:57+00:00")
         assert dt is not None
@@ -3734,7 +3734,7 @@ class TestConfigTimestamps:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/config.py — known_drives.json with last_backup_at
+#  lib/config.py - known_drives.json with last_backup_at
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -3820,12 +3820,12 @@ class TestConfigKnownDrivesTimestamp:  # pylint: disable=missing-function-docstr
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/drives.py — staleness helpers
+#  lib/drives.py - staleness helpers
 # ═════════════════════════════════════════════════════════════════════════
 
 
 class TestDrivesStaleness:  # pylint: disable=missing-function-docstring
-    """``drive_staleness_days`` / ``is_drive_stale`` — the pre-flight
+    """``drive_staleness_days`` / ``is_drive_stale`` - the pre-flight
     arithmetic that gates ``zark backup``."""
 
     @staticmethod
@@ -3836,7 +3836,7 @@ class TestDrivesStaleness:  # pylint: disable=missing-function-docstring
         assert drive_staleness_days(self._info(None)) is None
 
     def test_staleness_none_when_field_malformed(self):
-        """Malformed timestamps must not raise — the user shouldn't be
+        """Malformed timestamps must not raise - the user shouldn't be
         blocked by a typo in known_drives.json."""
         assert drive_staleness_days(self._info("garbage")) is None
 
@@ -3853,7 +3853,7 @@ class TestDrivesStaleness:  # pylint: disable=missing-function-docstring
         assert drive_staleness_days(info, now=now) == 30
 
     def test_is_stale_at_threshold_boundary_not_stale(self):
-        """At exactly threshold_days, the drive is NOT yet stale —
+        """At exactly threshold_days, the drive is NOT yet stale -
         is_drive_stale uses strict ``>`` so the boundary is fresh."""
 
         now = datetime(2026, 5, 8, 15, 0, 0, tzinfo=UTC)
@@ -3868,13 +3868,13 @@ class TestDrivesStaleness:  # pylint: disable=missing-function-docstring
         assert is_drive_stale(info, 60, now=now)
 
     def test_is_stale_false_when_field_absent(self):
-        """Drives with no ``last_backup_at`` are not considered stale —
+        """Drives with no ``last_backup_at`` are not considered stale -
         they auto-populate on first successful backup."""
         assert not is_drive_stale(self._info(None), 60)
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/setup.py — template_minimal migration diff
+#  commands/setup.py - template_minimal migration diff
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -3882,7 +3882,7 @@ class TestSetupTemplateDiff:  # pylint: disable=missing-function-docstring
     """``_diff_rules`` must surface a diff for ``[template_minimal]``
     when the parsed values disagree with the expected constants.
     Saying yes to the migration regenerates the file with the new
-    values — verified via a parse-of-generator round-trip."""
+    values - verified via a parse-of-generator round-trip."""
 
     def test_no_diff_when_template_matches(self):
         """A file generated by the current ``_generate_sanoid_conf``
@@ -3955,7 +3955,7 @@ class TestSetupTemplateDiff:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/backup.py — staleness reporting (informative only)
+#  commands/backup.py - staleness reporting (informative only)
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -4013,7 +4013,7 @@ class TestBackupRpoReporting:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/sanoid_retention.py — config parsing
+#  lib/sanoid_retention.py - config parsing
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -4304,7 +4304,7 @@ class TestSystemPoolImportOrder:  # pylint: disable=missing-function-docstring
 class TestReadbackVerification:  # pylint: disable=missing-function-docstring
     """#1: verify_exported_pool_readback re-imports read-only and checks health.
 
-    Guards against USB-SATA bridges that lie about FUA — an export that
+    Guards against USB-SATA bridges that lie about FUA - an export that
     returns 0 over a pool that is no longer importable (``error=52``).
     """
 
@@ -4677,8 +4677,8 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("rm -rf").succeeds()
         mock.on("wipefs").succeeds()
         mock.on("sgdisk").succeeds()
-        # First dmesg call (the marker, tail -1) — old timestamp.
-        # Subsequent dmesg call (the scan) — contains a DID_ERROR after it.
+        # First dmesg call (the marker, tail -1) - old timestamp.
+        # Subsequent dmesg call (the scan) - contains a DID_ERROR after it.
         mock.on("dmesg | tail -1").succeeds("[ 100.0] sd 0:0:0:0: [sda] ready")
         mock.on("dmesg").succeeds(
             "[ 100.0] sd 0:0:0:0: [sda] ready\n"
@@ -4921,7 +4921,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
 
 
 class TestIsLiveUsb:  # pylint: disable=missing-function-docstring
-    """lib.sh.is_live_usb — single source of truth for live-media detection."""
+    """lib.sh.is_live_usb - single source of truth for live-media detection."""
 
     def test_true_on_casper_cmdline(self):
         mock = MockShell()
@@ -4989,7 +4989,7 @@ class _FakeKeystore:  # pylint: disable=missing-class-docstring,missing-function
 
     def umount(self):
         """Never reached in these tests, but Cleanup.track_keystore will
-        call it if the cleanup handler ever runs — so the stub must have
+        call it if the cleanup handler ever runs - so the stub must have
         it, and the KeystoreLike protocol now says so."""
 
 
@@ -5176,7 +5176,7 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("zfs unmount")
 
     def test_a_failed_export_is_not_reported_as_unmounted(self):
-        # K6-1 (eli): "SYSTEM UNMOUNTED — exported cleanly" printed under two
+        # K6-1 (eli): "SYSTEM UNMOUNTED - exported cleanly" printed under two
         # "Could not export" warnings.
         mock = MockShell()
         mock.on("zpool list rpool").succeeds("rpool")
@@ -5325,8 +5325,8 @@ class TestAptGuard:  # pylint: disable=missing-function-docstring
     Covers the Python installer (writes three files, correct perms, overwrite
     semantics) and the cheap exit paths of the shell hook that can run without
     zpool/dpkg-deb present (the ZARK_INTERNAL escape and the no-sensitive-
-    package short-circuit). The block path — external pool + boot-critical
-    package — needs a real importable pool and is exercised by integration
+    package short-circuit). The block path - external pool + boot-critical
+    package - needs a real importable pool and is exercised by integration
     testing, not CI; here it is covered by content assertions on the script.
     """
 
@@ -5556,7 +5556,7 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  lib/identity.py and lib/registry.py (M1: I20–I25, hallazgo 7)
+#  lib/identity.py and lib/registry.py (M1: I20-I25, hallazgo 7)
 # ═════════════════════════════════════════════════════════════════════════
 
 _KINGSTON_ID = "usb-Kingston_DT_microDuo_3C_408D5C15CFA5E961091D0CCA-0:0"
@@ -9518,7 +9518,7 @@ class TestReplicationNames:
 
 
 class TestReplicationPlanner:
-    """Per-dataset states (redesign §4; M2 decisions 5–10, 18)."""
+    """Per-dataset states (redesign §4; M2 decisions 5-10, 18)."""
 
     def _o(
         self, rel: str, snaps: list["repl.Ref"], bms: list["repl.Ref"] | None = None
@@ -9860,7 +9860,7 @@ class TestSharedSnapshots:
 
 
 class TestEngine:  # pylint: disable=too-many-public-methods
-    """The engine end to end against FakeZfs (redesign §4, I-A…I-G)."""
+    """The engine end to end against FakeZfs (redesign §4, I-A...I-G)."""
 
     def _fresh(self, pools: tuple[str, ...] = ("backup",)) -> FakeZfs:
         return _fresh_fake(pools)
@@ -11241,7 +11241,7 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
             assert not _decide(
                 plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log(log_path)
             )
-        assert "…and 3 more (full list in zark.log)" in out.getvalue()
+        assert "...and 3 more (full list in zark.log)" in out.getvalue()
         logged = Path(log_path).read_text(encoding="utf-8")
         assert all(name in logged for name in newer)
 
@@ -11624,7 +11624,7 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         )
 
     def test_report_keeps_dataset_names(self) -> None:
-        """O1: "Rolled back rpool/ROOT/…@zark_…Z", not "rpool/root/…z"."""
+        """O1: "Rolled back rpool/ROOT/...@zark_...Z", not "rpool/root/...z"."""
         with patch_sh(_fresh_fake()), redirect_stdout(StringIO()) as buf:
             eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
             eng._report(  # pylint: disable=protected-access
@@ -11691,7 +11691,7 @@ class TestIncompleteBanner:
         assert text.count("changed on the drive") == 1
         assert "  changed on the drive: the next backup asks again (17):" in text
         assert "    rpool/d14" in text and "rpool/d15" not in text
-        assert "    …and 2 more (see the table above)" in text
+        assert "    ...and 2 more (see the table above)" in text
 
 
 class TestBackupCommand:
@@ -13274,7 +13274,7 @@ class TestPruneCommand:
         before = {ds: fake.names(ds) for ds in fake.ds}
         out = self._origin(fake, make_config(), *self._answers([1, 0], ["0"], "prune", True))
         assert before == {ds: fake.names(ds) for ds in fake.ds}
-        assert "Not confirmed (PRUNE was not typed) — nothing removed" in out
+        assert "Not confirmed (PRUNE was not typed) - nothing removed" in out
 
     def test_interrupted_points_warn_of_both_effects(self) -> None:
         """M3 decision 8a (eli R8.7), shrunk by 8b (M4b-4): each point names
@@ -13748,7 +13748,7 @@ class TestStatus:
         st = status_lib.Status(
             caps={"rpool": 86, "bpool": 40},
             ages={"black": 3, "blue": 34},
-            shared=["blue: no anchor in origin; 1 dataset(s) share no snapshot with it: …"],
+            shared=["blue: no anchor in origin; 1 dataset(s) share no snapshot with it: ..."],
             residues=23,
         )
         text = status_lib.motd_text(st)
@@ -13894,7 +13894,7 @@ class TestStatus:
         ):
             status_mod.run(["--refresh", "--notify"])
             status_mod.run(["--refresh", "--notify"])
-        assert sent == ["rpool is 85% full — free space with: sudo zark prune"]
+        assert sent == ["rpool is 85% full - free space with: sudo zark prune"]
 
 
 class TestAlerts:

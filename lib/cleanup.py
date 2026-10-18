@@ -20,16 +20,16 @@ Ensures pools are exported and mounts removed on exit.
 This module also exposes the two device-flush primitives used by
 commands that finish with an external (removable) drive still attached:
 
-  * ``flush_device_cache(log)`` — pushes kernel buffers to the device
+  * ``flush_device_cache(log)`` - pushes kernel buffers to the device
     via ``sync(2)`` and pauses to let the bridge firmware drain. Called
     unconditionally by ``Cleanup.run()`` after every successful pool
     export; commands that do not go through ``Cleanup`` (prepare, purge,
     umount) call it inline at the equivalent point.
 
-  * ``eject_device(device, log)`` — issues SCSI ``SYNCHRONIZE CACHE``
+  * ``eject_device(device, log)`` - issues SCSI ``SYNCHRONIZE CACHE``
     followed by ``START STOP UNIT`` (i.e. ``eject(1)``). Powers the
     bridge down. Only invoked when the operator has confirmed they
-    want to physically disconnect the drive — never automatically,
+    want to physically disconnect the drive - never automatically,
     because commands like ``prepare`` are typically followed by
     ``backup`` against the same drive, and a forced eject between them
     would require the operator to unplug-and-replug for nothing.
@@ -69,7 +69,7 @@ def flush_device_cache(log: Log) -> None:
     ``USB_FLUSH_DELAY_SEC`` so misbehaving USB-SATA bridges have time
     to write their internal DRAM to NAND before any subsequent action.
 
-    Does **not** eject the device — the bridge stays powered on and the
+    Does **not** eject the device - the bridge stays powered on and the
     drive stays visible in ``/dev``. Use ``eject_device()`` separately
     when the operator has confirmed they want to physically remove the
     drive.
@@ -94,7 +94,7 @@ def eject_device(device: str, log: Log) -> bool:
     Wraps ``eject(1)`` from ``util-linux``, which sends SCSI
     ``SYNCHRONIZE CACHE (0x35)`` followed by ``START STOP UNIT``
     (stop=1). SYNCHRONIZE CACHE is the device's most authoritative
-    flush primitive — distinct from inline FUA — and most bridges that
+    flush primitive - distinct from inline FUA - and most bridges that
     cheat on FUA still honour it. STOP UNIT then asks the controller to
     power down; note that some USB-SATA bridges ignore it and keep the
     device enumerated, so a successful eject does not guarantee the
@@ -106,7 +106,7 @@ def eject_device(device: str, log: Log) -> bool:
     bridge-specific cache layer.
 
     Side effect: after a successful eject the device usually disappears
-    from ``/dev`` until physically replugged — though bridges that
+    from ``/dev`` until physically replugged - though bridges that
     ignore STOP UNIT may keep it present. This is fine either way: the
     operator just told us they were going to unplug, and the data is
     durable.
@@ -114,14 +114,14 @@ def eject_device(device: str, log: Log) -> bool:
     r = run(f"eject {device}")
     if r.ok:
         log.ok(
-            f"Device {device} eject sent — caches flushed (some USB bridges "
+            f"Device {device} eject sent - caches flushed (some USB bridges "
             "ignore the controller-stop request, so the device may stay "
             "powered; the data is already durable either way)",
         )
         return True
     log.warn(
         f"eject {device} failed (rc={r.returncode}); data is durable but "
-        "device-internal flush could not be confirmed — this enclosure "
+        "device-internal flush could not be confirmed - this enclosure "
         "may not honour SYNCHRONIZE CACHE, unplug at your own risk",
     )
     return False
@@ -155,7 +155,7 @@ def prompt_eject_or_attach(
         ejecting would force a pointless unplug/replug cycle.
 
     Independent of the prompt, the kernel-side flush
-    (``flush_device_cache``) has already run — issued by ``Cleanup.run()``
+    (``flush_device_cache``) has already run - issued by ``Cleanup.run()``
     after the export, or inline by commands that do not go through
     ``Cleanup``. The operator's "no" therefore leaves the drive in a
     consistent state: pool exported, kernel buffers flushed, bridge
@@ -166,15 +166,15 @@ def prompt_eject_or_attach(
     ``device=None`` means the underlying ``/dev/disk/by-id/...`` could
     not be resolved (typically a pool registered without a stable
     drive_id, or imported via ``zark mount`` outside the registry).
-    No prompt is shown in that case — the banner alone tells the
+    No prompt is shown in that case - the banner alone tells the
     operator the drive is still attached and suggests ``zark umount``
     for a later clean disconnect.
 
     ``autoeject`` (per-drive, from ``known_drives.json``) opts this
     drive into a timed prompt: a 10 s countdown
     (``EJECT_TIMEOUT_SECONDS``) after which the drive is **ejected**
-    (auto-eject means auto-eject, so the command's no-eject default —
-    used by ``prepare`` for the manual path — is
+    (auto-eject means auto-eject, so the command's no-eject default -
+    used by ``prepare`` for the manual path - is
     overridden here). Any keypress cancels the countdown and falls back to
     a normal prompt. When ``False`` (default), the prompt waits for the
     operator indefinitely, exactly as before.
@@ -182,7 +182,7 @@ def prompt_eject_or_attach(
     if device is None:
         log.warn(
             f"Device path for drive '{pool}' could not be resolved; "
-            "eject skipped — use 'zark umount' for a clean disconnect later.",
+            "eject skipped - use 'zark umount' for a clean disconnect later.",
         )
         log.banner_drive_attached(pool)
         return
@@ -217,7 +217,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self._keystores: list[KeystoreLike] = []  # keystores to close
         self._dirs: list[str] = []  # temp dirs to remove
         self._actions: list[Callable[[], None]] = []  # run first, newest first
-        self._exported_pools: list[str] = []  # populated by run() — query via exported_pools()
+        self._exported_pools: list[str] = []  # populated by run() - query via exported_pools()
         self._registered = False
         self._disabled = False
 
@@ -235,7 +235,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self._disabled = False
 
     def disable(self):
-        """Disable cleanup — use when leaving resources mounted for the user."""
+        """Disable cleanup - use when leaving resources mounted for the user."""
         self._disabled = True
         self._pools.clear()
         self._mounts.clear()
@@ -265,7 +265,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         always followed by ``flush_device_cache()``, never by ``eject``.
         The decision to power the bridge down is the calling command's,
         based on operator intent (typically asked interactively after
-        the success banner) — see ``eject_device()`` for the eject
+        the success banner) - see ``eject_device()`` for the eject
         primitive.
         """
         if name not in self._pools:
@@ -296,7 +296,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
 
         Callers use this after a successful operation to know which
         drives' caches were flushed and may be safe to physically
-        disconnect (subject to the operator confirming an eject —
+        disconnect (subject to the operator confirming an eject -
         Cleanup itself never ejects). Empty before ``run()`` is called,
         and reset on each ``run()`` invocation.
         """
@@ -348,7 +348,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
             ks.umount()
         self._keystores.clear()
 
-        # Export pools — each successful export is followed by the
+        # Export pools - each successful export is followed by the
         # kernel-side flush (sync + sleep). Cleanup never ejects; that
         # is the calling command's call, made after the success banner
         # based on whether the operator intends to disconnect now.

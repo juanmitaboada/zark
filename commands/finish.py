@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-zark finish — Post-recovery finalization.
+zark finish - Post-recovery finalization.
 
 Run from inside the recovered system (not live USB).
 Fixes hostid, cachefile, ZFS services, GRUB, initramfs.
@@ -48,7 +48,7 @@ def run(
 
     # ── Verify not live USB ──────────────────────────────────────────────
     if not zfs.pool_exists("rpool"):
-        log.fatal("rpool not found — run --finish from the recovered system")
+        log.fatal("rpool not found - run --finish from the recovered system")
     if not Path("/etc/os-release").exists():
         log.fatal("Not a running Ubuntu system")
 
@@ -129,7 +129,7 @@ def run(
     ):
         log.ok("Secure Boot chain present ✓")
     else:
-        log.info("EFI binaries incomplete — reconfiguring signed packages...")
+        log.info("EFI binaries incomplete - reconfiguring signed packages...")
         _ = sh.run("dpkg-reconfigure -f noninteractive grub-efi-amd64-signed", log=log)
         _ = sh.run("dpkg-reconfigure -f noninteractive shim-signed", log=log)
 

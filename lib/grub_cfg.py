@@ -61,5 +61,5 @@ def regenerate_grub_cfg(grub_cfg: Path, command: str, backup: Path, log: Log) ->
     if backed_up and sh.run(f"cp {backup} {grub_cfg}").ok:
         log.warn("Restored the grub.cfg found at the start of this run")
     else:
-        log.warn("No grub.cfg from this run to restore — the generated one is left in place")
+        log.warn("No grub.cfg from this run to restore - the generated one is left in place")
     return reason
