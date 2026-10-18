@@ -26,6 +26,7 @@ cmd/snap/cmd_services.go:265-282, overlord/servicestate/service_control.go:
 """
 
 from lib import sh
+from lib.lock import selftest_subcommand
 from lib.log import Log
 
 PROBE_SERVICE = "ubuntu-desktop-bootstrap.subiquity-server"
@@ -49,10 +50,13 @@ IMPORTING = frozenset(
 )
 
 
-def stop_installer_probe(command: str, log: Log) -> bool:
+def stop_installer_probe(command: str, args: list[str], log: Log) -> bool:
     """Stop the installer's probe service for this session when ``command``
     imports pools and this is a live session; True when it was stopped."""
     if command not in IMPORTING or not sh.is_live_usb():
+        return False
+    # Only selftest's run makes pools; warnings takes the lock but imports nothing.
+    if command == "selftest" and selftest_subcommand(args) != "run":
         return False
     r = sh.run(f"snap stop {PROBE_SERVICE}")
     if r.ok:

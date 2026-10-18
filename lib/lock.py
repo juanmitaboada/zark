@@ -46,6 +46,11 @@ class LockHeld(Exception):
     """Another zark run holds the lock; the text says who."""
 
 
+def selftest_subcommand(args: list[str]) -> str:
+    """The subcommand ``zark selftest`` runs for ``args``: ``run`` when none is named."""
+    return args[0] if args and not args[0].startswith("-") else "run"
+
+
 def needs_lock(command: str, args: list[str]) -> bool:
     """Whether ``command`` (as typed, kebab-case) changes state."""
     if command in _READ_ONLY:
@@ -57,7 +62,7 @@ def needs_lock(command: str, args: list[str]) -> bool:
         # backup holding the lock must not leave the guards behind.
         return False
     if command == "selftest":
-        return not args or args[0] not in ("status", "report", "certificate")
+        return selftest_subcommand(args) not in ("status", "report", "certificate")
     return True
 
 

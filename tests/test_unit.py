@@ -10289,25 +10289,36 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
     def test_stopped_before_an_import_on_a_live_session(self) -> None:
         mock = self._mock(live=True)
         with patch_sh(mock), redirect_stdout(StringIO()):
-            assert live_mod.stop_installer_probe("recover", Log())
+            assert live_mod.stop_installer_probe("recover", [], Log())
         assert mock.was_called("snap stop ubuntu-desktop-bootstrap.subiquity-server")
         assert not mock.was_called("--disable")  # runtime only
-        mock = self._mock(live=True)
-        with patch_sh(mock), redirect_stdout(StringIO()):
-            assert live_mod.stop_installer_probe("selftest", Log())
+        for args in ([], ["run"], ["--stick", "/dev/sdz"], ["run", "--only", "POOL-01"]):
+            mock = self._mock(live=True)
+            with patch_sh(mock), redirect_stdout(StringIO()):
+                assert live_mod.stop_installer_probe("selftest", args, Log()), args
 
     def test_left_alone_on_an_installed_system_or_without_an_import(self) -> None:
-        for live, cmd in ((False, "mount"), (True, "status"), (True, "backup")):
+        cases: list[tuple[bool, str, list[str]]] = [
+            (False, "mount", []),
+            (True, "status", []),
+            (True, "backup", []),
+            # M4sP.7: selftest's other subcommands import nothing.
+            (True, "selftest", ["status"]),
+            (True, "selftest", ["report"]),
+            (True, "selftest", ["certificate", "x.json"]),
+            (True, "selftest", ["warnings", "on"]),
+        ]
+        for live, cmd, args in cases:
             mock = self._mock(live=live)
             with patch_sh(mock), redirect_stdout(StringIO()):
-                assert not live_mod.stop_installer_probe(cmd, Log())
-            assert not mock.was_called("snap stop"), (live, cmd)
+                assert not live_mod.stop_installer_probe(cmd, args, Log())
+            assert not mock.was_called("snap stop"), (live, cmd, args)
 
     def test_a_missing_snap_is_not_an_error(self) -> None:
         mock = self._mock(live=True, snap_ok=False)
         out = StringIO()
         with patch_sh(mock), redirect_stdout(out):
-            assert not live_mod.stop_installer_probe("clean", Log())
+            assert not live_mod.stop_installer_probe("clean", [], Log())
         assert "ERROR" not in out.getvalue() and "FATAL" not in out.getvalue()
 
     def test_the_entry_point_stops_it_before_the_command(self) -> None:
@@ -10319,7 +10330,7 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
         loader.exec_module(entry)
         order: list[str] = []
         with (
-            patch.object(sys, "argv", ["zark", "prune"]),
+            patch.object(sys, "argv", ["zark", "prune", "--dry-run"]),
             patch("os.geteuid", return_value=0),
             patch("lib.signals.guard_output"),
             patch.object(lock_mod, "guard"),
@@ -10327,12 +10338,12 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
             patch.object(
                 live_mod,
                 "stop_installer_probe",
-                side_effect=lambda c, _l: order.append(f"stop {c}"),
+                side_effect=lambda c, a, _l: order.append(f"stop {c} {a}"),
             ),
             patch.object(prune_mod, "run", side_effect=lambda _a: order.append("prune")),
         ):
             entry.main()
-        assert order == ["stop prune", "prune"], order
+        assert order == ["stop prune ['--dry-run']", "prune"], order
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
@@ -16428,6 +16439,8 @@ class TestSelftestLock:  # pylint: disable=missing-function-docstring,too-few-pu
             assert lock_mod.needs_lock("selftest", args), args
         for args in (["status"], ["report"], ["certificate", "x.json"]):
             assert not lock_mod.needs_lock("selftest", args), args
+        assert lock_mod.selftest_subcommand(["--only", "POOL-01"]) == "run"
+        assert lock_mod.selftest_subcommand(["report", "f"]) == "report"
 
 
 def _facts(**over: Any) -> pfacts.Facts:

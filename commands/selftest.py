@@ -30,7 +30,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from lib import certificates, platform_facts, sh
+from lib import certificates, lock, platform_facts, sh
 from lib.certificates import RunInfo
 from lib.cleanup import Cleanup
 from lib.config import Config
@@ -49,7 +49,7 @@ USAGE = (
 def run(args: list[str]) -> None:
     """Dispatch the subcommand."""
     log = Log()
-    sub = args[0] if args and not args[0].startswith("-") else "run"
+    sub = lock.selftest_subcommand(args)
     rest = args[1:] if args and not args[0].startswith("-") else args
     handlers = {
         "run": _run,

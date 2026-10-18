@@ -1028,7 +1028,8 @@ sequence and writes its log to the pendrive, not to */var/log/*, while in
 this mode. Before a command that imports pools, **zark** stops the
 installer's **ubuntu-desktop-bootstrap.subiquity-server** for the session
 (**snap stop**, nothing changes for the next boot): it probes the disks on
-every change and pops up a crash report after each import.
+every change and pops up a crash report after each import. Of
+**selftest**'s subcommands only **run** imports pools.
 
 ## The drive's keystore
 

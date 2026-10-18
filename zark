@@ -141,7 +141,7 @@ def main():
     # command's cleanup, once (H12).
     signals.install()
     # On a live session the installer's disk probe reports a crash after each import (M4aF-6).
-    live.stop_installer_probe(cmd_name, Log())
+    live.stop_installer_probe(cmd_name, cmd_args, Log())
 
     # Import and run the command. CLI uses kebab-case (e.g. "repair-boot"),
     # Python module names use snake_case (e.g. "repair_boot.py").
