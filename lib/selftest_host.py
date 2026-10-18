@@ -32,6 +32,7 @@ from pathlib import Path
 from lib import alerts
 from lib.selftest import Bench, Fail, Skip, check, exit_status, expect, text_of
 from lib.selftest_l1 import reimport
+from lib.zfs import BACKUP_ALTROOT_BASE
 
 
 def _q(s: str) -> str:
@@ -77,6 +78,53 @@ def mnt_01(b: Bench) -> None:
         opts = [ln for ln in r.lines if "," in ln or ln in ("ro", "rw")]
         ro = [o.split(",")[0] for o in opts]
         expect(ro == ["ro", "ro"], "both mounts read-only", " | ".join(opts))
+    finally:
+        b.drop_pool(c)
+
+
+_READONLY_MOUNTS = r"""
+A={a}
+zfs mount {p} && zfs mount {k1} || exit 90
+echo "OPTS $(findmnt -rn -o OPTIONS $A/p | cut -d, -f1)"
+echo "K1 $(findmnt -rn -o TARGET $A/p/k1 | wc -l)"
+zfs mount {k2} 2>&1
+echo "RC $?"
+echo "K2 $(findmnt -rn -o TARGET $A/p/k2 | wc -l)"
+umount -R $A/p
+"""
+
+
+@check(
+    "MNT-04",
+    1,
+    1,
+    "a read-only import mounts with zfs mount, and cannot create a mountpoint",
+    depends=("mount local read-only (M4c-21)", "lib/mount.py: mount_system_pools"),
+)
+def mnt_04(b: Bench) -> None:
+    """In its own namespace: on a pool imported ``readonly=on``, ``zfs mount``
+    mounts a dataset read-only, and fails for one whose mountpoint directory
+    does not exist in its read-only parent (it cannot be created). OpenZFS
+    lib/libzfs/libzfs_mount.c:383-388, :464-474; module/os/linux/zfs/
+    zfs_vfsops.c:461-463, :936-945."""
+    c = b.make_pool("c")
+    try:
+        p = b.fs(f"{c}/p", "mountpoint=/p")
+        # Created -u: k2's mountpoint directory is never made.
+        k1, k2 = b.fs(f"{p}/k1"), b.fs(f"{p}/k2")
+        a = f"{BACKUP_ALTROOT_BASE}/{c}"
+        # Read-write once, in a namespace: p and its k1 directory exist after.
+        rw = b.in_namespace(f"zfs mount {p} && zfs mount {k1} && umount {a}/p/k1 && umount {a}/p")
+        expect(rw.ok, "the read-write mounts", exit_status(rw), text_of(rw))
+        _ = b.ok(f"zpool export {c}")
+        reimport(b, c, "-o readonly=on")
+        r = b.in_namespace(_READONLY_MOUNTS.format(a=_q(a), p=p, k1=k1, k2=k2))
+        vals = dict(ln.split(" ", 1) for ln in r.lines if ln.startswith(("OPTS", "K1", "RC", "K2")))
+        expect(
+            vals.get("OPTS") == "ro", "the read-only pool mounted read-only", str(vals), text_of(r)
+        )
+        expect(vals.get("K1") == "1", f"{k1} mounted", str(vals), text_of(r))
+        expect(vals.get("RC", "0") != "0" and vals.get("K2") == "0", f"{k2} refused", str(vals))
     finally:
         b.drop_pool(c)
 

@@ -420,6 +420,42 @@ def pool_11(b: Bench) -> None:
     expect(not missing, "every feature of this release listed", ", ".join(missing))
 
 
+@check(
+    "POOL-12",
+    1,
+    1,
+    "a pool's label carries the hostid of the system that imported it",
+    depends=("finish's hostid line (M4c-4)", "identity.read_pool_label"),
+)
+def pool_12(b: Bench) -> None:
+    """The label of a pool this system created and imported carries its
+    hostid, the 4 little-endian bytes of /etc/hostid, which ``zdb -l``
+    prints in decimal; zark's parser reads it. OpenZFS
+    module/zfs/spa_misc.c:792; module/os/linux/spl/spl-generic.c:449-463,
+    :400-443; module/zfs/spa.c:5671-5700; cmd/zdb/zdb.c:5447;
+    module/nvpair/nvpair.c:3804-3806."""
+    try:
+        raw = Path("/etc/hostid").read_bytes()
+    except OSError as e:
+        raise Skip("this system has no /etc/hostid") from e
+    if len(raw) < 4:
+        raise Skip("/etc/hostid is shorter than 4 bytes")
+    want = str(int.from_bytes(raw[:4], "little"))
+    c = b.make_pool("c")
+    try:
+        _ = b.ok(f"zpool export {c}")
+        reimport(b, c)
+        _ = b.ok(f"zpool export {c}")
+        r = b.ok(f"zdb -l {b.vdev(c)}")
+        expect(f"hostid: {want}" in r.stdout, f"hostid: {want} in the label", "not there")
+        label = identity.read_pool_label(b.vdev(c))
+        got = label.hostid if label is not None else "no label"
+        expect(got == want, f"read_pool_label: hostid {want}", observed(got))
+        reimport(b, c)
+    finally:
+        b.drop_pool(c)
+
+
 def _zfs_userland(b: Bench) -> str:
     out = b.ok("zfs version").lines
     return out[0].removeprefix("zfs-") if out else ""
@@ -997,6 +1033,59 @@ def snd_11(b: Bench) -> None:
     _ = b.pipe_ok(f"zfs send {zv}@k", f"zfs receive -u -o encryption=off {b.a}/ks11")
     got = b.value("encryption", f"{b.a}/ks11")
     expect(got == "off", "encryption off on the restored keystore", got)
+
+
+@check(
+    "SND-12",
+    1,
+    1,
+    "a recovered snapshot's bookmark, and a renamed one, are the drive's bases",
+    depends=(
+        "recover's anchors (M4c-12): anchor_restored, anchor_bpool",
+        "the drive's next backup after a recover",
+    ),
+)
+def snd_12(b: Bench) -> None:
+    """recover receives a drive's snapshot raw into a new origin, bookmarks
+    it and ``zfs change-key -i`` puts it under origin's key: that bookmark
+    is a base the drive accepts for a raw incremental (the snapshot keeps
+    the stream's IV set and guid, the bookmark copies both, change-key keeps
+    the master key). On bpool, unencrypted, the restored snapshot renamed to
+    the anchor's name is a base for a non-raw incremental (a rename keeps
+    the guid). OpenZFS module/zfs/dmu_recv.c:3720-3721, :3746-3747,
+    :462-478, :484-497; module/zfs/dsl_bookmark.c:352, :364-369;
+    module/zfs/dsl_crypt.c:1251, :1484-1494, :2073-2087, :2199-2210;
+    module/zfs/dsl_dataset.c:3023-3060."""
+    x = _origin(b, "snd12", 64)
+    _ = b.ok(f"zfs snapshot {x}@p")
+    drive = f"{b.b}/snd12"
+    _send_full(b, f"{x}@p", drive)
+    rec = f"{b.a}/rec12"
+    _ = b.pipe_ok(f"zfs send -w {drive}@p", f"zfs receive -u {rec}")
+    _ = b.ok(f"zfs bookmark {rec}@p {rec}#anchor")
+    _load_key(b, rec)
+    _ = b.ok(f"zfs change-key -i {rec}")
+    root = b.value("encryptionroot", rec)
+    expect(root == b.a, f"{rec} under {b.a}'s key", root)
+    b.write(rec, 64)
+    _ = b.ok(f"zfs snapshot {rec}@q")
+    _ = b.ok(f"zfs destroy {rec}@p")  # origin pruned it: only the bookmark is left
+    _ = b.pipe_ok(f"zfs send -w -i {rec}#anchor {rec}@q", f"zfs receive -s -u {drive}")
+    got = ", ".join(b.snapshot_names(drive))
+    expect(got == "p, q", "p, q on the drive", got)
+    boot = b.fs(f"{b.b}/snd12boot")
+    b.write(boot, 16)
+    _ = b.ok(f"zfs snapshot {boot}@p")
+    dboot = f"{b.b}/snd12dboot"
+    _ = b.pipe_ok(f"zfs send {boot}@p", f"zfs receive -u {dboot}")
+    restored = f"{b.b}/snd12rboot"
+    _ = b.pipe_ok(f"zfs send {dboot}@p", f"zfs receive -u {restored}")
+    _ = b.ok(f"zfs rename {restored}@p {restored}@zark_anchor")
+    b.write(restored, 16)
+    _ = b.ok(f"zfs snapshot {restored}@q")
+    _ = b.pipe_ok(f"zfs send -i {restored}@zark_anchor {restored}@q", f"zfs receive -s -u {dboot}")
+    got = ", ".join(b.snapshot_names(dboot))
+    expect(got == "p, q", "p, q on the drive's bpool", got)
 
 
 # ── destroy, clone, keys ─────────────────────────────────────────────────
