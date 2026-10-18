@@ -16200,12 +16200,16 @@ class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
         assert int(calls[last].split("seek=")[1].split()[0]) * 512 == 1024**3 - 10 * 1024**2
 
     def test_nothing_is_written_while_a_pool_uses_the_stick(self):
-        for listing in (
-            "zsts\t1G\n\t/dev/disk/by-id/usb-S_1-0:0-part1\n",
-            "zsts\t1G\n\t/dev/sdz1\n",
+        # M4c-27 (M4sV-2): each vdev resolved to its disks, a dm device included.
+        for vdev in (
+            "/dev/disk/by-id/usb-S_1-0:0-part1",
+            "/dev/sdz1",
+            "/dev/mapper/luks-on-stick",
+            "/dev/disk/by-id/wwn-0x5000-part1",  # a by-id name the stick's list lacks
         ):
             mock = MockShell()
-            mock.on("zpool list -vHP").succeeds(listing)
+            mock.on("zpool list -vHP").succeeds(f"zsts\t1G\n\t{vdev}\n")
+            mock.on(f"lsblk -nrs -o NAME,TYPE {vdev}").succeeds("x part\nsdz disk\n")
             calls = self._teardown(mock)
             assert not [c for c in calls if c.startswith(("dd ", "wipefs", "sgdisk"))], calls
         mock = MockShell()
@@ -16213,6 +16217,7 @@ class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
         assert not [c for c in self._teardown(mock) if c.startswith(("dd ", "wipefs"))]
         mock = MockShell()
         mock.on("zpool list -vHP").succeeds("zstx\t1G\n\t/dev/sdza1\n")
+        mock.on("lsblk -nrs -o NAME,TYPE /dev/sdza1").succeeds("sdza1 part\nsdza disk\n")
         assert "wipefs -a /dev/sdz" in self._teardown(mock)
 
 

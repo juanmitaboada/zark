@@ -94,16 +94,15 @@ class StickBench(Bench):
 
     def pool_on_stick(self) -> bool:
         """Whether an imported pool has a vdev on the stick (or the listing
-        failed, which cannot tell)."""
+        failed, which cannot tell). Each vdev is resolved to its whole disks
+        with ``lsblk -s``, as protected_disks does (M4c-27, M4sV-2): a by-id
+        name, a kernel name, a dm or md device on the stick all count."""
         r = sh.run("zpool list -vHP", log=self.log)
         if not r.ok:
             return True
-        names = {f"{identity.BY_ID_DIR}/{n}" for n in (self.stick.by_id, *self.stick.aliases) if n}
         for line in r.lines:
             path = line.strip().split("\t")[0]
-            if any(path.startswith(n + "-part") for n in names) or path == self.disk:
-                return True
-            if path.startswith(self.disk) and path[len(self.disk) :].lstrip("p").isdigit():
+            if path.startswith("/dev/") and self.disk in identity.disks_under(path):
                 return True
         return False
 
