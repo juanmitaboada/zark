@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import anchors, certificates, drive_marks, engine, forensics, sh, status, survey
+from lib import anchors, certificates, drive_marks, engine, forensics, reclaim, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -457,14 +457,14 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
         first=complete.first,
     )
     tops = [t for t, _ in prune.datasets]
-    freed = engine.reclaim(pool, prune.snapshots, tops) if not prune.empty else 0
+    freed = reclaim.reclaim(pool, prune.snapshots, tops) if not prune.empty else 0
     actions: list[Callable[[], object]] = []
     if not prune.empty:
         log.info(
             f"Retention policy: {len(prune.snapshots)} snapshot(s) on {pool} go now "
             + f"(frees {_gib(freed)})"
         )
-        actions.append(partial(engine.apply_prune, pool, prune, log))
+        actions.append(partial(reclaim.apply_prune, pool, prune, log))
     chosen: list[tuple[str, int]] = []
     beyond = Prune()
     total = freed
@@ -482,7 +482,7 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
             for d in whole_datasets(eng.dest, [*prune.snapshots, *beyond.snapshots])
             if d not in prune.datasets
         ]
-        new_total = engine.reclaim(
+        new_total = reclaim.reclaim(
             pool, [*prune.snapshots, *beyond.snapshots], [*tops, *(t for t, _ in beyond.datasets)]
         )
         chosen.append((name, new_total - total))
@@ -500,7 +500,7 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
         for top, _why in beyond.datasets:
             log.info(f"  {pool}/{top} and everything below it go too (nothing of it would be left)")
         if log.ask(f"Remove these {len(chosen)} backup point(s) from {pool}?", default=False):
-            actions.append(partial(engine.apply_prune, pool, beyond, log))
+            actions.append(partial(reclaim.apply_prune, pool, beyond, log))
             room = avail + total
     _check_room(pool, needed, room, margin, policy, log)
     return actions
@@ -554,12 +554,12 @@ def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
         log.info(f"  kept {pool}/{target}: {why}")
     if prune.empty:
         return 0, 0
-    freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
+    freed = reclaim.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
     log.info(
         f"Retention on {pool} (window {policy.window_days} days): "
         + f"{len(prune.snapshots)} snapshot(s) go, freeing {_gib(freed)}"
     )
-    count, failed = engine.apply_prune(pool, prune, log)
+    count, failed = reclaim.apply_prune(pool, prune, log)
     if failed:
         log.warn(f"{len(failed)} snapshot(s) could not be removed (see above); kept for next time")
     return count, freed

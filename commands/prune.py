@@ -42,7 +42,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import anchors, drive_marks, engine, sh, status, survey
+from lib import anchors, drive_marks, reclaim, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -100,7 +100,7 @@ def _summary(inv: Inventory, drives: dict[str, str], log: Log) -> None:
     def line(label: str, items: list[Item]) -> None:
         if items:
             oldest = min(i.creation for i in items)
-            freed = engine.reclaim_names([i.target for i in items])
+            freed = reclaim.reclaim_names([i.target for i in items])
             log.info(
                 f"  {label:34} {len(items):5}  oldest {_when(oldest)}"
                 + f"  all of them free {_gib(freed)}"
@@ -118,7 +118,7 @@ def _summary(inv: Inventory, drives: dict[str, str], log: Log) -> None:
 
 
 def _remove(items: list[Item], why: str, log: Log) -> None:
-    count, failed = engine.destroy_snapshots([(i.target, i.reason or why) for i in items], log)
+    count, failed = reclaim.destroy_snapshots([(i.target, i.reason or why) for i in items], log)
     log.ok(f"{count} snapshot(s) removed")
     if failed:
         log.warn(f"{len(failed)} could not be removed (see above)")
@@ -133,7 +133,7 @@ def _by_age(inv: Inventory, log: Log) -> None:
     if not items:
         log.info(f"No sanoid snapshot is older than {raw} days")
         return
-    freed = engine.reclaim_names([i.target for i in items])
+    freed = reclaim.reclaim_names([i.target for i in items])
     log.warn(
         f"{len(items)} sanoid snapshot(s) older than {raw} days; "
         + f"removing them frees {_gib(freed)}"
@@ -146,7 +146,7 @@ def _by_age(inv: Inventory, log: Log) -> None:
 def _residues(inv: Inventory, log: Log) -> None:
     for i in inv.residues_kept:
         log.info(f"  kept {i.target}: {i.reason}")
-    freed = engine.reclaim_names([i.target for i in inv.residues])
+    freed = reclaim.reclaim_names([i.target for i in inv.residues])
     for i in inv.residues:
         log.info(f"  {i.target}: {i.reason}")
     if log.ask(f"Remove these {len(inv.residues)} residue(s) ({_gib(freed)})?", default=False):
@@ -193,7 +193,7 @@ def _anchors(inv: Inventory, drives: dict[str, str], log: Log) -> None:
     guid = guids[pick - 1]
     items = inv.anchors[guid]
     name = drives.get(guid, guid)
-    freed = engine.reclaim_names([i.target for i in items])
+    freed = reclaim.reclaim_names([i.target for i in items])
     # The drive's newest snapshot on bpool is its backup point, so the only
     # common snapshots left are sanoid's: a rollback, never incremental (M3R-1).
     log.warn(
@@ -298,13 +298,13 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     for target, why in prune.kept:  # as backup's retention reports them (M3X.5)
         log.info(f"  kept {pool}/{target}: {why}")
     if not prune.empty:
-        freed = engine.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
+        freed = reclaim.reclaim(pool, prune.snapshots, [t for t, _ in prune.datasets])
         log.info(
             f"{pool}'s retention (window {policy.window_days} days) removes "
             + f"{len(prune.snapshots)} snapshot(s) now, freeing {_gib(freed)}"
         )
         if log.ask(f"Apply {pool}'s retention now?", default=False):
-            _ = engine.apply_prune(pool, prune, log)
+            _ = reclaim.apply_prune(pool, prune, log)
             dest = _reread(pool, log)
             prune = Prune()
     else:
@@ -341,7 +341,7 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
             # 7a (M3R-3): a lineage these removals leave empty goes whole, and
             # its `used` counts in what the removal frees.
             tops = [t for t, _ in whole_datasets(dest, removals)]
-            freed = engine.reclaim(pool, removals, tops)
+            freed = reclaim.reclaim(pool, removals, tops)
             log.info(f"  {i}) {name}  (with the ones above: {_gib(freed)})")
         raw = log.ask_input("How many of the oldest to remove? (0: none)", "0")
         n = min(int(raw), len(names)) if raw.isdigit() else 0
@@ -350,19 +350,19 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         for top, _why in plan.datasets:
             log.info(f"  {pool}/{top} and everything below it go too (nothing of it would be left)")
         if chosen and _typed(log, f"remove the {n} oldest backup point(s) from {pool}"):
-            _ = engine.apply_prune(pool, plan, log)
+            _ = reclaim.apply_prune(pool, plan, log)
             dest = _reread(pool, log)
     legacy = _legacy_history(dest, pins, complete.first)
     if not legacy.empty:
         tops = [t for t, _ in legacy.datasets]
-        freed = engine.reclaim(pool, legacy.snapshots, tops)
+        freed = reclaim.reclaim(pool, legacy.snapshots, tops)
         whole = f", and {len(tops)} archived or kept dataset(s) left empty" if tops else ""
         log.info(
             f"{pool} holds {len(legacy.snapshots)} snapshot(s) from before its first backup "
             + f"point{whole}; removing them frees {_gib(freed)}"
         )
         if _typed(log, f"remove the history from before {pool}'s first backup point"):
-            _ = engine.apply_prune(pool, legacy, log)
+            _ = reclaim.apply_prune(pool, legacy, log)
 
 
 def run(args: list[str]) -> None:

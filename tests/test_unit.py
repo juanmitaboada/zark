@@ -158,6 +158,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     engine,
     forensics,
     grub_guard,
+    reclaim,
     survey,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -12675,7 +12676,7 @@ class TestRetentionOnDrive:
         assert f"rpool/ROOT/be@{P1}" in gone and f"rpool/ROOT/be@{P2}" not in gone
         before = len(fake.calls)
         with patch_sh(fake), redirect_stdout(StringIO()):
-            count, failed = engine.apply_prune("backup", prune, Log())
+            count, failed = reclaim.apply_prune("backup", prune, Log())
         destroys = [c for c in fake.calls[before:] if c.startswith("zfs destroy")]
         assert count == len(prune.snapshots) and not failed
         assert all("%" not in c and " -r " not in c for c in destroys)
@@ -12720,7 +12721,7 @@ class TestRetentionOnDrive:
         fake.snap("backup/b", "only")
         targets = [(f"backup/a@{n}", "old") for n in names] + [("backup/b@only", "old")]
         with patch_sh(fake), redirect_stdout(StringIO()):
-            count, failed = engine.destroy_snapshots(targets, Log())
+            count, failed = reclaim.destroy_snapshots(targets, Log())
         destroys = [c for c in fake.calls if c.startswith("zfs destroy")]
         assert (count, failed) == (251, [])
         assert [len(_destroyed(c)) for c in destroys] == [100, 100, 50, 1]
@@ -12738,7 +12739,7 @@ class TestRetentionOnDrive:
         fake.ds["backup/a"].snaps[1].userrefs = 1  # zfs hold
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out):
-            count, failed = engine.destroy_snapshots(
+            count, failed = reclaim.destroy_snapshots(
                 [(f"backup/a@{n}", "old") for n in ("x", "y", "z")], Log()
             )
         assert (count, failed) == (2, ["backup/a@y"])
@@ -12863,7 +12864,7 @@ class TestRetentionOnDrive:
         prune = self._plan(fake)
         before = len(fake.calls)
         with patch_sh(fake):
-            freed = engine.reclaim("backup", prune.snapshots)
+            freed = reclaim.reclaim("backup", prune.snapshots)
         dry = [c for c in fake.calls[before:] if c.startswith("zfs destroy -nvp")]
         assert freed == len(prune.snapshots) * (1 << 20)
         assert len(dry) == len({r.rel for r in prune.snapshots})
@@ -12885,7 +12886,7 @@ class TestRetentionOnDrive:
         with tempfile.TemporaryDirectory() as td:
             logf = os.path.join(td, "zark.log")
             with patch_sh(fake), redirect_stdout(StringIO()):
-                count, failed = engine.apply_prune("backup", prune, Log(logf))
+                count, failed = reclaim.apply_prune("backup", prune, Log(logf))
             logged = Path(logf).read_text(encoding="utf-8")
         assert not failed and count == len(prune.snapshots)
         assert f"{arch}@zark_2026-08-01_10:00:00Z goes with {arch}" in logged
@@ -12901,7 +12902,7 @@ class TestRetentionOnDrive:
         fake.fail_cmds.add(f"-t filesystem,volume -r {arch}")
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out):
-            _count, failed = engine.apply_prune("backup", prune, Log())
+            _count, failed = reclaim.apply_prune("backup", prune, Log())
         assert failed == [arch] and arch in fake.ds
         assert "its datasets could not be listed" in out.getvalue()
         assert not any(c.startswith("zfs destroy -r") for c in fake.calls)
@@ -12922,7 +12923,7 @@ class TestRetentionOnDrive:
         ]
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out):
-            _ = engine.apply_prune("backup", prune, Log())
+            _ = reclaim.apply_prune("backup", prune, Log())
         assert arch not in fake.ds
         assert f"zfs destroy -r {arch}" in fake.calls
 
@@ -12988,7 +12989,7 @@ class TestBackupSpace:
             prune = ret.plan_prune(
                 dest, drive_marks.drive_complete("backup").run, ret.Policy(), NOW
             )
-            _ = engine.apply_prune("backup", prune, Log())
+            _ = reclaim.apply_prune("backup", prune, Log())
         policy = ret.Policy(margin_pct=0)
         ok, asked, out = self._decide(fake, 0, 10**12, False, policy)
         assert ok is None and asked == ["Remove these 1 backup point(s) from backup?"]
@@ -13527,7 +13528,7 @@ class TestPruneCommand:
             prune = ret.plan_prune(
                 dest, drive_marks.drive_complete("backup").run, ret.Policy(), NOW
             )
-            _ = engine.apply_prune("backup", prune, Log())
+            _ = reclaim.apply_prune("backup", prune, Log())
         home = fake.ds["backup/rpool/USERDATA/home"]
         next(x for x in home.snaps if x.name == P2).clones = "backup/rpool/USERDATA/home2"
         cfg = make_config()
@@ -13645,7 +13646,7 @@ class TestPruneCommand:
         must be read in full; a failed listing stops prune before the
         oldest points are offered."""
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
-        real = engine.apply_prune
+        real = reclaim.apply_prune
 
         def apply_then_fail(pool: str, prune: ret.Prune, log: Log) -> tuple[int, list[str]]:
             r = real(pool, prune, log)
@@ -13654,7 +13655,7 @@ class TestPruneCommand:
 
         out, stopped = self._prune_drive_run(
             fake,
-            patch.object(prune_mod.engine, "apply_prune", side_effect=apply_then_fail),
+            patch.object(prune_mod.reclaim, "apply_prune", side_effect=apply_then_fail),
             *self._answers([], ["1"], "PRUNE", True),
         )
         assert stopped and "Cannot read backup" in out
