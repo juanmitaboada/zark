@@ -799,7 +799,10 @@ for the canonical end-to-end sequences.
     datasets mount read-only without the intent log replayed (the last
     writes before an unclean shutdown are not seen), and a dataset whose
     mountpoint directory is missing cannot have it created: it is listed
-    as not mounted.
+    as not mounted. A link in the installed tree is resolved inside it by
+    the same rule as the backup's tree, here and for **chroot** and
+    **repair-boot**: a dataset under the tree's */var/run* mounts on the
+    tree's */run*, never the live session's.
 
     The complementary command is **umount**.
 

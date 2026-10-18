@@ -17,11 +17,16 @@ Mounting the installed system's pools from a live USB.
 Imports rpool/bpool under an altroot (-R) and mounts each dataset with
 `zfs mount`, which prefixes the stored mountpoint with the altroot. This
 handles every ZFS mountpoint type without modifying dataset properties.
+A mountpoint that crosses a symlink of the installed tree is resolved
+inside it first (layout_target), as the backup mount does.
 
 Used by:
   - zark mount local / zark chroot / zark repair-boot (installed system
     from a live USB)
 """
+
+import os
+import shlex
 
 from lib.backup_layout import choose_dataset
 from lib.cleanup import Cleanup
@@ -53,6 +58,93 @@ def find_system_root_dataset(log: Log) -> str | None:
     return choose_dataset(found, "rpool", log) or None
 
 
+MAX_SYMLINKS = 40  # as the kernel's path walk (MAXSYMLINKS)
+
+
+def resolve_in_tree(root: str, path: str) -> str | None:
+    """``path`` (absolute, inside ``root``) resolved as a chroot at ``root``
+    would: component by component, an absolute link restarting at ``root``,
+    ``..`` never above it (M4c-22). Returns the path with no symlink left,
+    or None after more than :data:`MAX_SYMLINKS` links. Components that do
+    not exist are kept as they are."""
+    rel = os.path.relpath(path, root)
+    parts = [] if rel == "." else rel.split("/")
+    current: list[str] = []
+    links = 0
+    while parts:
+        c = parts.pop(0)
+        if c in ("", "."):
+            continue
+        if c == "..":
+            if current:
+                _ = current.pop()
+            continue
+        here = os.path.join(root, *current, c)
+        if os.path.islink(here):
+            links += 1
+            if links > MAX_SYMLINKS:
+                return None
+            link = os.readlink(here)
+            if link.startswith("/"):
+                current = []
+            parts = link.split("/") + parts
+            continue
+        current.append(c)
+    return os.path.join(root, *current) if current else root
+
+
+def layout_target(path: str, mnt: str, root: str, readonly: bool) -> tuple[str, str]:
+    """Where ``path`` (a target under ``mnt``) is mounted: ``(target, "")``,
+    or ``("", why it is skipped)``.
+
+    A symlink or .. in the backup must not lead out of the tree onto the
+    running system. Read-only, it is resolved inside the tree as a chroot
+    would (an absolute /var/run -> /run of the backup is the tree's /run):
+    nothing in a read-only pool changes between the resolution and the
+    mount (M4c-22). Read-write, one that leaves the tree is refused. Either
+    way the resolved path, with no link left, is mounted.
+    """
+    if not readonly:
+        target = os.path.realpath(path)
+        if not target.startswith(f"{root}/"):
+            return "", f"{path} resolves to {target}"
+        return target, ""
+    resolved = resolve_in_tree(root, os.path.join(root, os.path.relpath(path, mnt)))
+    if resolved is None:
+        return "", f"{path}: too many symlinks"
+    if resolved == root:
+        # Mounted there, it would hide the boot environment's root.
+        return "", f"{path} resolves to the root"
+    return resolved, ""
+
+
+def _mount_in_tree(ds: str, altroot: str, zfs: ZFS, log: Log, readonly: bool) -> str:
+    """Mount ``ds`` of the installed tree at ``altroot``; where, or "".
+
+    libzfs joins the altroot and the mountpoint as strings and mkdirs and
+    mounts that path, so the kernel follows every link in it: the tree's
+    /var/run -> /run would land on the live session's /run
+    (lib/libzfs/libzfs_dataset.c:2731-2758, libzfs_mount.c:465-474,
+    os/linux/libzfs_mount_os.c:331-348). When the path crosses no link,
+    ``zfs mount`` as before.
+    """
+    mp = zfs.get_property(ds, "mountpoint")
+    if not mp.startswith("/"):
+        return ""
+    root = os.path.realpath(altroot)
+    target, why = layout_target(mp, altroot, root, readonly)
+    if why:
+        log.warn(f"{ds} not mounted: {why}")
+        return ""
+    if target == os.path.join(root, os.path.relpath(mp, altroot)):
+        return mp if run(f"zfs mount {ds}", log=log).ok else ""
+    if not readonly:
+        _ = run(f"mkdir -p {shlex.quote(target)}", log=log)
+    opts = "ro,zfsutil" if readonly else "zfsutil"
+    ok = run(f"mount -t zfs -o {opts} {ds} {shlex.quote(target)}", log=log).ok
+    return target if ok else ""
+
+
 def mount_system_pools(
     altroot: str,
     passphrase: str | None,
@@ -78,7 +170,9 @@ def mount_system_pools(
         pool left in use by an unclean shutdown still imports. The forced state
         is transient - the caller's ``Cleanup`` exports cleanly on exit.
       * Datasets mount at ``altroot`` + their *stored* mountpoint via plain
-        ``zfs mount``; this function NEVER runs ``zfs set mountpoint``. That
+        ``zfs mount``, or, when that path crosses a symlink of the installed
+        tree, at the path :func:`layout_target` resolves with ``mount -t zfs
+        -o [ro,]zfsutil``; this function NEVER runs ``zfs set mountpoint``. That
         honours the absolute project rule against mountpoint changes while the
         keystore zvol is imported - the altroot import is the sanctioned
         mitigation, and ``zfs mount <ds>`` mounts ``canmount=noauto`` boot
@@ -148,11 +242,10 @@ def mount_system_pools(
             continue
         if ds.canmount == "off" or ds.mountpoint in ("none", "-", "legacy"):
             continue
-        if run(f"zfs mount {ds.name}", log=log).ok:
-            mp = zfs.get_property(ds.name, "mountpoint")
-            if mp:
-                cleanup.track_mount(mp)
-                mount_points.append(mp)
+        mp = _mount_in_tree(ds.name, altroot, zfs, log, readonly)
+        if mp:
+            cleanup.track_mount(mp)
+            mount_points.append(mp)
         elif readonly:
             not_mounted.append(ds.name)
 
@@ -163,8 +256,8 @@ def mount_system_pools(
         else:
             log.warn("Could not import bpool - /boot will be unavailable in the chroot")
     bpool_boot = f"bpool/BOOT/{ubuntu_name}"
-    if zfs.dataset_exists(bpool_boot) and run(f"zfs mount {bpool_boot}", log=log).ok:
-        bp_mp = zfs.get_property(bpool_boot, "mountpoint")
+    if zfs.dataset_exists(bpool_boot):
+        bp_mp = _mount_in_tree(bpool_boot, altroot, zfs, log, readonly)
         if bp_mp:
             cleanup.track_mount(bp_mp)
             mount_points.append(bp_mp)

@@ -96,6 +96,7 @@ import lib.health as health_mod  # pylint: disable=wrong-import-position # noqa:
 import lib.initrd as initrd_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.live as live_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.mount as lib_mount  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
 import lib.platform_facts as pfacts  # pylint: disable=wrong-import-position # noqa: E402
@@ -5474,7 +5475,7 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
             "rpool/ROOT\nrpool/ROOT/ubuntu_x\n",
         )
         mock.on("zfs mount rpool/ROOT/ubuntu_x").succeeds()
-        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x").succeeds("/")
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x").succeeds("/mnt/zark/chroot")
         # rpool dataset listing: container + BE + keystore zvol + a child.
         mock.on(
             "zfs list -H -o name,mountpoint,used,refer,canmount,type -t filesystem,volume -r rpool",
@@ -5486,14 +5487,20 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
             "rpool/USERDATA\t/home\t1G\t1G\ton\tfilesystem\n",
         )
         mock.on("zfs mount rpool/USERDATA").succeeds()
-        mock.on("zfs get -H -o value mountpoint rpool/USERDATA").succeeds("/home")
+        mock.on("zfs get -H -o value mountpoint rpool/USERDATA").succeeds("/mnt/zark/chroot/home")
         # bpool boot env.
         mock.on("zfs list bpool/BOOT/ubuntu_x").succeeds("bpool/BOOT/ubuntu_x")
         mock.on("zfs mount bpool/BOOT/ubuntu_x").succeeds()
-        mock.on("zfs get -H -o value mountpoint bpool/BOOT/ubuntu_x").succeeds("/boot")
+        mock.on("zfs get -H -o value mountpoint bpool/BOOT/ubuntu_x").succeeds(
+            "/mnt/zark/chroot/boot"
+        )
 
         cleanup = Cleanup(make_log())
-        with patch_sh(mock), redirect_stdout(StringIO()):
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch.object(lib_mount, "_mount_in_tree", wraps=lib_mount._mount_in_tree) as each,  # pylint: disable=protected-access
+        ):
             res = mount_system_pools(
                 "/mnt/zark/chroot",
                 "pp",
@@ -5513,6 +5520,53 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
         assert not mock.was_called("zfs mount rpool/keystore")
         # The helper must never touch mountpoint properties (project rule #1).
         assert not any("zfs set mountpoint" in c for c in mock.calls)
+        # No link in their paths: zfs mount, as before (M4d-18).
+        assert mock.was_called("zfs mount rpool/USERDATA")
+        assert mock.was_called("zfs mount bpool/BOOT/ubuntu_x")
+        assert not mock.was_called("mount -t zfs")
+        assert [c.args[0] for c in each.call_args_list] == ["rpool/USERDATA", "bpool/BOOT/ubuntu_x"]
+
+    def test_a_link_in_the_installed_tree_is_resolved_inside_it(self):
+        # M4c plan 14 (1): libzfs mounts at altroot + mountpoint, and the
+        # kernel follows the tree's /var/run -> /run onto the live's /run.
+        with tempfile.TemporaryDirectory() as td:
+            alt = os.path.realpath(td)
+            os.makedirs(f"{alt}/run")
+            os.makedirs(f"{alt}/var")
+            os.symlink("/run", f"{alt}/var/run")
+            for readonly in (True, False):
+                mock = MockShell()
+                mock.on("zfs get -H -o value mountpoint rpool/x").succeeds(f"{alt}/var/run/x")
+                mock.on_prefix("mount -t zfs").succeeds()
+                mock.on_prefix("mkdir -p").succeeds()
+                out = StringIO()
+                with patch_sh(mock), redirect_stdout(out):
+                    got = lib_mount._mount_in_tree(  # pylint: disable=protected-access
+                        "rpool/x", alt, ZFS(make_log()), make_log(), readonly
+                    )
+                assert mock.was_not_called("zfs mount"), mock.calls
+                if readonly:
+                    assert got == f"{alt}/run/x"
+                    assert mock.calls[-1] == f"mount -t zfs -o ro,zfsutil rpool/x {alt}/run/x"
+                else:  # the host's realpath leaves the tree: refused
+                    assert got == "" and mock.was_not_called("mount -t zfs"), mock.calls
+                    assert (
+                        f"rpool/x not mounted: {alt}/var/run/x resolves to /run/x" in out.getvalue()
+                    )
+            os.symlink("run", f"{alt}/lnk")  # a relative link stays in the tree
+            mock = MockShell()
+            mock.on("zfs get -H -o value mountpoint rpool/y").succeeds(f"{alt}/lnk/y")
+            mock.on_prefix("mount -t zfs").succeeds()
+            mock.on_prefix("mkdir -p").succeeds()
+            with patch_sh(mock), redirect_stdout(StringIO()):
+                got = lib_mount._mount_in_tree(  # pylint: disable=protected-access
+                    "rpool/y", alt, ZFS(make_log()), make_log(), False
+                )
+        assert got == f"{alt}/run/y"
+        assert mock.calls[-2:] == [
+            f"mkdir -p {alt}/run/y",
+            f"mount -t zfs -o zfsutil rpool/y {alt}/run/y",
+        ]
 
     def test_read_only_imports_readonly_and_lists_what_cannot_mount(self):
         # M4c-21 (R2§8.6): nothing written to the installed pools, no remount pass.
@@ -5524,7 +5578,7 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
         mock.on(f"{ro} bpool").succeeds()
         mock.on("zfs list -H -o name -r rpool/ROOT").succeeds("rpool/ROOT\nrpool/ROOT/ubuntu_x\n")
         mock.on("zfs mount rpool/ROOT/ubuntu_x").succeeds()
-        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x").succeeds("/")
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x").succeeds("/mnt/zark/system")
         mock.on(
             "zfs list -H -o name,mountpoint,used,refer,canmount,type -t filesystem,volume -r rpool",
         ).succeeds(
@@ -5533,13 +5587,16 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
             "rpool/srv\t/srv\t1G\t1G\ton\tfilesystem\n",
         )
         mock.on("zfs mount rpool/USERDATA").succeeds()
-        mock.on("zfs get -H -o value mountpoint rpool/USERDATA").succeeds("/home")
+        mock.on("zfs get -H -o value mountpoint rpool/USERDATA").succeeds("/mnt/zark/system/home")
         mock.on("zfs mount rpool/srv").fails(
             "cannot mount '/mnt/zark/system/srv': Read-only file system"
         )
+        mock.on("zfs get -H -o value mountpoint rpool/srv").succeeds("/mnt/zark/system/srv")
         mock.on("zfs list bpool/BOOT/ubuntu_x").succeeds("bpool/BOOT/ubuntu_x")
         mock.on("zfs mount bpool/BOOT/ubuntu_x").succeeds()
-        mock.on("zfs get -H -o value mountpoint bpool/BOOT/ubuntu_x").succeeds("/boot")
+        mock.on("zfs get -H -o value mountpoint bpool/BOOT/ubuntu_x").succeeds(
+            "/mnt/zark/system/boot"
+        )
         ks = _FakeKeystore()
         out = StringIO()
         with patch_sh(mock), redirect_stdout(out):
@@ -10554,7 +10611,7 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
 
     def test_links_resolve_inside_the_tree(self):
         # M4c-22 (M1P.19): an absolute link of the backup is the tree's, not the live's.
-        in_tree = mount_mod.resolve_in_tree
+        in_tree = lib_mount.resolve_in_tree
         with tempfile.TemporaryDirectory() as td:
             root = os.path.realpath(td)
             os.makedirs(f"{root}/run/lock")
