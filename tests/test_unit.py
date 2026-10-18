@@ -16498,7 +16498,7 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
 
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
-        assert len([c for c in checks if c.level == 1]) == 46
+        assert len([c for c in checks if c.level == 1]) == 47
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         for c in checks:

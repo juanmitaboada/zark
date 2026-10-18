@@ -1313,3 +1313,47 @@ def key_02(b: Bench) -> None:
         if Path(f"/dev/mapper/{mapper}").exists():
             _ = b.run(f"cryptsetup close {mapper}")
         b.drop_pool(c)
+
+
+@check(
+    "KEY-03",
+    1,
+    1,
+    "only an encryption root takes a key; loading it unlocks its children and clones",
+    depends=(
+        "ZFS.encryption_roots_needing_key (M4d-19)",
+        "Keystore.load_pool_keys, recover's _load_keys_from_file",
+    ),
+)
+def key_03(b: Bench) -> None:
+    """An encryption root with an inheriting child and a clone of the
+    child's snapshot elsewhere: with the key unloaded all three are
+    ``unavailable`` and name the root as ``encryptionroot``; ``load-key``
+    of the child is refused; loading the root alone makes all three
+    ``available``. OpenZFS lib/libzfs/libzfs_crypto.c:1316-1328,
+    :1209-1234; module/zfs/dsl_crypt.c:1166-1189, :436-456, :1913-1931."""
+    root = b.fs(
+        f"{b.a}/key03",
+        "encryption=aes-256-gcm",
+        "keyformat=raw",
+        f"keylocation=file://{b.key}",
+    )
+    child = b.fs(f"{root}/c")
+    b.write(child, 64)
+    _ = b.ok(f"zfs snapshot {child}@s")
+    clone = f"{b.a}/key03k"
+    _ = b.ok(f"zfs clone -u {child}@s {clone}")
+    three = (root, child, clone)
+    for ds in three:
+        got = b.value("encryptionroot", ds)
+        expect(got == root, f"{ds}: encryptionroot {root}", got)
+    _ = b.ok(f"zfs unload-key {root}")
+    for ds in three:
+        got = b.value("keystatus", ds)
+        expect(got == "unavailable", f"{ds} unavailable with the key unloaded", got)
+    r = b.run(f"zfs load-key -L file://{b.key} {child}")
+    expect(not r.ok, f"load-key of {child} refused", exit_status(r), text_of(r))
+    _ = b.ok(f"zfs load-key -L file://{b.key} {root}")
+    for ds in three:
+        got = b.value("keystatus", ds)
+        expect(got == "available", f"{ds} available once {root}'s key is loaded", got)
