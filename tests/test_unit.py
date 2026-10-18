@@ -6765,13 +6765,22 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
 class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
     """I16/I22/I23 + I-G in prepare."""
 
-    def _prepare(self, fake: FakeZfs, cfg_dir: Path, **answers: str) -> int:
+    def _prepare(
+        self,
+        fake: FakeZfs,
+        cfg_dir: Path,
+        readback: Readback | None = None,
+        out: StringIO | None = None,
+        **answers: str,
+    ) -> int:
         """Run prepare; ``answers`` by the first word of an input question
-        (Pool, Days); anything not given takes the default."""
+        (Pool, Days); anything not given takes the default. ``readback`` is
+        the drive's read-back (ONLINE when not given); ``out`` gets stdout."""
         answers = {"Pool": "blue", **answers}
         ident = _purge_ident(None)
         report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
-        readback = Readback(imported=True, health="ONLINE", reexported=True)
+        if readback is None:
+            readback = Readback(imported=True, health="ONLINE", reexported=True)
         rc = 0
         with ExitStack() as stack:
             for cm in (
@@ -6791,7 +6800,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
                 patch("builtins.input", return_value=""),
                 patch.object(prepare_mod, "prompt_eject_or_attach"),
                 patch.object(Cleanup, "register", lambda _self: None),
-                redirect_stdout(StringIO()),
+                redirect_stdout(StringIO() if out is None else out),
                 redirect_stderr(StringIO()),
             ):
                 stack.enter_context(cm)
@@ -6914,6 +6923,25 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
             for n in [b.name for b in d.bookmarks] + fake.names(ds)
         ]
         assert not [n for n in names if repl.anchor_disk(n) == "777"]
+
+    def test_not_verified_prepare_leaves_no_anchors(self):
+        """M2V-5 N28: a prepare whose read-back is not clean ends DRIVE NOT
+        VERIFIED, unregistered, and drops the anchors its datasets got."""
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        bad = Readback(imported=True, health="DEGRADED", status="x", reexported=True)
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, readback=bad, out=out) == 1
+        assert "DRIVE NOT VERIFIED" in out.getvalue()
+        names = [
+            n
+            for ds, d in fake.ds.items()
+            if ds.split("/")[0] in ("rpool", "bpool")
+            for n in [b.name for b in d.bookmarks] + fake.names(ds)
+        ]
+        assert not [n for n in names if repl.anchor_disk(n) == "777"], names
+        assert json.loads((cfg_dir / "known_drives.json").read_text()) == {}
 
     def test_prepare_drops_the_replaced_entrys_anchors(self):
         """M2R-6: the stale entry it replaces was this same disk."""
@@ -11074,6 +11102,45 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert res.ok, res
         assert P3 in fake.names("backup/rpool/USERDATA/home")
 
+    def test_token_stale_at_transfer_time_is_discarded_and_replanned(self) -> None:
+        """M2V-5 T4b: the token's snapshot goes between the survey and the
+        transfer (pruned by hand during the questions): the transfer's own
+        dry run finds it gone, the partial state is discarded once, and the
+        dataset is planned afresh in the same run."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        named = fake.ds["backup/rpool/USERDATA/home"].token.split("|")[2]
+        before = fake.names("backup/rpool/USERDATA/home")
+        seen: list[repl.State] = []
+
+        def decide(plans: list[repl.DatasetPlan], _eng: engine.Run) -> bool:
+            seen.append(next(q for q in plans if q.rel == "rpool/USERDATA/home").state)
+            home = fake.ds["rpool/USERDATA/home"]
+            home.snaps = [x for x in home.snaps if x.name != named]
+            return True
+
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P3, sleep=lambda _s: None)
+            res = engine.execute(eng, Cleanup(Log()), decide)
+        assert seen == [repl.State.RESUME]
+        assert res.ok, res
+        calls = fake.calls
+        aborts = [
+            i
+            for i, c in enumerate(calls)
+            if c.startswith("zfs receive -A backup/rpool/USERDATA/home")
+        ]
+        sends = [i for i, c in enumerate(calls) if c.startswith("zfs send -t ")]
+        assert len(aborts) == 1 and sends and sends[0] < aborts[0], calls
+        assert "partial receive discarded: cannot resume send:" in out.getvalue()
+        assert not fake.ds["backup/rpool/USERDATA/home"].token
+        after = fake.names("backup/rpool/USERDATA/home")
+        assert after[: len(before)] == before and after[-1] == P3
+
     def test_partial_receive_kept_when_the_resume_fails_otherwise(self) -> None:
         """M2R-10 (E8): an I/O error on resume keeps the partial state."""
         fake = self._fresh()
@@ -11293,6 +11360,28 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             assert not marker.exists()
         assert fake.units["sanoid.timer"] == "active"
         assert "left stopped by an earlier zark run" in out.getvalue()
+
+    def test_marker_stays_when_the_timer_cannot_be_started(self) -> None:
+        """M2V-5 S9: when `systemctl start sanoid.timer` fails at the end of a
+        run, the marker stays, and the next run starts the timer and removes
+        it."""
+        fake = self._fresh()
+        fake.fail_cmds.add("systemctl start sanoid.timer")
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P1, sleep=lambda _s: None)
+            assert engine.execute(eng, Cleanup(Log()), lambda _p, _r: True).ok
+            assert Path(engine.SANOID_MARKER).exists()
+            assert fake.units["sanoid.timer"] == "inactive"
+            assert "Could not start sanoid.timer;" in out.getvalue()
+            fake.fail_cmds.discard("systemctl start sanoid.timer")
+            again = StringIO()
+            with redirect_stdout(again):
+                eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+                assert engine.execute(eng, Cleanup(Log()), lambda _p, _r: True).ok
+            assert not Path(engine.SANOID_MARKER).exists()
+        assert fake.units["sanoid.timer"] == "active"
+        assert "left stopped by an earlier zark run" in again.getvalue()
 
     def test_marker_present_while_the_timer_is_stopped(self) -> None:
         """The marker exists exactly while this run holds the timer stopped."""
@@ -12321,6 +12410,33 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         ok, _ = self._decide(fake, [2], typed="DESTROY")
         assert ok and "backup/rpool/var/lib/docker" not in fake.ds
 
+    def test_orphan_destroy_lists_what_goes_before_the_word(self) -> None:
+        """M2V-5 N24: the ORPHAN destroy names every dataset it takes on the
+        drive before DESTROY is asked, as the DIVERGED one does."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _ = fake.ds.pop("rpool/var/lib/docker")
+        _ = fake.ds.pop("rpool/var/lib")
+        plans, eng = self._plans(fake)
+        out = StringIO()
+        shown: list[str] = []
+
+        def typed(*_a: object, **_k: object) -> str:
+            shown.append(out.getvalue())
+            return "DESTROY"
+
+        with (
+            patch_sh(fake),
+            patch.object(Log, "ask_choice", side_effect=[2]),
+            patch.object(Log, "ask_text", side_effect=typed),
+            redirect_stdout(out),
+        ):
+            assert _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+        assert "DESTROY takes 2 dataset(s) on the backup:" in shown[0], shown[0]
+        assert "backup/rpool/var/lib  (" in shown[0]
+        assert "backup/rpool/var/lib/docker  (" in shown[0]
+        assert "backup/rpool/var/lib" not in fake.ds
+
     def test_kept_orphan_back_in_origin_loses_its_mark(self) -> None:
         """O13: a kept orphan origin has again (after a recover) is replicated
         and unmarked, so a later removal in origin is asked about again."""
@@ -13288,6 +13404,27 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
             f"   pool: bpool\n     id: {pool_id}\n  state: ONLINE\n config:\n\n"
             f"\tbpool  ONLINE\n\t  {dev}  ONLINE\n\n"
         )
+
+    @staticmethod
+    def _pool(name: str, pool_id: str, dev: str) -> str:
+        return (
+            f"   pool: {name}\n     id: {pool_id}\n  state: ONLINE\n config:\n\n"
+            f"\t{name}  ONLINE\n\t  {dev}  ONLINE\n\n"
+        )
+
+    def test_only_a_pool_named_bpool_counts(self):
+        """M2V-5 N54: bpool is not imported, and the importable pools are a
+        drive and another disk's rpool: no bpool among them, no refusal."""
+        mock = MockShell()
+        mock.on("zpool list -H -o name bpool").fails("no such pool")
+        mock.on("env LC_ALL=C ZPOOL_VDEV_NAME_PATH=1 zpool import").succeeds(
+            self._pool("blue", "444", f"{_USB}-part1") + self._pool("rpool", "555", f"{_USB}-part4")
+        )
+        mock.on("zpool list -vHP rpool").succeeds(f"rpool\t1T\n\t{_NVME}-part4\t1T")
+        out = StringIO()
+        with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(out):
+            survey.require_boot_pool(make_log())
+        assert "bpool is not imported" not in out.getvalue()
 
     def test_own_bpool_is_imported_by_id(self):
         out = self._refusal(self._bpool("111", f"{_NVME}-part3"))
