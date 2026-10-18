@@ -40,13 +40,13 @@ import shlex
 from pathlib import Path
 
 from lib import anchors, registry, sh, survey
-from lib.config import Config
+from lib.config import Config, zark_command
 from lib.drives import drive_staleness_days, get_drive_id, scan_connected_drives
 from lib.identity import BY_ID_DIR, read_pool_label
 from lib.log import Log
 
 USAGE = (
-    "Usage: sudo zark registry list | forget <name|GUID> | fix [<name>]"
+    f"Usage: {zark_command()} registry list | forget <name|GUID> | fix [<name>]"
     + " | retention <name> [window=N] [max_age=N|off] [margin=N]"
 )
 # Command-line names of the retention settings (lib.registry.RETENTION_LIMITS).
@@ -108,7 +108,7 @@ def _policy_text(cfg: Config, name: str) -> str:
 def _retention(cfg: Config, log: Log, name: str, settings: list[str]) -> None:
     """Show or change one drive's retention settings (M3 decision 2b)."""
     if name not in cfg.known_drives:
-        log.fatal(f"'{name}' is not registered", solutions=["sudo zark registry list"])
+        log.fatal(f"'{name}' is not registered", solutions=[f"{zark_command()} registry list"])
     info = cfg.known_drives[name]
     if settings:
         current = info.extra.get(registry.RETENTION_KEY, {})
@@ -140,7 +140,7 @@ def _list_origin(cfg: Config, log: Log) -> None:
     for guid in sorted(anchors.anchored_disks(origin) - registered):
         n = len(anchors.disk_anchors(origin, guid))
         log.warn(f"  drive GUID {guid}: {n} anchor(s) in origin, no registry entry")
-        log.raw(f"      drop them: sudo zark registry forget {guid}")
+        log.raw(f"      drop them: {zark_command()} registry forget {guid}")
     left = anchors.leftover_points(origin)
     if left:
         log.info(
@@ -158,7 +158,7 @@ def _forget(cfg: Config, log: Log, name: str) -> None:
             return
         name = named[0]
     if name not in cfg.known_drives:
-        log.fatal(f"'{name}' is not registered", solutions=["sudo zark registry list"])
+        log.fatal(f"'{name}' is not registered", solutions=[f"{zark_command()} registry list"])
     info = cfg.known_drives[name]
     log.warn(f"Forgetting '{name}' (GUID {info.guid}, {info.drive_id})")
     log.info("The disk and its data are not touched: the registry entry and this")
@@ -175,12 +175,12 @@ def _forget(cfg: Config, log: Log, name: str) -> None:
         if failed:
             log.warn(
                 f"{len(failed)} anchor(s) could not be dropped: "
-                + f"sudo zark registry forget {info.guid}"
+                + f"{zark_command()} registry forget {info.guid}"
             )
     else:
         log.info(
             "rpool is not imported here: on the installed system run "
-            + f"sudo zark registry forget {info.guid}"
+            + f"{zark_command()} registry forget {info.guid}"
         )
     del cfg.known_drives[name]
     cfg.save_drives()
@@ -196,7 +196,7 @@ def _forget_guid(cfg: Config, log: Log, guid: str) -> None:
     if "rpool" not in pools:
         log.fatal(
             "rpool is not imported here",
-            solutions=[f"Run on the installed system: sudo zark registry forget {guid}"],
+            solutions=[f"Run on the installed system: {zark_command()} registry forget {guid}"],
         )
     names = anchors.disk_anchors(survey.read_origin(pools), guid)
     if not names:
@@ -245,7 +245,7 @@ def _fix(cfg: Config, log: Log, only: str | None) -> None:
     names = [only] if only else sorted(cfg.known_drives)
     for name in names:
         if name not in cfg.known_drives:
-            log.fatal(f"'{name}' is not registered", solutions=["sudo zark registry list"])
+            log.fatal(f"'{name}' is not registered", solutions=[f"{zark_command()} registry list"])
     changed = 0
     for name in names:
         info = cfg.known_drives[name]

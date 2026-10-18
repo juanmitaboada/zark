@@ -38,6 +38,14 @@ if TYPE_CHECKING:
 VERSION = "2.0.0-rc7"
 
 
+def zark_command() -> str:
+    """How a tip names zark: ``sudo zark`` when installed (the package's
+    /usr/bin/zark links /usr/share/zark/zark), else ``sudo ./zark`` (a
+    checkout or a stick), the entry script's rule (zark's
+    _invocation_hint). Always with sudo: every command runs as root."""
+    return "sudo zark" if str(Config.zark_root()) == "/usr/share/zark" else "sudo ./zark"
+
+
 def now_utc_iso() -> str:
     """Current time as ISO-8601 UTC, second precision, ``Z`` suffix.
 

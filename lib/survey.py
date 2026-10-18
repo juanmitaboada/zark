@@ -24,6 +24,7 @@ import re
 import shlex
 
 from lib import sh
+from lib.config import zark_command
 from lib.identity import disks_under
 from lib.log import Log
 from lib.replication import Dest, Origin, Ref
@@ -158,7 +159,7 @@ def require_bookmark_v2(log: Log) -> None:
         log.fatal(
             f"rpool feature@bookmark_v2 is {state or 'unknown'}",
             causes=["zark's backup anchors are rpool bookmarks, which need this feature"],
-            solutions=["Run: sudo zark setup  (it explains the change and asks first)"],
+            solutions=[f"Run: {zark_command()} setup  (it explains the change and asks first)"],
         )
 
 

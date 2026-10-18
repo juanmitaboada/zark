@@ -22,6 +22,7 @@ drive each one names, and their removal when a drive leaves the registry.
 import shlex
 
 from lib import sh
+from lib.config import zark_command
 from lib.drive_marks import snapshot_marks
 from lib.log import Log
 from lib.replication import POINT_RE, Origin, anchor_disk, anchor_name, is_bpool
@@ -126,7 +127,7 @@ def drop_anchors_of(disk_guid: str, log: Log) -> str:
     """Drop a drive's anchors here when rpool is imported (purge, prepare;
     M2R-6). Returns what is left to do, "" when nothing."""
     pools = source_pools()
-    retry = f"sudo zark registry forget {disk_guid}"
+    retry = f"{zark_command()} registry forget {disk_guid}"
     if "rpool" not in pools:
         return f"Its anchors stay in origin: on the installed system run {retry}"
     count, failed = drop_disk_anchors(disk_guid, pools, log)

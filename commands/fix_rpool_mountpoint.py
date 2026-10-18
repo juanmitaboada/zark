@@ -33,6 +33,7 @@ from types import FrameType
 from typing import NoReturn
 
 from lib import sh
+from lib.config import zark_command
 from lib.log import Log
 from lib.mount_props import UBUNTU_RPOOL_MOUNTPOINT, inherited
 from lib.zfs import ZFS
@@ -237,7 +238,7 @@ def run(args: list[str]) -> None:
         log.fatal(
             "rpool is already imported - refusing to start",
             solutions=[
-                "Mounted with 'zark mount local': sudo ./zark umount local",
+                f"Mounted with 'zark mount local': {zark_command()} umount local",
                 "Otherwise: sudo zpool export rpool",
             ],
         )
@@ -251,7 +252,7 @@ def run(args: list[str]) -> None:
             "zvol devices exist before rpool is imported - refusing to start",
             causes=[f"{', '.join(zvols)} of imported pool(s): {', '.join(pools) or 'unknown'}"],
             solutions=[
-                "A backup mounted with 'zark mount': sudo ./zark umount",
+                f"A backup mounted with 'zark mount': {zark_command()} umount",
                 f"Otherwise: sudo zpool export {' '.join(pools)}"
                 if pools
                 else "Otherwise reboot the live USB and run this command first",

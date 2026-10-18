@@ -46,7 +46,7 @@ from lib import (
     survey,
 )
 from lib.cleanup import Cleanup, prompt_eject_or_attach
-from lib.config import VERSION, Config, now_utc_iso
+from lib.config import VERSION, Config, now_utc_iso, zark_command
 from lib.drives import (
     backup_device,
     drive_staleness_days,
@@ -83,7 +83,7 @@ from lib.zfs import ZFS, KeyStatusError, PoolInfo
 # so it is never the answer to "out of space" (hallazgo 8).
 _FREE_SPACE_HINT = (
     "Free space on the drive: its retention removes old backup points (see "
-    "`sudo zark registry retention <pool>`); never destroy snapshots by a % range"
+    f"`{zark_command()} registry retention <pool>`); never destroy snapshots by a % range"
 )
 
 
@@ -854,8 +854,8 @@ def run(
             ],
             solutions=[
                 "Connect a backup drive and run again",
-                "Run: sudo ./zark explore  to scan for unknown pools",
-                "Run: sudo ./zark prepare /dev/sdX  to register a new drive",
+                f"Run: {zark_command()} explore  to scan for unknown pools",
+                f"Run: {zark_command()} prepare /dev/sdX  to register a new drive",
             ],
         )
 
@@ -954,7 +954,7 @@ def run(
                 causes=["Wrong passphrase (3 attempts)", "Keystore zvol not found"],
                 solutions=[
                     "Retry with the passphrase of the system this drive backs up",
-                    "Test the passphrase read-only: sudo ./zark mount",
+                    f"Test the passphrase read-only: {zark_command()} mount",
                 ],
             )
 
@@ -974,7 +974,7 @@ def run(
         log.info("--no-snapshot has no effect: the backup point is taken by zark itself")
     eng = engine.Run(pool_name, pool_guid, log, point_name(datetime.now(UTC)))
     _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
-    log.info("Tip: run 'sudo ./zark monitor' in another terminal for progress")
+    log.info(f"Tip: run '{zark_command()} monitor' in another terminal for progress")
 
     policy = cfg.drive_policy(pool_name)
 

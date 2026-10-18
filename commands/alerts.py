@@ -20,9 +20,10 @@ zark alerts - install or remove the space and backup-age alerts.
 """
 
 from lib import alerts
+from lib.config import zark_command
 from lib.log import Log
 
-USAGE = "Usage: sudo zark alerts install | remove"
+USAGE = f"Usage: {zark_command()} alerts install | remove"
 
 
 def run(args: list[str]) -> None:

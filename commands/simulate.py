@@ -65,6 +65,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lib import sh, signals
+from lib.config import zark_command
 from lib.log import Log
 
 # OVMF firmware search paths (Ubuntu / Debian)
@@ -583,7 +584,7 @@ def run(
     if not os.access(target_disk, os.R_OK):
         log.fatal(
             f"Cannot read {target_disk}",
-            causes=["Run as root: sudo ./zark simulate"],
+            causes=[f"Run as root: {zark_command()} simulate"],
         )
 
     # ── Read-only by default; --rw is opt-in and confirmed by path ───────

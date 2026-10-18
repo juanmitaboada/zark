@@ -62,7 +62,7 @@ from lib import certificates, drive_marks, replication, sh, survey, zfs_features
 from lib.backup_layout import find_be as _find_be
 from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
 from lib.cleanup import Cleanup, prompt_eject_or_attach
-from lib.config import VERSION, Config
+from lib.config import VERSION, Config, zark_command
 from lib.drives import backup_device, scan_connected_drives, select_drive
 from lib.identity import BY_ID_DIR, by_id_names, preferred_by_id, protected_disks, whole_disk
 from lib.initrd import installed_kernels, kernels_without_vmlinuz, regenerate_initrd
@@ -997,10 +997,10 @@ def run(
         "  3. Reboot - enter your rpool passphrase at the prompt",
         f"  {log.Y}⚠  If it drops to emergency shell on first boot:{log.N}",
         f"     {log.W}zpool import rpool && exit{log.N}",
-        f"  4. Run: {log.W}sudo ./zark finish{log.N}  (it also regenerates grub.cfg)",
+        f"  4. Run: {log.W}{zark_command()} finish{log.N}  (it also regenerates grub.cfg)",
         "",
         f"  {log.Y}If boot fails:{log.N} boot from live USB and run:",
-        f"     {log.W}sudo ./zark repair-boot{log.N}",
+        f"     {log.W}{zark_command()} repair-boot{log.N}",
     ]
     if errors:
         log.banner_error("RECOVERY COMPLETED WITH ERRORS", summary)

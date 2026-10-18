@@ -23,6 +23,7 @@ from pathlib import Path
 from lib import grub_guard, sh
 from lib.boot_chain import esp_of_rpool_disk
 from lib.cleanup import Cleanup
+from lib.config import zark_command
 from lib.grub_cfg import regenerate_grub_cfg
 from lib.initrd import installed_kernels, regenerate_initrd
 from lib.keystore import Keystore
@@ -65,7 +66,7 @@ def run(
     if not sh.is_live_usb():
         log.warn("This does not look like a live USB session.")
         log.info("repair-boot is meant to run from live media; on the running")
-        log.info("installed system use 'sudo ./zark finish' instead.")
+        log.info(f"installed system use '{zark_command()} finish' instead.")
         if not log.ask("Continue anyway?", default=False):
             log.fatal("Aborted - boot a live USB and retry, or use 'zark finish'.")
 

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib.config import Config, DriveInfo, parse_utc_iso
+from lib.config import Config, DriveInfo, parse_utc_iso, zark_command
 from lib.identity import (
     DiskIdentity,
     IdentityError,
@@ -356,7 +356,7 @@ def validate_external_block_device(
     if not dev:
         log.fatal(
             "No device specified",
-            solutions=[f"Usage: sudo zark {command} /dev/disk/by-id/<disk>"],
+            solutions=[f"Usage: {zark_command()} {command} /dev/disk/by-id/<disk>"],
         )
     if not Path(dev).exists():
         log.fatal(f"{dev} does not exist")

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from lib import alerts, apt_guard, certificates, grub_guard, sh
+from lib.config import zark_command
 
 # from lib.config import Config
 from lib.log import Log
@@ -887,6 +888,6 @@ def run(
             "sanoid installed and running",
             "Snapshots will be taken automatically",
             "",
-            f"Next: connect a backup drive and run: {log.W}sudo ./zark backup{log.N}",
+            f"Next: connect a backup drive and run: {log.W}{zark_command()} backup{log.N}",
         ],
     )

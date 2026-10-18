@@ -33,7 +33,7 @@ from typing import Any
 from lib import certificates, lock, platform_facts, sh
 from lib.certificates import RunInfo
 from lib.cleanup import Cleanup
-from lib.config import Config
+from lib.config import Config, zark_command
 from lib.drives import validate_external_block_device
 from lib.identity import DiskIdentity, match_registry, usb_ids
 from lib.log import Log
@@ -128,7 +128,7 @@ def _stick_identity(dev: str, log: Log) -> DiskIdentity:
         log.fatal(
             f"{dev} is not blank: the self-test only erases a disk that holds nothing",
             causes=[f"{len(parts)} partition(s)" if parts else f"blkid -p found: {probe.output}"],
-            solutions=[f"Wipe it first: sudo zark purge {ident.by_id_path or ident.disk}"],
+            solutions=[f"Wipe it first: {zark_command()} purge {ident.by_id_path or ident.disk}"],
         )
     log.info("Level 2 erases this disk:")
     log.info(f"  {ident.disk}  {ident.model}  {ident.size}  serial {ident.serial or '?'}")
@@ -192,7 +192,7 @@ def _summary(results: list[Result], path: Path | None, log: Log) -> bool:
     else:
         log.banner_ok("SELF-TEST PASSED", [summary])
     log.info(f"Report: {path}")
-    log.info("To share it: sudo zark selftest report")
+    log.info(f"To share it: {zark_command()} selftest report")
     return not fails
 
 
@@ -279,7 +279,7 @@ def _status(args: list[str], log: Log) -> None:
 def _report(args: list[str], log: Log) -> None:
     path = Path(args[0]) if args else certificates.latest_report()
     if path is None or not path.is_file():
-        log.error("No self-test report yet: run sudo zark selftest")
+        log.error(f"No self-test report yet: run {zark_command()} selftest")
         raise SystemExit(1)
     report = _load(path, log)
     link, whole = certificates.issue_link(report)

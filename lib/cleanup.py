@@ -88,7 +88,7 @@ def flush_device_cache(log: Log) -> None:
     time.sleep(USB_FLUSH_DELAY_SEC)
 
 
-def eject_device(device: str, log: Log) -> bool:
+def eject_device(device: str, log: Log, name: str = "") -> bool:
     """Power down the bridge after issuing SYNCHRONIZE CACHE.
 
     Wraps ``eject(1)`` from ``util-linux``, which sends SCSI
@@ -112,15 +112,18 @@ def eject_device(device: str, log: Log) -> bool:
     durable.
     """
     r = run(f"eject {device}")
+    # The prompt named the drive (``name``); the path goes to the debug line (I18).
+    drive = f"Drive '{name}'" if name else f"Device {device}"
+    log.dbg(f"eject {device}: rc={r.returncode}")
     if r.ok:
         log.ok(
-            f"Device {device} eject sent - caches flushed (some USB bridges "
+            f"{drive} ejected - caches flushed (some USB bridges "
             "ignore the controller-stop request, so the device may stay "
             "powered; the data is already durable either way)",
         )
         return True
     log.warn(
-        f"eject {device} failed (rc={r.returncode}); data is durable but "
+        f"Eject of {drive[0].lower()}{drive[1:]} failed (rc={r.returncode}); data is durable but "
         "device-internal flush could not be confirmed - this enclosure "
         "may not honour SYNCHRONIZE CACHE, unplug at your own risk",
     )
@@ -198,7 +201,7 @@ def prompt_eject_or_attach(
     else:
         decision = log.ask(question, default=default_eject)
     if decision:
-        eject_device(device, log)
+        eject_device(device, log, name=pool)
         log.banner_safe_unplug(pool)
     else:
         log.banner_drive_attached(pool)

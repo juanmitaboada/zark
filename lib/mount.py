@@ -30,6 +30,7 @@ import shlex
 
 from lib.backup_layout import choose_dataset
 from lib.cleanup import Cleanup
+from lib.config import zark_command
 from lib.keystore import KeystoreLike, open_keystore
 from lib.log import Log
 from lib.sh import run
@@ -298,7 +299,7 @@ def warn_rpool_mountpoint_lost(log: Log) -> None:
     log.warn("rpool has mountpoint=none; the Ubuntu installer sets / (zark recover ≤ 1.0.12)")
     log.info("  New datasets directly under rpool will not mount, and backup drives")
     log.info("  prepared from this system cannot be browsed with 'zark mount'.")
-    log.info("  Fix it from a live USB: sudo ./zark fix-rpool-mountpoint")
+    log.info(f"  Fix it from a live USB: {zark_command()} fix-rpool-mountpoint")
 
 
 _STABLE_VDEV_PREFIXES = ("/dev/disk/", "/dev/mapper/")
@@ -324,4 +325,6 @@ def warn_kernel_named_vdevs(log: Log) -> None:
     log.warn(f"rpool/bpool use kernel device names ({', '.join(paths)})")
     log.info("  A USB disk plugged in at boot can take that name and stop the")
     log.info("  pool import (emergency shell). Fix it from a live USB:")
-    log.info("  sudo ./zark repair-boot  (re-imports by /dev/disk/by-id, rewrites zpool.cache)")
+    log.info(
+        f"  {zark_command()} repair-boot  (re-imports by /dev/disk/by-id, rewrites zpool.cache)"
+    )

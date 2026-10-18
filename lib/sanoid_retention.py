@@ -50,6 +50,7 @@ no section uses are ignored.
 import configparser
 from pathlib import Path
 
+from lib.config import zark_command
 from lib.log import Log
 
 # Standard location of sanoid's config. The package ships
@@ -96,7 +97,7 @@ def _templates_in_use(log: Log | None, conf_path: Path) -> list[dict[str, str]] 
         if log is not None:
             log.warn(
                 f"sanoid.conf missing at {conf_path} - staleness detection disabled. "
-                "Run 'sudo ./zark setup' to generate it.",
+                f"Run '{zark_command()} setup' to generate it.",
             )
         return None
 

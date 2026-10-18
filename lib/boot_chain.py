@@ -23,6 +23,7 @@ from pathlib import Path
 
 from lib import apt_guard, grub_guard, sh
 from lib.cleanup import Cleanup
+from lib.config import zark_command
 from lib.identity import disks_under
 from lib.log import Log
 from lib.zfs import ZFS, fix_grub_bpool_uuid
@@ -300,14 +301,14 @@ def mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> N
     if not root_ok or not Path(f"{RECOVER_MNT}/usr/bin/bash").exists():
         log.fatal(
             f"Cannot mount the restored root at {RECOVER_MNT}",
-            solutions=["Boot the live USB again and run: sudo ./zark repair-boot"],
+            solutions=[f"Boot the live USB again and run: {zark_command()} repair-boot"],
         )
     if bpool_received:
         boot_ok = sh.run(f"zfs mount bpool/BOOT/{ubuntu_name}", log=log).ok
         if not boot_ok or not sh.run(f"findmnt -n {RECOVER_MNT}/boot").ok:
             log.fatal(
                 f"Cannot mount the restored bpool at {RECOVER_MNT}/boot",
-                solutions=["Boot the live USB again and run: sudo ./zark repair-boot"],
+                solutions=[f"Boot the live USB again and run: {zark_command()} repair-boot"],
             )
         # Regular vmlinuz-<v> files only: the kernel's postinst keeps the
         # vmlinuz and vmlinuz.old links next to them (M1P.8).

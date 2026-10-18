@@ -28,7 +28,7 @@ from pathlib import Path
 
 from lib import anchors, drive_marks, engine, registry, sh, survey
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
-from lib.config import VERSION, Config, DriveInfo, now_utc_iso
+from lib.config import VERSION, Config, DriveInfo, now_utc_iso, zark_command
 from lib.drives import record_backup, validate_external_block_device
 from lib.health import check_device, render_report
 from lib.log import Log
@@ -101,7 +101,7 @@ def run(
     if existing_parts or sigs:
         log.fatal(
             "Drive is NOT empty - has partitions or signatures",
-            solutions=[f"Wipe first: sudo ./zark purge {target_dev}"],
+            solutions=[f"Wipe first: {zark_command()} purge {target_dev}"],
         )
 
     log.ok("Drive appears empty ✓")
@@ -137,7 +137,7 @@ def run(
             f"Pool name '{new_pool}' is registered for another drive ({other})",
             solutions=[
                 "Choose another pool name",
-                f"Or, if that drive is gone: sudo zark registry forget {new_pool}",
+                f"Or, if that drive is gone: {zark_command()} registry forget {new_pool}",
             ],
         )
     if zfs.pool_exists(new_pool):
@@ -239,7 +239,7 @@ def run(
                 if not res.ok
                 else "The keystore did not land.",
                 "See the messages above. The drive has NOT been registered.",
-                f"Wipe and retry: sudo zark purge {ident.by_id_path}",
+                f"Wipe and retry: {zark_command()} purge {ident.by_id_path}",
                 *([left] if left else []),
             ],
         )
@@ -297,7 +297,7 @@ def run(
             "",
             f"Registered in: {log.W}{cfg.drives_file_path}{log.N}",
             "",
-            f"Run backup: {log.W}sudo ./zark backup{log.N}",
+            f"Run backup: {log.W}{zark_command()} backup{log.N}",
         ],
     )
 

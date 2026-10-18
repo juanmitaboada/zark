@@ -29,6 +29,7 @@ from pathlib import Path
 from commands.setup import sanoid_conf_gap
 from lib import alerts, apt_guard, grub_guard, sh
 from lib.boot_chain import esp_of_rpool_disk
+from lib.config import zark_command
 from lib.grub_cfg import regenerate_grub_cfg
 from lib.identity import read_pool_label
 from lib.initrd import installed_kernels, regenerate_initrd
@@ -39,7 +40,7 @@ from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 TOTAL_STEPS = 5
 EFI_DIR = "/boot/efi/EFI/ubuntu"
-REPAIR_ADVICE = "Boot the live USB and run: sudo ./zark repair-boot"
+REPAIR_ADVICE = f"Boot the live USB and run: {zark_command()} repair-boot"
 
 
 def _system_hostid() -> int | None:
@@ -334,7 +335,7 @@ def run(
             advice.append("Disconnect the external drive(s) if any,")
         if efi_failure.startswith(("the ESP is not mounted", "/boot/efi is")):
             advice.append("Mount the ESP of rpool's disk on /boot/efi,")
-        advice.append(f"then run again: {log.W}sudo ./zark finish{log.N}")
+        advice.append(f"then run again: {log.W}{zark_command()} finish{log.N}")
         if initrd_failures or (grub_failure and not grub_failure.startswith("update-grub failed")):
             # A kernel without an initrd gets no grub.cfg entry, and the next
             # boot may not reach this system: the live USB rebuilds both (R2-7).
@@ -344,5 +345,5 @@ def run(
     gaps = setup_gaps(zfs)
     setup = [f"setup would: {g}" for g in gaps]
     if gaps:
-        setup.append(f"Run setup: {log.W}sudo ./zark setup{log.N}")
+        setup.append(f"Run setup: {log.W}{zark_command()} setup{log.N}")
     log.banner_ok("FINISH COMPLETE", [*lines, *setup])

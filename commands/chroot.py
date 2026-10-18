@@ -32,6 +32,7 @@ for the single internal disk.
 
 from lib import sh, signals
 from lib.cleanup import Cleanup
+from lib.config import zark_command
 from lib.keystore import Keystore
 from lib.log import Log
 from lib.mount import mount_system_pools
@@ -93,7 +94,7 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
             "rpool is already imported.\n"
             "  If this is your running system, you are already inside it -\n"
             "  no chroot is needed. If it is a leftover from a previous run,\n"
-            "  run 'sudo ./zark clean' first, then retry from a live USB.",
+            f"  run '{zark_command()} clean' first, then retry from a live USB.",
         )
 
     if not sh.is_live_usb():

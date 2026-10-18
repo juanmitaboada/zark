@@ -28,6 +28,7 @@ import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from lib.config import zark_command
 from lib.sh import run
 
 if TYPE_CHECKING:
@@ -226,7 +227,8 @@ def check_drive(
                 f"This system runs {here[0] if here else 'an unknown OpenZFS'}",
             ],
             solutions=[
-                f"Mount it read-only: sudo ./{command}, then choose Read-only",
+                f"Mount it read-only: {zark_command()} {command.removeprefix('zark ')}, "
+                + "then choose Read-only",
                 "Nothing was imported or changed",
             ],
         )

@@ -27,6 +27,7 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 # only test code lives here - production modules stay under the standard
 # line limit.
 
+import ast
 import atexit
 import fcntl
 import importlib.machinery
@@ -176,6 +177,7 @@ from lib.config import (  # pylint: disable=wrong-import-position # noqa: E402
     DriveInfo,
     now_utc_iso,
     parse_utc_iso,
+    zark_command,
 )
 from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
     ConnectedDrive,
@@ -1408,6 +1410,56 @@ class TestFlushAndEjectHelpers:
 
         with patch_sh(mock):
             assert eject_device("/dev/sdb", log) is False
+
+    def test_the_eject_line_names_the_drive_the_prompt_named(self):
+        """I18 (M4d-22): the by-id path goes to the debug line only."""
+        path = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
+        mock = MockShell()
+        mock.on(f"eject {path}").succeeds()
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out), patch("builtins.input", return_value="y"):
+            prompt_eject_or_attach(path, "blue", make_log(), default_eject=True)
+        text = out.getvalue()
+        assert "Drive 'blue' ejected - caches flushed" in text
+        assert f"Device {path}" not in text
+
+
+class TestZarkCommand:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M4d-22: a tip names zark as it is run here, always with sudo."""
+
+    def test_installed_or_from_a_checkout(self):
+        with patch.object(Config, "zark_root", return_value=Path("/usr/share/zark")):
+            assert zark_command() == "sudo zark"
+        with patch.object(Config, "zark_root", return_value=Path("/media/stick/zark")):
+            assert zark_command() == "sudo ./zark"
+
+    def test_no_tip_hard_codes_the_command(self):
+        # The MOTD's lines (read at login) and the installed scripts say `zark`.
+        allowed = {"lib/status.py", "lib/certificates.py", "lib/alerts.py"}
+        allowed |= {"lib/apt_guard.py", "lib/grub_guard.py", "lib/config.py"}
+        root = Path(__file__).resolve().parent.parent
+        found: list[str] = []
+        for path in sorted([*root.glob("lib/*.py"), *root.glob("commands/*.py"), root / "zark"]):
+            rel = str(path.relative_to(root))
+            if rel in allowed:
+                continue
+            tree = ast.parse(path.read_text("utf-8"))
+            docs = {
+                id(n.body[0].value)
+                for n in ast.walk(tree)
+                if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef))
+                and n.body
+                and isinstance(n.body[0], ast.Expr)
+            }
+            found += [
+                f"{rel}:{n.lineno}"
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and id(n) not in docs
+                and re.search(r"sudo (\./)?zark\b", n.value)
+            ]
+        assert not found, found
 
 
 class TestPromptEjectOrAttach:
@@ -6856,7 +6908,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         registry_write_atomic(cfg_dir / "known_drives.json", {})
         with patch("lib.log.Log.ask", return_value=True):
             out = self._purge_on_fake(fake, cfg_dir, "1111")
-        assert "sudo zark registry forget 1111" in out
+        assert f"{zark_command()} registry forget 1111" in out
 
     def test_foreign_rpool_label_is_never_imported(self):
         cfg_dir = Path(tempfile.mkdtemp())
@@ -7298,6 +7350,13 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
         assert "Purge again to run the failed step." in text
         assert "may still hold the pool" not in text
 
+    def test_an_unregistered_blank_disk_is_named_by_its_model_and_name(self):
+        # M4d-22: the eject prompt named the bare kernel path.
+        mock = MockShell()
+        _wipe_succeeds(mock)
+        text, rc = self._purge_blank_label(mock)
+        assert rc == 0 and "Eject drive 'DT microDuo 3C (/dev/sdb)' now?" in text, text
+
     def test_a_disk_without_label_and_a_signature_left_says_something_is_left(self):
         mock = MockShell()
         mock.on("blkid -p /dev/sdb").succeeds('/dev/sdb: PTTYPE="gpt"')
@@ -7691,7 +7750,7 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
         assert _engine_run(fake, "blue", "2", P2).ok
         d = self._cfg_dir({"blue": {"guid": "2", "drive_id": "b"}})
         out = self._registry(fake, d, ["list"])
-        assert "drive GUID 1:" in out and "sudo zark registry forget 1" in out
+        assert "drive GUID 1:" in out and f"{zark_command()} registry forget 1" in out
         assert "drive GUID 2:" not in out
         _ = self._registry(fake, d, ["forget", "1"])
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("2", P2)]
@@ -7721,7 +7780,7 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
 
         with patch.object(Config, "save_drives", recording_save):
             out = self._registry(fake, d, ["forget", "black"])
-        assert "could not remove" in out and "sudo zark registry forget 1" in out
+        assert "could not remove" in out and f"{zark_command()} registry forget 1" in out
         assert not json.loads((d / "known_drives.json").read_text())
         assert destroys_before_save and destroys_before_save[0] > 0
 

@@ -131,7 +131,8 @@ def main():
 
     if cmd_name not in COMMANDS:
         print(f"\033[0;31mError:\033[0m unknown command '{cmd_name}'")
-        print("  Run: sudo ./zark --help")
+        prefix, invoke_name = _invocation_hint()
+        print(f"  Run: {prefix}{invoke_name} --help")
         sys.exit(1)
 
     # Two zark runs at once can remove each other's points or prune under a

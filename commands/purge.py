@@ -390,7 +390,13 @@ def run(
     # confuse a later `prepare`.
     flush_device_cache(log)
 
-    label = matched[0] if matched else target_dev
+    # How the eject prompt and the unplug banner name it (I18).
+    if matched:
+        label = matched[0]
+    elif ident.label:
+        label = ident.label.name
+    else:
+        label = f"{ident.model} ({target_dev})"
     log.banner_ok(
         "DRIVE PURGED",
         [

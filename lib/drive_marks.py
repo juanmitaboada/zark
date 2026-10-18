@@ -25,6 +25,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from lib import sh
+from lib.config import zark_command
 from lib.log import Log
 from lib.replication import State, plan
 from lib.restore_points import (
@@ -154,7 +155,7 @@ def check_drive_owner(pool: str, log: Log) -> None:
         solutions=[
             "Connect this system's own backup drive",
             "To reuse this drive for this system, wipe and re-prepare it: "
-            + "sudo zark purge <device> && sudo zark prepare <device>",
+            + f"{zark_command()} purge <device> && {zark_command()} prepare <device>",
         ],
     )
 
@@ -197,7 +198,7 @@ def _accept_unowned(pool: str, log: Log) -> None:
         solutions=[
             "Connect this system's own backup drive",
             "To use this drive for this system, wipe and prepare it: "
-            + "sudo zark purge <device> && sudo zark prepare <device>",
+            + f"{zark_command()} purge <device> && {zark_command()} prepare <device>",
         ],
     )
 

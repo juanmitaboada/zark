@@ -34,7 +34,7 @@ from pathlib import Path
 from lib import drive_marks, sh, zfs_features
 from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
 from lib.cleanup import Cleanup
-from lib.config import Config
+from lib.config import Config, zark_command
 from lib.drives import backup_device, scan_connected_drives, select_drive
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
@@ -216,9 +216,9 @@ def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
             f"Mode:        {log.W}{'read-only' if readonly else 'read-write'}{log.N}",
             "",
             f"{log.Y}Browse:{log.N}  ls {root_path}/",
-            f"{log.Y}Chroot:{log.N}  sudo ./zark chroot",
+            f"{log.Y}Chroot:{log.N}  {zark_command()} chroot",
             "",
-            f"{log.Y}To unmount:{log.N}  sudo ./zark umount local",
+            f"{log.Y}To unmount:{log.N}  {zark_command()} umount local",
         ],
     )
     # Leave it mounted for the operator.
@@ -273,7 +273,7 @@ def run(
 
     if zfs.pool_exists(pool_name):
         log.warn(f"Pool {pool_name} is already imported")
-        log.info("To unmount: sudo ./zark umount")
+        log.info(f"To unmount: {zark_command()} umount")
         cleanup.disable()
         return
 
@@ -366,7 +366,7 @@ def run(
 
     result_lines += [
         f"{log.Y}To unmount:{log.N}",
-        "  sudo ./zark umount",
+        f"  {zark_command()} umount",
     ]
 
     log.banner_ok(f"POOL {pool_name} MOUNTED", result_lines)

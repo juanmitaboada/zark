@@ -35,7 +35,7 @@ a self-contained report is written for filing a GitHub issue.
 from pathlib import Path
 
 from lib import sh
-from lib.config import Config
+from lib.config import Config, zark_command
 from lib.drives import scan_connected_drives, validate_external_block_device
 from lib.health import (
     PROFILE_FAST,
@@ -176,7 +176,7 @@ def run(args: list[str]) -> None:
         if parts or sigs:
             log.fatal(
                 "Drive is NOT empty - destructive test needs a blank drive",
-                solutions=[f"Wipe first: sudo ./zark purge {dev}"],
+                solutions=[f"Wipe first: {zark_command()} purge {dev}"],
             )
         # Confirm destruction BEFORE writing anything (incl. the speed probe).
         if not log.ask(f"This will DESTROY all data on {dev}. Continue?"):
