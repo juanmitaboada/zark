@@ -35,6 +35,10 @@ passes it on. Scenarios:
                     stop wait of half a second (STOP_WAIT_SECONDS patched)
     orphan:<SIGS>   the same, but the shell sh.run starts dies with the signal
                     and only its command (a grandchild) ignores it
+    afterexit:<SIG>,<SIG>  one signal stops the pipeline; the second arrives
+                    from an atexit handler that runs after the cleanup
+    resumed:        the command runs cleanup.run() itself, then prints lines
+                    until the reader of stdout goes away
     normalend:<SIG>[,<SIG>]  the command ends normally and runs cleanup.run()
                     itself; the first signal arrives while a cleanup step's
                     child runs, the second (if any) after the cleanup
@@ -47,8 +51,11 @@ Writes ``<workdir>/result.json``: ``cleanup`` (how many times it ran),
 when SIGKILL ended it, -2 for SIGINT, -15 for SIGTERM).
 """
 
+import atexit
+import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -120,6 +127,16 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-man
 
     log = Log(os.path.join(work, "zark.log"))
     signals.install(log)
+    if kind == "afterexit":
+        # Registered before the Cleanup, so atexit runs it after: a second
+        # signal once the signal-started cleanup is over.
+        def after() -> None:
+            os.kill(os.getpid(), signal.Signals[f"SIG{sigs[1]}"])
+            time.sleep(0.5)
+            result["after_cleanup"] = True
+            write()
+
+        _ = atexit.register(after)
     cleanup = Cleanup(log)
     cleanup.register()
     cleanup.track_action(action)
@@ -147,7 +164,7 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-man
         # is read when stop_children runs, so the module constant counts.
         signals.STOP_WAIT_SECONDS = 0.5
     if sigs:
-        one = kind in ("cleanup", "normalend")
+        one = kind in ("cleanup", "normalend", "afterexit")
         _sender(sigs[:1] if one else sigs, 0.5, apart=kind == "interactive")
     try:
         if kind == "normalend":
@@ -158,7 +175,16 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-man
                 _sender([sigs[1]], 0.0)
                 time.sleep(3.0)
             sys.exit(0)
-        if kind == "interactive":
+        if kind == "resumed":
+            # A normal-end cleanup (its lines kept off stdout, so the reader
+            # is still there after it), then the command goes on.
+            guarded, sys.stdout = sys.stdout, io.StringIO()
+            cleanup.run()
+            sys.stdout = guarded
+            for i in range(600):
+                print(f"line {i}", flush=True)
+                time.sleep(0.05)
+        elif kind == "interactive":
             _ = signals.run_interactive(["sh", "-c", f"echo $$ > {pids[0]}; exec sleep 60"])
         elif kind == "quietend":
             print("started", flush=True)

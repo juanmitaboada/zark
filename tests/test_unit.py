@@ -9588,6 +9588,15 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         rc, result, _ = self._run("normalend:TERM,INT")
         assert rc == 130 and result.get("continued") is True, (rc, result)
 
+    def test_a_signal_after_the_signal_started_cleanup_is_ignored(self):
+        # M4bV-2 F5b: a cleanup a signal started leaves the three signals
+        # ignored (no resume): a second one during the rest of the exit
+        # raises nothing inside atexit.
+        rc, result, took = self._run("afterexit:TERM,HUP")
+        assert rc == 128 + signal.SIGTERM and took < 20, (rc, result, took)
+        assert result.get("cleanup_done") is True and result.get("after_cleanup") is True, result
+        assert len(result["interrupted"]) == 1, result["interrupted"]
+
     def test_the_interruption_line_names_the_child_it_stops(self):
         # M4bR-8 (M4bF-7 7a): "stopping <child>", by executable and
         # subcommand, both sides of a pipeline; the full command is in the
@@ -9632,6 +9641,15 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         got = self._without_reader("deadpipe:")
         want = {"cleanup": 1, "continued": False, "cleanup_done": True}
         assert got == (128 + signal.SIGPIPE, want), got
+
+    def test_after_the_normal_end_cleanup_a_dead_stdout_stops_the_command_again(self):
+        # M4bV-2 F4: resume() clears the teardown mark, so a reader that goes
+        # away after the cleanup stops the command as before it.
+        got = self._without_reader("resumed:")
+        assert got == (
+            128 + signal.SIGPIPE,
+            {"cleanup": 1, "continued": False, "cleanup_done": True},
+        ), got
 
     def test_a_cleanup_with_nobody_reading_still_runs_to_its_end(self):
         # The command ended normally; only the cleanup finds the reader gone.
