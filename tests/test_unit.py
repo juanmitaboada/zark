@@ -12466,6 +12466,10 @@ class TestIncompleteBanner:
         assert "    ...and 2 more (see the table above)" in text
 
 
+# The real method, before any test patches it (M4cR-2).
+_REAL_DATASETS_NEEDING_KEY = ZFS.datasets_needing_key
+
+
 class TestBackupCommand:  # pylint: disable=too-many-public-methods
     """`zark backup` end to end on FakeZfs (drive discovery and keystore stubbed)."""
 
@@ -12536,16 +12540,19 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
 
     def test_an_unread_key_status_stops_before_the_point(self) -> None:
         """M4c-19 (review §4.7): a failed keystatus read was "Key already
-        loaded"; it is fatal now, before anything is written."""
+        loaded"; it is fatal now, before anything is written. The fake's
+        `zfs get keystatus` fails and the real datasets_needing_key reads it,
+        so the test fails if backup stops asking for a strict read (M4cR-2)."""
         fake = _fresh_fake()
+        fake.fail_cmds.add("zfs get -H keystatus -r backup/rpool")
         out = StringIO()
         _, rc = self._run(
             fake,
-            patch.object(ZFS, "datasets_needing_key", side_effect=KeyStatusError("I/O error")),
+            patch.object(ZFS, "datasets_needing_key", _REAL_DATASETS_NEEDING_KEY),
             redirect_stdout(out),
         )
         assert rc == 1
-        assert "Cannot read the key status of backup: I/O error" in out.getvalue()
+        assert "Cannot read the key status of backup: fake: injected failure" in out.getvalue()
         assert "Key already loaded" not in out.getvalue()
         assert not _origin_points(fake)
 
