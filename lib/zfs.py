@@ -216,9 +216,12 @@ class ZFS:
         altroot: str | None = None,
         no_mount: bool = False,
         force: bool = False,
+        readonly: bool = False,
     ) -> bool:
         """
-        Import a system pool (rpool, bpool). Candidates, in order:
+        Import a system pool (rpool, bpool); ``readonly`` adds
+        ``-o readonly=on`` (nothing is written to the pool, its labels
+        included). Candidates, in order:
           1. -d /dev/disk/by-id: the pool, and the zpool.cache written from
              it, record stable names instead of /dev/sdX (eli 2026-09-30: a
              kernel-named vdev stopped the boot with a USB stick plugged in);
@@ -242,6 +245,8 @@ class ZFS:
                 cmd += " -f"
             if no_mount:
                 cmd += " -N"
+            if readonly:
+                cmd += " -o readonly=on"
             if altroot:
                 cmd += f" -R {altroot}"
             if dev_arg:

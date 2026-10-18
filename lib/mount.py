@@ -83,10 +83,13 @@ def mount_system_pools(
         keystore zvol is imported - the altroot import is the sanctioned
         mitigation, and ``zfs mount <ds>`` mounts ``canmount=noauto`` boot
         environments without touching properties.
-      * ``readonly=True`` applies a VFS-level ``mount -o remount,ro`` to each
-        mountpoint after mounting (ZFS still needs rw to create mountpoint
-        directories first), leaving ZFS properties untouched - same technique
-        as ``zark mount``'s read-only inspection mode.
+      * ``readonly=True`` imports both pools ``-o readonly=on`` and opens the
+        keystore read-only (LUKS ``--readonly``, ext4 ``ro,noload``), so the
+        live session writes nothing to the installed system, not even its
+        labels (M4c-21). Datasets then mount read-only without their ZIL
+        replayed (the last writes of an unclean shutdown are not seen), and
+        one whose mountpoint directory is missing cannot have it created: it
+        is listed as not mounted instead of failing the command.
 
     Returns ``(root_path, ubuntu_name)`` on success (``root_path`` is the
     effective filesystem root, i.e. ``altroot``), or ``None`` on any failure.
@@ -98,7 +101,9 @@ def mount_system_pools(
     # ── Import rpool (no-mount) under altroot ─────────────────────────────
     if not zfs.pool_exists("rpool"):
         # pool_import scans by-id first; the hint is only its fallback.
-        if not zfs.pool_import("rpool", device=device, altroot=altroot, no_mount=True):
+        if not zfs.pool_import(
+            "rpool", device=device, altroot=altroot, no_mount=True, readonly=readonly
+        ):
             log.error("Cannot import rpool (tried clean import and -f)")
             return None
         cleanup.track_pool("rpool")
@@ -108,9 +113,9 @@ def mount_system_pools(
     # ── Unlock keystore + load keys ───────────────────────────────────────
     # passphrase=None prompts here, re-asking on a typo (I9).
     opened = (
-        open_keystore(keystore, "rpool", log)
+        open_keystore(keystore, "rpool", log, readonly=readonly)
         if passphrase is None
-        else keystore.mount("rpool", passphrase)
+        else keystore.mount("rpool", passphrase, readonly=readonly)
     )
     if not opened:
         log.error("Cannot open keystore - check passphrase")
@@ -137,6 +142,7 @@ def mount_system_pools(
         cleanup.track_mount(root_mp)
         mount_points.append(root_mp)
 
+    not_mounted: list[str] = []
     for ds in zfs.list_datasets("rpool", recursive=True):
         if ds.name in ("rpool", root_ds) or "keystore" in ds.name:
             continue
@@ -147,10 +153,12 @@ def mount_system_pools(
             if mp:
                 cleanup.track_mount(mp)
                 mount_points.append(mp)
+        elif readonly:
+            not_mounted.append(ds.name)
 
     # ── Import + mount bpool (/boot) ──────────────────────────────────────
     if not zfs.pool_exists("bpool"):
-        if zfs.pool_import("bpool", altroot=altroot, no_mount=True):
+        if zfs.pool_import("bpool", altroot=altroot, no_mount=True, readonly=readonly):
             cleanup.track_pool("bpool")
         else:
             log.warn("Could not import bpool - /boot will be unavailable in the chroot")
@@ -161,11 +169,13 @@ def mount_system_pools(
             cleanup.track_mount(bp_mp)
             mount_points.append(bp_mp)
 
-    # ── Optional read-only protection (VFS level, properties untouched) ───
     if readonly:
-        for mp in mount_points:
-            run(f"mount -o remount,ro {mp}")
-        log.ok("System mounted read-only")
+        log.ok("System mounted read-only (pools imported readonly=on)")
+        if not_mounted:
+            log.warn(
+                "Not mounted (no mountpoint directory, which a read-only pool cannot "
+                + f"create): {', '.join(not_mounted)}",
+            )
 
     return altroot, ubuntu_name
 

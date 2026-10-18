@@ -5023,8 +5023,10 @@ class _FakeKeystore:  # pylint: disable=missing-class-docstring,missing-function
 
     def __init__(self, loaded: int = 2):
         self._loaded = loaded
+        self.readonly_calls: list[bool] = []
 
     def mount(self, pool, passphrase, *, readonly=False):  # pylint: disable=unused-argument
+        self.readonly_calls.append(readonly)
         return True
 
     def load_pool_keys(self, pool_root):  # pylint: disable=unused-argument
@@ -5143,6 +5145,52 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
         assert not mock.was_called("zfs mount rpool/keystore")
         # The helper must never touch mountpoint properties (project rule #1).
         assert not any("zfs set mountpoint" in c for c in mock.calls)
+
+    def test_read_only_imports_readonly_and_lists_what_cannot_mount(self):
+        # M4c-21 (R2§8.6): nothing written to the installed pools, no remount pass.
+        mock = MockShell()
+        mock.on("zpool list rpool").fails()
+        mock.on("zpool list bpool").fails()
+        ro = "zpool import -N -o readonly=on -R /mnt/zark/system -d /dev/disk/by-id"
+        mock.on(f"{ro} rpool").succeeds()
+        mock.on(f"{ro} bpool").succeeds()
+        mock.on("zfs list -H -o name -r rpool/ROOT").succeeds("rpool/ROOT\nrpool/ROOT/ubuntu_x\n")
+        mock.on("zfs mount rpool/ROOT/ubuntu_x").succeeds()
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x").succeeds("/")
+        mock.on(
+            "zfs list -H -o name,mountpoint,used,refer,canmount,type -t filesystem,volume -r rpool",
+        ).succeeds(
+            "rpool/ROOT/ubuntu_x\t/\t1G\t1G\tnoauto\tfilesystem\n"
+            "rpool/USERDATA\t/home\t1G\t1G\ton\tfilesystem\n"
+            "rpool/srv\t/srv\t1G\t1G\ton\tfilesystem\n",
+        )
+        mock.on("zfs mount rpool/USERDATA").succeeds()
+        mock.on("zfs get -H -o value mountpoint rpool/USERDATA").succeeds("/home")
+        mock.on("zfs mount rpool/srv").fails(
+            "cannot mount '/mnt/zark/system/srv': Read-only file system"
+        )
+        mock.on("zfs list bpool/BOOT/ubuntu_x").succeeds("bpool/BOOT/ubuntu_x")
+        mock.on("zfs mount bpool/BOOT/ubuntu_x").succeeds()
+        mock.on("zfs get -H -o value mountpoint bpool/BOOT/ubuntu_x").succeeds("/boot")
+        ks = _FakeKeystore()
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            res = mount_system_pools(
+                "/mnt/zark/system",
+                "pp",
+                make_log(),
+                ZFS(make_log()),
+                ks,
+                Cleanup(make_log()),
+                readonly=True,
+            )
+        assert res == ("/mnt/zark/system", "ubuntu_x")
+        imports = [c for c in mock.calls if c.startswith("zpool import")]
+        assert imports == [f"{ro} rpool", f"{ro} bpool"]
+        assert not [c for c in mock.calls if "remount" in c]
+        assert "Not mounted (no mountpoint directory" in out.getvalue()
+        assert "rpool/srv" in out.getvalue()
+        assert ks.readonly_calls == [True]
 
 
 class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
