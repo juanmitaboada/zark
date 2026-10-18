@@ -34,6 +34,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -42,7 +43,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import (
     AbstractContextManager,
     ExitStack,
@@ -16157,6 +16158,71 @@ class _FakeBench(stest.Bench):
         pass
 
 
+# The accessors' options that take an argument (zfs-get.8, zpool-get.8, zfs-list.8).
+_ACCESSOR_ARG_OPTS = {"zfs get": "dost", "zpool get": "o", "zfs list": "dosSt"}
+
+
+def _accessor_operands(cmd: str) -> list[tuple[str, list[str]]]:
+    """Each ``zfs get``, ``zpool get`` or ``zfs list`` in ``cmd``, with the
+    objects it names: not its options, nor the property list of a get.
+
+    A pipe is split only when it begins with ``zfs send`` or an accessor: a
+    quoted ``sh -c`` script is not an accessor, and shlex would break on it.
+    """
+    parts = [cmd]
+    if " | " in cmd and cmd.startswith(("zfs send", *_PoisonShell.ACCESSORS)):
+        parts = cmd.split(" | ")
+    found: list[tuple[str, list[str]]] = []
+    for piece in parts:
+        if not piece.startswith(_PoisonShell.ACCESSORS):
+            continue
+        argv = shlex.split(piece)
+        name = " ".join(argv[:2])
+        takes = _ACCESSOR_ARG_OPTS[name]
+        operands: list[str] = []
+        i = 2
+        while i < len(argv):
+            arg = argv[i]
+            if arg.startswith("-") and len(arg) > 1:
+                letters = arg[1:]
+                # An option with an argument ends a bundle; last, it takes the next word.
+                for j, ch in enumerate(letters):
+                    if ch in takes:
+                        i += j == len(letters) - 1
+                        break
+            else:
+                operands.append(arg)
+            i += 1
+        found.append((name, operands if name == "zfs list" else operands[1:]))
+    return found
+
+
+def _foreign_operands(calls: Iterable[str], bench: stest.Bench) -> list[str]:
+    """The accessor calls that read anything but the bench's own objects (M4sV-1).
+
+    The poisoned shell answers them with nothing, on the ground that they
+    only read the run's pools, what is below them, its vdev files and the
+    stick; one with no object reads the whole system.
+    """
+    pools = "|".join(re.escape(bench.pool(x)) for x in "abcs")
+    own = re.compile(rf"({pools})([/@#].*)?")
+    stick = getattr(bench, "stick", None)
+    allowed = {stick.part1, stick.by_id_path} if stick is not None else set()
+    bad: list[str] = []
+    for cmd in calls:
+        for name, operands in _accessor_operands(cmd):
+            if not operands:
+                bad.append(f"{cmd}: {name} with no object")
+            bad += [
+                f"{cmd}: {op}"
+                for op in operands
+                if not own.fullmatch(op)
+                and not op.startswith(f"{bench.dir}/")
+                and op not in allowed
+            ]
+    return bad
+
+
 class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-few-public-methods
     """M4s-12: every check marked fake runs against tests/fake_zfs.py and
     passes; a check the fake fails names a divergence from OpenZFS."""
@@ -16165,6 +16231,8 @@ class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-f
         checks = [c for c in all_selftest_checks() if c.fake]
         assert len(checks) == 19
         failed: list[str] = []
+        foreign: list[str] = []
+        accessors = 0
         for c in checks:
             fake = FakeZfs()
             with patch_sh(fake):
@@ -16173,7 +16241,12 @@ class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-f
                 res = stest.run_one(c, bench)
             if res.result != "PASS":
                 failed.append(f"{c.key}: {res.expected} / {res.came}")
+            # M4sV-1: on their whole pass path, the reads name the bench's objects.
+            foreign += [f"{c.key}: {b}" for b in _foreign_operands(fake.calls, bench)]
+            accessors += sum(len(_accessor_operands(cmd)) for cmd in fake.calls)
         assert not failed, failed
+        assert not foreign, foreign
+        assert accessors > 50, accessors  # the calls are recorded and parsed
 
 
 class TestSelftestFramework:  # pylint: disable=missing-function-docstring
@@ -16386,6 +16459,7 @@ class _PoisonShell(MockShell):
 
     def mock_run(self, cmd, check=False, input=None, log=None, timeout=None) -> RunResult:  # pylint: disable=redefined-builtin
         del check, input, log, timeout
+        self._calls.append(str(cmd))  # for _foreign_operands (M4sV-1)
         out = "" if str(cmd).startswith(self.ACCESSORS) else self.text
         return RunResult(self.returncode, out, self.text, str(cmd))
 
@@ -16396,8 +16470,14 @@ class _PoisonShell(MockShell):
 class TestSelftestReportPrivacy:  # pylint: disable=missing-function-docstring,too-few-public-methods
     """M4sR-1: no command output reaches a report, whatever a check reads."""
 
-    def _reports(self, returncode: int) -> dict[str, str]:
+    accessors = 0  # accessor calls parsed by _reports
+
+    def _reports(self, returncode: int, foreign: list[str] | None = None) -> dict[str, str]:
+        """Each check's report on the poisoned shell; the accessor calls that
+        read anything but the bench's objects go to ``foreign``, and one
+        entry per accessor call parsed is counted in ``self.accessors``."""
         out: dict[str, str] = {}
+        shell = _PoisonShell(returncode)
         ident = DiskIdentity(
             disk="/dev/zarktestnone",
             by_id="usb-Scratch_STICK0042-0:0",
@@ -16406,7 +16486,7 @@ class TestSelftestReportPrivacy:  # pylint: disable=missing-function-docstring,t
         )
         with (
             tempfile.TemporaryDirectory() as td,
-            patch_sh(_PoisonShell(returncode)),
+            patch_sh(shell),
             patch("time.sleep"),
             redirect_stdout(StringIO()),
         ):
@@ -16421,7 +16501,11 @@ class TestSelftestReportPrivacy:  # pylint: disable=missing-function-docstring,t
                 # Benches made in one second share a directory one time in
                 # 65536 (stamp + 2 random bytes); nothing here writes to it (M4cF-1).
                 os.makedirs(bench.mnt, exist_ok=True)
+                shell.reset()
                 res = stest.run_one(c, bench)
+                if foreign is not None:
+                    foreign += [f"{c.key}: {b}" for b in _foreign_operands(shell.calls, bench)]
+                    self.accessors += sum(len(_accessor_operands(cmd)) for cmd in shell.calls)
                 report = certs.build_report(
                     _facts(), certs.RunInfo(c.level, False), [res], bench.masks()
                 )
@@ -16470,10 +16554,37 @@ class TestSelftestReportPrivacy:  # pylint: disable=missing-function-docstring,t
 
     def test_no_check_puts_command_output_in_the_report(self):
         leaks = []
+        foreign: list[str] = []
+        self.accessors = 0
         for rc in (0, 1):
-            for key, text in self._reports(rc).items():
+            for key, text in self._reports(rc, foreign).items():
                 leaks += [f"rc {rc} {key}: {s}" for s in _PLANTED if s in text]
         assert not leaks, leaks
+        # M4sV-1: the accessors, answered with nothing, read only the run's own objects.
+        assert not foreign, foreign
+        assert self.accessors > 20, self.accessors  # the calls are recorded and parsed
+
+    def test_an_accessor_reading_beyond_the_bench_is_found(self):
+        with redirect_stdout(StringIO()):
+            log = make_log()
+            bench = stest.Bench(log, Cleanup(log), root="/nonexistent")
+        a = bench.pool("a")
+        assert _accessor_operands(
+            f"zfs get -H -p -r -s local -t snapshot -o name,value org.zark:t {a}/x"
+        ) == [("zfs get", [f"{a}/x"])]
+        assert _accessor_operands(f"zfs send -w {a}@s | zfs list -Hp -o name {a}") == [
+            ("zfs list", [a])
+        ]
+        assert not _foreign_operands(
+            [f"zpool get -H -o property,value all {a}", f"zfs list -Hp -r {a}@s"], bench
+        )
+        assert _foreign_operands(["zfs list -H -o name"], bench) == [
+            "zfs list -H -o name: zfs list with no object"
+        ]
+        assert _foreign_operands(["zfs list -Hp -t snapshot -o name -r rpool"], bench) == [
+            "zfs list -Hp -t snapshot -o name -r rpool: rpool"
+        ]
+        assert _foreign_operands([f"zpool get -Hp -o value guid {a}x"], bench)
 
 
 class TestCertificates:  # pylint: disable=missing-function-docstring
@@ -17167,6 +17278,56 @@ class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
         mock.on("zpool list -vHP").succeeds("zstx\t1G\n\t/dev/sdza1\n")
         mock.on("lsblk -nrs -o NAME,TYPE /dev/sdza1").succeeds("sdza1 part\nsdza disk\n")
         assert "wipefs -a /dev/sdz" in self._teardown(mock)
+
+
+class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
+    """M4sR-6: ``zark selftest run`` through ``zark``, stopped while a child
+    runs: tests/selftest_stop_harness.py, in its own mount namespace, on fake
+    zpool and zfs tools. Needs root and mount namespaces; skipped otherwise."""
+
+    def _run(self, case: str) -> dict[str, Any]:
+        TestUmountPropagation._skip_unless_possible()  # pylint: disable=protected-access
+        if _sh.is_live_usb():
+            raise SkipTest("on a live session zark.log is the checkout's, outside the tmpfs")
+        avail = stest._mem_available()  # pylint: disable=protected-access
+        if avail is not None and avail < stest.MIN_MEM_AVAILABLE:
+            raise SkipTest("too little memory for the bench")
+        harness = Path(__file__).parent / "selftest_stop_harness.py"
+        with tempfile.TemporaryDirectory() as td:
+            r = subprocess.run(
+                [sys.executable, str(harness), td, case],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=120,
+                check=False,
+            )
+        assert r.returncode == 0, (case, r.returncode, r.stderr[-2000:])
+        result: dict[str, Any] = json.loads(r.stdout.strip().splitlines()[-1])
+        for d in result["made"]:  # empty mount points the harness had to make
+            os.rmdir(d)
+        return result
+
+    def _stopped(self, name: str) -> None:
+        r = self._run(f"sig:{name}")
+        assert r["reached"], r
+        assert r["rc"] == 128 + getattr(signal, f"SIG{name}"), r
+        # The bench's two pools, by name; POOL-01's own create was stopped.
+        assert len(r["created"]) == 2 and r["destroyed"] == r["created"], r
+        assert not r["left"] and not r["benches"] and not r["child_alive"], r
+        assert r["rm_after_destroys"], r["log"]
+        assert sum("Interrupted by" in ln for ln in r["log"]) == 1, r["log"]
+        assert not [ln for ln in r["log"] if "Traceback" in ln], r["log"]
+        assert r["report"] == {"partial": True, "stopped": True, "checks": {}}, r
+
+    def test_sigint_while_a_child_runs(self):
+        self._stopped("INT")
+
+    def test_sigterm_while_a_child_runs(self):
+        self._stopped("TERM")
+
+    def test_sighup_while_a_child_runs(self):
+        self._stopped("HUP")
 
 
 class TestTypography:  # pylint: disable=missing-function-docstring
