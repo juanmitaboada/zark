@@ -282,3 +282,23 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> None:
         log.ok("APT backup guard installed (kernel/GRUB upgrades blocked with external pool) ✓")
     else:
         log.ok("APT backup guard already current ✓")
+
+
+def is_current(target_root: str = "") -> bool:
+    """True when the hook, its APT config and the MOTD script under
+    ``target_root`` hold this zark's content and are executable (what
+    :func:`install` with ``overwrite=True`` would leave; M4c-10)."""
+    root = target_root.rstrip("/")
+    base = f"{root}/" if root else "/"
+    for rel, content in (
+        (HOOK_RELATIVE_PATH, HOOK_SCRIPT),
+        (APT_CONF_RELATIVE_PATH, APT_CONF),
+        (MOTD_RELATIVE_PATH, MOTD_SCRIPT),
+    ):
+        path = Path(f"{base}{rel}")
+        try:
+            if path.read_text(encoding="utf-8") != content or not path.stat().st_mode & 0o111:
+                return False
+        except (OSError, UnicodeDecodeError):
+            return False
+    return True

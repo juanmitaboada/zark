@@ -26,16 +26,18 @@ import os
 import re
 from pathlib import Path
 
-from lib import apt_guard, grub_guard, sh
+from commands.setup import sanoid_conf_gap
+from lib import alerts, apt_guard, grub_guard, sh
 from lib.boot_chain import esp_of_rpool_disk
 from lib.grub_cfg import regenerate_grub_cfg
 from lib.identity import read_pool_label
 from lib.initrd import installed_kernels, regenerate_initrd
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
+from lib.survey import bookmark_feature
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
-TOTAL_STEPS = 4
+TOTAL_STEPS = 5
 EFI_DIR = "/boot/efi/EFI/ubuntu"
 REPAIR_ADVICE = "Boot the live USB and run: sudo ./zark repair-boot"
 
@@ -130,6 +132,69 @@ def check_esp_and_efi(esp: str, log: Log) -> str:
         log.ok("Secure Boot chain present after the reconfigure ✓")
         return ""
     return f"{', '.join(still)} missing in {EFI_DIR} ({', '.join(rcs)})"
+
+
+def mount_canmount_on(log: Log) -> list[str]:
+    """M4c-11: every filesystem of rpool and bpool that should be mounted
+    (``canmount=on``, an absolute mountpoint, its key available, no resume
+    token) and is not gets one ``zfs mount``; returns those still unmounted
+    (["<the listing>"] when it cannot be read)."""
+    r = sh.run(
+        "zfs list -H -o name,canmount,mountpoint,keystatus,receive_resume_token,mounted "
+        + "-t filesystem -r rpool bpool",
+    )
+    if not r.ok:
+        log.warn("Cannot list the datasets to check what is mounted")
+        return ["(the dataset listing failed)"]
+    left: list[str] = []
+    for line in r.lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        name, canmount, mountpoint, keystatus, token, mounted = fields
+        if canmount != "on" or not mountpoint.startswith("/") or mounted == "yes":
+            continue
+        if keystatus not in ("-", "available") or token != "-":
+            continue
+        if sh.run(f"zfs mount {name}", log=log).ok:
+            log.ok(f"  {name} mounted on {mountpoint}")
+        else:
+            log.warn(f"  {name}: not mounted on {mountpoint}")
+            left.append(name)
+    if not left:
+        log.ok("Every canmount=on dataset is mounted ✓")
+    return left
+
+
+def setup_gaps(zfs: ZFS) -> list[str]:
+    """M4c-10: what ``zark setup`` would still do here, read-only: the four
+    things it guarantees (sanoid's timer and policy, rpool's bookmark_v2,
+    the alerts timer) and the guards and the alerts' files holding this
+    zark's content (finish keeps a restored system's older copies)."""
+    gaps: list[str] = []
+
+    def unit_state(verb: str, unit: str) -> str:
+        return sh.run(f"systemctl {verb} {unit}", timeout=10).output.strip()
+
+    if unit_state("is-enabled", "sanoid.timer") != "enabled" or (
+        unit_state("is-active", "sanoid.timer") != "active"
+    ):
+        gaps.append("enable and start sanoid.timer")
+    if conf := sanoid_conf_gap(zfs):
+        gaps.append(conf)
+    if bookmark_feature("rpool") not in ("enabled", "active"):
+        gaps.append("enable feature@bookmark_v2 on rpool")
+    if not Path(f"/{alerts.TIMER_PATH}").exists():
+        gaps.append("install the alerts timer")
+    elif unit_state("is-enabled", alerts.TIMER) != "enabled":
+        gaps.append("enable the alerts timer")
+    if not apt_guard.is_current():
+        gaps.append("update the APT guard to this zark's")
+    if not grub_guard.is_current():
+        gaps.append("update the grub guard to this zark's")
+    if Path(f"/{alerts.TIMER_PATH}").exists() and not alerts.files_current():
+        gaps.append("update the alerts' MOTD script and units to this zark's")
+    return gaps
 
 
 def run(
@@ -227,8 +292,12 @@ def run(
         log.warn("No EFI System Partition found on rpool's disk - fstab not checked")
     efi_failure = check_esp_and_efi(esp, log)
 
-    # ── 4. Verify ────────────────────────────────────────────────────────
-    log.step(4, TOTAL_STEPS, "Verifying system state...")
+    # ── 4. Datasets ──────────────────────────────────────────────────────
+    log.step(4, TOTAL_STEPS, "Checking the mounted datasets...")
+    unmounted = mount_canmount_on(log)
+
+    # ── 5. Verify ────────────────────────────────────────────────────────
+    log.step(5, TOTAL_STEPS, "Verifying system state...")
     unhealthy: list[str] = []
     for pool in ("rpool", "bpool"):
         health = zfs.pool_health(pool)
@@ -252,6 +321,11 @@ def run(
         ),
         "EFI binaries present ✓" if not efi_failure else f"✗ EFI: {efi_failure}",
         *(f"✗ pool {u}" for u in unhealthy),
+        *(
+            [f"⚠ not mounted: {', '.join(unmounted)}: reboot and run finish again"]
+            if unmounted
+            else []
+        ),
         "",
     ]
     if failed:
@@ -267,4 +341,8 @@ def run(
             advice = [REPAIR_ADVICE]
         log.banner_error("FINISH INCOMPLETE", [*lines, *advice])
         raise SystemExit(1)
-    log.banner_ok("FINISH COMPLETE", [*lines, f"Run setup: {log.W}sudo ./zark setup{log.N}"])
+    gaps = setup_gaps(zfs)
+    setup = [f"setup would: {g}" for g in gaps]
+    if gaps:
+        setup.append(f"Run setup: {log.W}sudo ./zark setup{log.N}")
+    log.banner_ok("FINISH COMPLETE", [*lines, *setup])

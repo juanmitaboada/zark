@@ -113,3 +113,16 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> None:
     _ = guard_path.write_text(GUARD_SCRIPT, encoding="utf-8")
     guard_path.chmod(0o755)
     log.ok("Grub guard installed (09_zfs_backup_guard) ✓")
+
+
+def is_current(target_root: str = "") -> bool:
+    """True when the guard under ``target_root`` holds this zark's script and
+    is executable (what :func:`install` would leave; M4c-10)."""
+    root = target_root.rstrip("/")
+    path = Path(f"{root}/{GUARD_RELATIVE_PATH}") if root else Path(f"/{GUARD_RELATIVE_PATH}")
+    try:
+        return path.read_text(encoding="utf-8") == GUARD_SCRIPT and bool(
+            path.stat().st_mode & 0o111
+        )
+    except (OSError, UnicodeDecodeError):
+        return False

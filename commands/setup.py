@@ -687,6 +687,25 @@ def _check_secure_boot_alternatives(log: Log) -> None:
         log.warn("update-grub had warnings - review the log")
 
 
+def sanoid_conf_gap(zfs: ZFSQuery) -> str:
+    """ "" when /etc/sanoid/sanoid.conf holds setup's policy for this system
+    (no rule added, removed or changed, template_minimal as setup writes
+    it), else what setup would change (finish's setup line, M4c-10)."""
+    conf = Path("/etc/sanoid/sanoid.conf")
+    if not conf.exists():
+        return "write /etc/sanoid/sanoid.conf"
+    ubuntu_name = _detect_ubuntu_ds()
+    if not ubuntu_name:
+        return "configure sanoid (no rpool/ROOT/ubuntu_* boot environment found)"
+    try:
+        current = _parse_sanoid_conf(conf.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return "rewrite /etc/sanoid/sanoid.conf (unreadable)"
+    diff = _diff_rules(current, _discover_rules(zfs, ubuntu_name))
+    n = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"]) + len(diff["templates"])
+    return f"update /etc/sanoid/sanoid.conf ({n} section(s) differ)" if n else ""
+
+
 def _install_guards(log: Log) -> None:
     """Install both backup guards on the running system, current versions.
 

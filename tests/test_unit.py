@@ -3515,6 +3515,31 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
         assert "use_template = production" in text
         assert "recursive = yes" in text
 
+    def test_sanoid_conf_gap(self):
+        # M4c-10: finish's read-only view of setup's sanoid step.
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "sanoid.conf"
+            real = Path
+
+            def fake_path(p: object) -> Path:
+                return conf if str(p) == "/etc/sanoid/sanoid.conf" else real(str(p))
+
+            with (
+                patch.object(setup_mod, "Path", fake_path),
+                patch.object(setup_mod, "_detect_ubuntu_ds", return_value=self.UBUNTU),
+                patch.object(setup_mod, "_discover_rules", return_value=self._planned()),
+            ):
+                zfs = ZFS(make_log())
+                assert setup_mod.sanoid_conf_gap(zfs) == "write /etc/sanoid/sanoid.conf"
+                _ = conf.write_text(_generate_sanoid_conf(self._planned()), encoding="utf-8")
+                assert setup_mod.sanoid_conf_gap(zfs) == ""
+                _ = conf.write_text(
+                    _generate_sanoid_conf(self._planned()[:-1]),
+                    encoding="utf-8",
+                )
+                gap = setup_mod.sanoid_conf_gap(zfs)
+                assert gap == "update /etc/sanoid/sanoid.conf (1 section(s) differ)"
+
     def test_round_trip_preserves_manual_section(self):
         """Generate → parse → check that manual sections survived intact.
 
@@ -8149,11 +8174,13 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
     """J, M4c-4/5/7/8: finish reports what it did, never touches the pools' import."""
 
     @staticmethod
-    def _run(
+    def _run(  # pylint: disable=too-many-locals
         grub_failure: str = "",
         initrd_failures: tuple[str, ...] = (),
         health: str = "ONLINE",
         efi_failure: str = "",
+        gaps: tuple[str, ...] = (),
+        unmounted: tuple[str, ...] = (),
     ) -> tuple[str, bool, list[str]]:
         order: list[str] = []
 
@@ -8189,6 +8216,8 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
             patch.object(finish_mod, "fix_grub_bpool_uuid"),
             patch.object(finish_mod, "esp_of_rpool_disk", return_value="/dev/nvme1n1p1"),
             patch.object(finish_mod, "check_esp_and_efi", side_effect=fake_efi),
+            patch.object(finish_mod, "mount_canmount_on", return_value=list(unmounted)),
+            patch.object(finish_mod, "setup_gaps", return_value=list(gaps)),
             patch.object(ZFS, "pool_exists", return_value=True),
             patch.object(ZFS, "pool_guid", return_value=""),
             patch.object(ZFS, "pool_health", return_value=health),
@@ -8255,6 +8284,26 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         out, exited, _ = self._run(health="DEGRADED")
         assert exited
         assert "✗ pool rpool: DEGRADED" in out
+
+    def test_no_setup_line_when_setup_has_nothing_to_do(self):
+        # M4c-10: setup is recommended only for what is missing.
+        out, exited, _ = self._run()
+        assert not exited and "setup" not in out.split("FINISH COMPLETE")[1]
+
+    def test_the_setup_line_names_what_is_missing(self):
+        out, exited, _ = self._run(
+            gaps=("install the alerts timer", "enable feature@bookmark_v2 on rpool")
+        )
+        assert not exited
+        assert "setup would: install the alerts timer" in out
+        assert "setup would: enable feature@bookmark_v2 on rpool" in out
+        assert "sudo ./zark setup" in out
+
+    def test_a_dataset_left_unmounted_is_a_warning(self):
+        # M4c-11 11a: named, with the advice; the finish is still complete.
+        out, exited, _ = self._run(unmounted=("rpool/USERDATA/home_x",))
+        assert not exited and "FINISH COMPLETE" in out
+        assert "⚠ not mounted: rpool/USERDATA/home_x: reboot and run finish again" in out
 
 
 class TestFinishChecks:  # pylint: disable=missing-function-docstring
@@ -8346,6 +8395,99 @@ class TestFinishChecks:  # pylint: disable=missing-function-docstring
             "shimx64.efi missing in /boot/efi/EFI/ubuntu "
             + "(grub-efi-amd64-signed rc=0, shim-signed rc=1)"
         )
+
+    LISTING = (
+        "rpool\toff\t/\t-\t-\tno\n"
+        "rpool/ROOT/x\tnoauto\t/\t-\t-\tyes\n"
+        "rpool/USERDATA/home_x\ton\t/home/x\tavailable\t-\tno\n"
+        "rpool/srv\ton\t/srv\t-\t-\tno\n"
+        "rpool/var/lib\ton\t/var/lib\t-\t-\tyes\n"
+        "rpool/locked\ton\t/locked\tunavailable\t-\tno\n"
+        "rpool/partial\ton\t/partial\t-\t1-abc\tno\n"
+        "rpool/legacy\ton\tlegacy\t-\t-\tno\n"
+    )
+
+    def test_canmount_on_datasets_get_one_mount(self):
+        mock = MockShell()
+        mock.on_prefix("zfs list -H -o name,canmount,mountpoint").succeeds(self.LISTING)
+        mock.on("zfs mount rpool/USERDATA/home_x").succeeds()
+        mock.on("zfs mount rpool/srv").fails("cannot mount")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            left = finish_mod.mount_canmount_on(make_log())
+        assert left == ["rpool/srv"]
+        mounts = [c for c in mock.calls if c.startswith("zfs mount")]
+        assert mounts == ["zfs mount rpool/USERDATA/home_x", "zfs mount rpool/srv"]
+
+    def test_a_failed_listing_is_reported(self):
+        mock = MockShell()
+        mock.on_prefix("zfs list -H -o name,canmount,mountpoint").fails()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert finish_mod.mount_canmount_on(make_log()) == ["(the dataset listing failed)"]
+
+    @staticmethod
+    def _gaps(good: bool) -> list[str]:
+        mock = MockShell()
+        mock.on("systemctl is-enabled sanoid.timer").succeeds("enabled" if good else "disabled")
+        mock.on("systemctl is-active sanoid.timer").succeeds("active")
+        mock.on("systemctl is-enabled zark-status.timer").succeeds("enabled")
+
+        class _P:  # pylint: disable=too-few-public-methods
+            def __init__(self, p: object) -> None:
+                self.p = str(p)
+
+            def exists(self) -> bool:
+                return good
+
+        with (
+            patch_sh(mock),
+            patch.object(finish_mod, "Path", _P),
+            patch.object(finish_mod, "sanoid_conf_gap", return_value="" if good else "write x"),
+            patch.object(finish_mod, "bookmark_feature", return_value="active" if good else ""),
+            patch.object(finish_mod.apt_guard, "is_current", return_value=good),
+            patch.object(finish_mod.grub_guard, "is_current", return_value=good),
+            patch.object(finish_mod.alerts, "files_current", return_value=good),
+        ):
+            return finish_mod.setup_gaps(ZFS(make_log()))
+
+    def test_setup_gaps_none(self):
+        assert not self._gaps(True)
+
+    def test_setup_gaps_each_named(self):
+        assert self._gaps(False) == [
+            "enable and start sanoid.timer",
+            "write x",
+            "enable feature@bookmark_v2 on rpool",
+            "install the alerts timer",
+            "update the APT guard to this zark's",
+            "update the grub guard to this zark's",
+        ]
+
+    def test_installed_files_are_current_until_changed(self):
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(StringIO()):
+            assert not apt_guard.is_current(td) and not grub_guard.is_current(td)
+            apt_guard.install(target_root=td, log=make_log())
+            grub_guard.install(target_root=td, log=make_log())
+            assert apt_guard.is_current(td) and grub_guard.is_current(td)
+            guard = Path(td) / grub_guard.GUARD_RELATIVE_PATH
+            _ = guard.write_text(guard.read_text(encoding="utf-8") + "# older\n", encoding="utf-8")
+            assert not grub_guard.is_current(td)
+            hook = Path(td) / apt_guard.HOOK_RELATIVE_PATH
+            hook.chmod(0o644)
+            assert not apt_guard.is_current(td)
+
+    def test_alerts_files_current(self):
+        with tempfile.TemporaryDirectory() as td:
+            assert not alerts_mod.files_current(td, "/opt/zark/zark")
+            base = Path(td)
+            for rel, text in (
+                (alerts_mod.MOTD_SCRIPT_PATH, alerts_mod.MOTD_SCRIPT),
+                (alerts_mod.SERVICE_PATH, alerts_mod.service_unit("/opt/zark/zark")),
+                (alerts_mod.TIMER_PATH, alerts_mod.TIMER_UNIT),
+            ):
+                (base / rel).parent.mkdir(parents=True, exist_ok=True)
+                _ = (base / rel).write_text(text, encoding="utf-8")
+            assert alerts_mod.files_current(td, "/opt/zark/zark")
+            assert not alerts_mod.files_current(td, "/usr/share/zark/zark")
 
     def test_reconfigure_that_restores_them_is_success(self):
         reason, _ = self._efi("/dev/sda1 vfat", {"grubx64.efi"}, {"grubx64.efi", "shimx64.efi"})

@@ -123,6 +123,24 @@ def install(log: Log, root: str = "/", zark: str = "") -> None:
         log.warn(f"Could not enable {TIMER}; the MOTD stays empty until it runs")
 
 
+def files_current(root: str = "/", zark: str = "") -> bool:
+    """True when the MOTD script, the service and the timer under ``root``
+    hold what :func:`install` writes for ``zark`` (M4c-10)."""
+    zark = zark or zark_path()
+    base = Path(root)
+    for rel, text in (
+        (MOTD_SCRIPT_PATH, MOTD_SCRIPT),
+        (SERVICE_PATH, service_unit(zark)),
+        (TIMER_PATH, TIMER_UNIT),
+    ):
+        try:
+            if (base / rel).read_text(encoding="utf-8") != text:
+                return False
+        except (OSError, UnicodeDecodeError):
+            return False
+    return True
+
+
 def remove(log: Log, root: str = "/") -> None:
     """Disable the timer and remove what :func:`install` wrote, and what the
     timer wrote under /run/zark (the directory stays: other markers live
