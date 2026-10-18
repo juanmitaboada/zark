@@ -23,6 +23,7 @@ from pathlib import Path
 
 from lib import apt_guard, grub_guard, sh
 from lib.grub_cfg import regenerate_grub_cfg
+from lib.initrd import installed_kernels
 
 # from lib.config import Config
 from lib.log import Log
@@ -113,6 +114,7 @@ def run(
         grub_cfg,
         "update-grub",
         Path(f"{grub_cfg}.pre-finish"),
+        installed_kernels(""),
         log,
     )
 

@@ -24,7 +24,7 @@ from lib import grub_guard, sh
 from lib.cleanup import Cleanup
 from lib.grub_cfg import regenerate_grub_cfg
 from lib.identity import disks_under
-from lib.initrd import regenerate_initrd
+from lib.initrd import installed_kernels, regenerate_initrd
 from lib.keystore import Keystore
 from lib.log import Log
 from lib.mount import kernel_named_vdevs, mount_system_pools
@@ -174,6 +174,7 @@ def run(
         grub_cfg,
         f"chroot {REPAIR_MNT} update-grub",
         Path(f"{grub_cfg}.pre-repair"),
+        installed_kernels(REPAIR_MNT),
         log,
     )
 

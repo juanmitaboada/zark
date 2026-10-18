@@ -91,6 +91,7 @@ import lib.certificates as certs  # pylint: disable=wrong-import-position # noqa
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.health as health_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.initrd as initrd_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.live as live_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -2873,6 +2874,22 @@ class TestFixGrubBpoolUuid:
         p = Path(path)
         p.write_text(content, encoding="utf-8")
         return p
+
+    def test_a_title_that_is_not_utf8_is_written_back_as_read(self):
+        """M4c-6: bytes that are not UTF-8 survive the rewrite unchanged."""
+        fd, path = tempfile.mkstemp(suffix=".cfg")
+        os.close(fd)
+        p = Path(path)
+        _ = p.write_bytes(
+            b"menuentry 'Ubuntu \xff\xfe' {\n"
+            + f"    search --no-floppy --fs-uuid --set=root {self.OLD_HEX}\n}}\n".encode(),
+        )
+        assert fix_grub_bpool_uuid(p, self.NEW_HEX, make_log()) is True
+        assert p.read_bytes() == (
+            b"menuentry 'Ubuntu \xff\xfe' {\n"
+            + f"    search --no-floppy --fs-uuid --set=root {self.NEW_HEX}\n}}\n".encode()
+        )
+        os.unlink(p)
 
     def test_replaces_set_root(self):
         """Real Ubuntu pattern: --set=root."""
@@ -7846,14 +7863,49 @@ class TestInitrd:  # pylint: disable=missing-function-docstring
     def test_dracut_per_kernel_and_failure_reported(self):
         root = self._root()
         mock = MockShell()
-        mock.on(f"cat {root}/etc/machine-id").fails()
-        mock.on(f"chroot {root} dracut --force --kver=7.0.0-31-generic").succeeds()
-        mock.on(f"chroot {root} dracut --force --kver=7.0.0-34-generic").fails(rc=1)
+        ok = "dracut --force /boot/initrd.img-7.0.0-31-generic 7.0.0-31-generic"
+        bad = "dracut --force /boot/initrd.img-7.0.0-34-generic 7.0.0-34-generic"
+        mock.on(f"chroot {root} {ok}").succeeds()
+        mock.on(f"chroot {root} {bad}").fails(rc=1)
         with patch_sh(mock), redirect_stdout(StringIO()):
             failures = regenerate_initrd(root, make_log())
         assert failures == ["dracut failed for 7.0.0-34-generic (rc=1)"]
         assert mock.was_not_called("--regenerate-all")
         assert mock.was_not_called("7.0.0-14")
+
+    def test_dracut_is_given_the_output_path_and_nothing_is_made_on_the_esp(self):
+        # M4c-5: without the path, an ESP with loader/entries gets the initrd.
+        root = self._root()
+        mock = MockShell()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            _ = regenerate_initrd(root, make_log())
+        assert mock.was_not_called("--kver")
+        assert mock.was_not_called("mkdir")
+        assert mock.was_not_called("machine-id")
+
+    def test_the_kernel_links_are_not_kernels(self):
+        # M1P.8: the postinst's vmlinuz and vmlinuz.old links, and a vmlinuz-<v> link.
+        root = Path(self._root())
+        (root / "boot/vmlinuz").symlink_to("vmlinuz-7.0.0-34-generic")
+        (root / "boot/vmlinuz.old").symlink_to("vmlinuz-7.0.0-31-generic")
+        (root / "lib/modules/7.0.0-99-generic").mkdir(parents=True)
+        (root / "lib/modules/7.0.0-99-generic/modules.dep").write_text("")
+        (root / "boot/vmlinuz-7.0.0-99-generic").symlink_to("vmlinuz-7.0.0-34-generic")
+        assert installed_kernels(str(root)) == ["7.0.0-31-generic", "7.0.0-34-generic"]
+
+    def test_the_running_system_is_not_chrooted(self):
+        mock = MockShell()
+        mock.on("dracut --force /boot/initrd.img-7.0.0-34-generic 7.0.0-34-generic").succeeds()
+        with (
+            patch_sh(mock),
+            patch.object(initrd_mod, "installed_kernels", return_value=["7.0.0-34-generic"]),
+            patch.object(initrd_mod.Path, "exists", return_value=True),
+            redirect_stdout(StringIO()),
+        ):
+            assert not regenerate_initrd("", make_log())
+        assert mock.calls == [
+            "dracut --force /boot/initrd.img-7.0.0-34-generic 7.0.0-34-generic",
+        ]
 
 
 class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
@@ -7978,15 +8030,17 @@ class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
     @staticmethod
     def _regenerate(
         root: Path,
-        generated: str,
+        generated: str | bytes,
         update_grub_ok: bool = True,
         stderr: str = "boom",
+        kernels: list[str] | None = None,
     ) -> str:
         grub_cfg = root / "grub.cfg"
 
         def fake_run(cmd: str, **_kw: object) -> RunResult:
             if "update-grub" in cmd:
-                grub_cfg.write_text(generated, encoding="utf-8")
+                data = generated if isinstance(generated, bytes) else generated.encode()
+                grub_cfg.write_bytes(data)
                 rc, err = (0, "") if update_grub_ok else (1, stderr)
                 return RunResult(returncode=rc, stdout="", stderr=err, command=cmd)
             if cmd.startswith("cp "):
@@ -7999,6 +8053,7 @@ class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
                 grub_cfg,
                 "chroot /mnt/repair update-grub",
                 root / "grub.cfg.pre-repair",
+                kernels or [],
                 make_log(),
             )
 
@@ -8008,6 +8063,38 @@ class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
             (root / "grub.cfg").write_text("old vmlinuz-1", encoding="utf-8")
             with redirect_stdout(StringIO()):
                 assert self._regenerate(root, "linux /vmlinuz-7") == ""
+
+    def test_every_installed_kernel_needs_its_entry(self):
+        # M4c-6: 10_linux_zfs exits 0 even when it stops half way.
+        cfg = (
+            'menuentry "Ubuntu" {\n'
+            '\tlinux\t"/BOOT/ubuntu_x@/vmlinuz-7.0.0-38-generic" root=ZFS="rpool/ROOT/x"\n'
+            "}\n"
+            "function zsyshistorymenu {\n"
+            '\tlinux "${kernel}" root=ZFS="${dataset}"\n'
+            "}\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "grub.cfg").write_text("OLD vmlinuz", encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                both = ["7.0.0-31-generic", "7.0.0-38-generic"]
+                reason = self._regenerate(root, cfg, kernels=both)
+                assert reason == "update-grub wrote no entry for 7.0.0-31-generic"
+                assert self._regenerate(root, cfg, kernels=["7.0.0-38-generic"]) == ""
+                # A version that is a prefix of another is not its entry.
+                assert self._regenerate(root, cfg, kernels=["7.0.0-3"]) != ""
+                # The zsyshistorymenu line alone is no entry.
+                hist = cfg.split("function")[1]
+                reason = self._regenerate(root, hist)
+                assert reason == "update-grub produced no kernel entries"
+
+    def test_a_title_that_is_not_utf8_is_read(self):
+        cfg = b'menuentry "Ubuntu \xff" {\n\tlinux /BOOT/x@/vmlinuz-7.0.0-38-generic ro\n}\n'
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with redirect_stdout(StringIO()):
+                assert self._regenerate(root, cfg, kernels=["7.0.0-38-generic"]) == ""
 
     def test_stale_backup_from_an_earlier_run_is_not_restored(self):
         with tempfile.TemporaryDirectory() as td:

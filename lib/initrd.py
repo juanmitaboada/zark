@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-initrd regeneration for a mounted target system (recover, repair-boot).
+initrd regeneration for a mounted target system (recover, repair-boot) or
+the running one (finish, ``root=""``).
 
-Only kernels that are really installed are regenerated: a version needs
-both ``/boot/vmlinuz-<v>`` and ``/lib/modules/<v>/modules.dep[.bin]`` in the
-target. ``dracut --regenerate-all`` iterates every ``/lib/modules/*`` with a
-``modules.dep``, including the directory the Ubuntu installer leaves for
-the live ISO kernel (P0-7), and returns non-zero when any of them fails;
-zark used to ignore that exit status. Each version is now run on its own
-with ``dracut --force --kver=<v>`` (what ``--regenerate-all`` does per
-directory) and every failure is reported.
+Only kernels that are really installed are regenerated: a version needs a
+regular file ``/boot/vmlinuz-<v>`` (never the ``vmlinuz``/``vmlinuz.old``
+links the kernel's postinst keeps) and ``/lib/modules/<v>/modules.dep[.bin]``
+in the target. ``dracut --regenerate-all`` iterates every ``/lib/modules/*``
+with a ``modules.dep``, including the directory the Ubuntu installer leaves
+for the live ISO kernel (P0-7), and returns non-zero when any of them
+fails. Each version is run on its own and every failure is reported.
+
+dracut is given the output path, ``dracut --force /boot/initrd.img-<v> <v>``,
+as Ubuntu's own update-initramfs wrapper for dracut does: without it dracut
+picks its path itself, and an ESP restored with a ``loader/entries``
+directory sends the initrd there, where 10_linux_zfs never looks (M4c-5).
 """
 
 from pathlib import Path
@@ -34,6 +39,8 @@ def installed_kernels(root: str) -> list[str]:
     """Kernel versions with both a vmlinuz in /boot and modules in /lib/modules."""
     versions: list[str] = []
     for vmlinuz in sorted(Path(f"{root}/boot").glob("vmlinuz-*")):
+        if vmlinuz.is_symlink() or not vmlinuz.is_file():
+            continue
         v = vmlinuz.name[len("vmlinuz-") :]
         mods = Path(f"{root}/lib/modules/{v}")
         if (mods / "modules.dep").exists() or (mods / "modules.dep.bin").exists():
@@ -44,20 +51,20 @@ def installed_kernels(root: str) -> list[str]:
 def regenerate_initrd(root: str, log: Log) -> list[str]:
     """Regenerate the initrd of every installed kernel in ``root``.
 
-    Returns human-readable failures (empty on full success). Uses dracut
-    when the target has it, initramfs-tools otherwise.
+    ``root`` is a mounted target, run through ``chroot``, or "" for the
+    running system. Returns human-readable failures, each naming its kernel
+    (empty on full success). Uses dracut when the target has it,
+    initramfs-tools otherwise.
     """
     kernels = installed_kernels(root)
     if not kernels:
         return [f"no installed kernel found under {root}/boot"]
+    inside = f"chroot {root} " if root else ""
     failures: list[str] = []
     if Path(f"{root}/usr/bin/dracut").exists():
         log.info(f"Regenerating initrd (dracut) for: {', '.join(kernels)}")
-        machine_id = sh.run(f"cat {root}/etc/machine-id").output.strip()
         for v in kernels:
-            if machine_id:
-                _ = sh.run(f"mkdir -p {root}/boot/efi/{machine_id}/{v}")
-            r = sh.run(f"chroot {root} dracut --force --kver={v}", log=log)
+            r = sh.run(f"{inside}dracut --force /boot/initrd.img-{v} {v}", log=log)
             if r.ok:
                 log.ok(f"initrd regenerated for {v} (dracut) ✓")
             else:
@@ -66,7 +73,7 @@ def regenerate_initrd(root: str, log: Log) -> list[str]:
     elif Path(f"{root}/usr/sbin/update-initramfs").exists():
         log.info(f"Regenerating initrd (update-initramfs) for: {', '.join(kernels)}")
         for v in kernels:
-            r = sh.run(f"chroot {root} update-initramfs -u -k {v}", log=log)
+            r = sh.run(f"{inside}update-initramfs -u -k {v}", log=log)
             if r.ok:
                 log.ok(f"initrd regenerated for {v} ✓")
             else:

@@ -736,7 +736,8 @@ def fix_grub_bpool_uuid(grub_cfg: Path, new_bpool_hex: str, log: Log) -> bool:
         log.warn(f"{grub_cfg} not found - bpool content was not restored")
         return False
 
-    content = grub_cfg.read_text()
+    # surrogateescape: a title that is not UTF-8 is written back as it was read.
+    content = grub_cfg.read_text(encoding="utf-8", errors="surrogateescape")
     matches = _GRUB_FS_UUID_RE.findall(content)
     if not matches:
         log.warn(f"No fs-uuid --set= references in {grub_cfg.name} - bpool UUID not updated")
@@ -756,7 +757,11 @@ def fix_grub_bpool_uuid(grub_cfg: Path, new_bpool_hex: str, log: Log) -> bool:
             return match.group(0)
         return f"{prefix}{new_bpool_hex}"
 
-    grub_cfg.write_text(_GRUB_FS_UUID_RE.sub(_sub, content))
+    _ = grub_cfg.write_text(
+        _GRUB_FS_UUID_RE.sub(_sub, content),
+        encoding="utf-8",
+        errors="surrogateescape",
+    )
 
     old_list = ", ".join(sorted(old_uuids))
     log.ok(f"Fixed bpool UUID in grub.cfg: {old_list} → {new_bpool_hex}")
