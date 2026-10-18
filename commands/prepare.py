@@ -245,7 +245,11 @@ def run(
         )
         raise SystemExit(1)
 
-    rb = zfs.verify_exported_pool_readback(new_pool, device=ident.part1) if exported else None
+    rb = (
+        zfs.verify_exported_pool_readback(new_pool, device=ident.part1, cleanup=cleanup)
+        if exported
+        else None
+    )
     if rb is None or not rb.ok:
         lines = (
             rb.describe() if rb else [f"{new_pool} could not be exported, so it was not read back."]

@@ -1011,7 +1011,7 @@ def run(
         )
         _notify("❌ Backup NOT verified", f"{pool_name} could not be exported")
         raise SystemExit(1)
-    rb = zfs.verify_exported_pool_readback(pool_name, device=device)
+    rb = zfs.verify_exported_pool_readback(pool_name, device=device, cleanup=cleanup)
     if not rb.ok:
         log.banner_error(
             "BACKUP NOT VERIFIED", [*rb.describe(), "", "Do NOT rely on this backup.", *marked]

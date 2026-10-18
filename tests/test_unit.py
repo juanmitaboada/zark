@@ -4417,6 +4417,49 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         assert mock.was_called("zpool export -f black")
 
 
+class TestReadbackTracked:  # pylint: disable=missing-function-docstring
+    """M4c-25 (M4bX.1): the read-back's import is the Cleanup's until exported."""
+
+    DEV = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
+    IMPORT = f"zpool import -o readonly=on -N -R /run/zark/altroot/black -d {DEV} black"
+
+    def _readback(self, export_ok: bool, import_ok: bool = True) -> tuple[Cleanup, list[str]]:
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        seen: list[str] = []
+        cleanup = Cleanup(make_log())
+        imp = mock.on(self.IMPORT)
+        _ = imp.succeeds() if import_ok else imp.fails("x")
+
+        def health(*_a: object) -> str:
+            seen.extend(cleanup._pools)  # pylint: disable=protected-access
+            return "ONLINE"
+
+        _ = (
+            mock.on("zpool export").succeeds()
+            if export_ok
+            else mock.on("zpool export").fails("busy")
+        )
+        with patch_sh(mock), patch.object(ZFS, "pool_health", side_effect=health):
+            _ = ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, cleanup)
+        return cleanup, seen
+
+    def test_tracked_while_imported_untracked_once_exported(self):
+        cleanup, seen = self._readback(export_ok=True)
+        assert seen == ["black"]
+        assert not cleanup._pools  # pylint: disable=protected-access
+
+    def test_still_tracked_when_the_export_fails(self):
+        cleanup, _ = self._readback(export_ok=False)
+        assert cleanup._pools == ["black"]  # pylint: disable=protected-access
+
+    def test_untracked_when_the_import_fails(self):
+        with patch.object(forensics, "capture"):
+            cleanup, _ = self._readback(export_ok=True, import_ok=False)
+        assert not cleanup._pools  # pylint: disable=protected-access
+
+
 class TestHealthChecks:  # pylint: disable=missing-function-docstring
     """Non-destructive drive risk checks in lib/health.py."""
 

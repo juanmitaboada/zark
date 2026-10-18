@@ -29,6 +29,16 @@ from lib.log import Log
 from lib.sh import run
 
 
+class PoolTracker(Protocol):
+    """What :meth:`ZFS.verify_exported_pool_readback` needs of a Cleanup."""
+
+    def track_pool(self, name: str) -> None:
+        """Export ``name`` on exit."""
+
+    def untrack_pool(self, name: str) -> None:
+        """No longer export ``name`` on exit."""
+
+
 class KeyStatusError(Exception):
     """``zfs get keystatus`` failed: which keys are loaded is unknown."""
 
@@ -370,8 +380,13 @@ class ZFS:
         self,
         name: str,
         device: str | None = None,
+        cleanup: PoolTracker | None = None,
     ) -> "Readback":
         """Confirm an already-exported pool can be re-imported and reads clean.
+
+        ``cleanup`` tracks the pool from before its re-import until its
+        export succeeded, so a run stopped in between (a signal, a fatal)
+        still exports it on exit (M4bX.1, M4c-25).
 
         This is the only reliable guard against USB-SATA bridges that lie
         about FUA: a ``zpool export`` returning 0 does NOT guarantee the pool
@@ -412,8 +427,12 @@ class ZFS:
         if device:
             cmd += f" -d {device}"
         cmd += f" {name}"
+        if cleanup is not None:
+            cleanup.track_pool(name)
         r = run(cmd, log=self.log)
         if not r.ok:
+            if cleanup is not None:
+                cleanup.untrack_pool(name)  # not imported: nothing to export
             self.log.error(f"Read-back of {name}: could not re-import: {r.stderr.strip()}")
             _ = forensics.capture(name, "read-back could not re-import the pool", self.log)
             return Readback(imported=False, error=r.stderr.strip())
@@ -434,6 +453,8 @@ class ZFS:
             ).ok
         )
         run("sync")
+        if reexported and cleanup is not None:
+            cleanup.untrack_pool(name)
         if reexported:
             self.log.ok(f"Read-back of {name}: exported again")
         else:
