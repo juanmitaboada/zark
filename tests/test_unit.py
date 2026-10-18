@@ -13189,6 +13189,16 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert fake.units["sanoid.timer"] == "active"
         assert not any(c.startswith("syncoid") or "sanoid --take" in c for c in fake.calls)
 
+    def test_the_banner_shows_the_pool_roots_available(self) -> None:
+        """M3P.9: BACKUP COMPLETED shows the pool root's zfs used and
+        available (as step 4 and the space plan do), not zpool's free."""
+        out = StringIO()
+        _, rc = self._run(_fresh_fake(), redirect_stdout(out))
+        text = re.sub(r"\x1b\[[0-9;]*m", "", out.getvalue())
+        assert rc == 0
+        assert f"Available:      {_sh.humanize_bytes(10**13)}" in text, text[-1500:]
+        assert f"Used on target: {_sh.humanize_bytes(10**9)} (" in text
+
     def test_complete_backup_records_what_the_drive_shares(self) -> None:
         """M3 decision 5e: after a complete run the registry holds, per
         dataset, the sanoid snapshots the drive shares with origin (the
@@ -13324,7 +13334,8 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         out = StringIO()
         _cfg, rc = self._run(fake, redirect_stdout(out))
         assert rc == 0
-        assert "1 legacy snapshot(s) in origin no registered drive needs" in out.getvalue()
+        assert status_lib.residue_line(1) in out.getvalue()
+        assert "In origin: 1 snapshot(s) no registered drive needs" in out.getvalue()
         assert fake.names("rpool/keystore") == ["prepare_20260927_082338"]
 
     def test_a_failed_read_of_origin_after_the_transfer_says_so(self) -> None:
@@ -13353,7 +13364,7 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         text = out.getvalue()
         assert rc == 0 and "BACKUP COMPLETED" in text, text
         assert "Could not read the source pools" in text
-        assert "no anchor" not in text and "legacy snapshot(s)" not in text
+        assert "no anchor" not in text and "no registered drive needs" not in text
         assert "blue: " in text and "day(s) since its last backup" in text
 
     @staticmethod
@@ -15177,7 +15188,8 @@ class TestStatus:
         assert "rpool is 86% full (warning from 80%): sudo zark prune" in text
         assert "bpool" not in text
         assert "zark: last backups: black 3 day(s) ago, blue 34 day(s) ago" in text
-        assert "blue: no anchor in origin" in text and "23 legacy snapshot(s)" in text
+        assert "blue: no anchor in origin" in text
+        assert "zark: In origin: 23 snapshot(s) no registered drive needs (`syncoid_*`" in text
 
     def test_a_failed_read_of_origin_says_so(self) -> None:
         """M3R-2 (E3): with the snapshot listing failing, no drive is called
@@ -15338,6 +15350,17 @@ class TestStatus:
             backup_mod._notify("zark: backup completed", "Duration: 1m 2s")  # pylint: disable=protected-access
         sent.assert_called_once_with("zark: backup completed", "Duration: 1m 2s")
 
+    def test_the_report_shows_the_critical_level_as_an_error(self) -> None:
+        """M3P.23: `zark status` prints the critical CAP level as [ERROR] (red,
+        as the MOTD shows it) and the warning level as [WARN]."""
+        out = StringIO()
+        with redirect_stdout(out):
+            status_mod._report(status_lib.Status(caps={"rpool": 92, "bpool": 85}), Log())  # pylint: disable=protected-access
+        lines = out.getvalue().splitlines()
+        rpool = next(ln for ln in lines if "rpool: 92% full (critical)" in ln)
+        bpool = next(ln for ln in lines if "bpool: 85% full (warning)" in ln)
+        assert "[ERROR]" in rpool and "[WARN]" in bpool, lines
+
     def test_status_command_notifies_once_a_day(self) -> None:
         """The timer's `status --refresh --notify` twice: one notification."""
         fake = _fresh_fake()
@@ -15392,6 +15415,23 @@ class TestAlerts:
                 )
             )
             assert "systemctl disable --now zark-status.timer" in mock.calls
+
+    def test_a_second_install_is_already_current(self) -> None:
+        """M4aP.8: nothing to write and the timer enabled and running: the
+        same "already current" as the guards, and no enable."""
+        mock = MockShell()
+        mock.on("systemctl is-enabled zark-status.timer").succeeds("enabled")
+        mock.on("systemctl is-active zark-status.timer").succeeds("active")
+        mock.on_prefix("systemctl").succeeds("")
+        with tempfile.TemporaryDirectory() as root, patch_sh(mock):
+            with redirect_stdout(StringIO()):
+                alerts_mod.install(make_log(), root, "/opt/zark/zark")
+            enables = mock.calls.count("systemctl enable --now zark-status.timer")
+            out = StringIO()
+            with redirect_stdout(out):
+                alerts_mod.install(make_log(), root, "/opt/zark/zark")
+        assert "Space and backup-age alerts already current" in out.getvalue()
+        assert mock.calls.count("systemctl enable --now zark-status.timer") == enables == 1
 
     def test_a_path_with_spaces_and_percent(self) -> None:
         """zark run from a stick mounted under its label: ExecStart quotes the

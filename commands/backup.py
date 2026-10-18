@@ -177,6 +177,20 @@ def _gib(n: int) -> str:
     return sh.humanize_bytes(n)
 
 
+def _used(info: PoolInfo | None) -> str:
+    """The pool root's zfs ``used`` with its share, or ``?``."""
+    if info is None or info.size_bytes <= 0:
+        return "?"
+    return f"{_gib(info.used_bytes)} ({info.pct_used}%)"
+
+
+def _avail(info: PoolInfo | None) -> str:
+    """The pool root's zfs ``available``, or ``?``."""
+    if info is None or info.size_bytes <= 0:
+        return "?"
+    return _gib(info.avail_bytes)
+
+
 def _space(info: PoolInfo | None) -> str:
     """``used=... (N%)  available=...`` from the pool root's byte counts."""
     if info is None or info.size_bytes <= 0:
@@ -1048,8 +1062,10 @@ def run(
         [
             f"Point:          {log.W}{eng.point}{log.N}",
             f"Duration:       {log.W}{mins}m {secs}s{log.N}",
-            f"Used on target: {log.W}{used_after.used if used_after else '?'}{log.N}",
-            f"Available:      {log.W}{used_after.avail if used_after else '?'}{log.N}",
+            # The pool root's zfs used and available, as step 4 and the space
+            # plan show them; zpool's free counts the slop space too (M3P.9).
+            f"Used on target: {log.W}{_used(used_after)}{log.N}",
+            f"Available:      {log.W}{_avail(used_after)}{log.N}",
             *(
                 [f"Retention:      {pruned[0]} old snapshot(s) removed, {_gib(pruned[1])} freed"]
                 if pruned[0]
@@ -1078,10 +1094,7 @@ def run(
     status.refresh_quietly(cfg)
     residues = inventory(origin, {i.guid: n for n, i in cfg.known_drives.items()}).residues
     if residues:
-        log.info(
-            f"{len(residues)} legacy snapshot(s) in origin no registered drive needs "
-            + "(zark 1.x residues): sudo zark prune removes them"
-        )
+        log.info(status.residue_line(len(residues)))
 
     prompt_eject_or_attach(
         device,

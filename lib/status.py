@@ -108,6 +108,15 @@ def cap_lines(st: Status) -> list[tuple[str, str]]:
     return out
 
 
+def residue_line(n: int) -> str:
+    """The one wording of the legacy residues in origin, for backup,
+    `zark status` and the MOTD (decided 2026-10-13, M3P.8 2a)."""
+    return (
+        f"In origin: {n} snapshot(s) no registered drive needs "
+        + "(`syncoid_*` left by zark 1.x, keystore `prepare_*`): sudo zark prune removes them"
+    )
+
+
 def rpo_line(st: Status) -> tuple[bool, str]:
     """(stale, text): days since every drive's last backup; stale when the
     newest backup of all is older than RPO_WARNING_DAYS."""
@@ -134,9 +143,7 @@ def motd_text(st: Status) -> str:
     if st.read_error:
         lines.append(f"{yellow}zark:{plain} {st.read_error}")
     if st.residues:
-        lines.append(
-            f"zark: {st.residues} legacy snapshot(s) in origin no drive needs: sudo zark prune"
-        )
+        lines.append(f"zark: {residue_line(st.residues)}")
     lines += [f"{yellow}zark:{plain} {line}" for line in st.selftest]
     return "\n".join(lines) + "\n" if lines else ""
 

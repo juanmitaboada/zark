@@ -35,7 +35,9 @@ def _report(st: status.Status, log: Log) -> None:
     for pool, pct in sorted(st.caps.items()):
         level = status.cap_level(pct)
         text = f"{pool}: {pct}% full" + (f" ({level})" if level else "")
-        if level:
+        if level == "critical":
+            log.error(text)  # red, as in the MOTD (M3P.23)
+        elif level:
             log.warn(text)
         else:
             log.ok(text)
@@ -49,7 +51,7 @@ def _report(st: status.Status, log: Log) -> None:
     if st.read_error:
         log.warn(st.read_error)
     if st.residues:
-        log.info(f"{st.residues} legacy snapshot(s) in origin no drive needs: sudo zark prune")
+        log.info(status.residue_line(st.residues))
 
 
 def _notify(st: status.Status) -> None:

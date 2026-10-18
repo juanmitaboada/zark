@@ -117,6 +117,14 @@ def install(log: Log, root: str = "/", zark: str = "") -> None:
     changed = _write(base / TIMER_PATH, TIMER_UNIT, 0o644) or changed
     if changed:
         _ = sh.run("systemctl daemon-reload", log=log)
+    elif (
+        sh.run(f"systemctl is-enabled {TIMER}", timeout=10).output == "enabled"
+        and sh.run(f"systemctl is-active {TIMER}", timeout=10).output == "active"
+    ):
+        # Nothing to write and the timer enabled and running: as the guards
+        # say on a second setup (M4aP.8).
+        log.ok("Space and backup-age alerts already current ✓")
+        return
     if sh.run(f"systemctl enable --now {TIMER}", log=log).ok:
         log.ok("Space and backup-age alerts installed (MOTD, hourly timer, notifications) ✓")
     else:
