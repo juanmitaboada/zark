@@ -34,12 +34,19 @@ from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
 from lib.identity import match_registry, read_pool_label
 from lib.log import Log
-from lib.zfs import ZFS
+from lib.zfs import ZFS, backup_altroot
 
 # One line of purge's report (M4aF-4): True done, False failed, None not done
 # (with the reason). The final banner lists every line, so it says what
 # happened to the disk, not only what failed.
 Mark = tuple[bool | None, str]
+
+
+class Wiped(NamedTuple):
+    """The wipe's report lines, and whether every check after it came back clean."""
+
+    marks: list[Mark]
+    checks_clean: bool
 
 
 class Stop(NamedTuple):
@@ -103,6 +110,8 @@ def _destroy_labelled_pool(  # pylint: disable=too-many-return-statements
     r = sh.run(f"zpool destroy {name}", log=log)
     if r.ok:
         log.ok(done[0].upper() + done[1:])
+        # The import made it (M4aX.4); rmdir removes only an empty directory.
+        _ = sh.run(f"rmdir {backup_altroot(name)}")
         return (True, done), None
     return (False, f"zpool destroy {name} failed: {_error(r)}"), export_first
 
@@ -173,7 +182,7 @@ def _held_from_udev(disk: str, log: Log) -> Iterator[bool]:
         os.close(fd)
 
 
-def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
+def _wipe(target_dev: str, part1: str, log: Log) -> Wiped:
     """Overwrite both ends, wipe signatures and the partition table, verify.
 
     Every step runs even when an earlier one failed (more erased is never
@@ -181,6 +190,7 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     written when the disk cannot be held from udev.
     """
     marks: list[Mark] = []
+    checks: list[Mark] = []  # also in marks: what was read back, not run
     # The ZFS labels live in part1, and zdb -l reads them at offsets of the
     # device it is given, so only part1's node shows them: they are read
     # there right after the overwrite. That is the check that sees a dd that
@@ -195,7 +205,7 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
             # label check could not run; a second purge then has no part1 to
             # check either (M4aV-1). The contention is transient: stop here.
             marks.append((False, f"nothing overwritten: {target_dev} could not be held from udev"))
-            return marks
+            return Wiped(marks, checks_clean=False)
         had_part1 = _present(part1)
         log.step(2, 5, "Overwriting first 10MB...")
         _ = _step(
@@ -222,17 +232,19 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
         else:
             marks.append((None, "last 10MB: the disk is 20MB or less, covered by the first"))
         if _present(part1):
-            marks.append(_label_mark(part1, "after the overwrite", log))
+            checks.append(_label_mark(part1, "after the overwrite", log))
         elif had_part1:
             # Held, part1 still goes if the drive resets during the dd.
             text = "labels on the first partition not read: it went away during the overwrite"
             log.warn(text[0].upper() + text[1:])
-            marks.append((None, text))
+            checks.append((None, text))
+        marks += checks
 
     log.step(4, 5, "Wiping filesystem signatures...")
     _ = _step(f"wipefs -a {target_dev}", "signatures wiped", "wipefs -a", marks, log)
     if _present(part1):  # wipefs left the partition table
-        marks.append(_label_mark(part1, "after wipefs", log))
+        checks.append(_label_mark(part1, "after wipefs", log))
+        marks.append(checks[-1])
 
     log.step(5, 5, "Destroying partition table...")
     _ = _step(
@@ -246,7 +258,7 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     _ = sh.run(f"blockdev --flushbufs {target_dev}")
     parts = sh.run(f"lsblk -nr -o NAME,TYPE {target_dev}")
     left = [ln.split()[0] for ln in parts.lines if ln.split()[1:2] == ["part"]]
-    marks.append(
+    checks.append(
         (False, f"partitions still present: {', '.join(left)}")
         if left
         else (True, "no partition left")
@@ -254,12 +266,13 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     # blkid -p: exit 2 is "nothing found"; 0 means a signature is still there.
     probe = sh.run(f"blkid -p {target_dev}")
     if probe.returncode == 0:
-        marks.append((False, f"signature still on {target_dev}: {probe.output}"))
+        checks.append((False, f"signature still on {target_dev}: {probe.output}"))
     elif probe.returncode != 2:
-        marks.append((False, f"blkid -p {target_dev} failed: exit {probe.returncode}"))
+        checks.append((False, f"blkid -p {target_dev} failed: exit {probe.returncode}"))
     else:
-        marks.append((True, "no signature found (blkid -p)"))
-    return marks
+        checks.append((True, "no signature found (blkid -p)"))
+    marks += checks[-2:]
+    return Wiped(marks, checks_clean=all(ok is True for ok, _ in checks))
 
 
 def _report_lines(marks: list[Mark]) -> list[str]:
@@ -323,19 +336,24 @@ def run(
     else:
         log.info("No ZFS label on this disk: nothing to destroy")
         first = (None, "no ZFS label on this disk: no pool to destroy")
+    wiped = Wiped([], checks_clean=False)
     if stop:
         marks = [first, (None, stop.reason)]
     else:
-        marks = [first, *_wipe(target_dev, ident.part1, log)]
+        wiped = _wipe(target_dev, ident.part1, log)
+        marks = [first, *wiped.marks]
 
     if any(ok is False for ok, _ in marks):
+        look = f"  blkid -p {target_dev}; lsblk {target_dev}"
         if stop:
             advice = [stop.advice]
+        elif wiped.checks_clean and (ident.label is None or first[0] is True):
+            # M4aP.11: only a step failed, and no pool is left to find.
+            advice = ["Purge again to run the failed step."]
+        elif ident.label is None:
+            advice = ["Something is left on the disk. Purge again, or look:", look]
         else:
-            advice = [
-                "The disk may still hold the pool. Purge again, or look:",
-                f"  blkid -p {target_dev}; lsblk {target_dev}",
-            ]
+            advice = ["The disk may still hold the pool. Purge again, or look:", look]
         if matched:
             kept = f"Kept: the registry entries {', '.join(matched)} and the pool's anchors."
         elif ident.label:

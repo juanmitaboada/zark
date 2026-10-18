@@ -6603,7 +6603,9 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
             patch.object(Config, "default_config_dir", return_value=cfg_dir),
             patch.object(purge_mod, "validate_external_block_device", return_value=ident),
             patch.object(ZFS, "import_backup_pool", return_value=True),
-            patch.object(purge_mod, "_wipe", return_value=[]),  # FakeZfs has no disk
+            patch.object(
+                purge_mod, "_wipe", return_value=purge_mod.Wiped([], checks_clean=True)
+            ),  # FakeZfs has no disk
             patch("builtins.input", side_effect=["yes", "sdb", "n"]),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(out),
@@ -6718,6 +6720,9 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
             "✓ no signature found (blkid -p)",
         ):
             assert line in purged, line
+        # M4aX.4: the import's altroot goes with the pool.
+        destroy = mock.calls.index("zpool destroy backup")
+        assert mock.calls.index("rmdir /run/zark/altroot/backup") > destroy, mock.calls
 
     def test_failing_wipefs_is_incomplete(self):
         mock = MockShell()
@@ -6741,6 +6746,27 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert "DRIVE PURGED" not in out
         assert "backup" in data
         assert mock.was_called("sgdisk --zap-all /dev/sdb")  # the rest still runs
+        # M4aP.11: the pool was destroyed and every check is clean.
+        assert "Purge again to run the failed step." in out
+        assert "may still hold the pool" not in out
+
+    def test_a_failed_step_after_a_pool_not_destroyed_may_still_hold_it(self):
+        mock = MockShell()
+        mock.on_prefix("zpool import -N -R /run/zark/altroot/backup").fails("I/O error")
+        _wipe_succeeds(mock, failing="wipefs -a /dev/sdb")
+        out, rc, _ = self._purge(mock)
+        assert rc == 1 and "- pool backup could not be imported" in out
+        assert "The disk may still hold the pool. Purge again, or look:" in out
+
+    def test_a_failed_step_after_part1_went_away_may_still_hold_the_pool(self):
+        # The label check did not run, so the checks are not all clean.
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock, failing="wipefs -a /dev/sdb")
+        stack, state = self._udev(mock, reset=True)
+        with stack:
+            out, rc, _ = self._purge(mock, lambda _p: not state["gone"])
+        assert rc == 1 and "The disk may still hold the pool. Purge again, or look:" in out
 
     def test_failing_destroy_writes_nothing(self):
         mock = MockShell()
@@ -6749,6 +6775,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         out, rc, data = self._purge(mock)
         assert rc == 1 and "zpool export backup" in out
         assert "✗ zpool destroy backup failed: pool is busy" in out
+        assert mock.was_not_called("rmdir"), mock.calls
         assert "- nothing overwritten: the pool is still imported from this disk" in out
         assert mock.was_not_called("dd if=/dev/urandom")
         assert "backup" in data
@@ -6988,17 +7015,18 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         _wipe_succeeds(mock)
         out, rc, data = self._purge(mock)
         assert rc == 1 and "signature still on /dev/sdb" in out
+        assert "The disk may still hold the pool. Purge again, or look:" in out
+        assert "  blkid -p /dev/sdb; lsblk /dev/sdb" in out
         assert "backup" in data
 
 
 class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
     """M4aF-4: an unregistered blank-label disk has nothing to keep; M4aF-5: the warning."""
 
-    def test_unregistered_disk_without_label_says_nothing_is_kept(self):
+    @staticmethod
+    def _purge_blank_label(mock: MockShell) -> tuple[str, int]:
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(cfg_dir / "known_drives.json", {})
-        mock = MockShell()
-        _wipe_succeeds(mock, failing="wipefs -a /dev/sdb")
         out = StringIO()
         rc = 0
         with (
@@ -7016,11 +7044,28 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
                 purge_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
             except SystemExit as e:
                 rc = int(e.code) if isinstance(e.code, int) else 1
-        text = out.getvalue()
+        return out.getvalue(), rc
+
+    def test_unregistered_disk_without_label_says_nothing_is_kept(self):
+        mock = MockShell()
+        _wipe_succeeds(mock, failing="wipefs -a /dev/sdb")
+        text, rc = self._purge_blank_label(mock)
         assert rc == 1
         assert "- no ZFS label on this disk: no pool to destroy" in text
         assert "Not registered and no pool label: nothing to keep." in text
         assert "anchors" not in text.split("PURGE INCOMPLETE", 1)[1]
+        # M4aP.11: no label, every check clean: only the step is to run again.
+        assert "Purge again to run the failed step." in text
+        assert "may still hold the pool" not in text
+
+    def test_a_disk_without_label_and_a_signature_left_says_something_is_left(self):
+        mock = MockShell()
+        mock.on("blkid -p /dev/sdb").succeeds('/dev/sdb: PTTYPE="gpt"')
+        _wipe_succeeds(mock)
+        text, rc = self._purge_blank_label(mock)
+        assert rc == 1
+        assert "Something is left on the disk. Purge again, or look:" in text
+        assert "may still hold the pool" not in text
 
     def test_irreversible_subtitle_is_yellow(self):
         out = StringIO()

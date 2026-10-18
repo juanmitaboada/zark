@@ -122,7 +122,7 @@ class StickBench(Bench):
         from commands import purge  # pylint: disable=import-outside-toplevel # purge's own wipe
 
         self.log.info(f"Leaving {self.disk} blank, as zark purge leaves a drive")
-        marks = purge._wipe(self.disk, self.part1, self.log)  # pylint: disable=protected-access
+        marks = purge._wipe(self.disk, self.part1, self.log).marks  # pylint: disable=protected-access
         for ok, text in marks:
             if ok is False:
                 self.log.warn(f"Wiping the stick: {text}")
@@ -283,12 +283,12 @@ def dsk_05(b: Bench) -> None:
     --zap-all``) on a stick with a pool: every step and check succeeds, and
     the label is gone from part1 after the overwrite (four 256 KiB labels,
     two at each end of the partition). OpenZFS module/zfs/vdev_label.c:162-170,
-    include/sys/vdev_impl.h:535-562; commands/purge.py:192-218."""
+    include/sys/vdev_impl.h:535-562; commands/purge.py:202-228."""
     from commands import purge  # pylint: disable=import-outside-toplevel # the code certified
 
     s = _stick(b)
     _ = s.prepare()
-    marks = purge._wipe(s.disk, s.part1, s.log)  # pylint: disable=protected-access
+    marks = purge._wipe(s.disk, s.part1, s.log).marks  # pylint: disable=protected-access
     bad = [text for ok, text in marks if ok is False]
     expect(not bad, "every wipe step and check succeeds", f"{len(bad)} failed", "\n".join(bad))
     texts = [text for ok, text in marks if ok]

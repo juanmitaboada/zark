@@ -488,8 +488,9 @@ for the canonical end-to-end sequences.
     signature **blkid -p** finds are checked. When the disk cannot be
     locked for 10 seconds (another program holds it), nothing is
     overwritten. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
-    the registry entries and the anchors in the source are kept, since the
-    disk may still hold the pool. Both banners list every step and check as
+    the registry entries and the anchors in the source are kept; the
+    banner says whether the disk may still hold the pool, or only a failed
+    step has to run again. Both banners list every step and check as
     done, failed or not done, so they show what state the disk is in.
 
 **registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\] | **retention** *name* \[**window=***N*\] \[**max_age=***N*|**off**\] \[**margin=***N*\]\]
