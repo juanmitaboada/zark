@@ -26,7 +26,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import engine, registry, sh
+from lib import engine, registry, sh, survey
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso
 from lib.drives import record_backup, validate_external_block_device
@@ -53,8 +53,8 @@ def run(
 
     log.banner("PREPARE NEW BACKUP DRIVE")
     warn_rpool_mountpoint_lost(log)
-    engine.require_bookmark_v2(log)
-    engine.require_boot_pool(log)
+    survey.require_bookmark_v2(log)
+    survey.require_boot_pool(log)
 
     # ── Verify rpool keystore accessible ─────────────────────────────────
     if not Path("/run/keystore/rpool/system.key").exists():

@@ -42,7 +42,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import engine, sh, status
+from lib import engine, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -89,7 +89,7 @@ def _typed(log: Log, what: str) -> bool:
 
 
 def _capacity(log: Log) -> None:
-    for pool in engine.source_pools():
+    for pool in survey.source_pools():
         r = sh.run(f"zpool list -Hp -o name,capacity,size,free {pool}")
         f = r.output.strip().split("\t") if r.ok else []
         if len(f) == 4 and f[2].isdigit() and f[3].isdigit():
@@ -155,8 +155,8 @@ def _residues(inv: Inventory, log: Log) -> None:
 
 def _points(inv: Inventory, log: Log) -> None:
     try:
-        owners = engine.point_owners(engine.source_pools())
-    except engine.ReadError as e:
+        owners = engine.point_owners(survey.source_pools())
+    except survey.ReadError as e:
         log.warn(f"Could not read which drive each point is for: {e}")
         owners = {}
     for i in inv.points:
@@ -212,8 +212,8 @@ def _prune_origin(cfg: Config, log: Log) -> None:
     while True:
         _capacity(log)
         try:
-            origin = engine.read_origin(engine.source_pools(), strict=True)
-        except engine.ReadError as e:
+            origin = survey.read_origin(survey.source_pools(), strict=True)
+        except survey.ReadError as e:
             log.fatal(f"Cannot read origin: {e}")
         inv = inventory(origin, drives)
         _summary(inv, drives, log)
@@ -267,8 +267,8 @@ def _reread(pool: str, log: Log) -> dict[str, Dest]:
     """The drive's listing after a removal; fatal when it cannot be read, as
     every read that decides a removal here is (M3R-8)."""
     try:
-        dest = engine.read_dest(pool, strict=True)
-    except engine.ReadError as e:
+        dest = survey.read_dest(pool, strict=True)
+    except survey.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
     return dest
 
@@ -287,10 +287,10 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     policy = cfg.drive_policy(pool)
     now = int(time.time())
     try:
-        dest = engine.read_dest(pool, strict=True)
+        dest = survey.read_dest(pool, strict=True)
         complete = engine.drive_complete(pool)
         pins = engine.drive_pins(pool, strict=True)
-    except engine.ReadError as e:
+    except survey.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
     prune = plan_prune(
         dest, complete.run, policy, now, whole=complete.whole, pinned=pins, first=complete.first
@@ -374,7 +374,7 @@ def run(args: list[str]) -> None:
     log.banner("PRUNE", "Reclaim space in origin or on a backup drive")
     drives = [d for d in scan_connected_drives(cfg, log) if d.known]
     targets: list[str] = []
-    if "rpool" in engine.source_pools():
+    if "rpool" in survey.source_pools():
         targets.append("origin (rpool, bpool)")
     targets += [f"backup drive {d.name}" for d in drives]
     if not targets:

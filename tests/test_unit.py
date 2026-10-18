@@ -156,6 +156,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     engine,
     forensics,
     grub_guard,
+    survey,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
     Cleanup,
@@ -7618,7 +7619,7 @@ def _marks_unreadable(snaps: list[Snap]) -> Callable[..., list[Snap]]:
 
     def read(_pool: str, strict: bool = False) -> list[Snap]:
         if strict:
-            raise engine.ReadError("could not read: zfs get")
+            raise survey.ReadError("could not read: zfs get")
         return snaps
 
     return read
@@ -11795,7 +11796,7 @@ class TestBackupCommand:
         guid = next(s.guid for s in fake.ds["rpool/USERDATA/home"].snaps if s.name == home[0][0])
         assert home[0][1] == guid and isinstance(home[0][2], int)
         with patch_sh(fake):
-            replicated = repl.expected(engine.read_origin(["rpool", "bpool"]))
+            replicated = repl.expected(survey.read_origin(["rpool", "bpool"]))
         assert set(extra["shared"]) == set(replicated)
         assert extra["last_backup_version"] == VERSION
         assert extra["prepared_at"] == "2026-10-01T10:00:00Z"
@@ -12131,8 +12132,8 @@ class TestBackupCommand:
             states = {
                 p.state
                 for p in engine.plan(
-                    engine.read_origin(engine.source_pools(), strict=True),
-                    engine.read_dest("backup", strict=True),
+                    survey.read_origin(survey.source_pools(), strict=True),
+                    survey.read_dest("backup", strict=True),
                     "",
                 )
             }
@@ -12244,7 +12245,7 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
         out = StringIO()
         with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(out):
             try:
-                engine.require_boot_pool(make_log())
+                survey.require_boot_pool(make_log())
             except SystemExit:
                 return out.getvalue()
         raise AssertionError("expected a refusal")
@@ -12337,7 +12338,7 @@ def _marked(fake: FakeZfs, pool: str = "backup") -> set[str]:
 def _record(fake: FakeZfs, point: str, pool: str = "backup") -> None:
     """record_complete for every expected dataset, as backup does after a complete run."""
     with patch_sh(fake), redirect_stdout(StringIO()):
-        rels = repl.expected(engine.read_origin(["rpool", "bpool"]))
+        rels = repl.expected(survey.read_origin(["rpool", "bpool"]))
         assert engine.record_complete(pool, point, rels, Log())
 
 
@@ -12648,7 +12649,7 @@ class TestRetentionOnDrive:
 
     def _plan(self, fake: FakeZfs, policy: ret.Policy | None = None) -> ret.Prune:
         with patch_sh(fake):
-            dest = engine.read_dest("backup", strict=True)
+            dest = survey.read_dest("backup", strict=True)
             complete = engine.drive_complete("backup")
             return ret.plan_prune(
                 dest,
@@ -12979,7 +12980,7 @@ class TestBackupSpace:
         transfer that does not fit stops the backup; yes removes them."""
         fake = self._history()
         with patch_sh(fake), redirect_stdout(StringIO()):
-            dest = engine.read_dest("backup", strict=True)
+            dest = survey.read_dest("backup", strict=True)
             prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
             _ = engine.apply_prune("backup", prune, Log())
         policy = ret.Policy(margin_pct=0)
@@ -13516,7 +13517,7 @@ class TestPruneCommand:
         typed PRUNE removes, so nothing is refused (M3R-13, P7)."""
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
         with patch_sh(fake), redirect_stdout(StringIO()):
-            dest = engine.read_dest("backup", strict=True)
+            dest = survey.read_dest("backup", strict=True)
             prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
             _ = engine.apply_prune("backup", prune, Log())
         home = fake.ds["backup/rpool/USERDATA/home"]
@@ -13576,7 +13577,7 @@ class TestPruneCommand:
         with why, as backup's retention does."""
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
         with patch_sh(fake), redirect_stdout(StringIO()):
-            dest = engine.read_dest("backup", strict=True)
+            dest = survey.read_dest("backup", strict=True)
             prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
         held = prune.snapshots[0]
         rel, _, name = held.target.partition("@")

@@ -39,7 +39,7 @@ All writes go through lib.registry (validated, atomic).
 import shlex
 from pathlib import Path
 
-from lib import engine, registry, sh
+from lib import engine, registry, sh, survey
 from lib.config import Config
 from lib.drives import drive_staleness_days, get_drive_id, scan_connected_drives
 from lib.identity import BY_ID_DIR, read_pool_label
@@ -131,11 +131,11 @@ def _retention(cfg: Config, log: Log, name: str, settings: list[str]) -> None:
 
 def _list_origin(cfg: Config, log: Log) -> None:
     """Anchors of drives without an entry, and backup points left in origin."""
-    pools = engine.source_pools()
+    pools = survey.source_pools()
     if "rpool" not in pools:
         log.info("rpool is not imported here: anchors in origin not checked")
         return
-    origin = engine.read_origin(pools)
+    origin = survey.read_origin(pools)
     registered = {info.guid for info in cfg.known_drives.values()}
     for guid in sorted(engine.anchored_disks(origin) - registered):
         n = len(engine.disk_anchors(origin, guid))
@@ -168,7 +168,7 @@ def _forget(cfg: Config, log: Log, name: str) -> None:
         return
     # Anchors first, entry last: an interruption in between leaves the
     # entry, so the same command can be run again.
-    pools = engine.source_pools()
+    pools = survey.source_pools()
     if "rpool" in pools:
         dropped, failed = engine.drop_disk_anchors(info.guid, pools, log)
         log.ok(f"{dropped} anchor(s) of '{name}' dropped from origin")
@@ -192,13 +192,13 @@ def _forget(cfg: Config, log: Log, name: str) -> None:
 def _forget_guid(cfg: Config, log: Log, guid: str) -> None:
     """Drop the anchors of a drive that has no registry entry (purged,
     replaced, or never registered)."""
-    pools = engine.source_pools()
+    pools = survey.source_pools()
     if "rpool" not in pools:
         log.fatal(
             "rpool is not imported here",
             solutions=[f"Run on the installed system: sudo zark registry forget {guid}"],
         )
-    names = engine.disk_anchors(engine.read_origin(pools), guid)
+    names = engine.disk_anchors(survey.read_origin(pools), guid)
     if not names:
         log.info(f"No anchor of drive GUID {guid} in origin and no registry entry: nothing to do")
         return
@@ -217,7 +217,7 @@ def _leftover_points(cfg: Config, pools: list[str], log: Log) -> None:
     """Backup points left in origin (decision M2F-5; M3R-5): offered for
     removal only when no registered drive remains, since a registered one may
     still need one as the base of its next run."""
-    left = engine.leftover_points(engine.read_origin(pools))
+    left = engine.leftover_points(survey.read_origin(pools))
     if not left:
         return
     log.info(

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import certificates, engine, sh
+from lib import certificates, engine, sh, survey
 from lib.config import Config
 from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
@@ -74,7 +74,7 @@ def gather(cfg: Config, log: Log) -> Status:
     """Read the pools, the registry and origin's anchors."""
     st = Status()
     st.selftest = certificates.warnings(log)
-    pools = engine.source_pools()
+    pools = survey.source_pools()
     for pool in pools:
         r = sh.run(f"zpool list -Hp -o capacity {pool}")
         if r.ok and r.output.strip().isdigit():
@@ -83,8 +83,8 @@ def gather(cfg: Config, log: Log) -> Status:
     if "rpool" not in pools:
         return st
     try:
-        origin = engine.read_origin(pools, strict=True)
-    except engine.ReadError as e:
+        origin = survey.read_origin(pools, strict=True)
+    except survey.ReadError as e:
         # A failed listing is not an empty origin: every drive would read as
         # unanchored and the MOTD would promise full resends (M3R-2).
         st.read_error = f"could not read the source pools: {e}"
@@ -179,7 +179,7 @@ def refresh_quietly(cfg: Config) -> None:
     failure never turns a finished command into a failed one."""
     try:
         _ = refresh(cfg, Log(os.devnull))
-    except (OSError, ValueError, engine.ReadError) as e:
+    except (OSError, ValueError, survey.ReadError) as e:
         Log().warn(f"Could not refresh the status file: {e}")
 
 

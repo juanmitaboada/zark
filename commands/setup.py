@@ -39,10 +39,10 @@ from pathlib import Path
 from typing import TypedDict
 
 from lib import alerts, apt_guard, certificates, grub_guard, sh
-from lib.engine import bookmark_feature
 
 # from lib.config import Config
 from lib.log import Log
+from lib.survey import bookmark_feature
 from lib.zfs import ZFS, DatasetInfo, ZFSQuery
 
 DEPS = {

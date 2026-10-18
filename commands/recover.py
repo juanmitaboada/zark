@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
-from lib import apt_guard, certificates, engine, grub_guard, sh, zfs_features
+from lib import apt_guard, certificates, engine, grub_guard, sh, survey, zfs_features
 from lib.backup_layout import (
     find_be as _find_be,
     list_datasets as _list_datasets,
@@ -553,7 +553,7 @@ def _list_snapshots(pool: str, log: Log) -> list[Snap]:
     one and pick the default point from org.zark:last-point alone."""
     try:
         snaps = engine.drive_snapshots(pool, strict=True)
-    except engine.ReadError as e:
+    except survey.ReadError as e:
         log.fatal(
             f"Cannot read the snapshots of {pool}: {e}",
             causes=["The drive did not answer a zfs listing; nothing was written"],

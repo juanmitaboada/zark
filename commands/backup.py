@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import certificates, engine, forensics, sh, status
+from lib import certificates, engine, forensics, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -438,7 +438,7 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
         return []
     try:
         complete, pins = engine.drive_complete(pool), engine.drive_pins(pool, strict=True)
-    except engine.ReadError as e:
+    except survey.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         _check_room(pool, needed, avail, margin, policy, log)
         return []
@@ -535,10 +535,10 @@ def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
     what ZFS measured they free; (0, 0) when nothing goes or the drive
     cannot be read."""
     try:
-        dest = engine.read_dest(pool, strict=True)
+        dest = survey.read_dest(pool, strict=True)
         complete = engine.drive_complete(pool)
         pins = engine.drive_pins(pool, strict=True)
-    except engine.ReadError as e:
+    except survey.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         return 0, 0
     prune = plan_prune(
@@ -817,8 +817,8 @@ def run(
 
     warn_rpool_mountpoint_lost(log)
     warn_kernel_named_vdevs(log)
-    engine.require_bookmark_v2(log)
-    engine.require_boot_pool(log)
+    survey.require_bookmark_v2(log)
+    survey.require_boot_pool(log)
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")
@@ -1052,9 +1052,9 @@ def run(
     )
     origin: dict[str, Origin] = {}
     try:
-        origin = engine.read_origin(engine.source_pools(), strict=True)
+        origin = survey.read_origin(survey.source_pools(), strict=True)
         anchored: set[str] | None = engine.anchored_disks(origin)
-    except engine.ReadError as e:
+    except survey.ReadError as e:
         # Not an empty origin: the report would call every other drive
         # unanchored and promise full resends (M3R-2). Ages only.
         log.warn(

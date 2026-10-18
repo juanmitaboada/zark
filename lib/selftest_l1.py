@@ -249,7 +249,7 @@ def pool_05(b: Bench) -> None:
     1,
     "zpool import -d lists only, in zark's format",
     depends=(
-        "the bpool refusal (engine.require_boot_pool)",
+        "the bpool refusal (survey.require_boot_pool)",
         "health's import state",
         "chroot's listing",
         "recover's drive check (M4s-11)",
