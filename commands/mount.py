@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import drive_marks, sh
+from lib import drive_marks, sh, zfs_features
 from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
 from lib.cleanup import Cleanup
 from lib.config import Config
@@ -350,10 +350,14 @@ def run(
     # ── Import once, under the user-visible altroot (I-G) ────────────────
     # Read-only mode imports the pool readonly=on: nothing on the backup is
     # written, not even the keystore's ext4 journal replay.
+    device = backup_device(drive)
+    # A drive using features this ZFS lacks is named before any import (M4c-23).
+    if device:
+        zfs_features.check_drive(pool_name, device, log, "zark mount", writing=not readonly)
     log.info(f"Importing pool {pool_name} (altroot={mnt_point})...")
     if not zfs.import_backup_pool(
         pool_name,
-        backup_device(drive),
+        device,
         altroot=mnt_point,
         readonly=readonly,
         guid=drive.guid,

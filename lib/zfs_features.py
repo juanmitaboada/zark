@@ -188,14 +188,22 @@ def needed_release(guids: tuple[str, ...]) -> str:
     return release_text(max(known)) if known else "a newer OpenZFS"
 
 
-def check_drive(pool: str, device: str, log: "Log") -> None:
-    """Before recover imports a drive: stop when this ZFS cannot read it.
+def check_drive(
+    pool: str,
+    device: str,
+    log: "Log",
+    command: str = "recover",
+    writing: bool = False,
+) -> None:
+    """Before ``command`` imports a drive: stop when this ZFS cannot use it.
 
     ``zpool import -d <device>`` (listing only, nothing imported) says
     which features of the pool this system lacks: for reading (no import is
     possible, a FATAL naming each feature, the release that has it and this
-    system's OpenZFS) or only for writing (recover imports read-only: one
-    line). A listing that fails or names nothing leaves recover as it was.
+    system's OpenZFS) or only for writing: one line when ``command`` imports
+    it read-only, a FATAL that says to import it read-only when ``writing``
+    (zark mount's read-write mode, M4c-23). A listing that fails or names
+    nothing leaves the command as it was.
     """
     r = run(f"zpool import -d {shlex.quote(device)}", log=log)
     found = [u for u in parse_unsupported(r.stdout) if u.pool == pool]
@@ -203,13 +211,25 @@ def check_drive(pool: str, device: str, log: "Log") -> None:
         return
     u = found[0]
     names = [describe(g) for g in u.guids]
-    if not u.read:
+    if not u.read and not writing:
         log.info(
             f"{pool} uses feature(s) this system can only read, not write "
-            + f"({', '.join(names)}): recover imports it read-only"
+            + f"({', '.join(names)}): {command} imports it read-only"
         )
         return
     here = run("zfs version").lines
+    if not u.read:
+        log.fatal(
+            f"This system's ZFS can only read {pool}, not write it",
+            causes=[
+                f"{pool} uses: {', '.join(names)}",
+                f"This system runs {here[0] if here else 'an unknown OpenZFS'}",
+            ],
+            solutions=[
+                f"Mount it read-only: sudo ./{command}, then choose Read-only",
+                "Nothing was imported or changed",
+            ],
+        )
     log.fatal(
         f"This system's ZFS cannot read {pool}",
         causes=[
@@ -218,7 +238,7 @@ def check_drive(pool: str, device: str, log: "Log") -> None:
         ],
         solutions=[
             f"Boot a live session with {needed_release(u.guids)} or later "
-            + "(Ubuntu 26.04 or newer for OpenZFS 2.4) and run recover from it",
+            + f"(Ubuntu 26.04 or newer for OpenZFS 2.4) and run {command} from it",
             "Nothing was imported or changed",
         ],
     )

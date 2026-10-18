@@ -15746,6 +15746,37 @@ class TestZfsFeatures:  # pylint: disable=missing-function-docstring
                 zfeat.check_drive("backup", dev, make_log())
         assert "recover imports it read-only" in out.getvalue()
 
+    def test_mount_read_write_refuses_a_drive_it_can_only_read(self):
+        # M4c-23 (M4sP.3): read-only mode is the INFO line, read-write a FATAL.
+        mock = MockShell()
+        write = self.LISTING.replace(
+            "The pool uses the following feature(s) not supported on this system:",
+            "The pool can only be accessed in read-only mode on this system. It\n"
+            + "\tcannot be accessed in read-write mode because it uses the following\n"
+            + "\tfeature(s) not supported on this system:",
+        )
+        mock.on("zpool import -d /dev/x").succeeds(write)
+        mock.on("zfs version").succeeds("zfs-2.2.2-0ubuntu9\n")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out), patch("builtins.input", return_value=""):
+            zfeat.check_drive("backup", "/dev/x", make_log(), "zark mount")
+            assert "zark mount imports it read-only" in out.getvalue()
+            try:
+                zfeat.check_drive("backup", "/dev/x", make_log(), "zark mount", writing=True)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("no FATAL")
+        assert "can only read backup, not write it" in out.getvalue()
+        assert "sudo ./zark mount, then choose Read-only" in out.getvalue()
+
+    def test_mount_checks_the_drive_before_its_import(self):
+        src = Path(mount_mod.__file__).read_text(encoding="utf-8")
+        check = (
+            'zfs_features.check_drive(pool_name, device, log, "zark mount", writing=not readonly)'
+        )
+        assert src.index(check) < src.index("if not zfs.import_backup_pool(")
+
     def test_recover_checks_the_drive_before_its_first_import(self):
         src = Path(recover_mod.__file__).read_text(encoding="utf-8")
         assert src.index("zfs_features.check_drive(pool_name, device, log)") < src.index(
