@@ -15211,11 +15211,11 @@ class TestStatus:
         mock.on("loginctl list-sessions --no-legend").succeeds(
             "2 1000 br0th3r seat0 tty2\n3 0 root - pts/0\n"
         )
-        mock.on("loginctl show-session 2 -p Type -p Active -p Name -p User").succeeds(
-            "Type=wayland\nActive=yes\nName=br0th3r\nUser=1000\n"
+        mock.on("loginctl show-session 2 -p Type -p Class -p Active -p Name -p User").succeeds(
+            "Type=wayland\nClass=user\nActive=yes\nName=br0th3r\nUser=1000\n"
         )
-        mock.on("loginctl show-session 3 -p Type -p Active -p Name -p User").succeeds(
-            "Type=tty\nActive=yes\nName=root\nUser=0\n"
+        mock.on("loginctl show-session 3 -p Type -p Class -p Active -p Name -p User").succeeds(
+            "Type=tty\nClass=user\nActive=yes\nName=root\nUser=0\n"
         )
         mock.on_prefix("runuser").succeeds("")
         with patch_sh(mock):
@@ -15227,22 +15227,62 @@ class TestStatus:
         assert "notify-send" in call and "'rpool is 92% full'" in call
 
     def test_inactive_sessions_are_not_notified(self) -> None:
-        """A locked seat or a greeter (Active=no) gets nothing (M3R-13, A5)."""
+        """A session that is not its seat's active one (Active=no) gets nothing
+        (M3R-13, A5)."""
         mock = MockShell()
         mock.on("loginctl list-sessions --no-legend").succeeds(
             "2 1000 br0th3r seat0 tty2\n4 1001 guest seat0 tty3\n"
         )
-        mock.on("loginctl show-session 2 -p Type -p Active -p Name -p User").succeeds(
-            "Type=wayland\nActive=yes\nName=br0th3r\nUser=1000\n"
+        mock.on("loginctl show-session 2 -p Type -p Class -p Active -p Name -p User").succeeds(
+            "Type=wayland\nClass=user\nActive=yes\nName=br0th3r\nUser=1000\n"
         )
-        mock.on("loginctl show-session 4 -p Type -p Active -p Name -p User").succeeds(
-            "Type=wayland\nActive=no\nName=guest\nUser=1001\n"
+        mock.on("loginctl show-session 4 -p Type -p Class -p Active -p Name -p User").succeeds(
+            "Type=wayland\nClass=user\nActive=no\nName=guest\nUser=1001\n"
         )
         mock.on_prefix("runuser").succeeds("")
         with patch_sh(mock):
             assert notify_mod.notify("zark: disk space", "rpool is 92% full") == 1
         calls = [c for c in mock.calls if c.startswith("runuser")]
         assert len(calls) == 1 and "-u br0th3r " in calls[0]
+
+    def test_a_greeter_on_an_idle_seat_is_not_notified(self) -> None:
+        """M3P.1 (M4d-6 6b): with nobody logged in, the login screen is the
+        seat's active session (Class=greeter): it gets nothing."""
+        mock = MockShell()
+        mock.on("loginctl list-sessions --no-legend").succeeds("c1 120 gdm seat0 tty1\n")
+        mock.on("loginctl show-session c1 -p Type -p Class -p Active -p Name -p User").succeeds(
+            "Type=wayland\nClass=greeter\nActive=yes\nName=gdm\nUser=120\n"
+        )
+        mock.on_prefix("runuser").succeeds("")
+        with patch_sh(mock):
+            assert notify_mod.notify("zark: disk space", "rpool is 92% full") == 0
+        assert mock.was_not_called("runuser")
+
+    def test_a_hung_session_bus_does_not_hold_the_notification(self) -> None:
+        """M4d-6 6b: notify-send runs with a timeout."""
+        seen: list[int | None] = []
+        mock = MockShell()
+        mock.on("loginctl list-sessions --no-legend").succeeds("2 1000 br0th3r seat0 tty2\n")
+        mock.on("loginctl show-session 2 -p Type -p Class -p Active -p Name -p User").succeeds(
+            "Type=wayland\nClass=user\nActive=yes\nName=br0th3r\nUser=1000\n"
+        )
+        real = mock.mock_run
+
+        def spy(cmd: Any, *a: Any, **k: Any) -> RunResult:
+            if str(cmd).startswith("runuser"):
+                seen.append(k.get("timeout"))
+            return real(cmd, *a, **k)
+
+        with patch.object(mock, "mock_run", side_effect=spy), patch_sh(mock):
+            _ = notify_mod.notify("t", "b")
+        assert seen == [notify_mod.NOTIFY_TIMEOUT_SEC], seen
+
+    def test_backup_notifies_through_loginctl(self) -> None:
+        """M3P.1: backup's notifications go through lib.notify, which finds
+        Wayland sessions too (backup used `who`, which lists none)."""
+        with patch.object(notify_mod, "notify", return_value=1) as sent:
+            backup_mod._notify("zark: backup completed", "Duration: 1m 2s")  # pylint: disable=protected-access
+        sent.assert_called_once_with("zark: backup completed", "Duration: 1m 2s")
 
     def test_status_command_notifies_once_a_day(self) -> None:
         """The timer's `status --refresh --notify` twice: one notification."""

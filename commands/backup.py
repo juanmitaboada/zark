@@ -33,7 +33,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import anchors, certificates, drive_marks, engine, forensics, reclaim, sh, status, survey
+from lib import (
+    anchors,
+    certificates,
+    drive_marks,
+    engine,
+    forensics,
+    notify,
+    reclaim,
+    sh,
+    status,
+    survey,
+)
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -88,15 +99,9 @@ def _detect_live_usb() -> bool:
     return False
 
 
-def _notify(title: str, message: str):
-    """Desktop notification (best-effort)."""
-    user = sh.run("who | grep -m1 '(:0)' | awk '{print $1}'").output
-    if user:
-        _ = sh.run(
-            f"sudo -u {user} DISPLAY=:0 "
-            + f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u {user})/bus "
-            + f"notify-send '{title}' '{message}' --icon=drive-harddisk",
-        )
+def _notify(title: str, message: str) -> None:
+    """Desktop notification in every user's graphical session (best effort)."""
+    _ = notify.notify(title, message)
 
 
 def _report_rpo(
