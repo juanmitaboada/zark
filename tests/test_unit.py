@@ -153,6 +153,7 @@ from commands.umount import (  # pylint: disable=wrong-import-position # noqa: E
 from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
     backup_layout,
+    drive_marks,
     engine,
     forensics,
     grub_guard,
@@ -308,7 +309,9 @@ _SYSFS_ROOT = patch("lib.identity.SYS_BLOCK", _TEST_LOG_DIR, create=True).start(
 # _fresh_fake prepares name this one as their owner, as prepare does.
 TEST_MACHINE_ID = "7e57000000000000000000000000beef"
 Path(_TEST_LOG_DIR, "machine-id").write_text(TEST_MACHINE_ID + "\n", encoding="ascii")
-_MACHINE_ID = patch("lib.engine.MACHINE_ID_PATH", os.path.join(_TEST_LOG_DIR, "machine-id")).start()
+_MACHINE_ID = patch(
+    "lib.drive_marks.MACHINE_ID_PATH", os.path.join(_TEST_LOG_DIR, "machine-id")
+).start()
 
 
 def _real_log_state() -> dict[str, tuple[int, int] | None]:
@@ -6696,7 +6699,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         registry_write_atomic(cfg_dir / "known_drives.json", {})
         mid = cfg_dir / "machine-id"
         mid.write_text("5ca1ab1e0000000000000000000000ff\n", encoding="ascii")
-        with patch.object(engine, "MACHINE_ID_PATH", str(mid)):
+        with patch.object(drive_marks, "MACHINE_ID_PATH", str(mid)):
             assert self._prepare(fake, cfg_dir) == 0
         props = fake.ds["blue"].props
         assert props["org.zark:origin-machine-id"] == "5ca1ab1e0000000000000000000000ff"
@@ -7692,7 +7695,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(Keystore, "load_pool_keys", return_value=1),
             patch.object(recover_mod, "whole_disk", return_value="/dev/sdb"),
             patch.object(recover_mod, "_find_be", return_value=_BE),
-            patch.object(engine, "drive_snapshots", side_effect=_marks_unreadable(snaps))
+            patch.object(drive_marks, "drive_snapshots", side_effect=_marks_unreadable(snaps))
             if snaps_fail
             else patch.object(recover_mod, "_list_snapshots", return_value=snaps),
             patch.object(recover_mod, "_choose_point", side_effect=spy("_choose_point", point)),
@@ -11262,7 +11265,7 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
     def test_rollback_counts_the_incrementals_that_follow(self) -> None:
         """O11: after "roll back" the estimate holds each post-rollback incremental."""
         fake = self._with_rollback()
-        fake.ds["backup"].props["org.zark:format"] = engine.FORMAT
+        fake.ds["backup"].props["org.zark:format"] = drive_marks.FORMAT
         plans, eng = self._plans(fake)
         estimated: list[tuple[repl.State, bool]] = []
         real = eng.estimate
@@ -12027,7 +12030,7 @@ class TestBackupCommand:
         that holds this system's point, is accepted and owned again (M4a-7)."""
         fake = _fresh_fake()
         fake.ds["backup"].props["org.zark:origin-machine-id"] = "aaaa1111"
-        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
+        with patch.object(drive_marks, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
             _, rc = self._run(fake)
             assert rc == 0
             del fake.ds["backup"].props["org.zark:origin-machine-id"]
@@ -12047,7 +12050,7 @@ class TestBackupCommand:
         )
         out = StringIO()
         with (
-            patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")),
+            patch.object(drive_marks, "MACHINE_ID_PATH", self._machine_id("aaaa1111")),
             patch("sys.stdout", out),
         ):
             _, rc = self._run(fake)
@@ -12063,7 +12066,7 @@ class TestBackupCommand:
         fake = _fresh_fake()
         fake.ds["backup"].props["org.zark:origin-machine-id"] = "bbbb2222"
         reached = AssertionError("reached past the owner check")
-        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
+        with patch.object(drive_marks, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
             _, rc = self._run(
                 fake,
                 patch.object(ZFS, "pool_health", side_effect=reached),
@@ -12078,7 +12081,7 @@ class TestBackupCommand:
         fake = _fresh_fake()
         fake.ds["backup"].props["org.zark:origin-machine-id"] = "bbbb2222"
         missing = os.path.join(tempfile.mkdtemp(), "no-machine-id")
-        with patch.object(engine, "MACHINE_ID_PATH", missing):
+        with patch.object(drive_marks, "MACHINE_ID_PATH", missing):
             _, rc = self._run(fake)
         assert rc == 1
         assert "backup/rpool" not in fake.ds
@@ -12089,7 +12092,7 @@ class TestBackupCommand:
         fake = _fresh_fake()
         fake.ds["backup"].props["org.zark:origin-machine-id"] = "bbbb2222"
         fake.fail_cmds.add("zfs get -H -s local -o property,value all")
-        with patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
+        with patch.object(drive_marks, "MACHINE_ID_PATH", self._machine_id("aaaa1111")):
             _, rc = self._run(fake)
         assert rc == 1
         assert not any(c.startswith(("zfs snapshot", "systemctl stop")) for c in fake.calls)
@@ -12137,8 +12140,8 @@ class TestBackupCommand:
                     "",
                 )
             }
-            engine.check_drive_owner("backup", Log())
-        assert states & set(engine.SHARED_STATES) == {engine.State.ROLLBACK}, states
+            drive_marks.check_drive_owner("backup", Log())
+        assert states & set(drive_marks.SHARED_STATES) == {engine.State.ROLLBACK}, states
 
     def test_other_systems_datasets_without_owner_are_refused(self) -> None:
         """M2R-7 (E11a): a registered drive holding another system's datasets
@@ -12170,12 +12173,12 @@ class TestBackupCommand:
         out = StringIO()
         with (
             patch_sh(fake),
-            patch.object(engine, "MACHINE_ID_PATH", self._machine_id("aaaa1111")),
+            patch.object(drive_marks, "MACHINE_ID_PATH", self._machine_id("aaaa1111")),
             patch("builtins.input", return_value=""),
             redirect_stdout(out),
         ):
             try:
-                engine.check_drive_owner("backup", Log())
+                drive_marks.check_drive_owner("backup", Log())
             except SystemExit:
                 pass
             else:
@@ -12310,12 +12313,12 @@ class TestDriveMetadata:
         fake = _fresh_fake()
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out):
-            assert engine.write_metadata(
+            assert drive_marks.write_metadata(
                 "backup",
                 {"format": "2", "version": "2.0.0-rc2", "origin-host": "eli", "last-point": P1},
                 Log(),
             )
-            meta = engine.log_metadata("backup", Log())
+            meta = drive_marks.log_metadata("backup", Log())
         assert meta["format"] == "2" and meta["origin-host"] == "eli"
         assert f"written by zark 2.0.0-rc2 on eli, last point {P1}" in out.getvalue()
 
@@ -12325,21 +12328,21 @@ class TestDriveMetadata:
         del fake.ds["backup"].props["org.zark:origin-machine-id"]
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out):
-            assert not engine.log_metadata("backup", Log())
+            assert not drive_marks.log_metadata("backup", Log())
         assert "zark <= 2.0.0-rc1" in out.getvalue()
 
 
 def _marked(fake: FakeZfs, pool: str = "backup") -> set[str]:
     """Names of the backup points complete on a drive, as recover reads them."""
     with patch_sh(fake):
-        return complete_points(engine.drive_snapshots(pool), "")
+        return complete_points(drive_marks.drive_snapshots(pool), "")
 
 
 def _record(fake: FakeZfs, point: str, pool: str = "backup") -> None:
     """record_complete for every expected dataset, as backup does after a complete run."""
     with patch_sh(fake), redirect_stdout(StringIO()):
         rels = repl.expected(survey.read_origin(["rpool", "bpool"]))
-        assert engine.record_complete(pool, point, rels, Log())
+        assert drive_marks.record_complete(pool, point, rels, Log())
 
 
 # ── Destination retention policy (M3 decision 1) ─────────────────────────
@@ -12650,14 +12653,14 @@ class TestRetentionOnDrive:
     def _plan(self, fake: FakeZfs, policy: ret.Policy | None = None) -> ret.Prune:
         with patch_sh(fake):
             dest = survey.read_dest("backup", strict=True)
-            complete = engine.drive_complete("backup")
+            complete = drive_marks.drive_complete("backup")
             return ret.plan_prune(
                 dest,
                 complete.run,
                 policy or ret.Policy(),
                 NOW,
                 whole=complete.whole,
-                pinned=engine.drive_pins("backup"),
+                pinned=drive_marks.drive_pins("backup"),
             )
 
     def test_prune_by_exact_name_keeps_bases_and_marks_true(self) -> None:
@@ -12696,11 +12699,11 @@ class TestRetentionOnDrive:
         fake = self._drive_with_history()
         fake.ds["backup"].props.pop("org.zark:first-point", None)
         with patch_sh(fake), redirect_stdout(StringIO()):
-            engine.record_first_point("backup", Log())
+            drive_marks.record_first_point("backup", Log())
             assert fake.ds["backup"].props["org.zark:first-point"] == P1
-            assert engine.drive_complete("backup").first == P1
+            assert drive_marks.drive_complete("backup").first == P1
             fake.ds["backup"].props["org.zark:first-point"] = P2
-            engine.record_first_point("backup", Log())
+            drive_marks.record_first_point("backup", Log())
         assert fake.ds["backup"].props["org.zark:first-point"] == P2
 
     def test_destroys_are_grouped_per_dataset_at_most_100_names(self) -> None:
@@ -12981,7 +12984,9 @@ class TestBackupSpace:
         fake = self._history()
         with patch_sh(fake), redirect_stdout(StringIO()):
             dest = survey.read_dest("backup", strict=True)
-            prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
+            prune = ret.plan_prune(
+                dest, drive_marks.drive_complete("backup").run, ret.Policy(), NOW
+            )
             _ = engine.apply_prune("backup", prune, Log())
         policy = ret.Policy(margin_pct=0)
         ok, asked, out = self._decide(fake, 0, 10**12, False, policy)
@@ -13518,7 +13523,9 @@ class TestPruneCommand:
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
         with patch_sh(fake), redirect_stdout(StringIO()):
             dest = survey.read_dest("backup", strict=True)
-            prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
+            prune = ret.plan_prune(
+                dest, drive_marks.drive_complete("backup").run, ret.Policy(), NOW
+            )
             _ = engine.apply_prune("backup", prune, Log())
         home = fake.ds["backup/rpool/USERDATA/home"]
         next(x for x in home.snaps if x.name == P2).clones = "backup/rpool/USERDATA/home2"
@@ -13578,7 +13585,9 @@ class TestPruneCommand:
         fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
         with patch_sh(fake), redirect_stdout(StringIO()):
             dest = survey.read_dest("backup", strict=True)
-            prune = ret.plan_prune(dest, engine.drive_complete("backup").run, ret.Policy(), NOW)
+            prune = ret.plan_prune(
+                dest, drive_marks.drive_complete("backup").run, ret.Policy(), NOW
+            )
         held = prune.snapshots[0]
         rel, _, name = held.target.partition("@")
         next(x for x in fake.ds[f"backup/{rel}"].snaps if x.name == name).userrefs = 1

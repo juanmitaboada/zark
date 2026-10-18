@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import engine, sh
+from lib import drive_marks, sh
 from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
 from lib.cleanup import Cleanup
 from lib.config import Config
@@ -302,7 +302,7 @@ def run(
     ):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
-    _ = engine.log_metadata(pool_name, log)
+    _ = drive_marks.log_metadata(pool_name, log)
 
     ks = Keystore(log)
     if not open_keystore(ks, pool_name, log, readonly=readonly):

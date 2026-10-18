@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
 
-from lib import apt_guard, certificates, engine, grub_guard, sh, survey, zfs_features
+from lib import apt_guard, certificates, drive_marks, grub_guard, sh, survey, zfs_features
 from lib.backup_layout import (
     find_be as _find_be,
     list_datasets as _list_datasets,
@@ -552,7 +552,7 @@ def _list_snapshots(pool: str, log: Log) -> list[Snap]:
     (M3R-9): a failed read of the marks would turn the drive into a legacy
     one and pick the default point from org.zark:last-point alone."""
     try:
-        snaps = engine.drive_snapshots(pool, strict=True)
+        snaps = drive_marks.drive_snapshots(pool, strict=True)
     except survey.ReadError as e:
         log.fatal(
             f"Cannot read the snapshots of {pool}: {e}",
@@ -1385,7 +1385,7 @@ def run(
     if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
-    meta = engine.log_metadata(pool_name, log)
+    meta = drive_marks.log_metadata(pool_name, log)
     backup_disk = whole_disk(device)
 
     ks = Keystore(log)

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from lib import certificates, engine, forensics, sh, status, survey
+from lib import certificates, drive_marks, engine, forensics, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso
 from lib.drives import (
@@ -271,7 +271,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
     # Only an older common snapshot left (§7 migration; recovered older point).
     rollbacks = [p for p in plans if p.state is State.ROLLBACK]
     if rollbacks:
-        pre_v2 = engine.read_metadata(pool_name).get("format") != engine.FORMAT
+        pre_v2 = drive_marks.read_metadata(pool_name).get("format") != drive_marks.FORMAT
         log.warn(
             f"{len(rollbacks)} dataset(s) on {pool_name} hold snapshots newer than anything origin "
             + (
@@ -437,7 +437,7 @@ def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-argume
     if needed + margin <= avail:
         return []
     try:
-        complete, pins = engine.drive_complete(pool), engine.drive_pins(pool, strict=True)
+        complete, pins = drive_marks.drive_complete(pool), drive_marks.drive_pins(pool, strict=True)
     except survey.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         _check_room(pool, needed, avail, margin, policy, log)
@@ -536,8 +536,8 @@ def _apply_retention(pool: str, policy: Policy, log: Log) -> tuple[int, int]:
     cannot be read."""
     try:
         dest = survey.read_dest(pool, strict=True)
-        complete = engine.drive_complete(pool)
-        pins = engine.drive_pins(pool, strict=True)
+        complete = drive_marks.drive_complete(pool)
+        pins = drive_marks.drive_pins(pool, strict=True)
     except survey.ReadError as e:
         log.warn(f"Retention skipped: {e}")
         return 0, 0
@@ -719,15 +719,15 @@ def _write_metadata(pool_name: str, source_pool: str, point: str, log: Log) -> N
     """Decision 17a. The point and its time are recorded only for a complete run."""
     rpool_guid = sh.run(f"zpool get -H -o value guid {source_pool}").output.strip()
     fields = {
-        "format": engine.FORMAT,
+        "format": drive_marks.FORMAT,
         "version": VERSION,
         "origin-host": socket.gethostname(),
         "origin-rpool-guid": rpool_guid,
-        "origin-machine-id": engine.machine_id(),
+        "origin-machine-id": drive_marks.machine_id(),
     }
     if point:
         fields |= {"last-backup-at": now_utc_iso(), "last-point": point}
-    _ = engine.write_metadata(pool_name, fields, log)
+    _ = drive_marks.write_metadata(pool_name, fields, log)
 
 
 def _heal_drive_id(cfg: Config, pool_name: str, device: str | None, log: Log) -> None:
@@ -886,9 +886,9 @@ def run(
     log.ok(f"Pool {pool_name} imported (GUID: {actual_guid} ✓)")
     # By content, not only by the registry: a drive of another system is
     # refused before anything is asked or written.
-    engine.check_drive_owner(pool_name, log)
+    drive_marks.check_drive_owner(pool_name, log)
     _heal_drive_id(cfg, pool_name, device, log)
-    engine.record_first_point(pool_name, log)
+    drive_marks.record_first_point(pool_name, log)
 
     # ── Check health ─────────────────────────────────────────────────────
     log.step(3, TOTAL_STEPS, "Checking pool health...")
@@ -966,11 +966,11 @@ def run(
     meta: dict[str, str] = {}
     if res.ok:
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
-        _ = engine.record_complete(pool_name, eng.point, at_point, log)
+        _ = drive_marks.record_complete(pool_name, eng.point, at_point, log)
         pruned = _apply_retention(pool_name, policy, log)
         # After retention, which may remove shared intermediates (decision 5e).
         shared = eng.shared_with_origin()
-        meta = engine.read_metadata(pool_name)
+        meta = drive_marks.read_metadata(pool_name)
     _write_metadata(pool_name, cfg.source_pool, eng.point if res.ok else "", log)
 
     # ── Export and read back ─────────────────────────────────────────────

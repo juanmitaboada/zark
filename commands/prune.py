@@ -42,7 +42,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import engine, sh, status, survey
+from lib import drive_marks, engine, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -283,13 +283,13 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     if not zfs.import_backup_pool(pool, device, guid=drive.guid):
         log.fatal(f"Cannot import pool {pool}", solutions=["Reconnect the drive and run again"])
     cleanup.track_pool(pool)
-    engine.check_drive_owner(pool, log)
+    drive_marks.check_drive_owner(pool, log)
     policy = cfg.drive_policy(pool)
     now = int(time.time())
     try:
         dest = survey.read_dest(pool, strict=True)
-        complete = engine.drive_complete(pool)
-        pins = engine.drive_pins(pool, strict=True)
+        complete = drive_marks.drive_complete(pool)
+        pins = drive_marks.drive_pins(pool, strict=True)
     except survey.ReadError as e:
         log.fatal(f"Cannot read {pool}: {e}")
     prune = plan_prune(

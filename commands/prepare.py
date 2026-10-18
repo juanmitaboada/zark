@@ -26,7 +26,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import engine, registry, sh, survey
+from lib import drive_marks, engine, registry, sh, survey
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso
 from lib.drives import record_backup, validate_external_block_device
@@ -198,22 +198,22 @@ def run(
     shared: dict[str, list[Ref]] | None = None
     if res.ok:
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
-        _ = engine.record_complete(new_pool, eng.point, at_point, log)
+        _ = drive_marks.record_complete(new_pool, eng.point, at_point, log)
         shared = eng.shared_with_origin()  # a full send carries only the point: empty lists
     prepared_at = now_utc_iso()
     rpool_guid = sh.run("zpool get -H -o value guid rpool").output.strip()
     fields = {
-        "format": engine.FORMAT,
+        "format": drive_marks.FORMAT,
         "version": VERSION,
         "prepared-at": prepared_at,
         "prepared-version": VERSION,  # org.zark:version is rewritten by every backup
         "origin-host": socket.gethostname(),
-        "origin-machine-id": engine.machine_id(),
+        "origin-machine-id": drive_marks.machine_id(),
         "origin-rpool-guid": rpool_guid,
     }
     if res.ok:
         fields |= {"last-backup-at": prepared_at, "last-point": eng.point, "first-point": eng.point}
-    _ = engine.write_metadata(new_pool, fields, log)
+    _ = drive_marks.write_metadata(new_pool, fields, log)
 
     # ── Keystore: outside the rpool tree, the last ZFS work before export ─
     log.step(3, 4, "Sending the keystore...")
