@@ -66,7 +66,7 @@ from lib.retention import (
     space_candidates,
     whole_datasets,
 )
-from lib.zfs import ZFS, PoolInfo
+from lib.zfs import ZFS, KeyStatusError, PoolInfo
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
 # so it is never the answer to "out of space" (hallazgo 8).
@@ -916,7 +916,15 @@ def run(
     # container, so "every key loaded" is read from the datasets below it.
     ks = Keystore(log)
 
-    if not zfs.datasets_needing_key(f"{pool_name}/rpool"):
+    try:
+        needing = zfs.datasets_needing_key(f"{pool_name}/rpool", strict=True)
+    except KeyStatusError as e:
+        log.fatal(
+            f"Cannot read the key status of {pool_name}: {e}",
+            causes=["The drive did not answer a zfs get; nothing was written"],
+            solutions=[f"Check the drive: zpool status {pool_name}", "Run the backup again"],
+        )
+    if not needing:
         log.ok("Key already loaded")
         if not log.ask("Key already loaded. Proceed with backup?", default=True):
             log.fatal("Aborted by user")

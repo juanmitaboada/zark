@@ -29,6 +29,10 @@ from lib.log import Log
 from lib.sh import run
 
 
+class KeyStatusError(Exception):
+    """``zfs get keystatus`` failed: which keys are loaded is unknown."""
+
+
 @dataclass
 class PoolInfo:  # pylint: disable=too-many-instance-attributes
     """Information about a ZFS pool."""
@@ -547,16 +551,21 @@ class ZFS:
         r = run(f"zfs load-key -L file://{keyfile} {dataset}", log=self.log)
         return r.ok
 
-    def datasets_needing_key(self, root: str) -> list[str]:
+    def datasets_needing_key(self, root: str, strict: bool = False) -> list[str]:
         """
         Return datasets under `root` whose key is not yet loaded.
 
         Reads `zfs get -H keystatus -r <root>` and selects every non-snapshot
         dataset (no '@' in the name) with keystatus == 'unavailable'. Used by
         every caller that needs to walk an encryption hierarchy and load keys.
+        A failed read is no dataset; with ``strict`` it raises
+        :class:`KeyStatusError` instead, since "nothing to load" would then
+        skip the passphrase (M4c-19).
         """
         r = run(f"zfs get -H keystatus -r {root}")
         if not r.ok:
+            if strict:
+                raise KeyStatusError(r.stderr.strip() or f"zfs get keystatus -r {root} failed")
             return []
         out: list[str] = []
         for line in r.lines:

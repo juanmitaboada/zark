@@ -273,6 +273,7 @@ from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
     DatasetInfo,
+    KeyStatusError,
     PoolInfo,
     Readback,
     create_command as zfs_create_command,
@@ -8037,6 +8038,23 @@ class TestRecoverKeystoreSnapshot:  # pylint: disable=missing-function-docstring
         assert "Could not remove rpool/keystore@prepare_1" in out.getvalue()
 
 
+class TestKeyStatusRead:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M4c-19: the keystatus read is strict when asked."""
+
+    def test_strict_raises_lenient_is_empty(self):
+        mock = MockShell()
+        mock.on("zfs get -H keystatus -r backup/rpool").fails("I/O error")
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert not zfs.datasets_needing_key("backup/rpool")
+            try:
+                _ = zfs.datasets_needing_key("backup/rpool", strict=True)
+            except KeyStatusError as e:
+                assert "I/O error" in str(e)
+            else:
+                raise AssertionError("expected KeyStatusError")
+
+
 class TestInitrd:  # pylint: disable=missing-function-docstring
     """P0-7: only installed kernels; dracut failures are reported."""
 
@@ -12250,7 +12268,7 @@ class TestIncompleteBanner:
         assert "    ...and 2 more (see the table above)" in text
 
 
-class TestBackupCommand:
+class TestBackupCommand:  # pylint: disable=too-many-public-methods
     """`zark backup` end to end on FakeZfs (drive discovery and keystore stubbed)."""
 
     def _run(self, fake: FakeZfs, *extra: AbstractContextManager[object]) -> tuple[Config, int]:
@@ -12317,6 +12335,21 @@ class TestBackupCommand:
         assert rc == 1 and "BACKUP NOT VERIFIED" in text
         assert f"backup already records {point} as its last backup point" in text
         assert not cfg.known_drives["backup"].last_backup_at
+
+    def test_an_unread_key_status_stops_before_the_point(self) -> None:
+        """M4c-19 (review §4.7): a failed keystatus read was "Key already
+        loaded"; it is fatal now, before anything is written."""
+        fake = _fresh_fake()
+        out = StringIO()
+        _, rc = self._run(
+            fake,
+            patch.object(ZFS, "datasets_needing_key", side_effect=KeyStatusError("I/O error")),
+            redirect_stdout(out),
+        )
+        assert rc == 1
+        assert "Cannot read the key status of backup: I/O error" in out.getvalue()
+        assert "Key already loaded" not in out.getvalue()
+        assert not _origin_points(fake)
 
     def test_a_drive_without_its_first_point_gets_it_at_the_next_backup(self) -> None:
         """M3P.25 (M4b-9): a drive whose first point was not recorded (prepared
