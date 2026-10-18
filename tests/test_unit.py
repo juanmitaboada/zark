@@ -2313,6 +2313,35 @@ class TestClean:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("rm "), mock.calls
         assert rc == 1  # the mocked table still shows the mount: not complete
 
+    def test_a_selftest_mapper_is_listed_and_closed_before_the_export(self):
+        # M4cR-1: inventory() wires _selftest_mappers in; the mapper on the
+        # keystore zvol of a pool under zark's altroot is closed, then the
+        # pool exported.
+        with tempfile.TemporaryDirectory() as td:
+            _, altroot, stack = self._env(td)
+            os.makedirs(os.path.join(td, "mapper"))
+            _ = Path(td, "mapper", "zst0123abcdc-ks").write_text("", encoding="ascii")
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(
+                f"rpool\t-\nzst0123abcdc\t{altroot}/zst0123abcdc"
+            )
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on("cryptsetup status zst0123abcdc-ks").succeeds(
+                "/dev/mapper/zst0123abcdc-ks is active.\n  type:    LUKS2\n  device:  /dev/zd16\n"
+            )
+            mock.on_prefix("cryptsetup close").succeeds()
+            mock.on_prefix("zpool export").succeeds()
+            real = {"/dev/zvol/zst0123abcdc/keystore": "/dev/zd16"}
+            out = StringIO()
+            with patch.object(clean_mod.os.path, "realpath", side_effect=lambda p: real.get(p, p)):
+                with patch_sh(mock):
+                    assert clean_mod.inventory().keystores == ["zst0123abcdc-ks"]
+                _ = self._run(mock, stack, out=out)
+        assert "keystore: /dev/mapper/zst0123abcdc-ks (close)" in out.getvalue()
+        close = mock.calls.index("cryptsetup close zst0123abcdc-ks")
+        assert close < mock.calls.index("zpool export zst0123abcdc"), mock.calls
+
     def test_a_pool_imported_by_hand_is_left_alone(self):
         with tempfile.TemporaryDirectory() as td:
             _, _, stack = self._env(td)
@@ -8166,6 +8195,34 @@ class TestSelftestLeftovers:  # pylint: disable=missing-function-docstring
             rms = [c for c in mock.calls if c.startswith("rm ")]
             assert rms == [f"rm -r --one-file-system {td}/{names[0]}"]
             assert f"Removed {td}/{names[0]}, left by an earlier self-test" in out.getvalue()
+
+    def test_setup_removes_the_leftovers_first(self):
+        # M4cR-3: Bench.setup calls _remove_leftovers before anything else,
+        # even when it then refuses (here: no space in /dev/shm).
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(f"{td}/zark-selftest-1-aaaa")
+            bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+            mock = MockShell()
+            mock.on("zpool list -vHP").succeeds("")
+            mock.on("findmnt -rn -o TARGET").succeeds("/\n")
+            mock.on_prefix("rm -r --one-file-system").succeeds()
+            small = os.statvfs_result((4096, 4096, 10, 10, 10, 10, 10, 10, 0, 255))
+            with (
+                patch_sh(mock),
+                patch("lib.selftest.os.statvfs", return_value=small),
+                redirect_stdout(StringIO()),
+            ):
+                try:
+                    bench.setup()
+                except stest.SetupError:
+                    pass
+                else:
+                    raise AssertionError("no refusal")
+        assert mock.calls == [
+            "zpool list -vHP",
+            "findmnt -rn -o TARGET",
+            f"rm -r --one-file-system {td}/zark-selftest-1-aaaa",
+        ], mock.calls
 
     def test_a_failed_listing_removes_nothing(self):
         with tempfile.TemporaryDirectory() as td:
