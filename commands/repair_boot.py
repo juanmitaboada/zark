@@ -21,9 +21,9 @@ Use when grub.cfg is corrupted (e.g., update-grub ran with backup drive connecte
 from pathlib import Path
 
 from lib import grub_guard, sh
+from lib.boot_chain import esp_of_rpool_disk
 from lib.cleanup import Cleanup
 from lib.grub_cfg import regenerate_grub_cfg
-from lib.identity import disks_under
 from lib.initrd import installed_kernels, regenerate_initrd
 from lib.keystore import Keystore
 from lib.log import Log
@@ -32,25 +32,6 @@ from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 REPAIR_MNT = "/mnt/repair"
 TOTAL_STEPS = 7
-
-
-_ESP_PARTTYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
-
-
-def _esp_of_rpool_disk() -> str:
-    """EFI System Partition on the disk holding rpool's vdev, or ""."""
-    vdevs = sh.run("zpool list -vHP rpool")
-    for line in vdevs.lines[1:] if vdevs.ok else []:
-        path = line.strip().split("\t")[0]
-        if not path.startswith("/dev/"):
-            continue
-        for disk in sorted(disks_under(path)):
-            parts = sh.run(f"lsblk -nr -o NAME,PARTTYPE {disk}")
-            for p in parts.lines if parts.ok else []:
-                fields = p.split()
-                if len(fields) == 2 and fields[1].lower() == _ESP_PARTTYPE:
-                    return f"/dev/{fields[0]}"
-    return ""
 
 
 def run(
@@ -143,7 +124,7 @@ def run(
 
     # EFI: the ESP on the disk that holds rpool (never "the first vfat",
     # which on a live session can be the live USB's own ESP)
-    efi_part = _esp_of_rpool_disk()
+    efi_part = esp_of_rpool_disk()
     if efi_part:
         _ = sh.run(f"mkdir -p {REPAIR_MNT}/boot/efi")
         if sh.run(f"mount {efi_part} {REPAIR_MNT}/boot/efi", log=log).ok:

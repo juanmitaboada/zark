@@ -22,6 +22,7 @@ from pathlib import Path
 
 from lib import apt_guard, grub_guard, sh
 from lib.cleanup import Cleanup
+from lib.identity import disks_under
 from lib.log import Log
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
@@ -497,3 +498,22 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     # Install the apt guard - stops a later kernel/GRUB/ZFS upgrade on the
     # recovered system from half-applying while a backup drive is connected.
     apt_guard.install(target_root=RECOVER_MNT, log=log)
+
+
+_ESP_PARTTYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+
+def esp_of_rpool_disk() -> str:
+    """EFI System Partition on the disk holding rpool's vdev, or ""."""
+    vdevs = sh.run("zpool list -vHP rpool")
+    for line in vdevs.lines[1:] if vdevs.ok else []:
+        path = line.strip().split("\t")[0]
+        if not path.startswith("/dev/"):
+            continue
+        for disk in sorted(disks_under(path)):
+            parts = sh.run(f"lsblk -nr -o NAME,PARTTYPE {disk}")
+            for p in parts.lines if parts.ok else []:
+                fields = p.split()
+                if len(fields) == 2 and fields[1].lower() == _ESP_PARTTYPE:
+                    return f"/dev/{fields[0]}"
+    return ""

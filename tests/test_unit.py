@@ -8146,23 +8146,32 @@ class _FinishPath:  # pylint: disable=too-few-public-methods
 
 
 class TestFinishBanner:  # pylint: disable=missing-function-docstring
-    """J: finish reports update-grub, update-initramfs and pool failures."""
+    """J, M4c-4/5/7/8: finish reports what it did, never touches the pools' import."""
 
     @staticmethod
     def _run(
         grub_failure: str = "",
-        initramfs_ok: bool = True,
+        initrd_failures: tuple[str, ...] = (),
         health: str = "ONLINE",
-    ) -> tuple[str, bool, list[tuple[object, ...]]]:
-        grub_calls: list[tuple[object, ...]] = []
+        efi_failure: str = "",
+    ) -> tuple[str, bool, list[str]]:
+        order: list[str] = []
 
         def fake_run(cmd: str, **_kw: object) -> RunResult:
-            rc = 1 if cmd.startswith("update-initramfs") and not initramfs_ok else 0
-            return RunResult(returncode=rc, stdout="", stderr="", command=cmd)
+            order.append(cmd)
+            return RunResult(returncode=0, stdout="", stderr="", command=cmd)
 
         def fake_grub(*a: object) -> str:
-            grub_calls.append(a)
+            order.append(f"regenerate_grub_cfg {a[1]} {a[3]}")
             return grub_failure
+
+        def fake_initrd(root: str, _log: Log) -> list[str]:
+            order.append(f"regenerate_initrd {root!r}")
+            return list(initrd_failures)
+
+        def fake_efi(esp: str, _log: Log) -> str:
+            order.append(f"check_esp_and_efi {esp}")
+            return efi_failure
 
         buf = StringIO()
         exited = False
@@ -8174,8 +8183,12 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
             patch.object(finish_mod, "warn_kernel_named_vdevs"),
             patch.object(finish_mod.grub_guard, "install"),
             patch.object(finish_mod.apt_guard, "install"),
+            patch.object(finish_mod, "installed_kernels", return_value=["7.0.0-38-generic"]),
+            patch.object(finish_mod, "regenerate_initrd", side_effect=fake_initrd),
             patch.object(finish_mod, "regenerate_grub_cfg", side_effect=fake_grub),
             patch.object(finish_mod, "fix_grub_bpool_uuid"),
+            patch.object(finish_mod, "esp_of_rpool_disk", return_value="/dev/nvme1n1p1"),
+            patch.object(finish_mod, "check_esp_and_efi", side_effect=fake_efi),
             patch.object(ZFS, "pool_exists", return_value=True),
             patch.object(ZFS, "pool_guid", return_value=""),
             patch.object(ZFS, "pool_health", return_value=health),
@@ -8188,15 +8201,29 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
                 finish_mod.run([])
             except SystemExit:
                 exited = True
-        return buf.getvalue(), exited, grub_calls
+        return buf.getvalue(), exited, order
 
     def test_all_good_is_complete(self):
-        out, exited, calls = self._run()
+        out, exited, order = self._run()
         assert not exited
         assert "FINISH COMPLETE" in out and "GRUB config updated ✓" in out
-        assert [(str(a[0]), a[1], str(a[2])) for a in calls] == [
-            ("/boot/grub/grub.cfg", "update-grub", "/boot/grub/grub.cfg.pre-finish"),
-        ]
+        assert "initrds rebuilt ✓" in out and "EFI binaries present ✓" in out
+        assert "regenerate_grub_cfg update-grub ['7.0.0-38-generic']" in order
+
+    def test_no_pool_is_exported_or_imported(self):
+        # M4c-4: an export of the running rpool unmounts what is not busy, then fails.
+        _, _, order = self._run()
+        assert not [c for c in order if c.startswith(("zpool export", "zpool import"))]
+        assert "Pool hostid synced" not in self._run()[0]
+
+    def test_cache_then_initrds_then_grub_then_esp(self):
+        _, _, order = self._run()
+        cache = order.index("zpool set cachefile=/etc/zfs/zpool.cache bpool")
+        initrd = order.index("regenerate_initrd ''")
+        grub = next(i for i, c in enumerate(order) if c.startswith("regenerate_grub_cfg"))
+        assert cache < initrd < grub < order.index("check_esp_and_efi /dev/nvme1n1p1")
+        fstab = order.index("blkid -s UUID -o value /dev/nvme1n1p1")
+        assert grub < fstab < order.index("check_esp_and_efi /dev/nvme1n1p1")
 
     def test_guard_refusal_is_incomplete(self):
         reason = "update-grub failed: ERROR: External ZFS pool(s) detected: backup"
@@ -8205,16 +8232,124 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         assert "FINISH INCOMPLETE" in out
         assert "GRUB config updated ✓" not in out
         assert f"grub.cfg not regenerated: {reason}" in out
+        assert "Disconnect the external drive(s)" in out
 
-    def test_initramfs_failure_is_incomplete(self):
-        out, exited, _ = self._run(initramfs_ok=False)
+    def test_initrd_failure_names_its_kernel_and_sends_to_repair_boot(self):
+        out, exited, _ = self._run(initrd_failures=("dracut failed for 7.0.0-38-generic (rc=1)",))
         assert exited
-        assert "FINISH INCOMPLETE" in out and "initramfs updated ✓" not in out
+        assert "FINISH INCOMPLETE" in out and "initrds rebuilt ✓" not in out
+        assert "✗ initrd: dracut failed for 7.0.0-38-generic (rc=1)" in out
+        assert "sudo ./zark repair-boot" in out and "Disconnect" not in out
+
+    def test_a_kernel_without_entry_sends_to_repair_boot(self):
+        out, exited, _ = self._run(grub_failure="update-grub wrote no entry for 7.0.0-38-generic")
+        assert exited and "sudo ./zark repair-boot" in out
+
+    def test_efi_failure_is_incomplete(self):
+        out, exited, _ = self._run(efi_failure="the ESP is not mounted on /boot/efi")
+        assert exited
+        assert "✗ EFI: the ESP is not mounted on /boot/efi" in out
+        assert "Mount the ESP of rpool's disk on /boot/efi," in out
 
     def test_degraded_pool_is_incomplete(self):
         out, exited, _ = self._run(health="DEGRADED")
         assert exited
         assert "✗ pool rpool: DEGRADED" in out
+
+
+class TestFinishChecks:  # pylint: disable=missing-function-docstring
+    """M4c-4 and M4c-7: the hostid line and the ESP/EFI verdict, read-only."""
+
+    @staticmethod
+    def _hostid(label: str, system: bytes | None) -> str:
+        mock = MockShell()
+        mock.on("zpool list -vHP rpool").succeeds("rpool\t1G\n\t/dev/disk/by-id/nvme-X-part4\t1G")
+        mock.on("zdb -l /dev/disk/by-id/nvme-X-part4").succeeds(label)
+        buf = StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            hostid = Path(td) / "hostid"
+            if system is not None:
+                _ = hostid.write_bytes(system)
+            real = Path
+
+            def fake_path(p: object) -> Path:
+                return hostid if str(p) == "/etc/hostid" else real(str(p))
+
+            with patch_sh(mock), patch.object(finish_mod, "Path", fake_path), redirect_stdout(buf):
+                finish_mod.check_label_hostid("rpool", make_log())
+        return buf.getvalue()
+
+    LABEL = (
+        "------------------------------------\nLABEL 0\n------------------------------------\n"
+        + "    version: 5000\n    name: 'rpool'\n    pool_guid: 42\n    hostid: 2864358476\n"
+    )
+
+    def test_label_hostid_matches(self):
+        out = self._hostid(self.LABEL, (2864358476).to_bytes(4, "little"))
+        assert "labels carry this system's hostid (aabaa44c) ✓" in out
+
+    def test_label_hostid_differs_and_names_both(self):
+        out = self._hostid(self.LABEL, (1).to_bytes(4, "little"))
+        assert "labels carry hostid aabaa44c, this system's is 00000001" in out
+        assert "the next boot rewrites them" in out
+
+    def test_unreadable_label_is_a_warning(self):
+        out = self._hostid("", b"\x01\x00\x00\x00")
+        assert "cannot read its label" in out
+
+    @staticmethod
+    def _efi(
+        findmnt: str, present: set[str], after: set[str] | None = None
+    ) -> tuple[str, MockShell]:
+        mock = MockShell()
+        mock.on("findmnt -n -o SOURCE,FSTYPE /boot/efi").succeeds(findmnt)
+        state = {"files": set(present)}
+
+        def reconfigure() -> None:
+            state["files"] = set(after if after is not None else present)
+
+        mock.on("dpkg-reconfigure -f noninteractive grub-efi-amd64-signed").succeeds()
+        mock.on("dpkg-reconfigure -f noninteractive shim-signed").fails(rc=1)
+
+        class _P:  # pylint: disable=too-few-public-methods
+            def __init__(self, p: object) -> None:
+                self.p = str(p)
+
+            def exists(self) -> bool:
+                if any(c.startswith("dpkg-reconfigure") for c in mock.calls):
+                    reconfigure()
+                return Path(self.p).name in state["files"]
+
+        with patch_sh(mock), patch.object(finish_mod, "Path", _P), redirect_stdout(StringIO()):
+            return finish_mod.check_esp_and_efi("/dev/sda1", make_log()), mock
+
+    def test_esp_not_mounted_looks_at_no_file(self):
+        reason, mock = self._efi("", set())
+        assert reason == "the ESP is not mounted on /boot/efi"
+        assert mock.was_not_called("dpkg-reconfigure")
+
+    def test_a_directory_of_bpool_is_not_the_esp(self):
+        reason, _ = self._efi("bpool/BOOT/x zfs", {"shimx64.efi", "grubx64.efi"})
+        assert reason == "the ESP is not mounted on /boot/efi"
+
+    def test_another_disks_esp_is_named(self):
+        reason, _ = self._efi("/dev/sdb1 vfat", {"shimx64.efi", "grubx64.efi"})
+        assert reason == "/boot/efi is /dev/sdb1, not the ESP of rpool's disk (/dev/sda1)"
+
+    def test_binaries_present(self):
+        reason, mock = self._efi("/dev/sda1 vfat", {"shimx64.efi", "grubx64.efi"})
+        assert reason == "" and mock.was_not_called("dpkg-reconfigure")
+
+    def test_reconfigure_that_does_not_restore_them_is_a_failure(self):
+        reason, _ = self._efi("/dev/sda1 vfat", {"grubx64.efi"})
+        assert reason == (
+            "shimx64.efi missing in /boot/efi/EFI/ubuntu "
+            + "(grub-efi-amd64-signed rc=0, shim-signed rc=1)"
+        )
+
+    def test_reconfigure_that_restores_them_is_success(self):
+        reason, _ = self._efi("/dev/sda1 vfat", {"grubx64.efi"}, {"grubx64.efi", "shimx64.efi"})
+        assert reason == ""
 
 
 class TestFailClosedAndLogging:  # pylint: disable=missing-function-docstring
