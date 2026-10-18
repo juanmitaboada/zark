@@ -92,14 +92,41 @@ class StickBench(Bench):
         if guid and sh.run(f"zpool get -Hp -o value guid {self.s}").output == guid:
             _ = self.run(f"zpool destroy -f {self.s}")
 
+    def pool_on_stick(self) -> bool:
+        """Whether an imported pool has a vdev on the stick (or the listing
+        failed, which cannot tell)."""
+        r = sh.run("zpool list -vHP", log=self.log)
+        if not r.ok:
+            return True
+        names = {f"{identity.BY_ID_DIR}/{n}" for n in (self.stick.by_id, *self.stick.aliases) if n}
+        for line in r.lines:
+            path = line.strip().split("\t")[0]
+            if any(path.startswith(n + "-part") for n in names) or path == self.disk:
+                return True
+            if path.startswith(self.disk) and path[len(self.disk) :].lstrip("p").isdigit():
+                return True
+        return False
+
     def blank(self) -> None:
-        """Erase what the run left on the stick: signatures and partition table."""
+        """Erase what the run left on the stick as purge erases a drive: both
+        ends overwritten (part1's four ZFS labels lie within them), then the
+        signatures and the partition table. ``wipefs`` alone leaves the
+        labels: it erases what it finds at the disk's own offsets."""
         if not self.same_disk():
             self.log.warn(f"{self.by_id} no longer names the stick the run began with: not wiped")
             return
-        _ = self.run(f"wipefs -a {self.disk}")
-        _ = self.run(f"sgdisk --zap-all {self.disk}")
-        _ = self.run(f"blockdev --flushbufs {self.disk}")
+        if self.pool_on_stick():
+            self.log.warn(
+                f"A pool is still imported from {self.disk}, or it cannot be told: not wiped"
+            )
+            return
+        from commands import purge  # pylint: disable=import-outside-toplevel # purge's own wipe
+
+        self.log.info(f"Leaving {self.disk} blank, as zark purge leaves a drive")
+        marks = purge._wipe(self.disk, self.part1, self.log)  # pylint: disable=protected-access
+        for ok, text in marks:
+            if ok is False:
+                self.log.warn(f"Wiping the stick: {text}")
         _ = self.run(SETTLE)
 
     def teardown(self) -> None:

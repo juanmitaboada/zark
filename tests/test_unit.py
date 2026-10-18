@@ -15220,7 +15220,8 @@ class TestSelftestStick:  # pylint: disable=missing-function-docstring,too-few-p
         ident = DiskIdentity(disk="/dev/sdz", by_id="usb-S_1-0:0", serial="S1")
         mock = MockShell()
         mock.on_prefix("blkid -p").returns(2)
-        with patch_sh(mock):
+        mock.on("zpool list -vHP").succeeds("")
+        with patch_sh(mock), redirect_stdout(StringIO()):
             bench = st_l2.StickBench(make_log(), Cleanup(make_log()), ident)
             other = DiskIdentity(disk="/dev/sdy", by_id="usb-S_1-0:0", serial="S1")
             with patch("lib.identity.resolve_disk", return_value=other):
@@ -15231,6 +15232,57 @@ class TestSelftestStick:  # pylint: disable=missing-function-docstring,too-few-p
                 bench.teardown()
             assert mock.was_called("wipefs -a /dev/sdz")
             assert mock.was_called("sgdisk --zap-all /dev/sdz")
+
+
+class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
+    """M4sR-2: the level-2 teardown clears part1's ZFS labels, as purge does."""
+
+    IDENT = DiskIdentity(
+        disk="/dev/sdz", by_id="usb-S_1-0:0", serial="S1", aliases=("usb-S_1-0:0",)
+    )
+
+    def _teardown(self, mock: MockShell) -> list[str]:
+        mock.on_prefix("blkid -p").returns(2)
+        mock.on("blockdev --getsize64 /dev/sdz").succeeds(f"{1024**3}\n")
+        mock.on_prefix("dd ").succeeds()
+        mock.on_prefix("wipefs").succeeds()
+        mock.on_prefix("sgdisk").succeeds()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch("lib.identity.resolve_disk", return_value=self.IDENT),
+            patch("commands.purge._present", return_value=False),
+            patch("commands.purge.os.open", side_effect=OSError("no device")),
+        ):
+            st_l2.StickBench(make_log(), Cleanup(make_log()), self.IDENT).teardown()
+        return mock.calls
+
+    def test_both_ends_are_overwritten_before_wipefs(self):
+        mock = MockShell()
+        mock.on("zpool list -vHP").succeeds("rpool\t100G\n\t/dev/disk/by-id/ata-X-part3\n")
+        calls = self._teardown(mock)
+        first = next(i for i, c in enumerate(calls) if c.startswith("dd ") and "count=10" in c)
+        last = next(i for i, c in enumerate(calls) if c.startswith("dd ") and "seek=" in c)
+        wipe = calls.index("wipefs -a /dev/sdz")
+        assert first < wipe and last < wipe, calls
+        assert int(calls[last].split("seek=")[1].split()[0]) * 512 == 1024**3 - 10 * 1024**2
+
+    def test_nothing_is_written_while_a_pool_uses_the_stick(self):
+        for listing in (
+            "zsts\t1G\n\t/dev/disk/by-id/usb-S_1-0:0-part1\n",
+            "zsts\t1G\n\t/dev/sdz1\n",
+        ):
+            mock = MockShell()
+            mock.on("zpool list -vHP").succeeds(listing)
+            calls = self._teardown(mock)
+            assert not [c for c in calls if c.startswith(("dd ", "wipefs", "sgdisk"))], calls
+        mock = MockShell()
+        mock.on("zpool list -vHP").fails()
+        assert not [c for c in self._teardown(mock) if c.startswith(("dd ", "wipefs"))]
+        mock = MockShell()
+        mock.on("zpool list -vHP").succeeds("zstx\t1G\n\t/dev/sdza1\n")
+        assert "wipefs -a /dev/sdz" in self._teardown(mock)
 
 
 def _run_one(name: str, method: Callable[[], object]) -> str:
