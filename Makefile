@@ -2,7 +2,7 @@
         test test-real test-deps test-all \
         test-phase1 test-phase2 test-phase3 test-cleanup \
         setup clean version \
-        check mypy pylint ruff format format-check basedpyright pre-commit lint tox \
+        check mypy pylint ruff format format-check basedpyright pre-commit lint tox tox-ruff \
         manpage manpage-view manpage-lint manpage-clean \
         dist dist-check fulltest fulltest-clean deb deb-source deb-ppa deb-ppa-test deb-ppa-resume
 
@@ -126,14 +126,14 @@ pylint: ## Run pylint on the whole project
 	}
 	pylint lib commands tests zark
 
-ruff: ## Run ruff (full ruleset, as configured in pyproject.toml)
+ruff: ## Run the ruff in PATH (full ruleset); fulltest uses the pinned one (tox -e ruff)
 	@command -v ruff >/dev/null || { \
 		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
 	}
 	ruff check .
 
-format-check: ## Check formatting without rewriting anything (what CI does)
+format-check: ## Check formatting with the ruff in PATH; fulltest uses the pinned one
 	@command -v ruff >/dev/null || { \
 		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
@@ -173,6 +173,13 @@ pre-commit: ## Run all pre-commit hooks against every tracked file
 	pre-commit run --all-files
 
 lint: check ruff format-check mypy pylint basedpyright ## Run all static checks (compile + ruff + mypy + pylint + basedpyright)
+
+tox-ruff: ## Run the pinned ruff (lint + format check) in its tox env
+	@command -v $(TOX) >/dev/null || { \
+		echo "  tox not installed. Install with: pip install tox --break-system-packages"; \
+		exit 1; \
+	}
+	$(TOX) -e ruff
 
 tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint + types (in isolated venvs)
 	@command -v $(TOX) >/dev/null || { \
@@ -435,15 +442,16 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 		fi
 	@echo "  OK: dpkg-source -b . succeeds"
 
-fulltest: check ruff format-check mypy pylint basedpyright test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
+fulltest: check tox-ruff mypy pylint basedpyright test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
 	@# fulltest is the "before-commit" gate. Make's default fail-fast
 	@# behaviour gives us free short-circuit semantics: the moment any
 	@# dependency fails, the rest is skipped.
 	@#
 	@# Order is fast→slow so failures surface early:
 	@#   check        — py_compile, milliseconds
-	@#   ruff         — full ruleset incl. RUF027, ~1s
-	@#   format-check — ruff format --check, ~1s
+	@#   tox-ruff     - tox -e ruff: the pinned ruff of pyproject.toml,
+	@#                  full ruleset incl. RUF027 and the format check;
+	@#                  never the ruff in PATH (M4c-2)
 	@#   mypy        — ~10-15s (cold) / ~2-3s (warm)
 	@#   basedpyright — ~4s
 	@#   pylint      — ~15-20s
@@ -464,7 +472,7 @@ fulltest: check ruff format-check mypy pylint basedpyright test manpage-lint dis
 	@#   - dpkg -i     : would alter the local zark installation.
 	@#   - test-real   : QEMU integration tests need root and ZFS modules.
 	@#   - pre-commit  : the ruff hooks run with --fix and rewrite files in
-	@#                   place; not "non-invasive". `format-check` above
+	@#                   place; not "non-invasive". `tox-ruff` above
 	@#                   covers the read-only half. Run separately when
 	@#                   desired.
 	@#   - make deb-source / deb-ppa : require the GPG signing key and

@@ -49,6 +49,11 @@ requires-python = ">=3.12"
 dev = [
     "mypy==2.3.1",
     "pylint==4.0.8",
+    {include-group = "ruff"},
+]
+# The ruff pin, on its own so that `tox -e ruff` (the first lint step of
+# `make fulltest`) installs only ruff; `dev` includes it (M4c-2).
+ruff = [
     "ruff==0.16.8",
 ]
 types = [
