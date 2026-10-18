@@ -116,8 +116,6 @@ from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position 
 from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
     _abort_missing_keystore,
     _check_sizes,
-    _force_latest_signed_alternative,
-    _mount_restored_system,
     _preflight,
     _target_candidates,
 )
@@ -149,6 +147,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     anchors,
     apt_guard,
     backup_layout,
+    boot_chain,
     drive_marks,
     engine,
     forensics,
@@ -156,6 +155,10 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     reclaim,
     restore_plan,
     survey,
+)
+from lib.boot_chain import (  # pylint: disable=wrong-import-position # noqa: E402
+    _force_latest_signed_alternative,
+    mount_restored_system,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
     Cleanup,
@@ -3555,7 +3558,7 @@ class TestSanoidPreserveManual:  # pylint: disable=missing-function-docstring
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  commands/recover.py — Secure Boot .latest variant pinning
+#  lib/boot_chain.py — Secure Boot .latest variant pinning
 # ═════════════════════════════════════════════════════════════════════════
 
 
@@ -8249,11 +8252,11 @@ class TestReviewFindings:  # pylint: disable=missing-function-docstring
         mock.on("zfs mount -a").succeeds()
         with (
             patch_sh(mock),
-            patch.object(recover_mod.Path, "exists", return_value=True),
-            patch.object(recover_mod.Path, "glob", return_value=[]),
+            patch.object(boot_chain.Path, "exists", return_value=True),
+            patch.object(boot_chain.Path, "glob", return_value=[]),
             redirect_stdout(StringIO()),
         ):
-            _mount_restored_system("x", True, make_log())
+            mount_restored_system("x", True, make_log())
         mounts = [c for c in mock.calls if c.startswith("zfs mount") and "|" not in c]
         assert mounts == ["zfs mount rpool/ROOT/x", "zfs mount bpool/BOOT/x", "zfs mount -a"]
 
@@ -8266,7 +8269,7 @@ class TestReviewFindings:  # pylint: disable=missing-function-docstring
             redirect_stdout(StringIO()),
         ):
             try:
-                _mount_restored_system("x", True, make_log())
+                mount_restored_system("x", True, make_log())
             except SystemExit:
                 return
         raise AssertionError("expected SystemExit")
