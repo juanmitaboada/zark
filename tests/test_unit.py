@@ -15016,6 +15016,47 @@ class TestSelftestCommand:  # pylint: disable=missing-function-docstring,protect
             data = json.loads(sorted(Path(td).glob("report-*.json"))[-1].read_text("utf-8"))
             assert data["certificate"]["partial"] and data["certificate"]["stopped"]
 
+    def test_a_stopped_level_2_run_masks_the_stick_in_its_report(self):
+        # M4sR-1: the stick's bare by-id alias and its serial (no word
+        # boundary before it) are masked only by the bench's masks.
+        alias = "usb-Kingston_DT_microDuo_3C_408D5C15CFA5E961091D0CCA-0:0"
+        serial = "408D5C15CFA5E961091D0CCA"
+        ident = DiskIdentity(disk="/dev/sdz", by_id=alias, serial=serial, aliases=(alias,))
+
+        def fail(_b: stest.Bench) -> None:
+            raise stest.Fail("a usb-...-0:0 by-id name", alias)
+
+        def stop(_b: stest.Bench) -> None:
+            raise KeyboardInterrupt
+
+        checks = [
+            stest.Check("T-01", 1, 2, "t", ("zark",), False, fail),
+            stest.Check("T-02", 1, 2, "t", ("zark",), False, stop),
+        ]
+        write = certs.write_report
+        with (
+            tempfile.TemporaryDirectory() as td,
+            redirect_stdout(StringIO()),
+            patch("commands.selftest.all_checks", return_value=checks),
+            patch("commands.selftest._stick_identity", return_value=ident),
+            patch("commands.selftest.usb_ids", return_value=("0951", "16ae")),
+            patch("lib.platform_facts.read", return_value=_facts()),
+            patch("commands.selftest.StickBench.setup"),
+            patch("commands.selftest.StickBench.teardown"),
+            patch("commands.selftest._system_pools", return_value=[]),
+            patch("lib.certificates.write_report", side_effect=lambda r: write(r, td)),
+        ):
+            try:
+                selftest_cmd.run(["--stick", "/dev/sdz"])
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("the interrupt was swallowed")
+            text = sorted(Path(td).glob("report-*.json"))[-1].read_text("utf-8")
+        assert json.loads(text)["certificate"]["stopped"]
+        assert alias not in text and serial not in text, text
+        assert "<by-id>" in text
+
     def test_certificate_merges_into_a_file(self):
         with tempfile.TemporaryDirectory() as td:
             rep = Path(td, "r.json")

@@ -438,6 +438,7 @@ class RunState:
 
     results: list[Result] = field(default_factory=list)
     current: str = ""
+    masks: dict[str, str] = field(default_factory=dict)  # the benches' names, from the start
 
 
 def run_checks(

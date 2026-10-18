@@ -143,21 +143,24 @@ def _run(args: list[str], log: Log) -> None:
     state = RunState()
     level = 2 if stick else 1
     bridge = ":".join(usb_ids(stick.name)).strip(":") if stick else ""
-    masks: dict[str, str] = {}
+    # Both benches and their masks before the first check, so a stopped
+    # run's report is masked as a complete one's (M4sR-1).
+    benches: list[Bench] = [Bench(log, cleanup)]
+    if stick:
+        benches.append(StickBench(log, cleanup, stick))
+    state.masks = {k: v for b in benches for k, v in b.masks().items()}
     before = _system_pools()
     try:
-        masks = _run_level(checks, 1, Bench(log, cleanup), log, state)
-        if stick:
-            masks |= _run_level(checks, 2, StickBench(log, cleanup, stick), log, state)
+        _run_levels(checks, benches, log, state)
     except BaseException:
         # A signal or a dead stdout: the record says the run was stopped,
         # which covers nothing; the cleanup still runs, from atexit.
-        _save(facts, RunInfo(level, True, bridge), state.results, masks, log, stopped=True)
+        _save(facts, RunInfo(level, True, bridge), state.results, state.masks, log, stopped=True)
         raise
     after = _system_pools()
     if after != before:
         log.warn(f"The system's pools changed during the run: {before} -> {after}")
-    path = _save(facts, RunInfo(level, bool(only), bridge), state.results, masks, log)
+    path = _save(facts, RunInfo(level, bool(only), bridge), state.results, state.masks, log)
     if not _summary(state.results, path, log):
         raise SystemExit(1)
 
@@ -185,12 +188,15 @@ def _summary(results: list[Result], path: Path | None, log: Log) -> bool:
     return not fails
 
 
-def _run_level(
-    checks: list[Check], level: int, bench: Bench, log: Log, state: RunState
-) -> dict[str, str]:
+def _run_levels(checks: list[Check], benches: list[Bench], log: Log, state: RunState) -> None:
+    for n, bench in enumerate(benches, 1):
+        _run_level(checks, n, bench, log, state)
+
+
+def _run_level(checks: list[Check], level: int, bench: Bench, log: Log, state: RunState) -> None:
     mine = [c for c in checks if c.level == level]
     if not mine:
-        return {}
+        return
     log.info(f"Level {level}: {len(mine)} check(s)")
     try:
         bench.setup()
@@ -200,7 +206,6 @@ def _run_level(
         log.ok(f"Bench ready: pools {bench.a} and {bench.b} in {bench.dir}")
     _ = run_checks(mine, bench, log, state)
     bench.teardown()
-    return bench.masks()
 
 
 def _system_pools() -> list[str]:
