@@ -42,7 +42,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import (
     AbstractContextManager,
     ExitStack,
@@ -1985,6 +1985,76 @@ class TestSimulateArgs:  # pylint: disable=missing-function-docstring
         # Defaults are sensible (>= HD)
         assert opts.display_w >= 1920
         assert opts.display_h >= 1080
+
+
+class TestSimulatePrompts:  # pylint: disable=missing-function-docstring
+    """R2-14: simulate's bare input() prompts, at EOF and with an answer."""
+
+    def test_the_rw_confirmation_needs_the_path_typed(self):
+        import commands.simulate as sim  # pylint: disable=import-outside-toplevel
+
+        for given in (EOFError, "/dev/sda"):
+            out = StringIO()
+            with (
+                patch("builtins.input", side_effect=EOFError if given is EOFError else [given, ""]),
+                redirect_stdout(out),
+            ):
+                try:
+                    sim._confirm_rw_or_abort("/dev/sdb", make_log())  # pylint: disable=protected-access
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError(f"no abort for {given!r}")
+            assert "typed path did not match the target disk" in out.getvalue()
+        assert "You typed: '/dev/sda'" in out.getvalue()
+        with patch("builtins.input", return_value="/dev/sdb"), redirect_stdout(StringIO()):
+            sim._confirm_rw_or_abort("/dev/sdb", make_log())  # pylint: disable=protected-access
+
+    def test_eof_at_the_qemu_prompt_takes_its_default(self):
+        # Today's behaviour: the [Y/n] default, as log.ask(default=True) would.
+        import commands.simulate as sim  # pylint: disable=import-outside-toplevel
+
+        class Stop(Exception):
+            """Ends the run where the prompt's answer was used."""
+
+        mock = MockShell()
+        mock.on("which qemu-system-x86_64").fails()
+        with (
+            patch_sh(mock),
+            patch("builtins.input", side_effect=EOFError),
+            patch.object(sim, "_install_deps", side_effect=Stop) as deps,
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                sim.run([])
+            except Stop:
+                pass
+        assert deps.called
+
+    def test_eof_at_the_disk_selection_aborts_before_qemu(self):
+        import commands.simulate as sim  # pylint: disable=import-outside-toplevel
+
+        mock = MockShell()
+        mock.on("which qemu-system-x86_64").succeeds("/usr/bin/qemu-system-x86_64")
+        with tempfile.NamedTemporaryFile() as fd:
+            with (
+                patch_sh(mock),
+                patch.object(sim, "_detect_gl", return_value=(False, "test")),
+                patch.object(sim, "_find_file", return_value=fd.name),
+                patch.object(sim.shutil, "copy2"),
+                patch.object(sim.os, "chmod"),
+                patch.object(sim, "_list_candidate_disks", return_value=[("/dev/sdz", "sdz")]),
+                patch("builtins.input", side_effect=EOFError),
+                redirect_stdout(StringIO()) as out,
+            ):
+                try:
+                    sim.run([])
+                except SystemExit:
+                    pass
+                else:
+                    raise AssertionError("no abort at EOF")
+        assert "invalid selection" in out.getvalue()
+        assert not [c for c in mock.calls if c.startswith("qemu-system")], mock.calls
 
 
 class TestSimulateInUseDetection:  # pylint: disable=missing-function-docstring
@@ -4693,6 +4763,37 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
             health_cmd.run([])
         assert "Test pool was not destroyed: zpool destroy failed: x" in out.getvalue()
 
+    def test_eof_at_the_reconnect_pause_raises_nothing(self):
+        # R2-14: the cold test's pause reads stdin; EOF there goes on (today's
+        # behaviour) and raises nothing out of the command.
+        mock = MockShell()
+        mock.on_prefix("lsblk -no NAME /dev/sdb").succeeds("")
+        mock.on("blkid /dev/sdb").succeeds("")
+        reached: list[bool] = []
+
+        def destructive(*_a: object, wait_for_reconnect: Callable[[], None], **_k: object):
+            wait_for_reconnect()
+            reached.append(True)
+            return HealthResult("fast", True, 1, 0.0, True, "ONLINE")
+
+        with (
+            patch_sh(mock),
+            patch.object(health_cmd, "_select_device", return_value="/dev/sdb"),
+            patch.object(health_cmd, "validate_external_block_device"),
+            patch.object(health_cmd, "measure_write_speed", return_value=0.0),
+            patch.object(health_cmd, "device_size_bytes", return_value=8 * 1024**3),
+            patch.object(health_cmd, "check_device", return_value=HealthReport("/dev/sdb")),
+            patch.object(health_cmd, "run_destructive_test", side_effect=destructive),
+            patch.object(health_cmd, "generate_report", return_value=""),
+            patch.object(health_cmd, "write_report_file", return_value="/tmp/r.txt"),
+            patch.object(Log, "ask_choice", side_effect=[1, 0]),  # destructive, fast
+            patch.object(Log, "ask", side_effect=[False, True, True]),  # obfuscate, go, cold
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(StringIO()),
+        ):
+            health_cmd.run([])
+        assert reached == [True]
+
     def test_imported_clean_pool_is_ok(self):
         mock = MockShell()
         mock.on("zpool list -H -o guid,name").succeeds("42\tblack")
@@ -5240,6 +5341,35 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
         )
         with patch_sh(mock), patch("builtins.input", side_effect=AssertionError("asked")):
             assert backup_layout.find_be("backup", make_log()) == "ubuntu_x"
+
+    def test_the_device_hint_is_rpools_import_fallback(self):
+        # R2-14: zark chroot <device>: by-id first, then the device given.
+        mock = MockShell()
+        mock.on("zpool list rpool").fails()
+        mock.on("zpool list bpool").succeeds("bpool")
+        mock.on_prefix("zpool import -N -R /mnt/zark/chroot -d /dev/disk/by-id rpool").fails("no")
+        mock.on_prefix("zpool import -f -N -R /mnt/zark/chroot -d /dev/disk/by-id rpool").fails(
+            "no"
+        )
+        mock.on("zpool import -N -R /mnt/zark/chroot -d /dev/sda4 rpool").succeeds()
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            _ = mount_system_pools(
+                "/mnt/zark/chroot",
+                "pp",
+                make_log(),
+                ZFS(make_log()),
+                _FakeKeystore(),  # type: ignore[arg-type]
+                Cleanup(make_log()),
+                device="/dev/sda4",
+            )
+        imports = [c for c in mock.calls if c.startswith("zpool import")]
+        assert imports[:3] == [
+            "zpool import -N -R /mnt/zark/chroot -d /dev/disk/by-id rpool",
+            "zpool import -f -N -R /mnt/zark/chroot -d /dev/disk/by-id rpool",
+            "zpool import -N -R /mnt/zark/chroot -d /dev/sda4 rpool",
+        ], imports
+        assert "rpool was imported by /dev/sda4, not /dev/disk/by-id" in out.getvalue()
 
     def test_mount_system_pools_imports_both_and_returns_root(self):
         mock = MockShell()
@@ -7943,6 +8073,8 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         calls: dict[str, list[tuple[object, ...]]] | None = None,
         snaps_fail: bool = False,
         meta_fail: bool = False,
+        shell_setup: Callable[[MockShell], None] | None = None,
+        extra: Sequence[AbstractContextManager[object]] = (),
     ) -> MockShell:
         """``answer`` None simulates a closed terminal (EOF) at the YES prompt.
 
@@ -7951,12 +8083,15 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         the positional arguments of every ``choose_point`` and ``build_plan`` call.
         ``snaps_fail`` leaves the real ``list_snapshots`` in place with the
         engine's listing of the drive failing; ``meta_fail`` fails the read
-        of the drive's metadata.
+        of the drive's metadata. ``shell_setup`` adds responses to the shell
+        before any default, and ``extra`` patches go in last.
         """
         source_key = os.path.join(work, "source.key")
         Path(source_key).write_bytes(b"k" * 32)
         cleanups: list[Cleanup] = []
         mock = MockShell()
+        if shell_setup is not None:
+            shell_setup(mock)
         meta = mock.on("zfs get -H -s local -o property,value all backup")
         _ = meta.fails() if meta_fail else meta.succeeds("org.zark:format\t2\n")
         snaps = _stick_snaps()
@@ -8011,6 +8146,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             else patch("builtins.input", return_value=answer),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(StringIO()),
+            *extra,
         ]
         with ExitStack() as stack:
             for p in patches:
@@ -8033,6 +8169,38 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             assert copy.read_bytes() == b"k" * 32
             assert copy.stat().st_mode & 0o777 == 0o600
             assert mock.was_called(f"rm -rf {copy.parent}")
+
+    def test_both_pools_are_created_on_the_targets_by_id_partitions(self):
+        """R2-14: recover creates bpool and rpool on the target's
+        /dev/disk/by-id partitions, not on its kernel names."""
+        disk_id = "ata-KINGSTON_SKC600MS512G_50026B7784FC3319"
+        links = f"{disk_id}\t../../sda\n" + "".join(
+            f"{disk_id}-part{n}\t../../sda{n}\n" for n in range(1, 5)
+        )
+
+        def shell(mock: MockShell) -> None:
+            _ = mock.on_prefix("find /dev/disk/by-id/").succeeds(links)
+            _ = mock.on_prefix("zpool create").succeeds()
+
+        real_exists = recover_mod.Path.exists
+
+        def exists(path: Path, *a: Any, **k: Any) -> bool:
+            p = str(path)
+            if p.startswith(("/dev/sda", f"/dev/disk/by-id/{disk_id}-part")):
+                return True
+            return real_exists(path, *a, **k)
+
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_in(
+                td,
+                "YES",
+                shell_setup=shell,
+                extra=[patch.object(recover_mod.Path, "exists", autospec=True, side_effect=exists)],
+            )
+        creates = [c for c in mock.calls if c.startswith("zpool create")]
+        assert len(creates) == 2, mock.calls[-30:]
+        assert creates[0].endswith(f"bpool /dev/disk/by-id/{disk_id}-part2"), creates
+        assert creates[1].endswith(f"rpool /dev/disk/by-id/{disk_id}-part4"), creates
 
     def test_no_wipe_when_not_confirmed(self):
         mock = self._run("NO")
@@ -8201,6 +8369,36 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
             "EFI: shimx64.efi missing in /boot/efi/EFI/ubuntu after the signed packages' "
             + "reconfigure",
         ]
+
+    def test_debconf_gets_the_esp_by_id(self):
+        # R2-14: the ESP's /dev/disk/by-id name when it has one.
+        by_id = "/dev/disk/by-id/nvme-X-part1"
+        with tempfile.TemporaryDirectory() as td:
+            efi = Path(td) / "boot/efi/EFI/ubuntu"
+            efi.mkdir(parents=True)
+            for name in ("grubx64.efi", "shimx64.efi"):
+                _ = (efi / name).write_text("")
+            mock = MockShell()
+            mock.on_prefix(f"chroot {td} debconf-show").succeeds(
+                f"* grub-efi/install_devices: {by_id}\n"
+            )
+            mock.on_prefix(f"chroot {td} bash -c").succeeds()
+            mock.on_prefix("find /dev/disk/by-id/ -lname '*/nvme0n1p1'").succeeds(by_id + "\n")
+            with (
+                patch_sh(mock),
+                patch.object(boot_chain, "RECOVER_MNT", td),
+                patch.object(boot_chain.grub_guard, "install"),
+                patch.object(boot_chain.apt_guard, "install"),
+                patch.object(boot_chain, "_install_keystore_initramfs"),
+                patch.object(ZFS, "write_zpool_cache"),
+                redirect_stdout(StringIO()),
+            ):
+                errors = boot_chain.install_boot_chain(
+                    "/dev/nvme0n1", "x", ZFS(make_log()), Cleanup(make_log()), make_log()
+                )
+        assert not errors, errors
+        sets = [c for c in mock.calls if "debconf-set-selections" in c]
+        assert len(sets) == 1 and f"install_devices multiselect {by_id}'" in sets[0], sets
 
 
 class TestRecoverAnchors:  # pylint: disable=missing-function-docstring
@@ -8683,6 +8881,7 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         efi_failure: str = "",
         gaps: tuple[str, ...] = (),
         unmounted: tuple[str, ...] = (),
+        bpool_guid: str = "",
     ) -> tuple[str, bool, list[str]]:
         order: list[str] = []
 
@@ -8715,13 +8914,17 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
             patch.object(finish_mod, "installed_kernels", return_value=["7.0.0-38-generic"]),
             patch.object(finish_mod, "regenerate_initrd", side_effect=fake_initrd),
             patch.object(finish_mod, "regenerate_grub_cfg", side_effect=fake_grub),
-            patch.object(finish_mod, "fix_grub_bpool_uuid"),
+            patch.object(
+                finish_mod,
+                "fix_grub_bpool_uuid",
+                side_effect=lambda *a, **_k: order.append(f"fix_grub_bpool_uuid {a[0]}"),
+            ),
             patch.object(finish_mod, "esp_of_rpool_disk", return_value="/dev/nvme1n1p1"),
             patch.object(finish_mod, "check_esp_and_efi", side_effect=fake_efi),
             patch.object(finish_mod, "mount_canmount_on", return_value=list(unmounted)),
             patch.object(finish_mod, "setup_gaps", return_value=list(gaps)),
             patch.object(ZFS, "pool_exists", return_value=True),
-            patch.object(ZFS, "pool_guid", return_value=""),
+            patch.object(ZFS, "pool_guid", return_value=bpool_guid),
             patch.object(ZFS, "pool_health", return_value=health),
             redirect_stdout(buf),
         ]
@@ -8755,6 +8958,13 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         assert cache < initrd < grub < order.index("check_esp_and_efi /dev/nvme1n1p1")
         fstab = order.index("blkid -s UUID -o value /dev/nvme1n1p1")
         assert grub < fstab < order.index("check_esp_and_efi /dev/nvme1n1p1")
+
+    def test_the_bpool_uuid_is_fixed_after_update_grub(self):
+        # R2-14: the order test with a bpool GUID, so the fix runs.
+        _, _, order = self._run(bpool_guid="123")
+        grub = next(i for i, c in enumerate(order) if c.startswith("regenerate_grub_cfg"))
+        fix = next(i for i, c in enumerate(order) if c.startswith("fix_grub_bpool_uuid"))
+        assert grub < fix, order
 
     def test_guard_refusal_is_incomplete(self):
         reason = "update-grub failed: ERROR: External ZFS pool(s) detected: backup"
