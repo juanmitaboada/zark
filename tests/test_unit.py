@@ -7864,6 +7864,82 @@ class TestRecoverAltrootChecks:  # pylint: disable=missing-function-docstring
         assert "rm -rf --one-file-system {RECOVER_MNT}" in src
 
 
+class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
+    """M1P.8, M4c-9, M4c-7: kernel count, debconf's ESP, the EFI binaries."""
+
+    LINE = "grub-efi-amd64 grub-efi/install_devices multiselect /dev/disk/by-id/nvme-X-part1"
+
+    def _debconf(self, stderr: str = "", shown: str = "") -> tuple[bool, MockShell]:
+        mock = MockShell()
+        mock.on_prefix("chroot /r bash -c").returns(0, stderr=stderr)
+        mock.on("chroot /r debconf-show grub-efi-amd64").succeeds(shown)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            ok = boot_chain.set_install_devices("/r", "/dev/disk/by-id/nvme-X-part1", make_log())
+        return ok, mock
+
+    def test_the_line_has_its_owner_and_type(self):
+        ok, mock = self._debconf(shown="* grub-efi/install_devices: /dev/disk/by-id/nvme-X-part1\n")
+        assert ok
+        assert f"echo '{self.LINE}' | debconf-set-selections" in mock.calls[0]
+
+    def test_a_warning_is_not_set(self):
+        ok, _ = self._debconf(stderr="warning: Unknown type /dev/x, skipping line 1")
+        assert not ok
+
+    def test_the_value_is_read_back(self):
+        ok, _ = self._debconf(shown="  grub-efi/install_devices: /dev/sda1\n")
+        assert not ok
+        ok, _ = self._debconf(shown="  grub-pc/install_devices: /dev/sda\n")
+        assert not ok
+
+    def test_kernel_count_ignores_the_links(self):
+        with tempfile.TemporaryDirectory() as td:
+            boot = Path(td) / "boot"
+            boot.mkdir()
+            (Path(td) / "usr/bin").mkdir(parents=True)
+            _ = (Path(td) / "usr/bin/bash").write_text("")
+            _ = (boot / "vmlinuz-7.0.0-38-generic").write_text("")
+            (boot / "vmlinuz").symlink_to("vmlinuz-7.0.0-38-generic")
+            (boot / "vmlinuz.old").symlink_to("vmlinuz-7.0.0-38-generic")
+            mock = MockShell()
+            mock.on("zfs mount rpool/ROOT/x").succeeds()
+            mock.on("zfs mount bpool/BOOT/x").succeeds()
+            mock.on(f"findmnt -n {td}/boot").succeeds()
+            mock.on("zfs mount -a").succeeds()
+            buf = StringIO()
+            with patch_sh(mock), patch.object(boot_chain, "RECOVER_MNT", td), redirect_stdout(buf):
+                mount_restored_system("x", True, make_log())
+        assert "(1 kernel(s))" in buf.getvalue()
+
+    def test_a_missing_efi_binary_is_an_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            efi = Path(td) / "boot/efi/EFI/ubuntu"
+            efi.mkdir(parents=True)
+            _ = (efi / "grubx64.efi").write_text("")
+            mock = MockShell()
+            mock.on_prefix(f"chroot {td} debconf-show").succeeds(
+                "* grub-efi/install_devices: /dev/sda1\n",
+            )
+            mock.on_prefix(f"chroot {td} bash -c").succeeds()
+            mock.on_prefix("find /dev/disk/by-id/").succeeds("")
+            with (
+                patch_sh(mock),
+                patch.object(boot_chain, "RECOVER_MNT", td),
+                patch.object(boot_chain.grub_guard, "install"),
+                patch.object(boot_chain.apt_guard, "install"),
+                patch.object(boot_chain, "_install_keystore_initramfs"),
+                patch.object(ZFS, "write_zpool_cache"),
+                redirect_stdout(StringIO()),
+            ):
+                errors = boot_chain.install_boot_chain(
+                    "/dev/sda", "x", ZFS(make_log()), Cleanup(make_log()), make_log()
+                )
+        assert errors == [
+            "EFI: shimx64.efi missing in /boot/efi/EFI/ubuntu after the signed packages' "
+            + "reconfigure",
+        ]
+
+
 class TestInitrd:  # pylint: disable=missing-function-docstring
     """P0-7: only installed kernels; dracut failures are reported."""
 

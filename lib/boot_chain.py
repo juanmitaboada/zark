@@ -18,6 +18,7 @@ shim on the ESP, the keystore hook of dracut or initramfs-tools, and the
 guards.
 """
 
+import re
 from pathlib import Path
 
 from lib import apt_guard, grub_guard, sh
@@ -308,7 +309,13 @@ def mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> N
                 f"Cannot mount the restored bpool at {RECOVER_MNT}/boot",
                 solutions=["Boot the live USB again and run: sudo ./zark repair-boot"],
             )
-        kernel_count = len(list(Path(f"{RECOVER_MNT}/boot").glob("vmlinuz*")))
+        # Regular vmlinuz-<v> files only: the kernel's postinst keeps the
+        # vmlinuz and vmlinuz.old links next to them (M1P.8).
+        kernel_count = sum(
+            1
+            for k in Path(f"{RECOVER_MNT}/boot").glob("vmlinuz-*")
+            if k.is_file() and not k.is_symlink()
+        )
         log.ok(f"bpool mounted at {RECOVER_MNT}/boot ✓  ({kernel_count} kernel(s))")
     _ = sh.run("zfs mount -a")
     mounted = sh.run(f"zfs mount | grep -c {RECOVER_MNT}").output
@@ -321,8 +328,14 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     zfs: ZFS,
     cleanup: Cleanup,
     log: Log,
-) -> None:
-    """Chroot binds, zpool.cache, grub.cfg fix, signed GRUB/shim, keystore hook, guards."""
+) -> list[str]:
+    """Chroot binds, zpool.cache, grub.cfg fix, signed GRUB/shim, keystore hook, guards.
+
+    Returns the errors for recover's summary: the ESP device not recorded
+    in debconf (M4c-9), a signed EFI binary missing after the reconfigures
+    (M4c-7).
+    """
+    errors: list[str] = []
     # Bind mounts for chroot
     for d in ("proc", "sys", "dev", "dev/pts", "run"):
         _ = sh.run(f"mkdir -p {RECOVER_MNT}/{d}")
@@ -393,21 +406,13 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     new_efi_byid = sh.run(
         f"find /dev/disk/by-id/ -lname '*/{Path(new_efi_part).name}' | head -1",
     ).output.strip()
-    if new_efi_byid:
-        _ = sh.run(
-            f"chroot {RECOVER_MNT} bash -c "
-            + f"\"echo 'grub-efi/install_devices string {new_efi_byid}' | debconf-set-selections\"",
-            log=log,
+    # No by-id link (e.g. virtio): the kernel name.
+    esp_dev = new_efi_byid or new_efi_part
+    if esp_dev and not set_install_devices(RECOVER_MNT, esp_dev, log):
+        errors.append(
+            f"debconf grub-efi/install_devices not set to {esp_dev}: "
+            + "a later GRUB update may not find the ESP",
         )
-        log.dbg(f"debconf grub-efi/install_devices → {new_efi_byid}")
-    elif new_efi_part:
-        # No by-id link (e.g. virtio) - use raw device
-        _ = sh.run(
-            f"chroot {RECOVER_MNT} bash -c "
-            + f"\"echo 'grub-efi/install_devices string {new_efi_part}' | debconf-set-selections\"",
-            log=log,
-        )
-        log.dbg(f"debconf grub-efi/install_devices → {new_efi_part}")
 
     # ── Force .latest signed variant before dpkg-reconfigure ────────────
     # shim-signed and grub-efi-amd64-signed ship both .latest and .previous
@@ -469,10 +474,14 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     grub_ok = Path(f"{RECOVER_MNT}/boot/efi/EFI/ubuntu/grubx64.efi").exists()
     if shim_ok and grub_ok:
         log.ok("Secure Boot chain present (shim + grub) ✓")
-    elif grub_ok:
-        log.warn("grubx64.efi present but shimx64.efi missing - Secure Boot may fail")
     else:
-        log.warn("EFI binaries not found - boot may fail")
+        # M4c-7: a missing binary is an error of the recovery, not a warning.
+        gone = [n for n, ok in (("shimx64.efi", shim_ok), ("grubx64.efi", grub_ok)) if not ok]
+        log.error(f"{', '.join(gone)} missing in /boot/efi/EFI/ubuntu - boot may fail")
+        errors.append(
+            f"EFI: {', '.join(gone)} missing in /boot/efi/EFI/ubuntu after the signed packages' "
+            + "reconfigure",
+        )
 
     # Install keystore boot module - opens LUKS keystore zvol AFTER ZFS import
     # but BEFORE dataset mounting, so /run/keystore/rpool/system.key is available.
@@ -498,6 +507,30 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     # Install the apt guard - stops a later kernel/GRUB/ZFS upgrade on the
     # recovered system from half-applying while a backup drive is connected.
     apt_guard.install(target_root=RECOVER_MNT, log=log)
+    return errors
+
+
+# The template is a multiselect owned by grub-efi-amd64 (and grub2-common);
+# a line without its owner is "owner question type" to debconf-set-selections,
+# which warns "Unknown type", skips it and exits 0 (P0-9, M4c-9).
+_INSTALL_DEVICES_RE = re.compile(r"^\s*\*?\s*grub-efi/install_devices:\s*(.*?)\s*$", re.MULTILINE)
+
+
+def set_install_devices(root: str, device: str, log: Log) -> bool:
+    """Record ``device`` as the ESP in ``root``'s debconf and read it back."""
+    line = f"grub-efi-amd64 grub-efi/install_devices multiselect {device}"
+    r = sh.run(f"chroot {root} bash -c \"echo '{line}' | debconf-set-selections\"", log=log)
+    if not r.ok or "warning" in r.stderr.lower():
+        log.warn(f"debconf-set-selections did not take {line!r}: {r.stderr.strip()}")
+        return False
+    shown = sh.run(f"chroot {root} debconf-show grub-efi-amd64")
+    m = _INSTALL_DEVICES_RE.search(shown.output) if shown.ok else None
+    if m is None or m.group(1) != device:
+        got = m.group(1) if m else "nothing"
+        log.warn(f"debconf grub-efi/install_devices reads back {got}, not {device}")
+        return False
+    log.ok(f"debconf grub-efi/install_devices -> {device}")
+    return True
 
 
 _ESP_PARTTYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
