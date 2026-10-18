@@ -572,7 +572,11 @@ for the canonical end-to-end sequences.
     *@prepare_\** snapshot, which **prepare** leaves on the drive, is
     removed from the recovered system. A failed receive, anchor, ESP
     record in **debconf** or missing EFI binary makes the banner RECOVERY
-    COMPLETED WITH ERRORS, naming it.
+    COMPLETED WITH ERRORS, naming it. A dataset whose point failed after
+    its monthly arrived is named as left at that monthly and anchored
+    there; for **bpool** the banner also names each kernel the restored
+    root has and */boot* lacks, with the command that reinstalls it from
+    **zark chroot**.
 
     The recovered system boots without **zark** present and receives
     normal **apt**(8) upgrades thereafter. **zark** is needed only for

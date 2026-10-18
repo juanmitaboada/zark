@@ -53,9 +53,10 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn
+from typing import NamedTuple, NoReturn
 
 from lib import certificates, drive_marks, replication, sh, survey, zfs_features
 from lib.backup_layout import find_be as _find_be
@@ -64,7 +65,7 @@ from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config
 from lib.drives import backup_device, scan_connected_drives, select_drive
 from lib.identity import BY_ID_DIR, by_id_names, preferred_by_id, protected_disks, whole_disk
-from lib.initrd import regenerate_initrd
+from lib.initrd import installed_kernels, kernels_without_vmlinuz, regenerate_initrd
 from lib.keystore import SYSTEM_KEY_PATH, Keystore, open_keystore
 from lib.log import Log
 from lib.restore_plan import (
@@ -395,25 +396,101 @@ def _receive(  # pylint: disable=too-many-arguments,too-many-positional-argument
     return False
 
 
-def _receive_row(pool: str, row: RestoreRow, raw: bool, log: Log) -> str:
+class Received(NamedTuple):
+    """Where a dataset's receive left it: the row as restored (its snapshot
+    the point, or the monthly base when only that arrived; None when nothing
+    did), and the error line for the summary, "" when the point arrived."""
+
+    row: RestoreRow | None
+    error: str
+
+
+def _receive_row(pool: str, row: RestoreRow, raw: bool, log: Log) -> Received:
     """One dataset: its monthly base in full, then the point with ``-i``
     from it (M4b-6); the point in full when it has no base.
 
-    Returns "" when the dataset reached its snapshot, else the error line
-    for the summary (M4bR-6): a base that arrived leaves the dataset at
-    that older monthly, which is not "receive failed".
+    A base that arrived leaves the dataset at that older monthly, which is
+    not "receive failed" (M4bR-6), and is what gets anchored (M4cP.2).
     """
     assert row.snap is not None
     point = f"{pool}/{row.snap.stored}@{row.snap.name}"
     if row.base is None:
-        ok = _receive(point, row.rel, row.options, raw=raw, log=log)
-        return "" if ok else f"{row.rel}: receive failed"
+        if _receive(point, row.rel, row.options, raw=raw, log=log):
+            return Received(row, "")
+        return Received(None, f"{row.rel}: receive failed")
     base = f"{pool}/{row.base.stored}@{row.base.name}"
     if not _receive(base, row.rel, row.options, raw=raw, log=log):
-        return f"{row.rel}: receive failed"
+        return Received(None, f"{row.rel}: receive failed")
     if _receive(point, row.rel, row.options, raw=raw, log=log, base=base):
-        return ""
-    return f"{row.rel}: left at @{row.base.name}, older than the point (the point's receive failed)"
+        return Received(row, "")
+    return Received(
+        replace(row, snap=row.base),
+        f"{row.rel}: left at @{row.base.name}, older than the point (the point's receive failed)",
+    )
+
+
+def restore_rpool_rows(
+    pool: str, rows: list[RestoreRow], be_ds: str, disk_guid: str, log: Log
+) -> list[str]:
+    """Step 8: raw-receive every rpool dataset, then anchor what arrived;
+    the error lines. A boot environment that did not reach its point is fatal."""
+    reached: list[RestoreRow] = []  # at the point
+    at_base: list[RestoreRow] = []  # left at their monthly
+    errors: list[str] = []
+    for row in rows:
+        got = _receive_row(pool, row, raw=True, log=log)
+        if got.error:
+            if row.rel == be_ds:
+                log.fatal("Failed to raw send root dataset")
+            errors.append(got.error)
+        if got.row is not None:
+            (at_base if got.error else reached).append(got.row)
+    if len(reached) == len(rows):
+        log.ok(f"{len(rows)} of {len(rows)} rpool dataset(s) restored ✓")
+    else:
+        log.warn(f"{len(reached)} of {len(rows)} rpool dataset(s) restored")
+    # Before the backup pool goes: the anchors are for the drive just read.
+    # A monthly that arrived is a base sanoid must not prune either (M4cP.2).
+    return errors + anchor_restored(reached + at_base, pool, disk_guid, log)
+
+
+def restore_bpool(
+    pool: str, row: RestoreRow | None, disk_guid: str, log: Log
+) -> tuple[str | None, list[str]]:
+    """Step 12a: receive bpool's boot environment and anchor what arrived.
+
+    Returns where it was left ("" at the point, the monthly's name when
+    only that arrived, None when nothing was restored) and the error lines.
+    A bpool at its monthly is still mounted and anchored (M4cP.2): GRUB
+    reads it at boot whether zark mounts it or not.
+    """
+    if row is None or not row.restored or row.snap is None:
+        return None, ["bpool: not in backup at this point - kernels need reinstallation"]
+    _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
+    got = _receive_row(pool, row, raw=False, log=log)
+    if got.row is None or got.row.snap is None:
+        return None, ["bpool: receive failed - kernels need reinstallation"]
+    errors = [got.error] if got.error else []
+    # Before the keystore: the keystore stays the last zfs operation.
+    if failure := anchor_bpool(got.row, pool, disk_guid, log):
+        errors.append(failure)
+    return (got.row.snap.name if got.error else ""), errors
+
+
+def kernel_gaps(root: str, monthly: str) -> list[str]:
+    """With /boot at bpool's monthly and the root at the point: each kernel
+    the root has and /boot lacks, and whether any kernel is in both."""
+    errors = [
+        f"kernel {v}: in the restored root but not in /boot (bpool at @{monthly}): "
+        + f"reinstall it from zark chroot: apt install --reinstall linux-image-{v}"
+        for v in kernels_without_vmlinuz(root)
+    ]
+    if not installed_kernels(root):
+        errors.append(
+            "no kernel in /boot matches the restored root: it will not boot until one "
+            + "is reinstalled from zark chroot"
+        )
+    return errors
 
 
 def _anchor_for(disk_guid: str, row: RestoreRow) -> str:
@@ -741,23 +818,9 @@ def run(
     if any(r.rel.startswith("rpool/USERDATA/") for r in plan.rpool_rows):
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/USERDATA", log=log)
 
-    be_ds = f"rpool/ROOT/{ubuntu_name}"
-    reached: list[RestoreRow] = []
-    for row in plan.rpool_rows:
-        failure = _receive_row(pool_name, row, raw=True, log=log)
-        if failure:
-            if row.rel == be_ds:
-                log.fatal("Failed to raw send root dataset")
-            errors.append(failure)
-        else:
-            reached.append(row)
-    total = len(plan.rpool_rows)
-    if len(reached) == total:
-        log.ok(f"{total} of {total} rpool dataset(s) restored ✓")
-    else:
-        log.warn(f"{len(reached)} of {total} rpool dataset(s) restored")
-    # Before the backup pool goes: the anchors are for the drive just read.
-    errors += anchor_restored(reached, pool_name, drive.guid, log)
+    errors += restore_rpool_rows(
+        pool_name, plan.rpool_rows, f"rpool/ROOT/{ubuntu_name}", drive.guid, log
+    )
 
     # ── 9. Export backup pool (removes its zvols) ────────────────────────
     log.step(9, TOTAL_STEPS, "Exporting backup pool (prevents kernel crash)...")
@@ -794,18 +857,11 @@ def run(
     cleanup.track_pool(pool_name)
 
     # ── 12a. bpool (no zvol on rpool yet; properties set at receive)
-    bpool_received = False
-    bpool_row = plan.row(f"bpool/BOOT/{ubuntu_name}")
-    if bpool_row is not None and bpool_row.restored and bpool_row.snap is not None:
-        _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
-        bpool_received = not _receive_row(pool_name, bpool_row, raw=False, log=log)
-        if not bpool_received:
-            errors.append("bpool: receive failed - kernels need reinstallation")
-        elif failure := anchor_bpool(bpool_row, pool_name, drive.guid, log):
-            # Before the keystore: the keystore stays the last zfs operation.
-            errors.append(failure)
-    else:
-        errors.append("bpool: not in backup at this point - kernels need reinstallation")
+    bpool_left_at, bpool_errors = restore_bpool(
+        pool_name, plan.row(f"bpool/BOOT/{ubuntu_name}"), drive.guid, log
+    )
+    errors += bpool_errors
+    bpool_received = bpool_left_at is not None
 
     # ── 12b. Keystore zvol (LAST zfs op - adds zvol to rpool)
     #
@@ -838,6 +894,8 @@ def run(
     # ── 13. Mount system ─────────────────────────────────────────────────
     log.step(13, TOTAL_STEPS, "Mounting system...")
     mount_restored_system(ubuntu_name, bpool_received, log)
+    if bpool_left_at:
+        errors += kernel_gaps(RECOVER_MNT, bpool_left_at)
 
     # Format EFI partition
     _ = sh.run(f"mkfs.vfat -F32 {sh.part(internal_disk, 1)}", log=log)

@@ -8207,7 +8207,8 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
 
         mock.mock_run_pipe = pipe  # type: ignore[method-assign,assignment]
         with patch_sh(mock), redirect_stdout(StringIO()):
-            assert not recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
+            got = recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
+        assert got == recover_mod.Received(row, "")
         be = f"backup/rpool/ROOT/{_BE}"
         assert pipes == [
             f"zfs send -w {be}@{self.MONTHLY}",
@@ -8226,14 +8227,16 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
         )
         with patch_sh(mock), redirect_stdout(StringIO()):
             got = recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
-        assert got == (
+        assert got.error == (
             f"rpool/ROOT/{_BE}: left at @{self.MONTHLY}, older than the point "
             + "(the point's receive failed)"
         )
+        # M4cP.2: the row as it was left, at the monthly.
+        assert got.row is not None and got.row.snap == row.base and got.row.rel == row.rel
         results = iter([RunResult(1, "", "boom", "a")])
         with patch_sh(mock), redirect_stdout(StringIO()):
             got = recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
-        assert got == f"rpool/ROOT/{_BE}: receive failed"
+        assert got == recover_mod.Received(None, f"rpool/ROOT/{_BE}: receive failed")
 
     def test_a_monthly_in_another_lineage_is_not_a_base(self):
         # An incremental needs both snapshots in one dataset: a monthly kept
@@ -8732,6 +8735,99 @@ class TestRecoverAnchors:  # pylint: disable=missing-function-docstring
             f"zfs rename bpool/BOOT/be@{P1} bpool/BOOT/be@zark_111_2026-10-07_10:00:00Z",
         ]
         assert mock.was_not_called("zfs bookmark")
+
+
+class TestRecoverLeftAtTheMonthly:  # pylint: disable=missing-function-docstring
+    """M4cP.2: a dataset whose point failed after its monthly arrived is
+    named, mounted (bpool) and anchored at that monthly."""
+
+    MONTHLY = "autosnap_2026-09-01_00:00:00_monthly"
+    M_STAMP = int(datetime(2026, 9, 1, 0, 0, tzinfo=UTC).timestamp())
+    P_STAMP = int(datetime(2026, 10, 7, 10, 0, tzinfo=UTC).timestamp())
+
+    def _row(self, rel: str) -> RestoreRow:
+        return RestoreRow(
+            rel,
+            Snap(rel, P1, "g", 2, self.P_STAMP),
+            base=Snap(rel, self.MONTHLY, "m", 1, self.M_STAMP),
+        )
+
+    @staticmethod
+    def _mock(*pipes: bool) -> MockShell:
+        results = iter([RunResult(0 if ok else 1, "", "" if ok else "boom", "p") for ok in pipes])
+        mock = MockShell()
+        mock.mock_run_pipe = (  # type: ignore[method-assign,assignment]
+            lambda *_a, **_k: next(results)
+        )
+        mock.on_prefix("zfs create").succeeds()
+        mock.on_prefix("zfs rename").succeeds()
+        mock.on_prefix("zfs bookmark").succeeds()
+        return mock
+
+    def _bpool(self, *pipes: bool) -> tuple[str | None, list[str], MockShell]:
+        mock = self._mock(*pipes)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            left, errors = recover_mod.restore_bpool(
+                "backup", self._row("bpool/BOOT/be"), "111", make_log()
+            )
+        return left, errors, mock
+
+    def test_bpool_left_at_its_monthly_is_named_and_anchored_there(self):
+        left, errors, mock = self._bpool(True, False)
+        assert left == self.MONTHLY
+        assert errors == [
+            f"bpool/BOOT/be: left at @{self.MONTHLY}, older than the point "
+            + "(the point's receive failed)"
+        ]
+        assert mock.was_called(
+            f"zfs rename bpool/BOOT/be@{self.MONTHLY} bpool/BOOT/be@zark_111_2026-09-01_00:00:00Z"
+        ), mock.calls
+
+    def test_bpool_at_its_point_and_without_any(self):
+        left, errors, mock = self._bpool(True, True)
+        assert left == "" and not errors
+        assert mock.was_called(f"zfs rename bpool/BOOT/be@{P1} "), mock.calls
+        left, errors, mock = self._bpool(False)
+        assert left is None
+        assert errors == ["bpool: receive failed - kernels need reinstallation"]
+        assert mock.was_not_called("zfs rename")
+        with redirect_stdout(StringIO()):
+            left, errors = recover_mod.restore_bpool("backup", None, "111", make_log())
+        assert left is None and errors[0].startswith("bpool: not in backup at this point")
+
+    def test_an_rpool_dataset_left_at_its_monthly_is_bookmarked_there(self):
+        mock = self._mock(True, True, True, False)
+        rows = [self._row("rpool/ROOT/be"), self._row("rpool/srv")]
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            errors = recover_mod.restore_rpool_rows(
+                "backup", rows, "rpool/ROOT/be", "111", make_log()
+            )
+        assert errors == [
+            f"rpool/srv: left at @{self.MONTHLY}, older than the point (the point's receive failed)"
+        ]
+        assert mock.calls == [
+            f"zfs bookmark rpool/ROOT/be@{P1} rpool/ROOT/be#zark_111_2026-10-07_10:00:00Z",
+            f"zfs bookmark rpool/srv@{self.MONTHLY} rpool/srv#zark_111_2026-09-01_00:00:00Z",
+        ]
+
+    def test_kernels_the_monthly_boot_lacks_are_named(self):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "boot").mkdir()
+            _ = (Path(td) / "boot/vmlinuz-7.0.0-30-generic").write_text("")
+            for v in ("7.0.0-30-generic", "7.0.0-38-generic"):
+                (Path(td) / f"lib/modules/{v}").mkdir(parents=True)
+                _ = (Path(td) / f"lib/modules/{v}/modules.dep").write_text("")
+            (Path(td) / "lib/modules/7.0.0-12-generic").mkdir()  # no modules.dep: removed
+            assert recover_mod.kernel_gaps(td, self.MONTHLY) == [
+                "kernel 7.0.0-38-generic: in the restored root but not in /boot "
+                + f"(bpool at @{self.MONTHLY}): reinstall it from zark chroot: "
+                + "apt install --reinstall linux-image-7.0.0-38-generic"
+            ]
+            (Path(td) / "boot/vmlinuz-7.0.0-30-generic").unlink()
+            gaps = recover_mod.kernel_gaps(td, self.MONTHLY)
+        assert len(gaps) == 3 and gaps[-1].startswith(
+            "no kernel in /boot matches the restored root"
+        )
 
 
 class TestRecoverKeystoreSnapshot:  # pylint: disable=missing-function-docstring

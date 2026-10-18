@@ -48,6 +48,22 @@ def installed_kernels(root: str) -> list[str]:
     return versions
 
 
+def kernels_without_vmlinuz(root: str) -> list[str]:
+    """Kernel versions with modules in /lib/modules and no vmlinuz in /boot:
+    installed after the snapshot /boot was restored from (M4cP.2)."""
+    in_boot = {
+        k.name[len("vmlinuz-") :]
+        for k in Path(f"{root}/boot").glob("vmlinuz-*")
+        if k.is_file() and not k.is_symlink()
+    }
+    return [
+        d.name
+        for d in sorted(Path(f"{root}/lib/modules").glob("*"))
+        if ((d / "modules.dep").exists() or (d / "modules.dep.bin").exists())
+        and d.name not in in_boot
+    ]
+
+
 def regenerate_initrd(root: str, log: Log) -> list[str]:
     """Regenerate the initrd of every installed kernel in ``root``.
 
