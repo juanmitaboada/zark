@@ -340,6 +340,9 @@ class TestResult:  # pylint: disable=too-many-instance-attributes
     transport_errors: list[str] = field(default_factory=list)
     # Why the throwaway pool was not destroyed afterwards; "" when it was.
     cleanup_error: str = ""
+    # The same kind of lines, logged between the cold pass's eject and the
+    # reconnect: the unplug's own (M4aP.9), not counted as transport errors.
+    at_unplug: list[str] = field(default_factory=list)
 
 
 def device_size_bytes(dev: str) -> int:
@@ -469,18 +472,19 @@ def _dmesg_now_ts() -> float:
     return float(m.group(1)) if m else 0.0
 
 
-def _transport_errors_since(base: str, since_ts: float) -> list[str]:
+def _transport_lines(base: str, since_ts: float) -> list[tuple[float, str]]:
     """Return kernel transport-error lines for ``base`` newer than ``since_ts``.
 
     Scans dmesg for lines mentioning the device (``[sdX]`` or its host) that
     match a known transport-failure pattern and whose timestamp is after the
-    marker. DID_NO_CONNECT (a clean unplug) is deliberately not in the pattern
-    list, so a normal disconnect does not raise a false alarm.
+    marker, each with its timestamp. DID_NO_CONNECT (a clean unplug) is
+    deliberately not in the pattern list, so a normal disconnect does not
+    raise a false alarm.
     """
     r = run("sh -c 'dmesg'")
     if not r.ok:
         return []
-    hits: list[str] = []
+    hits: list[tuple[float, str]] = []
     for line in r.output.splitlines():
         m = re.match(r"\[\s*([0-9]+\.[0-9]+)\]", line)
         if not m or float(m.group(1)) <= since_ts:
@@ -492,8 +496,32 @@ def _transport_errors_since(base: str, since_ts: float) -> list[str]:
         if "DID_NO_CONNECT" in line:
             continue
         if any(p in line for p in _TRANSPORT_ERROR_PATTERNS):
-            hits.append(line.strip())
+            hits.append((float(m.group(1)), line.strip()))
     return hits
+
+
+def _within(ts: float, window: tuple[float, float] | None) -> bool:
+    return window is not None and window[0] < ts <= window[1]
+
+
+def _transport_errors_since(
+    base: str, since_ts: float, unplug: tuple[float, float] | None = None
+) -> list[str]:
+    """The transport-error lines since ``since_ts``, except those in ``unplug``.
+
+    ``unplug`` is the cold pass's window, from the last kernel line before
+    the eject to the last one once the links are back: the unplug's own
+    lines (a failed cache flush with DID_ERROR on some bridges) are in it,
+    and the pool was exported and synced before it began (M4aP.9).
+    """
+    return [line for ts, line in _transport_lines(base, since_ts) if not _within(ts, unplug)]
+
+
+def _at_unplug(base: str, unplug: tuple[float, float] | None) -> list[str]:
+    """The transport-error lines inside the cold pass's ``unplug`` window."""
+    if unplug is None:
+        return []
+    return [line for ts, line in _transport_lines(base, unplug[0]) if _within(ts, unplug)]
 
 
 # How long the cold pass waits for the disk's by-id links after Enter.
@@ -555,9 +583,10 @@ def run_destructive_test(
     # errors emitted during this test.
     dmesg_mark = _dmesg_now_ts()
     created = False
+    unplug: tuple[float, float] | None = None
 
     def _attempt() -> TestResult:
-        nonlocal created
+        nonlocal created, unplug
         bytes_written = 0
         log.info(f"Creating throwaway test pool '{test_pool}'...")
         # cachefile=none: the test pool never enters /etc/zfs/zpool.cache.
@@ -575,7 +604,7 @@ def run_destructive_test(
                 write_mb_s,
                 False,
                 f"could not create test pool: {r.stderr.strip()}",
-                _transport_errors_since(base, dmesg_mark),
+                _transport_errors_since(base, dmesg_mark, unplug),
             )
         created = True
 
@@ -588,6 +617,7 @@ def run_destructive_test(
         run("sync")
 
         if cold:
+            before_eject = _dmesg_now_ts()
             log.info("Powering the device down (eject)...")
             run(f"eject /dev/{base}", log=log)
             if wait_for_reconnect is not None:
@@ -606,6 +636,10 @@ def run_destructive_test(
                     f"the partition link {import_from} did not appear within "
                     + f"{LINK_WAIT_SEC} s of the reconnect"
                 )
+            back = _dmesg_now_ts()
+            # Without both timestamps every line counts, as before (M4aP.9).
+            if before_eject and back:
+                unplug = (before_eject, back)
             if missing:
                 return TestResult(
                     profile,
@@ -614,7 +648,7 @@ def run_destructive_test(
                     write_mb_s,
                     False,
                     missing,
-                    _transport_errors_since(base, dmesg_mark),
+                    _transport_errors_since(base, dmesg_mark, unplug),
                 )
 
         # Verify re-import, from the disk's own partition (by-id survives the
@@ -630,7 +664,7 @@ def run_destructive_test(
         # Transport errors are read AFTER the re-import attempt so the import's
         # own bus traffic (which is where a flaky bridge tends to stumble) is
         # included in the window.
-        terrs = _transport_errors_since(base, dmesg_mark)
+        terrs = _transport_errors_since(base, dmesg_mark, unplug)
         if not imp.ok:
             return TestResult(
                 profile,
@@ -666,6 +700,7 @@ def run_destructive_test(
     finally:
         cleanup_error = _remove_test_pool(test_pool, vdev, import_from, altroot, created, log)
     result.cleanup_error = cleanup_error
+    result.at_unplug = _at_unplug(base, unplug)
     return result
 
 
@@ -810,6 +845,11 @@ def generate_report(  # pylint: disable=too-many-locals
                 f"Transport errors during test ({len(test.transport_errors)}):",
             )
             lines += [f"  {_redact(e)}" for e in test.transport_errors]
+        if test.at_unplug:
+            lines.append(
+                f"At the unplug, not counted ({len(test.at_unplug)}):",
+            )
+            lines += [f"  {_redact(e)}" for e in test.at_unplug]
 
     lines += [
         "",

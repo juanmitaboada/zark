@@ -124,7 +124,12 @@ for the canonical end-to-end sequences.
     test pool's or there is none. A cold pass needs a by-id name and fails
     before writing without one; after the reconnect it waits for udev and
     up to 10 seconds for the disk's by-id links, and a partition link that
-    never appears is its own failure.
+    never appears is its own failure. Kernel transport errors logged
+    between the eject and the reconnect are listed as at the unplug and
+    not counted: the pool was exported and synced before the eject. A
+    failed test, or a test pool that could not be destroyed, ends with exit
+    status 1; a pass, also with transport errors, and the read-only
+    check's risks end with 0.
 
     Whenever a risk (a warning) or test failure is found, a self-contained diagnostic
     report is written to */tmp* (environment, drive, bridge VID:PID, findings,
@@ -963,7 +968,9 @@ To verify a recovery without rebooting:
 **1**
 :   A fatal error occurred. The **\[FATAL\]** banner printed just before
     exit explains the cause and lists likely remediations. With
-    **--debug**, a Python traceback is also printed.
+    **--debug**, a Python traceback is also printed. Also when a command
+    ends with a red banner that says what failed, such as **purge**'s
+    **PURGE INCOMPLETE** or **health**'s **DESTRUCTIVE TEST FAILED**.
 
 **75**
 :   Another **zark** run that changes state is in progress (it holds

@@ -4741,15 +4741,15 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
             health_cmd.run([])
         assert "Pool black: exported, zpool import reports DEGRADED" in out.getvalue()
 
-    def test_a_test_pool_left_behind_is_printed(self):
-        # M4aV-3 V14: the destructive run's cleanup failure reaches the operator.
+    @staticmethod
+    def _destructive(test: HealthResult) -> tuple[str, int, bool]:
+        """health's destructive run with ``test`` as its result: output, exit
+        status, and whether the report was written."""
         out = StringIO()
         mock = MockShell()
         mock.on_prefix("lsblk -no NAME /dev/sdb").succeeds("")
         mock.on("blkid /dev/sdb").succeeds("")
-        test = HealthResult(
-            "fast", False, 1, 0.0, True, "ONLINE", cleanup_error="zpool destroy failed: x"
-        )
+        rc = 0
         with (
             patch_sh(mock),
             patch.object(health_cmd, "_select_device", return_value="/dev/sdb"),
@@ -4759,13 +4759,50 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
             patch.object(health_cmd, "check_device", return_value=HealthReport("/dev/sdb")),
             patch.object(health_cmd, "run_destructive_test", return_value=test),
             patch.object(health_cmd, "generate_report", return_value=""),
-            patch.object(health_cmd, "write_report_file", return_value="/tmp/r.txt"),
+            patch.object(health_cmd, "write_report_file", return_value="/tmp/r.txt") as written,
             patch.object(Log, "ask_choice", side_effect=[1, 0]),  # destructive, fast
             patch.object(Log, "ask", side_effect=[False, True, False]),  # obfuscate, go, cold
             redirect_stdout(out),
         ):
-            health_cmd.run([])
-        assert "Test pool was not destroyed: zpool destroy failed: x" in out.getvalue()
+            try:
+                health_cmd.run([])
+            except SystemExit as e:
+                rc = int(e.code) if isinstance(e.code, int) else 1
+        return out.getvalue(), rc, written.called
+
+    def test_a_test_pool_left_behind_is_printed(self):
+        # M4aV-3 V14: the destructive run's cleanup failure reaches the operator.
+        test = HealthResult(
+            "fast", False, 1, 0.0, True, "ONLINE", cleanup_error="zpool destroy failed: x"
+        )
+        out, rc, written = self._destructive(test)
+        assert "Test pool was not destroyed: zpool destroy failed: x" in out
+        assert rc == 1 and written  # M4aX.2, after the report
+
+    def test_a_failed_test_exits_1_after_the_report(self):
+        out, rc, written = self._destructive(
+            HealthResult("fast", False, 1, 0.0, False, "re-import failed: x")
+        )
+        assert "DESTRUCTIVE TEST FAILED" in out
+        assert rc == 1 and written
+
+    def test_a_pass_exits_0_also_with_transport_errors(self):
+        out, rc, _ = self._destructive(HealthResult("fast", False, 1, 0.0, True, "ONLINE"))
+        assert rc == 0 and "Destructive test PASSED (ONLINE)" in out
+        out, rc, written = self._destructive(
+            HealthResult("fast", False, 1, 0.0, True, "ONLINE", ["[ 1.0] [sdb] DID_ERROR"])
+        )
+        assert rc == 0 and written and "PASSED WITH TRANSPORT ERRORS" in out
+
+    def test_errors_at_the_unplug_are_shown_and_not_counted(self):
+        line = "[ 2.0] sd 0:0:0:0: [sdb] Synchronize Cache(10) failed: hostbyte=DID_ERROR"
+        out, rc, written = self._destructive(
+            HealthResult("fast", True, 1, 0.0, True, "ONLINE", at_unplug=[line])
+        )
+        assert rc == 0 and not written, out
+        assert "Destructive test PASSED (ONLINE)" in out
+        assert "Kernel errors at the unplug, not counted (1): the pool was exported" in out
+        assert f"  {line}" in out
 
     def test_eof_at_the_reconnect_pause_raises_nothing(self):
         # R2-14: the cold test's pause reads stdin; EOF there goes on (today's
@@ -4968,6 +5005,53 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
             )
         assert mock.was_called("wipefs -a /dev/sda")
         assert mock.was_called("sgdisk --zap-all /dev/sda")
+
+    @staticmethod
+    def _cold_window(marks: list[float]) -> HealthResult:
+        """A cold pass whose kernel log has a transport error before the eject
+        (120), one at the unplug (200) and one after the reconnect (300);
+        ``marks`` are the last kernel line's timestamps: at the start, right
+        before the eject, once the links are back."""
+        mock = MockShell()
+        mock.on_prefix("find /dev/disk/by-id/").succeeds("usb-Stick_SER-0:0\t../../sda\n")
+        for cmd in ("zpool create", "dd", "sync", "zpool export", "eject", "drop_caches"):
+            mock.on(cmd).succeeds()
+        for cmd in ("zpool import", "zpool destroy", "rm -rf", "wipefs", "sgdisk"):
+            mock.on(cmd).succeeds()
+        mock.on("dmesg").succeeds(
+            "[ 120.0] sd 0:0:0:0: [sda] uas_eh_abort_handler 0 uas-tag 1\n"
+            "[ 200.0] sd 0:0:0:0: [sda] Synchronize Cache(10) failed: "
+            "Result: hostbyte=DID_ERROR driverbyte=DRIVER_OK\n"
+            "[ 300.0] sd 0:0:0:0: [sda] uas_eh_device_reset_handler start\n"
+        )
+        with (
+            patch_sh(mock),
+            patch("lib.health.Path.exists", return_value=True),
+            patch.object(health_mod, "_dmesg_now_ts", side_effect=marks),
+        ):
+            return run_destructive_test(
+                "/dev/sda",
+                PROFILE_FAST,
+                True,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+                wait_for_reconnect=lambda: None,
+            )
+
+    def test_errors_at_the_unplug_are_listed_apart(self):
+        # M4aP.9: eject, then the operator unplugs; the bridge's failed cache
+        # flush at that moment is the unplug's, not the transport's.
+        result = self._cold_window([100.0, 150.0, 250.0])
+        assert result.passed
+        assert [ln[:7] for ln in result.transport_errors] == ["[ 120.0", "[ 300.0"]
+        assert [ln[:7] for ln in result.at_unplug] == ["[ 200.0"]
+        with patch_sh(MockShell()):
+            report = generate_report("/dev/sda", HealthReport("/dev/sda"), result, obfuscate=False)
+        assert "At the unplug, not counted (1):\n  [ 200.0]" in report
+
+    def test_without_the_unplug_marks_every_line_counts(self):
+        result = self._cold_window([100.0, 0.0, 250.0])
+        assert len(result.transport_errors) == 3 and not result.at_unplug
 
     def test_transport_errors_ignores_clean_disconnect(self):
         """DID_NO_CONNECT (a clean unplug) must NOT be flagged as an error."""

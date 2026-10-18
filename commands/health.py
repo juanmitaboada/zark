@@ -265,6 +265,15 @@ def run(args: list[str]) -> None:
                 ],
             )
 
+        if test.at_unplug:
+            # The pool was exported and synced before the eject (M4aP.9).
+            log.info(
+                f"Kernel errors at the unplug, not counted ({len(test.at_unplug)}): "
+                + "the pool was exported before it",
+            )
+            for line in test.at_unplug[:5]:
+                log.info(f"  {line}")
+
         if test.cleanup_error:
             log.error(f"Test pool was not destroyed: {test.cleanup_error}")
 
@@ -282,3 +291,6 @@ def run(args: list[str]) -> None:
         )
     else:
         log.ok("No risk factors detected.")
+    # M4aX.2: what was shown in red ends with exit status 1, as in every other command.
+    if test is not None and (not test.passed or test.cleanup_error):
+        raise SystemExit(1)
