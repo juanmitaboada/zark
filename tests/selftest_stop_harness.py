@@ -30,7 +30,9 @@ records its pid and sleeps. Cases:
 
     sig:INT, sig:TERM, sig:HUP   the signal once that create is running
     deadpipe:                    the reader of zark's output leaves once the
-                                 bench is built (both its pools created)
+                                 bench is built (both its pools created); the
+                                 run sees it after POOL-01's create ends,
+                                 before its GUID is read (M4dF-1)
 
 Prints one JSON object: ``rc``, ``created`` (pools whose create finished),
 ``destroyed``, ``left`` (pools still there), ``benches`` (bench directories
@@ -64,8 +66,10 @@ case "$1 $2" in
     fi
     for f in "$S"/pool.*; do [ -f "$f" ] && echo "${f##*/pool.}"; done; exit 0;;
   "list -vHP")
+    [ -z "${3:-}" ] || [ -f "$S/pool.$3" ] || exit 1
     for f in "$S"/pool.*; do
       [ -f "$f" ] || continue
+      [ -z "${3:-}" ] || [ "$f" = "$S/pool.$3" ] || continue
       echo "${f##*/pool.}"; printf '\t%s\n' "$(cut -d' ' -f2 "$f")"
     done; exit 0;;
   "create "*)

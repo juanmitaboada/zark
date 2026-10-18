@@ -213,6 +213,8 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
         self.dir = f"{root}/{DIR_PREFIX}{stamp}-{secrets.token_hex(2)}"
         self.tag = secrets.token_hex(4)
         self.guids: dict[str, str] = {}  # pool -> GUID read right after its creation
+        # A stop between a create's end and its GUID's read (M4dF-1).
+        self.creating: set[str] = set()
         self.key = f"{self.dir}/key"
         self.mnt = f"{self.dir}/mnt"
         self._torn_down = False
@@ -414,8 +416,10 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
             "zpool create -o ashift=12 -O atime=off -O xattr=sa -O normalization=formD "
             + f"{options} -m none {root}{name} {vdev}"
         )
+        self.creating.add(name)
         _ = self.ok(" ".join(cmd.split()))
         self.guids[name] = self.pool_value("guid", name)
+        self.creating.discard(name)
         return name
 
     def drop_pool(self, name: str) -> None:
@@ -448,6 +452,22 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
         Path(vdev).unlink(missing_ok=True)
         remove_empty_dirs(f"{BACKUP_ALTROOT_BASE}/{name}")
 
+    def _destroy_created(self, name: str) -> None:
+        """A pool whose create was running when the run stopped: the run's
+        only when it sits on the run's own vdev file, then destroyed by the
+        GUID it has now (M4dF-1)."""
+        vdev = self.vdev(name)
+        if not sh.run(f"zpool list -H -o name {name}", log=self.log).ok:
+            Path(vdev).unlink(missing_ok=True)  # the create never ended
+            return
+        listing = sh.run(f"zpool list -vHP {name}", log=self.log)
+        on_vdev = listing.ok and any(ln.split()[:1] == [vdev] for ln in listing.lines)
+        guid = sh.run(f"zpool get -Hp -o value guid {name}", log=self.log)
+        if on_vdev and guid.ok and guid.output:
+            self._destroy_own(name, guid.output)
+        else:
+            self.log.warn(f"Pool {name} is not on {vdev}: left alone")
+
     def teardown(self) -> None:
         """Destroy every pool this run created, then its directory."""
         if self._torn_down:
@@ -456,6 +476,9 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
         for name, guid in list(self.guids.items()):
             self._destroy_own(name, guid)
             self.guids.pop(name, None)
+        for name in sorted(self.creating - set(self.guids)):
+            self._destroy_created(name)
+        self.creating.clear()
         if not os.path.isdir(self.dir):
             return
         listing = sh.run("zpool list -vHP")

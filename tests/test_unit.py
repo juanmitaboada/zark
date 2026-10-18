@@ -16351,6 +16351,33 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
             imp = next(i for i, c in enumerate(calls) if c.startswith("zpool import -d"))
             assert exp < imp < calls.index(f"zpool destroy {bench.a}")
 
+    def test_a_pool_created_before_its_guid_was_read_goes_only_from_its_own_file(self):
+        # M4dF-1: c's create ended, its GUID was never read; d's name has
+        # a pool on another disk; e's create never ended.
+        mock = MockShell()
+        with tempfile.TemporaryDirectory() as td, patch_sh(mock):
+            bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+            os.makedirs(bench.dir)
+            c, d, e = bench.pool("c"), bench.pool("d"), bench.pool("e")
+            Path(bench.vdev(e)).touch()
+            bench.creating = {c, d, e}
+            for name, vdev in ((c, bench.vdev(c)), (d, "/dev/sdz1")):
+                mock.on(f"zpool list -H -o name {name}").succeeds(name)
+                mock.on(f"zpool list -vHP {name}").succeeds(f"{name}\t1G\n\t{vdev}\t1G\n")
+            mock.on(f"zpool get -Hp -o value guid {c}").succeeds("333\n")
+            mock.on(f"zpool get -Hp -o value guid {d}").succeeds("444\n")
+            mock.on(f"zpool get -H -o value readonly {c}").succeeds("off\n")
+            mock.on(f"zpool destroy {c}").succeeds()
+            mock.on(f"zpool list -H -o name {e}").fails()
+            mock.on("zpool list -vHP").succeeds("")
+            mock.on_prefix("rm -rf").succeeds()
+            bench.teardown()
+            assert mock.was_called(f"zpool destroy {c}")
+            assert not [x for x in mock.calls if x.startswith(f"zpool destroy {d}")]
+            assert not [x for x in mock.calls if x.startswith(f"zpool destroy -f {d}")]
+            assert not os.path.exists(bench.vdev(e))
+            assert not bench.creating
+
     def test_the_directory_stays_while_an_imported_pool_uses_it(self):
         mock = MockShell()
         with tempfile.TemporaryDirectory() as td, patch_sh(mock):
@@ -17328,6 +17355,16 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
 
     def test_sighup_while_a_child_runs(self):
         self._stopped("HUP")
+
+    def test_a_reader_gone_after_a_create_leaves_no_pool(self):
+        # M4dF-1: the dead pipe is seen right after POOL-01's create
+        # returned, before its GUID was read: the pool is still the run's.
+        r = self._run("deadpipe:")
+        assert r["reached"], r
+        assert len(r["created"]) == 3 and sorted(r["destroyed"]) == sorted(r["created"]), r
+        assert not r["left"] and not r["benches"] and not r["child_alive"], r
+        assert r["rm_after_destroys"], r["log"]
+        assert not [ln for ln in r["log"] if "Traceback" in ln], r["log"]
 
 
 class TestTypography:  # pylint: disable=missing-function-docstring
