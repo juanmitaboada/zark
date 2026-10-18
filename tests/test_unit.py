@@ -7041,6 +7041,30 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
             finally:
                 os.close(probe)
 
+    def test_the_wipe_numbers_its_steps_only_for_purge(self):
+        # M4cP.4: inside the self-test's [k/8] its steps are unnumbered.
+        lines = (
+            "Overwriting first 10MB...",
+            "Overwriting last 10MB...",
+            "Wiping filesystem signatures...",
+            "Destroying partition table...",
+        )
+        for steps in (True, False):
+            mock = MockShell()
+            _wipe_succeeds(mock)
+            out = StringIO()
+            with (
+                patch_sh(mock),
+                patch.object(purge_mod, "_held_from_udev", _held_taken),
+                patch.object(purge_mod, "_present", return_value=False),
+                redirect_stdout(out),
+            ):
+                _ = purge_mod._wipe("/dev/sdb", "/dev/sdb1", make_log(), steps=steps)  # pylint: disable=protected-access
+            text = out.getvalue()
+            for n, line in enumerate(lines, 2):
+                assert (f"[{n}/5]{Log.N} {line}" in text) is steps, (steps, line)
+                assert (f"[INFO]{Log.N}      {line}" in text) is not steps, (steps, line)
+
     def test_a_disk_another_program_holds_is_not_held(self):
         # M4aV-3 V6: waited for 10 s, warned, and the caller is told.
         with tempfile.NamedTemporaryFile() as disk:
@@ -17299,7 +17323,7 @@ class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
         disk="/dev/sdz", by_id="usb-S_1-0:0", serial="S1", aliases=("usb-S_1-0:0",)
     )
 
-    def _teardown(self, mock: MockShell) -> list[str]:
+    def _teardown(self, mock: MockShell, out: StringIO | None = None) -> list[str]:
         mock.on_prefix("blkid -p").returns(2)
         mock.on("blockdev --getsize64 /dev/sdz").succeeds(f"{1024**3}\n")
         mock.on_prefix("dd ").succeeds()
@@ -17308,13 +17332,22 @@ class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
         mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
         with (
             patch_sh(mock),
-            redirect_stdout(StringIO()),
+            redirect_stdout(out or StringIO()),
             patch("lib.identity.resolve_disk", return_value=self.IDENT),
             patch("commands.purge._present", return_value=False),
             patch("commands.purge._held_from_udev", _held_taken),
         ):
             st_l2.StickBench(make_log(), Cleanup(make_log()), self.IDENT).teardown()
         return mock.calls
+
+    def test_the_teardown_wipe_has_no_numbered_steps(self):
+        mock = MockShell()
+        mock.on("zpool list -vHP").succeeds("")
+        out = StringIO()
+        calls = self._teardown(mock, out)
+        assert "wipefs -a /dev/sdz" in calls
+        assert "Wiping filesystem signatures..." in out.getvalue()
+        assert "/5]" not in out.getvalue()
 
     def test_both_ends_are_overwritten_before_wipefs(self):
         mock = MockShell()

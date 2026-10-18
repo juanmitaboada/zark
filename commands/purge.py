@@ -182,13 +182,21 @@ def _held_from_udev(disk: str, log: Log) -> Iterator[bool]:
         os.close(fd)
 
 
-def _wipe(target_dev: str, part1: str, log: Log) -> Wiped:
+def _wipe(target_dev: str, part1: str, log: Log, steps: bool = True) -> Wiped:
     """Overwrite both ends, wipe signatures and the partition table, verify.
 
     Every step runs even when an earlier one failed (more erased is never
     worse); the report has one line per step and per check. Nothing is
-    written when the disk cannot be held from udev.
+    written when the disk cannot be held from udev. ``steps`` False: the
+    step lines unnumbered, inside another command's own steps (the self-test).
     """
+
+    def say(num: int, msg: str) -> None:
+        if steps:
+            log.step(num, 5, msg)
+        else:
+            log.info(f"  {msg}")
+
     marks: list[Mark] = []
     checks: list[Mark] = []  # also in marks: what was read back, not run
     # The ZFS labels live in part1, and zdb -l reads them at offsets of the
@@ -207,7 +215,7 @@ def _wipe(target_dev: str, part1: str, log: Log) -> Wiped:
             marks.append((False, f"nothing overwritten: {target_dev} could not be held from udev"))
             return Wiped(marks, checks_clean=False)
         had_part1 = _present(part1)
-        log.step(2, 5, "Overwriting first 10MB...")
+        say(2, "Overwriting first 10MB...")
         _ = _step(
             f"dd if=/dev/urandom of={target_dev} bs=1M count=10 conv=fsync",
             "first 10MB overwritten",
@@ -216,7 +224,7 @@ def _wipe(target_dev: str, part1: str, log: Log) -> Wiped:
             log,
         )
 
-        log.step(3, 5, "Overwriting last 10MB...")
+        say(3, "Overwriting last 10MB...")
         disk_bytes = sh.run(f"blockdev --getsize64 {target_dev}").output
         if not disk_bytes.isdigit():
             marks.append((False, f"last 10MB not overwritten: size of {target_dev} unreadable"))
@@ -240,13 +248,13 @@ def _wipe(target_dev: str, part1: str, log: Log) -> Wiped:
             checks.append((None, text))
         marks += checks
 
-    log.step(4, 5, "Wiping filesystem signatures...")
+    say(4, "Wiping filesystem signatures...")
     _ = _step(f"wipefs -a {target_dev}", "signatures wiped", "wipefs -a", marks, log)
     if _present(part1):  # wipefs left the partition table
         checks.append(_label_mark(part1, "after wipefs", log))
         marks.append(checks[-1])
 
-    log.step(5, 5, "Destroying partition table...")
+    say(5, "Destroying partition table...")
     _ = _step(
         f"sgdisk --zap-all {target_dev}",
         "partition table destroyed",
