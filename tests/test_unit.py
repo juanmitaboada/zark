@@ -10071,6 +10071,40 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         assert mock.call_count("zpool export backup") == 2, mock.calls
         assert "BACKUP NOT UNMOUNTED" not in out, out
 
+    def test_a_bind_the_tree_had_is_released_where_only_it_stays(self):
+        # M4bV-2 F7: the other namespace holds only a (tmpfs, tmpfs) bind
+        # below the tree (no ZFS mount of the pool there): released because
+        # the tree had that pair here, and the export retried.
+        ns = "nsenter --mount=/proc/42/ns/mnt"
+        seen: dict[str, str] = {}
+
+        def setup(mock: MockShell, td: str) -> None:
+            tree = seen["tree"] = f"{td}/backup"
+            mock.on("findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree} zfs backup/rpool/ROOT/be\n{tree}/run tmpfs tmpfs"
+            )
+            listing = mock.on(f"{ns} findmnt -rn -o TARGET,FSTYPE,SOURCE").succeeds(
+                f"/ overlay overlay\n{tree}/run tmpfs tmpfs"
+            )
+            export = mock.on("zpool export backup").fails("pool is busy")
+            mock._responses.insert(0, mock._responses.pop())  # pylint: disable=protected-access
+            mock.on(f"{ns} umount -R {tree}/run").succeeds()
+            real = mock.mock_run
+
+            def run_hook(cmd: Any, *a: Any, **k: Any) -> RunResult:
+                r = real(cmd, *a, **k)
+                if str(cmd) == f"{ns} umount -R {tree}/run":
+                    _ = listing.succeeds("/ overlay overlay")
+                    _ = export.succeeds()
+                return r
+
+            mock.mock_run = run_hook  # type: ignore[method-assign]
+
+        mock, out = self._umount_backup(export_ok=True, setup=setup)
+        umounts = [c for c in mock.calls if c.startswith(f"{ns} umount")]
+        assert umounts == [f"{ns} umount -R {seen['tree']}/run"], mock.calls
+        assert "BACKUP NOT UNMOUNTED" not in out, out
+
     def test_an_unrelated_mount_at_the_same_path_elsewhere_is_left_alone(self):
         # M4bR-3 (M4bF-6 6a, review E3): a namespace with a root of its own
         # can hold anything at zark's path; only a copy of the tree (a ZFS
@@ -10144,14 +10178,15 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         own = os.readlink("/proc/self/ns/mnt")
         with tempfile.TemporaryDirectory() as td:
             proc, snapd = Path(td, "proc"), Path(td, "snapd")
-            for pid, ns in (("100", "mnt:[1]"), ("101", "mnt:[1]"), ("102", own), ("self", "x")):
+            # M4bV-2 F9: in pid order, numerically: 99 is older than 100.
+            for pid, ns in (("100", "mnt:[1]"), ("99", "mnt:[1]"), ("102", own), ("self", "x")):
                 Path(proc, pid, "ns").mkdir(parents=True)
                 os.symlink(ns, Path(proc, pid, "ns", "mnt"))
             snapd.mkdir()
             Path(snapd, "lxd.mnt").write_text("", encoding="ascii")
             Path(snapd, "lxd.info").write_text("", encoding="ascii")
             got = umount_mod._namespaces(str(proc), str(snapd))  # pylint: disable=protected-access
-        assert got == [f"{proc}/100/ns/mnt", f"{snapd}/lxd.mnt"], got
+        assert got == [f"{proc}/99/ns/mnt", f"{snapd}/lxd.mnt"], got
 
     def test_what_stays_mounted_here_is_named(self):
         # R2§11.4a: a process inside the tree keeps it here; the banner names
@@ -11576,6 +11611,31 @@ class TestEngine:  # pylint: disable=too-many-public-methods
             _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
         assert old in fake.bookmarks("rpool/var")
         assert old not in fake.bookmarks("rpool/ROOT/be")  # verified there: superseded
+
+    def test_a_point_never_taken_on_bpool_is_not_destroyed_there(self) -> None:
+        """M4bV-2 F13c: rpool's point taken, bpool's snapshot failed: the undo
+        removes rpool's and runs no zfs destroy on bpool, where the point does
+        not exist (it would fail and warn of a point that was never there)."""
+        fake = self._fresh()
+        real_run = fake.mock_run
+
+        def run_(cmd: str, *args: object, **kwargs: object) -> RunResult:
+            if cmd.startswith("zfs snapshot") and " bpool" in cmd:
+                fake._calls.append(cmd)  # pylint: disable=protected-access
+                return RunResult(1, "", "cannot create snapshot: out of space\n", cmd)
+            return real_run(cmd, *args, **kwargs)  # type: ignore[arg-type]
+
+        fake.mock_run = run_  # type: ignore[method-assign]
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            log = Log()
+            eng = engine.Run("backup", "111", log, P1, sleep=lambda _s: None)
+            res = engine.execute(eng, Cleanup(log), lambda _p, _r: True)
+        assert res.aborted and f"could not take {P1}" in res.error
+        assert any(c.startswith("zfs destroy rpool") for c in fake.calls), fake.calls
+        assert not any(c.startswith("zfs destroy bpool") for c in fake.calls), fake.calls
+        assert "could not remove" not in out.getvalue()
+        assert _origin_points(fake) == []
 
     def test_interrupted_run_keeps_the_point_where_a_receive_began(self) -> None:
         """Decision 13, as 8b amends it (M4b-4): after a Ctrl-C the point
