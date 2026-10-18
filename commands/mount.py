@@ -118,6 +118,66 @@ def _plan_origin_layout(  # pylint: disable=too-many-locals
     return plan
 
 
+MAX_SYMLINKS = 40  # as the kernel's path walk (MAXSYMLINKS)
+
+
+def resolve_in_tree(root: str, path: str) -> str | None:
+    """``path`` (absolute, inside ``root``) resolved as a chroot at ``root``
+    would: component by component, an absolute link restarting at ``root``,
+    ``..`` never above it (M4c-22). Returns the path with no symlink left,
+    or None after more than :data:`MAX_SYMLINKS` links. Components that do
+    not exist are kept as they are."""
+    rel = os.path.relpath(path, root)
+    parts = [] if rel == "." else rel.split("/")
+    current: list[str] = []
+    links = 0
+    while parts:
+        c = parts.pop(0)
+        if c in ("", "."):
+            continue
+        if c == "..":
+            if current:
+                _ = current.pop()
+            continue
+        here = os.path.join(root, *current, c)
+        if os.path.islink(here):
+            links += 1
+            if links > MAX_SYMLINKS:
+                return None
+            link = os.readlink(here)
+            if link.startswith("/"):
+                current = []
+            parts = link.split("/") + parts
+            continue
+        current.append(c)
+    return os.path.join(root, *current) if current else root
+
+
+def _layout_target(path: str, mnt: str, root: str, readonly: bool) -> tuple[str, str]:
+    """Where ``path`` (a target under ``mnt``) is mounted: ``(target, "")``,
+    or ``("", why it is skipped)``.
+
+    A symlink or .. in the backup must not lead out of the tree onto the
+    running system. Read-only, it is resolved inside the tree as a chroot
+    would (an absolute /var/run -> /run of the backup is the tree's /run):
+    nothing in a read-only pool changes between the resolution and the
+    mount (M4c-22). Read-write, one that leaves the tree is refused. Either
+    way the resolved path, with no link left, is mounted.
+    """
+    if not readonly:
+        target = os.path.realpath(path)
+        if not target.startswith(f"{root}/"):
+            return "", f"{path} resolves to {target}"
+        return target, ""
+    resolved = resolve_in_tree(root, os.path.join(root, os.path.relpath(path, mnt)))
+    if resolved is None:
+        return "", f"{path}: too many symlinks"
+    if resolved == root:
+        # Mounted there, it would hide the boot environment's root.
+        return "", f"{path} resolves to the root"
+    return resolved, ""
+
+
 def _mount_origin_layout(  # pylint: disable=too-many-locals
     pool: str,
     mnt: str,
@@ -153,11 +213,9 @@ def _mount_origin_layout(  # pylint: disable=too-many-locals
     root = os.path.realpath(mnt)
     # Parents before children: compare path components, not strings.
     for item in sorted((m for m in plan if m.target), key=lambda m: Path(m.target).parts):
-        # Resolved as mount(8) will: a symlink or .. in the backup must not lead
-        # out of the tree onto the running system. The resolved path is mounted.
-        target = os.path.realpath(item.target)
-        if not target.startswith(f"{root}/"):
-            skipped.append(LayoutMount(item.rel, "", f"{item.target} resolves to {target}"))
+        target, why = _layout_target(item.target, mnt, root, readonly)
+        if why:
+            skipped.append(LayoutMount(item.rel, "", why))
             continue
         if not Path(target).is_dir():
             # Creating it would write to the backup (impossible read-only).

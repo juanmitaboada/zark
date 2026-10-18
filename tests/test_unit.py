@@ -9663,6 +9663,55 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
         assert [s.rel for s in skipped] == ["rpool/var/lib/docker"]
         assert not any(c.startswith("mkdir") and "/mnt/zark/backup/" in c for c in mock.calls)
 
+    def test_links_resolve_inside_the_tree(self):
+        # M4c-22 (M1P.19): an absolute link of the backup is the tree's, not the live's.
+        in_tree = mount_mod.resolve_in_tree
+        with tempfile.TemporaryDirectory() as td:
+            root = os.path.realpath(td)
+            os.makedirs(f"{root}/run/lock")
+            os.makedirs(f"{root}/var")
+            os.symlink("/run", f"{root}/var/run")
+            os.symlink("../../../..", f"{root}/var/up")
+            os.symlink("run/lock", f"{root}/lk")
+            os.symlink("loop", f"{root}/loop")
+            assert in_tree(root, f"{root}/var/run/lock") == f"{root}/run/lock"
+            assert in_tree(root, f"{root}/var/up/etc") == f"{root}/etc"
+            assert in_tree(root, f"{root}/lk/x") == f"{root}/run/lock/x"
+            assert in_tree(root, f"{root}/../../etc") == f"{root}/etc"
+            assert in_tree(root, f"{root}/loop/x") is None
+            assert in_tree(root, root) == root
+
+    def test_read_only_mounts_at_the_resolved_path_read_write_refuses(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = os.path.realpath(td)
+            os.makedirs(f"{root}/run/user")
+            os.makedirs(f"{root}/var")
+            os.symlink("/run", f"{root}/var/run")
+            plan = [mount_mod.LayoutMount("rpool/var/run/user", f"{root}/var/run/user")]
+            for readonly in (True, False):
+                mock = MockShell()
+                mock.on("zfs list -H -o name -r backup/rpool/ROOT").succeeds(
+                    f"backup/rpool/ROOT\nbackup/rpool/ROOT/{_BE}",
+                )
+                mock.on_prefix("mount -t zfs").succeeds()
+                mock.on_prefix("mkdir -p").succeeds()
+                with (
+                    patch_sh(mock),
+                    patch.object(mount_mod, "_plan_origin_layout", return_value=plan),
+                    redirect_stdout(StringIO()),
+                ):
+                    _, skipped = mount_mod._mount_origin_layout(  # pylint: disable=protected-access
+                        "backup", root, make_log(), readonly=readonly
+                    )
+                mounts = [c for c in mock.calls if "backup/rpool/var/run/user" in c]
+                if readonly:
+                    assert mounts == [
+                        f"mount -t zfs -o ro,zfsutil backup/rpool/var/run/user {root}/run/user"
+                    ]
+                else:
+                    assert not mounts
+                    assert f"{root}/var/run/user resolves to /run/user" in skipped[0].reason
+
     def test_read_write_mount_uses_the_same_tree(self):
         # Decision 1: datasets on the backup are canmount=noauto with no
         # mountpoint of their own, so read-write mounts them explicitly too.
@@ -9757,8 +9806,11 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
                 f"mount -t zfs -o ro,zfsutil backup/rpool/srv {os.path.realpath(mnt)}/srv/ok",
             ]
             assert mounted == 2
-            assert {x.rel for x in skipped} == {"rpool/data", "rpool/up"}
-            assert all("resolves to" in x.reason for x in skipped)
+            # Read-only resolves inside the tree (M4c-22): the absolute link is
+            # the tree's own path, which does not exist; .. stops at the root.
+            reasons = {x.rel: x.reason for x in skipped}
+            assert reasons["rpool/data"] == f"no directory {mnt}/data"
+            assert reasons["rpool/up"] == f"{mnt}/etc/../.. resolves to the root"
 
     @staticmethod
     def _umount_backup(
