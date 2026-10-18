@@ -206,17 +206,18 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
     each other's state.
     """
 
-    def __init__(self, log: Log, cleanup: Cleanup, root: str = SHM):
+    def __init__(self, log: Log, cleanup: Cleanup, root: str | None = SHM):
+        """``root`` None: a bench with no directory (the stick's)."""
         self.log = log
         self.cleanup = cleanup
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        self.dir = f"{root}/{DIR_PREFIX}{stamp}-{secrets.token_hex(2)}"
+        self.dir = f"{root}/{DIR_PREFIX}{stamp}-{secrets.token_hex(2)}" if root else ""
         self.tag = secrets.token_hex(4)
         self.guids: dict[str, str] = {}  # pool -> GUID read right after its creation
         # A stop between a create's end and its GUID's read (M4dF-1).
         self.creating: set[str] = set()
-        self.key = f"{self.dir}/key"
-        self.mnt = f"{self.dir}/mnt"
+        self.key = f"{self.dir}/key" if root else ""
+        self.mnt = f"{self.dir}/mnt" if root else ""
         self._torn_down = False
 
     # ── names ────────────────────────────────────────────────────────────
@@ -241,8 +242,9 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
 
     def masks(self) -> dict[str, str]:
         """What the report writes instead of this run's names."""
-        out = {self.dir: "<run>", self.pool("a"): "<pool-a>", self.pool("b"): "<pool-b>"}
-        out[self.pool("c")] = "<pool-c>"
+        out = {self.pool("a"): "<pool-a>", self.pool("b"): "<pool-b>", self.pool("c"): "<pool-c>"}
+        if self.dir:
+            out[self.dir] = "<run>"
         return out
 
     # ── commands ─────────────────────────────────────────────────────────
@@ -567,13 +569,6 @@ def run_one(c: Check, bench: "Bench") -> Result:
             output=traceback.format_exc().strip(),
         )
     return Result(c.key, "PASS")
-
-
-def masked(text: str, masks: dict[str, str]) -> str:
-    """``text`` with each key of ``masks`` replaced by its value."""
-    for k, v in sorted(masks.items(), key=lambda kv: -len(kv[0])):
-        text = text.replace(k, v)
-    return text
 
 
 def dumps(obj: object) -> str:

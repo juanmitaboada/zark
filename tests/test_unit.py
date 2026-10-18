@@ -16639,6 +16639,21 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
             assert secret not in text, secret
         assert "<pool-a>" in text and "<run>" in text
 
+    def test_a_mask_replaces_whole_names_only(self):
+        # M4sX.3: a short serial is not replaced inside a word, nor inside a
+        # mask put in before; a serial after "_" in a by-id name still is.
+        masks = {"1": "<serial>", "zstdeadbeefa": "<pool-a>", "pool": "<serial>"}
+        assert certs.sanitize("SND-01 a1b exit 1", masks) == "SND-01 a1b exit <serial>"
+        assert certs.sanitize("zstdeadbeefa/SND-01@s1", masks) == "<pool-a>/SND-01@s1"
+        assert certs.sanitize("zstdeadbeefab", masks) == "zstdeadbeefab"
+        serial = {"408D5C15CFA5": "<serial>"}
+        assert certs.sanitize("x_408D5C15CFA5-0:0 408D5C15CFA5Z", serial) == (
+            "x_<serial>-0:0 408D5C15CFA5Z"
+        )
+        host = socket.gethostname()
+        if len(host) > 1:
+            assert certs.sanitize(f"on {host}_x", {}) == "on <host>_x"
+
     def test_the_record_keeps_a_complete_run_beside_a_partial_one(self):
         with tempfile.TemporaryDirectory() as td:
             _ = certs.write_report(_report([stest.Result("POOL-01.1", "PASS")]), td)
@@ -16851,6 +16866,10 @@ class TestZfsFeatures:  # pylint: disable=missing-function-docstring
         assert zfeat.BY_GUID["com.klarasystems:dynamic_gang_header"].since == (2, 4)
         assert "dynamic_gang_header" not in zfeat.COMPAT_2_2
         assert "head_errlog" in zfeat.COMPAT_2_2 and "longname" not in zfeat.COMPAT_2_2
+        # M4sR-6: what drive_compatibility checks is newer than 2.2, in one place.
+        newer = {f.name for f in zfeat.FEATURES if f.since > (2, 2)}
+        assert set(zfeat.BEYOND_2_2_STREAM) <= newer
+        assert not set(zfeat.BEYOND_2_2_STREAM) & set(zfeat.COMPAT_2_2)
         assert zfeat.release_tuple("zfs-kmod-2.3.4-1ubuntu2") == (2, 3)
         assert zfeat.release_tuple("?") == (0, 0)
 
@@ -17249,6 +17268,15 @@ class TestSelftestStick:  # pylint: disable=missing-function-docstring,too-few-p
                 bench.teardown()
             assert mock.was_called("wipefs -a /dev/sdz")
             assert mock.was_called("sgdisk --zap-all /dev/sdz")
+
+    def test_a_stick_bench_has_no_directory(self):
+        # M4sX.1, M4sX.2: its pools live on the stick; by_id is its by-id path.
+        ident = DiskIdentity(disk="/dev/sdz", by_id="usb-S_1-0:0", serial="S1")
+        with redirect_stdout(StringIO()):
+            bench = st_l2.StickBench(make_log(), Cleanup(make_log()), ident)
+        assert bench.dir == bench.key == bench.mnt == ""
+        assert "<run>" not in bench.masks().values() and "" not in bench.masks()
+        assert bench.by_id == "/dev/disk/by-id/usb-S_1-0:0"
 
 
 class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring

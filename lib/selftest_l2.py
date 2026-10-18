@@ -39,10 +39,10 @@ class StickBench(Bench):
     """The level-2 bench: the stick, one pool on it at a time."""
 
     def __init__(self, log: Log, cleanup: Cleanup, stick: DiskIdentity):
-        super().__init__(log, cleanup)
+        super().__init__(log, cleanup, root=None)  # its pools live on the stick
         self.stick = stick
         self.disk = stick.disk
-        self.by_id = stick.by_id_path or stick.disk
+        self.by_id = stick.by_id_path  # never empty: selftest refuses a stick without one
         self.part1 = stick.part1
 
     @property

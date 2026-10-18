@@ -59,6 +59,7 @@ URL_MAX = 6000
 _LONG_NUMBER = re.compile(r"\b\d{8,}\b")
 _LONG_HEX = re.compile(r"\b(?:0x)?[0-9a-fA-F]{12,}\b")
 _BY_ID = re.compile(r"/dev/disk/by-id/[^\s'\"]+")
+_NOT_ALNUM_BEFORE, _NOT_ALNUM_AFTER = r"(?<![A-Za-z0-9])", r"(?![A-Za-z0-9])"
 
 
 def certificates_file() -> Path:
@@ -74,13 +75,19 @@ def sanitize(text: str, masks: dict[str, str]) -> str:
     """``text`` with nothing that names the machine: the run's own names
     (``masks``), by-id paths, the hostname, numbers of 8 digits or more and
     hex strings of 12 or more."""
-    for key, value in sorted(masks.items(), key=lambda kv: -len(kv[0])):
-        if key:
-            text = text.replace(key, value)
+    # One pass, longest name first, each a whole token: a short serial is
+    # not replaced inside a word, nor inside a mask put in before (M4sX.3).
+    # Not \b: a serial follows "_" in a by-id name.
+    keys = sorted((k for k in masks if k), key=len, reverse=True)
+    if keys:
+        alt = "|".join(re.escape(k) for k in keys)
+        text = re.sub(
+            rf"{_NOT_ALNUM_BEFORE}(?:{alt}){_NOT_ALNUM_AFTER}", lambda m: masks[m[0]], text
+        )
     text = _BY_ID.sub("<by-id>", text)
     host = socket.gethostname()
     if host and len(host) > 1:
-        text = re.sub(rf"\b{re.escape(host)}\b", "<host>", text)
+        text = re.sub(rf"{_NOT_ALNUM_BEFORE}{re.escape(host)}{_NOT_ALNUM_AFTER}", "<host>", text)
     text = _LONG_HEX.sub(lambda m: m.group(0) if m.group(0).isdigit() else "<hex>", text)
     return _LONG_NUMBER.sub("<n>", text)
 

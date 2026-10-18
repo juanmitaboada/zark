@@ -40,7 +40,6 @@ from lib.log import Log
 from lib.selftest import Bench, Check, Result, RunState, SetupError, all_checks, run_checks
 from lib.selftest_l2 import StickBench
 
-READ_ONLY = ("status", "report", "certificate")
 USAGE = (
     "Usage: zark selftest [run] [--stick <device>] [--only <ID>[,<ID>...]] | status | "
     + "report [<file>] | certificate [--into <file>] <file>... | warnings on|off"

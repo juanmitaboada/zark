@@ -27,6 +27,7 @@ from lib import forensics
 from lib.identity import BY_ID_DIR
 from lib.log import Log
 from lib.sh import run
+from lib.zfs_features import BEYOND_2_2_STREAM
 
 
 class PoolTracker(Protocol):
@@ -688,9 +689,6 @@ def backup_altroot(pool: str) -> str:
 # lib/libzfs/libzfs_pool.c:5170-5375).
 COMPAT_DIRS = ("/etc/zfs/compatibility.d", "/usr/share/zfs/compatibility.d")
 DRIVE_COMPATIBILITY = "openzfs-2.2"
-# Features a raw stream needs on the drive when origin has them active and
-# openzfs-2.2 lacks (module/zfs/dmu_recv.c:599, :614; dmu_send.c:2018-2030).
-_BEYOND_DRIVE_COMPAT = ("longname", "large_microzap")
 
 
 def create_command(pool: str, device: str, altroot: str, compatibility: str) -> str:
@@ -719,7 +717,7 @@ def drive_compatibility(origin_pools: tuple[str, ...], log: Log) -> str:
         log.warn(f"No {DRIVE_COMPATIBILITY} feature set installed: the drive gets every feature")
         return ""
     for pool in origin_pools:
-        for feature in _BEYOND_DRIVE_COMPAT:
+        for feature in BEYOND_2_2_STREAM:
             if run(f"zpool get -H -o value feature@{feature} {pool}").output == "active":
                 log.warn(
                     f"{pool} uses {feature}, which {DRIVE_COMPATIBILITY} lacks: the drive "
