@@ -966,7 +966,7 @@ def run(
                 "Cannot load encryption key for backup pool",
                 solutions=["Re-prepare the drive"],
             )
-        log.ok(f"Encryption key loaded ({loaded} datasets)")
+        log.ok(f"Encryption key loaded ({loaded} encryption root(s))")
 
     # ── Backup point, plan and questions ─────────────────────────────────
     log.step(6, TOTAL_STEPS, "Taking the backup point and planning every dataset...")

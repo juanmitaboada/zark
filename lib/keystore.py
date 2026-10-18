@@ -61,7 +61,7 @@ class KeystoreLike(Protocol):
         ...
 
     def load_pool_keys(self, pool_root: str) -> int:
-        """Load encryption keys for all datasets under pool_root."""
+        """Load the keys of the encryption roots under pool_root."""
         ...
 
     def umount(self):
@@ -216,7 +216,8 @@ class Keystore:
         return self._mounted and Path(SYSTEM_KEY_PATH).exists()
 
     def load_pool_keys(self, pool_root: str) -> int:
-        """Load encryption keys for all datasets under pool_root using system.key."""
+        """Load the keys of the encryption roots under pool_root with system.key;
+        the number loaded."""
         if not self.is_mounted:
             self.log.error("Keystore not mounted - cannot load keys")
             return 0
@@ -228,7 +229,7 @@ class Keystore:
         zfs = ZFS(self.log)
 
         count = 0
-        for ds in zfs.datasets_needing_key(pool_root):
+        for ds in zfs.encryption_roots_needing_key(pool_root):
             rk = run(f"zfs load-key -L file://{SYSTEM_KEY_PATH} {ds}")
             if rk.ok:
                 count += 1

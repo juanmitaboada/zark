@@ -573,11 +573,6 @@ class ZFS:
         r = run(f"zfs set {prop}={value} {dataset}", log=self.log)
         return r.ok
 
-    def load_key(self, dataset: str, keyfile: str) -> bool:
-        """Load the encryption key for a dataset from a file. Returns True if successful."""
-        r = run(f"zfs load-key -L file://{keyfile} {dataset}", log=self.log)
-        return r.ok
-
     def datasets_needing_key(self, root: str, strict: bool = False) -> list[str]:
         """
         Return datasets under `root` whose key is not yet loaded.
@@ -601,13 +596,37 @@ class ZFS:
                 out.append(parts[0].strip())
         return out
 
-    def load_keys_recursive(self, root: str, keyfile: str) -> int:
-        """Load keys for all encrypted datasets under `root`. Returns count loaded."""
-        count = 0
-        for ds in self.datasets_needing_key(root):
-            if self.load_key(ds, keyfile):
-                count += 1
-        return count
+    def encryption_roots_needing_key(self, root: str, strict: bool = False) -> list[str]:
+        """The encryption roots of the datasets under ``root`` whose key is
+        not loaded, in the order zfs lists them.
+
+        Only a root takes a key: libzfs refuses ``load-key`` of a dataset that
+        inherits one (lib/libzfs/libzfs_crypto.c:1316-1328), and loading the
+        root makes every dataset under it available, a clone of one of them
+        too (module/zfs/dsl_crypt.c:1166-1189, :1913-1931); ``zfs load-key
+        -a`` does the same (libzfs_crypto.c:1209-1234). A raw-received
+        dataset is its own root (dsl_crypt.c:2294-2329). ``strict`` as
+        :meth:`datasets_needing_key`.
+        """
+        r = run(
+            f"zfs get -H -o name,property,value -t filesystem,volume -r "
+            f"encryptionroot,keystatus {root}"
+        )
+        if not r.ok:
+            if strict:
+                raise KeyStatusError(r.stderr.strip() or f"zfs get keystatus -r {root} failed")
+            return []
+        props: dict[str, dict[str, str]] = {}
+        for line in r.lines:
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                props.setdefault(parts[0].strip(), {})[parts[1].strip()] = parts[2].strip()
+        roots: list[str] = []
+        for p in props.values():
+            enc = p.get("encryptionroot", "-")
+            if p.get("keystatus") == "unavailable" and enc not in ("-", "") and enc not in roots:
+                roots.append(enc)
+        return roots
 
     def mount_dataset(self, dataset: str, mountpoint: str) -> bool:
         """Mount a specific dataset at a specific path (safe, explicit)."""

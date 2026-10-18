@@ -107,13 +107,17 @@ def _is_live_usb() -> bool:
 
 
 def _load_keys_from_file(keyfile: str, pool_root: str, log: Log) -> int:
-    """Load encryption keys for all datasets using a key file."""
+    """Load the keys of the encryption roots under pool_root with a key file;
+    the number loaded."""
     zfs = ZFS(log)
     count = 0
-    for ds in zfs.datasets_needing_key(pool_root):
-        if sh.run(f"zfs load-key -L file://{keyfile} {ds}").ok:
+    for ds in zfs.encryption_roots_needing_key(pool_root):
+        r = sh.run(f"zfs load-key -L file://{keyfile} {ds}")
+        if r.ok:
             count += 1
             log.dbg(f"Key loaded: {ds}")
+        else:  # a root that fails is a real failure now, not inheritance
+            log.dbg(f"Key load failed: {ds}: {r.stderr.strip()}")
     return count
 
 

@@ -222,6 +222,7 @@ from lib.initrd import (  # pylint: disable=wrong-import-position # noqa: E402
     regenerate_initrd,
 )
 from lib.keystore import (  # pylint: disable=wrong-import-position # noqa: E402
+    SYSTEM_KEY_PATH,
     Keystore,
     open_keystore,
 )
@@ -8923,6 +8924,61 @@ class TestKeyStatusRead:  # pylint: disable=missing-function-docstring,too-few-p
                 assert "I/O error" in str(e)
             else:
                 raise AssertionError("expected KeyStatusError")
+
+
+class TestKeysForEncryptionRoots:  # pylint: disable=missing-function-docstring
+    """P0-5 and its kin (M4d-19): only an encryption root takes a key."""
+
+    GET = (
+        "zfs get -H -o name,property,value -t filesystem,volume -r "
+        + "encryptionroot,keystatus backup/rpool"
+    )
+    LISTING = "".join(
+        f"{name}\tencryptionroot\t{root}\n{name}\tkeystatus\t{status}\n"
+        for name, root, status in (
+            ("backup/rpool", "backup/rpool", "unavailable"),
+            ("backup/rpool/ROOT", "backup/rpool", "unavailable"),  # inherits
+            ("backup/rpool/srv.archived-20261001", "backup/rpool", "unavailable"),  # a clone
+            ("backup/rpool/USERDATA/home_x", "backup/rpool/USERDATA/home_x", "unavailable"),  # raw
+            ("backup/rpool/data", "backup/rpool/data", "available"),
+            ("backup/rpool/plain", "-", "-"),
+        )
+    )
+
+    def test_the_roots_of_what_is_locked_in_order(self):
+        mock = MockShell()
+        mock.on(self.GET).succeeds(self.LISTING)
+        with patch_sh(mock):
+            got = ZFS(make_log()).encryption_roots_needing_key("backup/rpool")
+        assert got == ["backup/rpool", "backup/rpool/USERDATA/home_x"]
+        mock = MockShell()
+        mock.on(self.GET).fails("I/O error")
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            assert not zfs.encryption_roots_needing_key("backup/rpool")
+            try:
+                _ = zfs.encryption_roots_needing_key("backup/rpool", strict=True)
+            except KeyStatusError as e:
+                assert "I/O error" in str(e)
+            else:
+                raise AssertionError("expected KeyStatusError")
+
+    def test_both_loaders_load_only_the_roots(self):
+        want = [
+            f"zfs load-key -L file://{SYSTEM_KEY_PATH} backup/rpool",
+            f"zfs load-key -L file://{SYSTEM_KEY_PATH} backup/rpool/USERDATA/home_x",
+        ]
+        mock = MockShell()
+        mock.on(self.GET).succeeds(self.LISTING)
+        mock.on_prefix("zfs load-key").succeeds()
+        ks = Keystore(make_log())
+        with patch_sh(mock), patch.object(Keystore, "is_mounted", True):
+            assert ks.load_pool_keys("backup/rpool") == 2
+        assert [c for c in mock.calls if c.startswith("zfs load-key")] == want
+        mock.reset()
+        with patch_sh(mock):
+            n = recover_mod._load_keys_from_file(SYSTEM_KEY_PATH, "backup/rpool", make_log())  # pylint: disable=protected-access
+        assert n == 2 and [c for c in mock.calls if c.startswith("zfs load-key")] == want
 
 
 class TestSelftestLeftovers:  # pylint: disable=missing-function-docstring
