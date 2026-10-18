@@ -22,8 +22,10 @@ only on that:
   * pools imported with an altroot at or below one of those roots. A pool
     without an altroot is never touched: on an installed system it is the
     running rpool/bpool, on a live session a pool imported by hand;
-  * keystore mappings ``/dev/mapper/zark_ks_*``; ``/run/keystore/rpool`` is
-    unmounted only while the mount on top of it comes from one of them;
+  * keystore mappings ``/dev/mapper/zark_ks_*``, and the self-test's
+    ``zst<8 hex><letter>-ks`` whose device is the keystore zvol of one of
+    those pools; ``/run/keystore/rpool`` is unmounted only while the mount
+    on top of it comes from one of them;
   * ``sanoid.timer`` left stopped by an interrupted backup (its marker in
     ``/run/zark``) and ``zvol_inhibit_dev=1`` left by fix-rpool-mountpoint.
 
@@ -34,6 +36,7 @@ below them are gone; anything else is listed, never deleted.
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,6 +55,8 @@ ROOTS: tuple[str, ...] = (
 )
 MAPPER_DIR = "/dev/mapper"
 KEYSTORE_PREFIX = "zark_ks_"
+# The self-test's mapper on its pool's keystore zvol (lib/selftest_l1.py, KEY-02).
+SELFTEST_MAPPER_RE = re.compile(r"^(zst[0-9a-f]{8}[a-z])-ks$")
 ZVOL_INHIBIT = "/sys/module/zfs/parameters/zvol_inhibit_dev"
 
 
@@ -96,6 +101,29 @@ def _mount_table() -> list[tuple[str, str]]:
     return out
 
 
+def _selftest_mappers(mapper: Path, pools: list[str]) -> list[str]:
+    """The self-test's mappers left open (M4c-26, M4sR-5): named after one of
+    zark's imported pools, on that pool's keystore zvol."""
+    found: list[str] = []
+    for p in sorted(mapper.iterdir()):
+        m = SELFTEST_MAPPER_RE.match(p.name)
+        if m is None or m.group(1) not in pools:
+            continue
+        status = sh.run(f"cryptsetup status {p.name}")
+        device = next(
+            (
+                ln.split(":", 1)[1].strip()
+                for ln in status.lines
+                if ln.strip().startswith("device:")
+            ),
+            "",
+        )
+        zvol = os.path.realpath(f"/dev/zvol/{m.group(1)}/keystore")
+        if device and os.path.realpath(device) == zvol:
+            found.append(p.name)
+    return found
+
+
 def inventory() -> Inventory:
     """Read what zark owns; read-only."""
     inv = Inventory()
@@ -121,6 +149,7 @@ def inventory() -> Inventory:
         inv.keystores = sorted(
             p.name for p in mapper.iterdir() if p.name.startswith(KEYSTORE_PREFIX)
         )
+        inv.keystores += _selftest_mappers(mapper, inv.pools)
     tops = [s for t, s in table if t == KEYSTORE_MOUNT]
     inv.keystore_mounted = bool(tops) and Path(tops[-1]).name.startswith(KEYSTORE_PREFIX)
 

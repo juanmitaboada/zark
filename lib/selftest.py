@@ -342,6 +342,7 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
 
     def setup(self) -> None:
         """Make the directory, its key and pools a and b."""
+        self._remove_leftovers()
         self._space()
         if not sh.run("zfs version").ok:
             raise SetupError("ZFS is not usable here: `zfs version` failed")
@@ -362,6 +363,33 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
             + f"-O keylocation=file://{self.key} -O dnodesize=auto",
         )
         _ = self.make_pool("b")
+
+    def _remove_leftovers(self) -> None:
+        """M4c-26 (M4sR-5): remove the directories earlier runs left in the
+        run's root (a SIGKILL skips the teardown), each only when no
+        imported pool has a vdev below it and nothing is mounted below it;
+        one log line each. A listing that fails removes nothing."""
+        root = os.path.dirname(self.dir)
+        try:
+            names = sorted(n for n in os.listdir(root) if n.startswith(DIR_PREFIX))
+        except OSError:
+            return
+        if not names:
+            return
+        vdevs = sh.run("zpool list -vHP")
+        mounts = sh.run("findmnt -rn -o TARGET")
+        if not vdevs.ok or not mounts.ok:
+            self.log.warn("Leftover self-test directories not checked: a listing failed")
+            return
+        used = [ln.strip().split("\t")[0] for ln in vdevs.lines] + mounts.lines
+        for name in names:
+            d = f"{root}/{name}"
+            if d == self.dir or not os.path.isdir(d) or os.path.islink(d):
+                continue
+            if any(u == d or u.startswith(f"{d}/") for u in used):
+                continue
+            if sh.run(f"rm -r --one-file-system {d}", log=self.log).ok:
+                self.log.info(f"Removed {d}, left by an earlier self-test")
 
     def _space(self) -> None:
         st = os.statvfs(SHM)

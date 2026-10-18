@@ -8146,6 +8146,61 @@ class TestKeyStatusRead:  # pylint: disable=missing-function-docstring,too-few-p
                 raise AssertionError("expected KeyStatusError")
 
 
+class TestSelftestLeftovers:  # pylint: disable=missing-function-docstring
+    """M4c-26 (M4sR-5): a SIGKILLed self-test's directory and mapper."""
+
+    def test_setup_removes_only_unused_leftovers(self):
+        with tempfile.TemporaryDirectory() as td:
+            names = ("zark-selftest-1-aaaa", "zark-selftest-2-bbbb", "zark-selftest-3-cccc")
+            for n in names:
+                os.makedirs(f"{td}/{n}")
+            os.makedirs(f"{td}/other")
+            bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+            mock = MockShell()
+            mock.on("zpool list -vHP").succeeds(f"zst1b\t1G\n\t{td}/{names[1]}/zst1b.img\t1G\n")
+            mock.on("findmnt -rn -o TARGET").succeeds(f"/\n{td}/{names[2]}/mnt\n")
+            mock.on_prefix("rm -r --one-file-system").succeeds()
+            out = StringIO()
+            with patch_sh(mock), redirect_stdout(out):
+                bench._remove_leftovers()  # pylint: disable=protected-access
+            rms = [c for c in mock.calls if c.startswith("rm ")]
+            assert rms == [f"rm -r --one-file-system {td}/{names[0]}"]
+            assert f"Removed {td}/{names[0]}, left by an earlier self-test" in out.getvalue()
+
+    def test_a_failed_listing_removes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(f"{td}/zark-selftest-1-aaaa")
+            bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+            mock = MockShell()
+            mock.on("zpool list -vHP").fails()
+            mock.on("findmnt -rn -o TARGET").succeeds("/\n")
+            with patch_sh(mock), redirect_stdout(StringIO()):
+                bench._remove_leftovers()  # pylint: disable=protected-access
+            assert mock.was_not_called("rm ")
+
+    def test_clean_closes_the_selftest_mapper_of_its_pool(self):
+        with tempfile.TemporaryDirectory() as td:
+            mapper = Path(td)
+            for n in ("zst0123abcdc-ks", "zst0123abcdz-ks", "zstnothexxc-ks", "other"):
+                _ = (mapper / n).write_text("")
+            mock = MockShell()
+            mock.on("cryptsetup status zst0123abcdc-ks").succeeds(
+                "/dev/mapper/zst0123abcdc-ks is active.\n  type:    LUKS2\n  device:  /dev/zd16\n"
+            )
+            real = {
+                "/dev/zd16": "/dev/zd16",
+                "/dev/zvol/zst0123abcdc/keystore": "/dev/zd16",
+            }
+            with (
+                patch_sh(mock),
+                patch.object(clean_mod.os.path, "realpath", side_effect=lambda p: real.get(p, p)),
+            ):
+                got = clean_mod._selftest_mappers(  # pylint: disable=protected-access
+                    mapper, ["zst0123abcdc"]
+                )
+        assert got == ["zst0123abcdc-ks"]
+
+
 class TestInitrd:  # pylint: disable=missing-function-docstring
     """P0-7: only installed kernels; dracut failures are reported."""
 
