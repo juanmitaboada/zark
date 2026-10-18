@@ -7557,12 +7557,33 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
 
         mock.mock_run_pipe = pipe  # type: ignore[method-assign,assignment]
         with patch_sh(mock), redirect_stdout(StringIO()):
-            assert recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
+            assert not recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
         be = f"backup/rpool/ROOT/{_BE}"
         assert pipes == [
             f"zfs send -w {be}@{self.MONTHLY}",
             f"zfs send -w -i {be}@{self.MONTHLY} {be}@{self.P2}",
         ]
+
+    def test_a_point_that_fails_after_its_base_names_where_it_was_left(self):
+        # M4bR-6, M4c-13: the dataset is at the monthly, not "receive failed".
+        plan, _ = self._plan()
+        row = plan.row(f"rpool/ROOT/{_BE}")
+        assert row is not None
+        results = iter([RunResult(0, "", "", "a"), RunResult(1, "", "boom", "b")])
+        mock = MockShell()
+        mock.mock_run_pipe = (  # type: ignore[method-assign,assignment]
+            lambda *_a, **_k: next(results)
+        )
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            got = recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
+        assert got == (
+            f"rpool/ROOT/{_BE}: left at @{self.MONTHLY}, older than the point "
+            + "(the point's receive failed)"
+        )
+        results = iter([RunResult(1, "", "boom", "a")])
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            got = recover_mod._receive_row("backup", row, raw=True, log=Log())  # pylint: disable=protected-access
+        assert got == f"rpool/ROOT/{_BE}: receive failed"
 
     def test_a_monthly_in_another_lineage_is_not_a_base(self):
         # An incremental needs both snapshots in one dataset: a monthly kept
@@ -7692,6 +7713,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         preflight_fails: bool = False,
         calls: dict[str, list[tuple[object, ...]]] | None = None,
         snaps_fail: bool = False,
+        meta_fail: bool = False,
     ) -> MockShell:
         """``answer`` None simulates a closed terminal (EOF) at the YES prompt.
 
@@ -7699,12 +7721,15 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         simulated after the command returns. ``calls``, when given, receives
         the positional arguments of every ``choose_point`` and ``build_plan`` call.
         ``snaps_fail`` leaves the real ``list_snapshots`` in place with the
-        engine's listing of the drive failing.
+        engine's listing of the drive failing; ``meta_fail`` fails the read
+        of the drive's metadata.
         """
         source_key = os.path.join(work, "source.key")
         Path(source_key).write_bytes(b"k" * 32)
         cleanups: list[Cleanup] = []
         mock = MockShell()
+        meta = mock.on("zfs get -H -s local -o property,value all backup")
+        _ = meta.fails() if meta_fail else meta.succeeds("org.zark:format\t2\n")
         snaps = _stick_snaps()
         point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
         plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [], "k@k", 1, "617fca2c")
@@ -7817,8 +7842,17 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             _ = self._run_in(td, "NO", calls=calls)
         (menu,) = calls["choose_point"]
         (plan,) = calls["build_plan"]
-        assert menu[-1] is complete
+        assert menu[2] is complete
         assert plan[-1] is complete
+
+    def test_a_failed_read_of_the_metadata_stops_before_the_menu(self) -> None:
+        """M4c-18 (M3X.1): the metadata is read strictly, as the marks are; an
+        unread last-point would turn the drive into a legacy one."""
+        calls: dict[str, list[tuple[object, ...]]] = {}
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_in(td, "YES", calls=calls, meta_fail=True)
+        assert "choose_point" not in calls
+        assert mock.was_not_called("wipefs")
 
 
 class TestRecoverAltrootChecks:  # pylint: disable=missing-function-docstring
@@ -14601,6 +14635,19 @@ class TestCompletePoints:
         assert _marked(fake) == {P1, P2}
 
 
+class TestRecoverDelta:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M4c-17 (M3P.10): the delta column in days from 48 h on."""
+
+    def test_formats(self):
+        fmt = restore_plan._fmt_delta  # pylint: disable=protected-access
+        assert fmt(0) == "0"
+        assert fmt(-(36 * 60 + 30)) == "-36m30s"
+        assert fmt(-(5 * 3600 + 2 * 60)) == "-5h02m"
+        assert fmt(47 * 3600 + 59 * 60) == "+47h59m"
+        assert fmt(-(48 * 3600)) == "-2d00h00m"
+        assert fmt(-(38 * 86400 + 23 * 3600 + 59 * 60 + 59)) == "-38d23h59m"
+
+
 class TestRecoverIncompletePoint:
     """M2R-1: a backup point left by an incomplete run is labelled, never the
     default, and never evidence that a dataset was destroyed in origin."""
@@ -14650,6 +14697,27 @@ class TestRecoverIncompletePoint:
         assert isinstance(options, list)
         assert "INCOMPLETE" in options[-1] and "INCOMPLETE" not in options[0]
         assert "complete backup point is the default" in str(shown["question"])
+
+    def test_a_point_that_lost_datasets_since_is_partly_removed(self) -> None:
+        """M4c-16 (M3P.5): complete at its run, part of it gone since: not
+        INCOMPLETE but PARTLY REMOVED, and still not the default."""
+        snaps = self._e1()
+        points = restore_points(snaps, self.BE)
+        shown: dict[str, object] = {}
+
+        def choice(_question: str, options: list[str], default: int = 0) -> int:
+            shown.update(options=options, default=default)
+            return default
+
+        complete = complete_points(snaps, "")
+        newest = point_name(points[-1])
+        with patch.object(Log, "ask_choice", side_effect=choice), redirect_stdout(StringIO()):
+            chosen = choose_point(points, make_log(), complete, complete | {newest})
+        options = shown["options"]
+        assert isinstance(options, list)
+        assert "backup point, PARTLY REMOVED  (2/3 datasets)" in options[-1]
+        assert "INCOMPLETE" not in options[-1]
+        assert chosen is points[0]
 
     def test_drive_written_by_the_engine(self) -> None:
         """E1b end to end: run 1 complete and marked, run 2 cut on home; then

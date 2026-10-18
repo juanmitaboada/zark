@@ -189,11 +189,24 @@ def is_incomplete(p: Point, complete: set[str] | None) -> bool:
     return p.family == "zark_" and complete is not None and point_name(p) not in complete
 
 
-def choose_point(points: list[Point], log: Log, complete: set[str] | None = None) -> Point:
+def partly_removed(p: Point, complete: set[str] | None, run_complete: set[str] | None) -> bool:
+    """True for a backup point whose run was complete but that lost datasets
+    on the drive since (a prune, a rollback or a destroy; M3P.5)."""
+    return is_incomplete(p, complete) and run_complete is not None and point_name(p) in run_complete
+
+
+def choose_point(
+    points: list[Point],
+    log: Log,
+    complete: set[str] | None = None,
+    run_complete: set[str] | None = None,
+) -> Point:
     """Backup points (``zark_``) first-class; other runs as carried intermediates,
     each with how many datasets it holds (redesign §4.2). A backup point of an
-    incomplete run is labelled so; the default is the newest complete backup
-    point (the newest entry when there is none)."""
+    incomplete run is labelled so, and one whose run was complete
+    (``run_complete``) but that lost datasets since as PARTLY REMOVED; the
+    default is the newest complete backup point (the newest entry when there
+    is none)."""
     total = len({ds for p in points for ds in p.members})
     options = []
     default = len(points) - 1
@@ -206,6 +219,9 @@ def choose_point(points: list[Point], log: Log, complete: set[str] | None = None
         default = good[-1] if good else default
     for p in points:
         held = f"{len(p.members)}/{total} datasets"
+        if partly_removed(p, complete, run_complete):
+            options.append(f"{p.label_utc()}  backup point, PARTLY REMOVED  ({held})")
+            continue
         if is_incomplete(p, complete):
             options.append(f"{p.label_utc()}  backup point, INCOMPLETE  ({held})")
             continue
@@ -381,12 +397,16 @@ def _plan_bases(pool: str, rows: list[RestoreRow], snaps: list[Snap], log: Log) 
 
 
 def _fmt_delta(seconds: int) -> str:
-    """Signed offset from the point, e.g. ``-36m30s`` or ``0``."""
+    """Signed offset from the point, e.g. ``-36m30s``, ``-5h02m``, from 48 h
+    on in days (``-38d23h59m``, M3P.10), or ``0``."""
     if seconds == 0:
         return "0"
     sign = "-" if seconds < 0 else "+"
     m, sec = divmod(abs(seconds), 60)
     h, m = divmod(m, 60)
+    if h >= 48:
+        d, h = divmod(h, 24)
+        return f"{sign}{d}d{h:02d}h{m:02d}m"
     return f"{sign}{h}h{m:02d}m" if h else f"{sign}{m}m{sec:02d}s"
 
 

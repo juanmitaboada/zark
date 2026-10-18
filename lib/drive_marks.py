@@ -202,9 +202,11 @@ def _accept_unowned(pool: str, log: Log) -> None:
     )
 
 
-def log_metadata(pool: str, log: Log) -> dict[str, str]:
-    """Show who wrote this drive and when (decision 17a); return the values."""
-    meta = read_metadata(pool)
+def log_metadata(pool: str, log: Log, strict: bool = False) -> dict[str, str]:
+    """Show who wrote this drive and when (decision 17a); return the values.
+    ``strict`` raises :class:`ReadError` when the properties cannot be read
+    (recover: an empty read would be taken for a drive without metadata)."""
+    meta = read_metadata(pool, strict=strict)
     if not meta:
         log.info(f"{pool}: no zark metadata (written by zark <= 2.0.0-rc1)")
         return meta

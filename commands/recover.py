@@ -56,7 +56,7 @@ import time
 from pathlib import Path
 from typing import NoReturn
 
-from lib import certificates, drive_marks, sh, zfs_features
+from lib import certificates, drive_marks, sh, survey, zfs_features
 from lib.backup_layout import find_be as _find_be
 from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
 from lib.cleanup import Cleanup, prompt_eject_or_attach
@@ -73,9 +73,10 @@ from lib.restore_plan import (
     choose_point,
     is_incomplete,
     list_snapshots,
+    partly_removed,
     show_plan,
 )
-from lib.restore_points import complete_points, point_name, restore_points
+from lib.restore_points import complete_points, point_name, restore_points, run_complete_points
 from lib.zfs import ZFS
 
 # bpool features safe for GRUB 2.12 (Ubuntu 24.04 / initramfs-tools)
@@ -393,17 +394,25 @@ def _receive(  # pylint: disable=too-many-arguments,too-many-positional-argument
     return False
 
 
-def _receive_row(pool: str, row: RestoreRow, raw: bool, log: Log) -> bool:
+def _receive_row(pool: str, row: RestoreRow, raw: bool, log: Log) -> str:
     """One dataset: its monthly base in full, then the point with ``-i``
-    from it (M4b-6); the point in full when it has no base."""
+    from it (M4b-6); the point in full when it has no base.
+
+    Returns "" when the dataset reached its snapshot, else the error line
+    for the summary (M4bR-6): a base that arrived leaves the dataset at
+    that older monthly, which is not "receive failed".
+    """
     assert row.snap is not None
     point = f"{pool}/{row.snap.stored}@{row.snap.name}"
     if row.base is None:
-        return _receive(point, row.rel, row.options, raw=raw, log=log)
+        ok = _receive(point, row.rel, row.options, raw=raw, log=log)
+        return "" if ok else f"{row.rel}: receive failed"
     base = f"{pool}/{row.base.stored}@{row.base.name}"
     if not _receive(base, row.rel, row.options, raw=raw, log=log):
-        return False
-    return _receive(point, row.rel, row.options, raw=raw, log=log, base=base)
+        return f"{row.rel}: receive failed"
+    if _receive(point, row.rel, row.options, raw=raw, log=log, base=base):
+        return ""
+    return f"{row.rel}: left at @{row.base.name}, older than the point (the point's receive failed)"
 
 
 def _export_verified(pool: str, log: Log) -> None:
@@ -514,7 +523,16 @@ def run(
     if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
         log.fatal(f"Cannot import pool {pool_name}")
     cleanup.track_pool(pool_name)
-    meta = drive_marks.log_metadata(pool_name, log)
+    # Strict (M3X.1, M4c-18): an unread last-point would make the drive a
+    # legacy one and change which points count as complete.
+    try:
+        meta = drive_marks.log_metadata(pool_name, log, strict=True)
+    except survey.ReadError as e:
+        log.fatal(
+            f"Cannot read the metadata of {pool_name}: {e}",
+            causes=["The drive did not answer a zfs get; nothing was written"],
+            solutions=[f"Check the drive: zpool status {pool_name}", "Run recover again"],
+        )
     backup_disk = whole_disk(device)
 
     ks = Keystore(log)
@@ -545,7 +563,8 @@ def run(
     if not points:
         log.fatal("No restore point found on backup (no snapshot of the boot environment)")
     complete = complete_points(snaps, meta.get("last-point", ""))
-    point = choose_point(points, log, complete)
+    run_complete = run_complete_points(snaps, meta.get("last-point", ""))
+    point = choose_point(points, log, complete, run_complete)
 
     # ── 4. Restore plan: datasets, mount properties, hostid ──────────────
     log.step(4, TOTAL_STEPS, "Resolving every dataset for this point...")
@@ -574,10 +593,17 @@ def run(
         earlier = [
             r for r in plan.rows if r.restored and r.snap and r.snap.name != point_name(point)
         ]
-        log.warn(
-            "This backup point is from an incomplete run: "
-            + f"{len(earlier)} dataset(s) come from earlier snapshots (Δ column)"
-        )
+        if partly_removed(point, complete, run_complete):
+            log.warn(
+                f"This backup point lost {len(earlier)} of its datasets on the drive since "
+                + "its run (a prune, a rollback or a destroy): they come from earlier "
+                + "snapshots (Δ column)"
+            )
+        else:
+            log.warn(
+                "This backup point is from an incomplete run: "
+                + f"{len(earlier)} dataset(s) come from earlier snapshots (Δ column)"
+            )
     inferred = [r.rel for r in plan.rows if r.props and r.props.source == "inferred"]
     if inferred:
         log.warn(f"Mount properties inferred for: {', '.join(inferred)}")
@@ -651,13 +677,20 @@ def run(
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/USERDATA", log=log)
 
     be_ds = f"rpool/ROOT/{ubuntu_name}"
+    reached = 0
     for row in plan.rpool_rows:
-        ok = _receive_row(pool_name, row, raw=True, log=log)
-        if not ok:
+        failure = _receive_row(pool_name, row, raw=True, log=log)
+        if failure:
             if row.rel == be_ds:
                 log.fatal("Failed to raw send root dataset")
-            errors.append(f"{row.rel}: receive failed")
-    log.ok(f"{len(plan.rpool_rows)} rpool dataset(s) restored ✓")
+            errors.append(failure)
+        else:
+            reached += 1
+    total = len(plan.rpool_rows)
+    if reached == total:
+        log.ok(f"{reached} of {total} rpool dataset(s) restored ✓")
+    else:
+        log.warn(f"{reached} of {total} rpool dataset(s) restored")
 
     # ── 9. Export backup pool (removes its zvols) ────────────────────────
     log.step(9, TOTAL_STEPS, "Exporting backup pool (prevents kernel crash)...")
@@ -698,7 +731,7 @@ def run(
     bpool_row = plan.row(f"bpool/BOOT/{ubuntu_name}")
     if bpool_row is not None and bpool_row.restored and bpool_row.snap is not None:
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none bpool/BOOT", log=log)
-        bpool_received = _receive_row(pool_name, bpool_row, raw=False, log=log)
+        bpool_received = not _receive_row(pool_name, bpool_row, raw=False, log=log)
         if not bpool_received:
             errors.append("bpool: receive failed - kernels need reinstallation")
     else:
