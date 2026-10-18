@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 from lib import alerts
-from lib.selftest import Bench, Fail, Skip, check, expect
+from lib.selftest import Bench, Fail, Skip, check, exit_status, expect, text_of
 from lib.selftest_l1 import reimport
 
 
@@ -71,9 +71,9 @@ def mnt_01(b: Bench) -> None:
             + f"findmnt -rn -o OPTIONS {m} && umount {m}"
         )
         r = b.in_namespace(script)
-        expect(r.ok, "both mounts", r.stderr.strip()[-300:])
+        expect(r.ok, "both mounts", exit_status(r), text_of(r))
         files = [ln for ln in r.lines if ln.startswith("f.")]
-        expect(len(files) == 1, "the file in the snapshot", r.stdout.strip()[:200])
+        expect(len(files) == 1, "the file in the snapshot", f"{len(files)} file(s)", text_of(r))
         opts = [ln for ln in r.lines if "," in ln or ln in ("ro", "rw")]
         ro = [o.split(",")[0] for o in opts]
         expect(ro == ["ro", "ro"], "both mounts read-only", " | ".join(opts))
@@ -126,9 +126,12 @@ def mnt_02(b: Bench) -> None:
     :1974-1979, sys-utils/nsenter.c:157-205, :251-285, :570-571."""
     r = b.in_namespace(_PROPAGATION.format(w=_q(b.mnt)))
     seen = dict(ln.split(" ", 1) for ln in r.lines if " " in ln)
-    expect(seen.get("SEEN", "0") != "0", "the tree listed by findmnt --task", r.stdout.strip())
-    expect(seen.get("AFTER") == "0", "no copy left after nsenter umount -R", r.stdout.strip())
-    expect(seen.get("HOST") == "1", "the host's own mount kept", r.stdout.strip())
+    marks = f"SEEN {seen.get('SEEN', '?')}, AFTER {seen.get('AFTER', '?')}"
+    marks += f", HOST {seen.get('HOST', '?')}"
+    out = text_of(r)
+    expect(seen.get("SEEN", "0") != "0", "the tree listed by findmnt --task", marks, out)
+    expect(seen.get("AFTER") == "0", "no copy left after nsenter umount -R", marks, out)
+    expect(seen.get("HOST") == "1", "the host's own mount kept", marks, out)
 
 
 _UMOUNT_TREE = r"""
@@ -174,7 +177,12 @@ def mnt_03(b: Bench) -> None:
     out = r.stdout
     listing = out.split("LIST\n", 1)[-1].split("END\n", 1)[0].splitlines()
     rows = {ln.split(" ")[0]: ln.split(" ") for ln in listing}
-    expect(f"{m}/sp\\x20ace" in rows, f"{m}/sp\\x20ace listed", " | ".join(listing)[-300:])
+    expect(
+        f"{m}/sp\\x20ace" in rows,
+        f"{m}/sp\\x20ace listed",
+        f"not among {len(listing)} line(s)",
+        text_of(r),
+    )
     bind = rows.get(f"{m}/b", [])
     expect(
         len(bind) == 3 and bind[2] == "zarkt[/src/sub]",
@@ -220,7 +228,12 @@ def prc_01(_b: Bench) -> None:
         [sys.executable, "-I", "-c", _IGNORE_CHILD], capture_output=True, text=True, check=False
     )
     lines = r.stdout.split()
-    expect(len(lines) == 2, "two lines from the child", r.stdout + r.stderr)
+    expect(
+        len(lines) == 2,
+        "two lines from the child",
+        f"{len(lines)}",
+        (r.stdout + r.stderr).strip(),
+    )
     mask = int(lines[0], 16)
     expect(bool(mask & (1 << (signal.SIGTERM - 1))), "SIGTERM ignored after exec", lines[0])
     expect(not mask & (1 << (signal.SIGPIPE - 1)), "SIGPIPE not ignored after exec", lines[0])
@@ -393,12 +406,13 @@ def sys_01(b: Bench) -> None:
         unit.write_text(alerts.service_unit(str(exe)), encoding="utf-8")
         units[tag] = str(unit)
     r = b.run(f"systemd-analyze verify {_q(units['good'])}")
-    expect(r.ok, "the unit with a space in the path to verify", r.stderr.strip()[-300:])
+    expect(r.ok, "the unit with a space in the path to verify", exit_status(r), text_of(r))
     r = b.run(f"systemd-analyze verify {_q(units['bad'])}")
     expect(
         not r.ok and "special characters" in r.stdout + r.stderr,
         "the quoted path refused for special characters",
-        f"exit {r.returncode}: {r.stderr.strip()[-300:]}",
+        exit_status(r),
+        text_of(r),
     )
 
 

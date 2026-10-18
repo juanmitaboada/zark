@@ -27,7 +27,17 @@ from pathlib import Path
 
 from lib import identity, sh, zfs_features
 from lib.keystore import ZVOL_ID, Keystore
-from lib.selftest import Bench, Fail, Skip, check, expect, remove_empty_dirs
+from lib.selftest import (
+    Bench,
+    Fail,
+    Skip,
+    check,
+    exit_status,
+    expect,
+    observed,
+    remove_empty_dirs,
+    text_of,
+)
 from lib.zfs import BACKUP_ALTROOT_BASE, COMPAT_DIRS, DRIVE_COMPATIBILITY
 
 ZPOOL_CACHE = "/etc/zfs/zpool.cache"
@@ -131,7 +141,7 @@ def pool_02(b: Bench) -> None:
         got = b.value("mountpoint", f"{c}/x")
         expect(got == f"{root}/x", f"mountpoint {root}/x", got)
         r = b.in_namespace(f"zfs mount {c}/x && findmnt -rn -o TARGET; zfs umount {c}/x")
-        expect(f"{root}/x" in r.lines, f"zfs mount on {root}/x", r.stdout.strip()[-300:])
+        expect(f"{root}/x" in r.lines, f"zfs mount on {root}/x", "not mounted there", text_of(r))
     finally:
         b.drop_pool(c)
 
@@ -156,7 +166,7 @@ def pool_03(b: Bench) -> None:
         root = _altroot(c)
         imp = f"zpool import -d {b.vdev(c)} -R {root} {c}"
         r = b.in_namespace(f"{imp} && findmnt -rn -o TARGET; zpool export {c}")
-        expect(r.ok, "the import and export in a namespace to succeed", r.stderr.strip()[-300:])
+        expect(r.ok, "the import and export in a namespace to succeed", exit_status(r), text_of(r))
         mounted = [t for t in r.lines if t.startswith(root)]
         expect(mounted == [f"{root}/on"], f"only {root}/on mounted", ", ".join(mounted) or "none")
         reimport(b, c)
@@ -217,14 +227,15 @@ def pool_05(b: Bench) -> None:
     try:
         _ = b.ok(f"zpool destroy {c}")
         r = b.run(f"zpool import -d {vdev}")
-        expect(f"pool: {c}" not in r.stdout, f"{c} not listed without -D", r.stdout.strip())
+        expect(f"pool: {c}" not in r.stdout, f"{c} not listed without -D", "listed", text_of(r))
         r = b.ok(f"zpool import -D -d {vdev}")
         expect(
             f"pool: {c}" in r.stdout and "(DESTROYED)" in r.stdout,
             f"{c} listed (DESTROYED) with -D",
-            r.stdout.strip()[:300],
+            "not listed so",
+            text_of(r),
         )
-        expect(guid in r.stdout, f"id {guid} in the -D listing", r.stdout.strip()[:300])
+        expect(guid in r.stdout, "its GUID in the -D listing", "not there", text_of(r))
     finally:
         if sh.run(f"zpool get -Hp -o value guid {c}").output == guid:
             _ = b.run(f"zpool destroy {c}")
@@ -255,7 +266,7 @@ def pool_06(b: Bench) -> None:
         _ = b.ok(f"zpool export {c}")
         r = b.ok(f"zpool import -d {b.vdev(c)}")
         for line in (f"  pool: {c}", f"    id: {guid}", " state: ONLINE"):
-            expect(line in r.stdout.splitlines(), f"a line {line!r}", r.stdout.strip()[:300])
+            expect(line in r.stdout.splitlines(), f"a line {line!r}", "no such line", text_of(r))
         expect(not b.run(f"zpool list -H {c}").ok, f"{c} still exported", "it was imported")
         empty = f"{b.dir}/empty"
         os.makedirs(empty, exist_ok=True)
@@ -263,7 +274,8 @@ def pool_06(b: Bench) -> None:
         expect(
             r.ok and "no pools available to import" in r.stderr,
             "exit 0 and 'no pools available to import' on stderr",
-            f"exit {r.returncode}: {r.stderr.strip()}",
+            exit_status(r),
+            text_of(r),
         )
         reimport(b, c)
     finally:
@@ -288,12 +300,12 @@ def pool_07(b: Bench) -> None:
         _ = b.ok(f"zpool export {c}")
         r = b.ok(f"zdb -l {b.vdev(c)}")
         for line in (f"name: '{c}'", f"pool_guid: {guid}", "state: 1"):
-            expect(line in r.stdout, f"{line!r} in the label", r.stdout.strip()[:300])
+            expect(line in r.stdout, f"{line!r} in the label", "not there", text_of(r))
         label = identity.read_pool_label(b.vdev(c))
         expect(
             label is not None and label.name == c and label.guid == guid,
             f"read_pool_label: {c} {guid}",
-            repr(label),
+            "no label" if label is None else f"{observed(label.name)} {observed(label.guid)}",
         )
         blank = f"{b.dir}/blank.img"
         with open(blank, "wb") as f:
@@ -318,7 +330,12 @@ def pool_08(b: Bench) -> None:
     cmd/zpool/zpool_main.c:7430-7432, :7192-7193; lib/libzfs/libzfs_pool.c:4504-4561."""
     r = b.ok(f"zpool list -vHP {b.b}")
     firsts = [line.strip().split("\t")[0] for line in r.lines[1:]]
-    expect(b.vdev(b.b) in firsts, f"a vdev line {b.vdev(b.b)}", ", ".join(firsts))
+    expect(
+        b.vdev(b.b) in firsts,
+        f"a vdev line {b.vdev(b.b)}",
+        f"{len(firsts)} other vdev line(s)",
+        text_of(r),
+    )
 
 
 @check(
@@ -396,7 +413,7 @@ def pool_11(b: Bench) -> None:
     there. OpenZFS cmd/zpool/zpool_main.c:11821-11826, :11835-11880."""
     r = b.ok("zpool upgrade -v")
     listed = zfs_features.parse_upgrade_v(r.stdout)
-    expect(bool(listed), "a feature list", r.stdout.strip()[:200])
+    expect(bool(listed), "a feature list", "none parsed", text_of(r))
     version = zfs_features.release_tuple(_zfs_userland(b))
     want = [f.name for f in zfs_features.FEATURES if f.since <= version]
     missing = sorted(set(want) - set(listed))
@@ -486,10 +503,13 @@ def snp_03(b: Bench) -> None:
     expect(
         sorted(r.lines) == [f"{x}@1\t2", f"{x}@2\t1"],
         "the two local values",
-        " | ".join(r.lines),
+        f"{len(r.lines)} line(s)",
+        text_of(r),
     )
     r = b.ok(f"{local} org.zark:anc {top}")
-    expect(not r.lines, "no local org.zark:anc on a snapshot", " | ".join(r.lines))
+    expect(
+        not r.lines, "no local org.zark:anc on a snapshot", f"{len(r.lines)} line(s)", text_of(r)
+    )
     got = b.value("org.zark:anc", f"{x}@1")
     expect(got == "v", "the ancestor's value shown on the snapshot", got)
 
@@ -752,7 +772,7 @@ def snd_05(b: Bench) -> None:
     )
     r = b.ok(f"zfs send -nvP -t {_q(token)}")
     sizes = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.startswith("size\t")]
-    expect(bool(sizes), "a size line from send -nvP -t", r.stdout.strip()[-200:])
+    expect(bool(sizes), "a size line from send -nvP -t", "none", text_of(r))
     _ = b.pipe_ok(f"zfs send -t {_q(token)}", f"zfs receive -s -u {dst}")
     names = b.snapshot_names(dst)
     expect(names == ["1", "2"], "1, 2 after the resume", ", ".join(names))
@@ -893,7 +913,7 @@ def _size(b: Bench, cmd: str) -> int:
         f = line.split("\t")
         if len(f) == 2 and f[0] == "size" and f[1].isdigit():
             return int(f[1])
-    raise Fail(f"a size line from `{cmd}`", r.stdout.strip()[-200:])
+    raise Fail(f"a size line from `{cmd}`", "none", text_of(r))
 
 
 @check(
@@ -1003,13 +1023,15 @@ def dst_01(b: Bench) -> None:
     expect(
         destroys == [f"destroy\t{x}@1", f"destroy\t{x}@3"],
         "destroy lines for 1 and 3",
-        " | ".join(destroys),
+        f"{len(destroys)} destroy line(s)",
+        text_of(r),
     )
     reclaim = [ln for ln in r.lines if ln.startswith("reclaim\t")]
     expect(
         len(reclaim) == 1 and reclaim[0].split("\t")[1].isdigit(),
         "one reclaim line",
-        " | ".join(r.lines),
+        f"{len(reclaim)}",
+        text_of(r),
     )
     got = ", ".join(b.snapshot_names(x))
     expect(got == "1, 2, 3", "nothing destroyed", got)
@@ -1188,14 +1210,16 @@ def key_02(b: Bench) -> None:
         r = b.in_namespace(
             f"mount /dev/mapper/{mapper} {b.mnt} && echo k > {b.mnt}/system.key; umount {b.mnt}"
         )
-        expect(r.ok, "the rw mount to write system.key", r.stderr.strip()[-200:])
+        expect(r.ok, "the rw mount to write system.key", exit_status(r), text_of(r))
         _ = b.ok(f"cryptsetup close {mapper}")
         _ = b.ok(f"cryptsetup open --readonly --key-file=- {zd} {mapper}", word)
         r = b.in_namespace(
             f"mount -o ro,noload /dev/mapper/{mapper} {b.mnt} && cat {b.mnt}/system.key; "
             + f"umount {b.mnt}"
         )
-        expect(r.output == "k", "system.key read from a ro,noload mount", r.stderr.strip()[-200:])
+        expect(
+            r.output == "k", "system.key read from a ro,noload mount", exit_status(r), text_of(r)
+        )
     finally:
         if Path(f"/dev/mapper/{mapper}").exists():
             _ = b.run(f"cryptsetup close {mapper}")

@@ -14436,7 +14436,9 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
         )
         assert got["fn_fail"].depends == ("zark",)
         assert (got["fn_skip"].result, got["fn_skip"].reason) == ("SKIP", "no tool")
-        assert got["fn_boom"].result == "FAIL" and "RuntimeError: boom" in got["fn_boom"].came
+        assert got["fn_boom"].result == "FAIL"
+        assert got["fn_boom"].came == "RuntimeError (in zark.log)"
+        assert "RuntimeError: boom" in got["fn_boom"].output
 
     def test_a_signal_is_not_turned_into_a_fail(self):
         def fn(_b: stest.Bench) -> None:
@@ -14574,6 +14576,121 @@ def _report(
         results,
         info.get("masks", {}),
     )
+
+
+# What a command on a real machine can print that names it (M4sR-1).
+_PLANTED_DATASET = "rpool/USERDATA/juanmi_x9q2"
+_PLANTED_MOUNT = "/run/media/juanmi/Backup Disk"
+_PLANTED_ALIAS = "usb-Vendor_Model_SERIALX1234567890AB-0:0"
+_PLANTED = (_PLANTED_DATASET, "juanmi", "Backup Disk", _PLANTED_ALIAS, "SERIALX")
+
+
+class _PoisonShell(MockShell):
+    """Every command answers ``returncode`` with stdout and stderr naming a
+    system dataset, a user's mount, the hostname and a bare by-id alias."""
+
+    def __init__(self, returncode: int):
+        super().__init__()
+        self.returncode = returncode
+        text = (
+            f"cannot open '{_PLANTED_DATASET}': dataset does not exist\n"
+            + f"{_PLANTED_MOUNT} ext4 /dev/mapper/luks-1 {socket.gethostname()}\n"
+            + f"{_PLANTED_ALIAS}\n"
+        )
+        self.text = text
+
+    # Reads of one property or listing of the run's own objects: what they
+    # print is the check's observed value, not free text.
+    ACCESSORS = ("zfs get ", "zpool get ", "zfs list ")
+
+    def mock_run(self, cmd, check=False, input=None, log=None, timeout=None) -> RunResult:  # pylint: disable=redefined-builtin
+        del check, input, log, timeout
+        out = "" if str(cmd).startswith(self.ACCESSORS) else self.text
+        return RunResult(self.returncode, out, self.text, str(cmd))
+
+    def mock_run_pipe(self, cmd1, cmd2, _log=None) -> RunResult:
+        return self.mock_run(f"{cmd1} | {cmd2}")
+
+
+class TestSelftestReportPrivacy:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M4sR-1: no command output reaches a report, whatever a check reads."""
+
+    def _reports(self, returncode: int) -> dict[str, str]:
+        out: dict[str, str] = {}
+        ident = DiskIdentity(
+            disk="/dev/zarktestnone",
+            by_id="usb-Scratch_STICK0042-0:0",
+            serial="STICK0042",
+            aliases=("usb-Scratch_STICK0042-0:0",),
+        )
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch_sh(_PoisonShell(returncode)),
+            patch("time.sleep"),
+            redirect_stdout(StringIO()),
+        ):
+            for c in all_selftest_checks():
+                log = make_log()
+                if c.level == 1:
+                    bench: stest.Bench = stest.Bench(log, Cleanup(log), root=td)
+                else:
+                    bench = st_l2.StickBench(log, Cleanup(log), ident)
+                    bench.dir = f"{td}/{c.cid}-stick"
+                    bench.key, bench.mnt = f"{bench.dir}/key", f"{bench.dir}/mnt"
+                os.makedirs(bench.mnt)
+                res = stest.run_one(c, bench)
+                report = certs.build_report(
+                    _facts(), certs.RunInfo(c.level, False), [res], bench.masks()
+                )
+                out[c.key] = json.dumps(report["results"])
+        return out
+
+    def _one(self, cid: str, shell: MockShell) -> tuple[str, str]:
+        """The report's results and the run's own log lines for ``cid``."""
+        check_ = next(c for c in all_selftest_checks() if c.cid == cid)
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as td, patch_sh(shell), redirect_stdout(out):
+            log = make_log()
+            bench = stest.Bench(log, Cleanup(log), root=td)
+            os.makedirs(bench.mnt)
+            state = stest.RunState()
+            _ = stest.run_checks([check_], bench, log, state)
+            report = certs.build_report(
+                _facts(), certs.RunInfo(1, False), state.results, bench.masks()
+            )
+        return json.dumps(report["results"]), out.getvalue()
+
+    def test_sanoid_naming_a_system_dataset_stays_out_of_the_report(self):
+        mock = MockShell()
+        mock.on_prefix("zfs ").succeeds()
+        mock.on_prefix("/usr/sbin/sanoid --prune-snapshots").returns(
+            1, "", f"cannot open '{_PLANTED_DATASET}': dataset does not exist\n"
+        )
+        with (
+            patch("lib.selftest_host.shutil.which", return_value="/usr/sbin/sanoid"),
+            patch("lib.selftest_host.SANOID_DEFAULTS", (__file__,)),
+            patch("lib.selftest_host.time.sleep"),
+        ):
+            report, terminal = self._one("SAN-01", mock)
+        assert '"FAIL"' in report and _PLANTED_DATASET not in report, report
+        assert '"came": "exit 1"' in report
+        assert _PLANTED_DATASET in terminal  # zark.log and the terminal keep it
+
+    def test_the_host_mounts_in_mnt_03_stay_out_of_the_report(self):
+        mock = MockShell()
+        rows = "".join(f"{_PLANTED_MOUNT}/{i} ext4 /dev/mapper/luks-1\n" for i in range(3))
+        mock.on_prefix("unshare").succeeds(f"LIST\n{rows}END\nRC 32\nROOT 1\nBUSY 1\n")
+        report, terminal = self._one("MNT-03", mock)
+        assert '"FAIL"' in report and "juanmi" not in report, report
+        assert "not among 3 line(s)" in report
+        assert _PLANTED_MOUNT in terminal
+
+    def test_no_check_puts_command_output_in_the_report(self):
+        leaks = []
+        for rc in (0, 1):
+            for key, text in self._reports(rc).items():
+                leaks += [f"rc {rc} {key}: {s}" for s in _PLANTED if s in text]
+        assert not leaks, leaks
 
 
 class TestCertificates:  # pylint: disable=missing-function-docstring

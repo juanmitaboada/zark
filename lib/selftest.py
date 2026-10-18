@@ -43,6 +43,7 @@ import os
 import secrets
 import shlex
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -65,12 +66,18 @@ DIR_PREFIX = "zark-selftest-"
 
 
 class Fail(Exception):
-    """A check saw something other than what zark relies on."""
+    """A check saw something other than what zark relies on.
 
-    def __init__(self, expected: str, came: str):
+    ``expected`` and ``came`` are what the check itself states (its own
+    values, counts, exit statuses); ``output`` is the command text behind
+    them, for the terminal and zark.log only, never the report (M4sR-1).
+    """
+
+    def __init__(self, expected: str, came: str, output: str = ""):
         super().__init__(f"expected {expected}; came {came}")
         self.expected = expected
         self.came = came
+        self.output = output
 
 
 class Skip(Exception):
@@ -109,6 +116,7 @@ class Result:
     expected: str = ""
     came: str = ""
     depends: tuple[str, ...] = ()
+    output: str = ""  # terminal and zark.log only
 
     def to_json(self) -> dict[str, Any]:
         """The report's form: only the fields that say something."""
@@ -158,15 +166,33 @@ def all_checks() -> list[Check]:
     return sorted(CHECKS, key=lambda c: c.level)
 
 
-def expect(ok: bool, expected: str, came: str) -> None:
+def expect(ok: bool, expected: str, came: str, output: str = "") -> None:
     """Raise :class:`Fail` unless ``ok``."""
     if not ok:
-        raise Fail(expected, came)
+        raise Fail(expected, came, output)
 
 
-def _short(r: sh.RunResult) -> str:
-    text = (r.stderr.strip() or r.stdout.strip()).replace("\n", " / ")
-    return f"exit {r.returncode}" + (f": {text[:300]}" if text else "")
+def exit_status(r: sh.RunResult) -> str:
+    """A command's exit status, for a FAIL's ``came``."""
+    return f"exit {r.returncode}"
+
+
+def text_of(r: sh.RunResult) -> str:
+    """A command's whole output, for a FAIL's ``output``."""
+    return "\n".join(s for s in (r.stdout.strip(), r.stderr.strip()) if s)
+
+
+_TOKEN_MAX = 40
+
+
+def observed(value: str) -> str:
+    """A value a check read, as a FAIL's ``came``: kept when it is one short
+    token (no blank, no ``/``), else only its length; the value itself goes
+    to ``output``. A path or a sentence could name the machine."""
+    v = value.strip()
+    if len(v) <= _TOKEN_MAX and not any(ch.isspace() or ch == "/" for ch in v):
+        return v or "nothing"
+    return f"<{len(v)} characters, in zark.log>"
 
 
 class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attributes
@@ -226,7 +252,7 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
     def ok(self, cmd: str, stdin: str | None = None) -> sh.RunResult:
         """Run a command that must succeed."""
         r = self.run(cmd, stdin)
-        expect(r.ok, f"`{cmd}` to succeed", _short(r))
+        expect(r.ok, f"`{cmd}` to succeed", exit_status(r), text_of(r))
         return r
 
     def refused(self, cmd: str, *texts: str) -> sh.RunResult:
@@ -235,7 +261,7 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
         said = r.stdout + r.stderr
         expect(not r.ok, f"`{cmd}` to be refused", "it succeeded")
         missing = [t for t in texts if t not in said]
-        expect(not missing, f"`{cmd}` refused saying {missing!r}", _short(r))
+        expect(not missing, f"`{cmd}` refused saying {missing!r}", exit_status(r), text_of(r))
         return r
 
     def pipe(self, send: str, recv: str) -> sh.RunResult:
@@ -245,7 +271,7 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
     def pipe_ok(self, send: str, recv: str) -> sh.RunResult:
         """A transfer that must succeed."""
         r = self.pipe(send, recv)
-        expect(r.ok, f"`{send} | {recv}` to succeed", _short(r))
+        expect(r.ok, f"`{send} | {recv}` to succeed", exit_status(r), text_of(r))
         return r
 
     def pipe_refused(self, send: str, recv: str, *texts: str) -> sh.RunResult:
@@ -254,7 +280,9 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
         said = r.stdout + r.stderr
         expect(not r.ok, f"`{send} | {recv}` to be refused", "it succeeded")
         missing = [t for t in texts if t not in said]
-        expect(not missing, f"`{send} | {recv}` refused saying {missing!r}", _short(r))
+        expect(
+            not missing, f"`{send} | {recv}` refused saying {missing!r}", exit_status(r), text_of(r)
+        )
         return r
 
     def value(self, prop: str, target: str) -> str:
@@ -461,6 +489,8 @@ def run_checks(
             log.error(f"  expected: {res.expected}")
             log.error(f"  came:     {res.came}")
             log.error(f"  zark relies on it for: {'; '.join(c.depends)}")
+            for line in res.output.splitlines():
+                log.dbg(f"  output: {line}")
     state.current = ""
     return state.results
 
@@ -472,14 +502,18 @@ def run_one(c: Check, bench: "Bench") -> Result:
     except Skip as e:
         return Result(c.key, "SKIP", reason=str(e))
     except Fail as e:
-        return Result(c.key, "FAIL", expected=e.expected, came=e.came, depends=c.depends)
+        return Result(
+            c.key, "FAIL", expected=e.expected, came=e.came, depends=c.depends, output=e.output
+        )
     except Exception as e:  # pylint: disable=broad-exception-caught
+        # Its text can quote a command's output: only the type is reported.
         return Result(
             c.key,
             "FAIL",
             expected="the check to run",
-            came=f"{type(e).__name__}: {e}",
+            came=f"{type(e).__name__} (in zark.log)",
             depends=c.depends,
+            output=traceback.format_exc().strip(),
         )
     return Result(c.key, "PASS")
 

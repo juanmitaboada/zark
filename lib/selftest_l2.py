@@ -29,7 +29,7 @@ from lib import identity, sh
 from lib.cleanup import Cleanup
 from lib.identity import DiskIdentity
 from lib.log import Log
-from lib.selftest import Bench, Fail, check, expect
+from lib.selftest import Bench, Fail, check, exit_status, expect, observed, text_of
 from lib.zfs import ZFS, backup_altroot, create_command
 
 SETTLE = "udevadm settle --timeout=30"
@@ -188,7 +188,7 @@ def dsk_02(b: Bench) -> None:
         got = s.pool_value("readonly", s.s)
         expect(got == "on", "readonly on", got)
         r = s.ok(f"zpool list -vHP {s.s}")
-        expect(s.part1 in r.stdout, f"{s.part1} in zpool list -vHP", r.stdout.strip()[-200:])
+        expect(s.part1 in r.stdout, f"{s.part1} in zpool list -vHP", "not there", text_of(r))
         mounted = [t for t in s.ok("findmnt -rn -o TARGET").lines if t.startswith(altroot)]
         expect(not mounted, "nothing mounted", ", ".join(mounted))
     finally:
@@ -208,12 +208,12 @@ def dsk_03(b: Bench) -> None:
     s = _stick(b)
     guid = s.prepare()
     r = s.ok(f"zdb -l {s.part1}")
-    expect("state: 1" in r.stdout, "state: 1", r.stdout.strip()[:200])
+    expect("state: 1" in r.stdout, "state: 1", "not there", text_of(r))
     label = identity.read_pool_label(s.part1)
     expect(
         label is not None and label.name == s.s and label.guid == guid,
         f"read_pool_label: {s.s} {guid}",
-        repr(label),
+        "no label" if label is None else f"{observed(label.name)} {observed(label.guid)}",
     )
 
 
@@ -264,12 +264,13 @@ def dsk_05(b: Bench) -> None:
     _ = s.prepare()
     marks = purge._wipe(s.disk, s.part1, s.log)  # pylint: disable=protected-access
     bad = [text for ok, text in marks if ok is False]
-    expect(not bad, "every wipe step and check succeeds", "; ".join(bad))
+    expect(not bad, "every wipe step and check succeeds", f"{len(bad)} failed", "\n".join(bad))
     texts = [text for ok, text in marks if ok]
     expect(
         "no ZFS label on the first partition after the overwrite" in texts,
         "the label checked gone after the overwrite",
-        "; ".join(texts),
+        "not checked",
+        "\n".join(texts),
     )
 
 
@@ -311,7 +312,7 @@ def dsk_07(b: Bench) -> None:
     _ = s.ok(f"blockdev --flushbufs {s.disk}")
     _ = s.ok(SETTLE)
     r = s.run(f"blkid -p {s.disk}")
-    expect(r.returncode == 2, "blkid -p exit 2", f"exit {r.returncode}: {r.output}")
+    expect(r.returncode == 2, "blkid -p exit 2", exit_status(r), text_of(r))
     parts = _partitions(s.disk)
     expect(not parts, "no partition", ", ".join(parts))
 
@@ -346,7 +347,7 @@ def dsk_08(b: Bench) -> None:
     _ = s.ok(f"zpool destroy {s.s}")
     s.guids.pop(s.s, None)
     r = s.run(f"zpool import -d {shlex.quote(s.part1)}")
-    expect(f"pool: {s.s}" not in r.stdout, "not listed without -D", r.stdout.strip()[:200])
+    expect(f"pool: {s.s}" not in r.stdout, "not listed without -D", "listed", text_of(r))
     r = s.run(f"zpool import -D -d {shlex.quote(s.part1)}")
     if f"pool: {s.s}" not in r.stdout or "(DESTROYED)" not in r.stdout:
-        raise Fail(f"{s.s} listed (DESTROYED) with -D", r.stdout.strip()[:200])
+        raise Fail(f"{s.s} listed (DESTROYED) with -D", "not listed so", text_of(r))
