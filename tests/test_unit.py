@@ -114,15 +114,10 @@ from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E
 )
 from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
 from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
-    RestorePlan,
-    RestoreRow,
     _abort_missing_keystore,
-    _absent_note,
     _check_sizes,
-    _choose_point,
     _force_latest_signed_alternative,
     _mount_restored_system,
-    _plan,
     _preflight,
     _target_candidates,
 )
@@ -159,6 +154,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     forensics,
     grub_guard,
     reclaim,
+    restore_plan,
     survey,
 )
 from lib.cleanup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -241,6 +237,13 @@ from lib.registry import (  # pylint: disable=wrong-import-position # noqa: E402
     parse as registry_parse,
     serialize as registry_serialize,
     write_atomic as registry_write_atomic,
+)
+from lib.restore_plan import (  # pylint: disable=wrong-import-position # noqa: E402
+    RestorePlan,
+    RestoreRow,
+    _absent_note,
+    build_plan,
+    choose_point,
 )
 from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa: E402
     COMPLETE_PROP,
@@ -7077,7 +7080,7 @@ class TestRestorePoints:  # pylint: disable=missing-function-docstring
         points = restore_points(snaps, f"rpool/ROOT/{_BE}")
         out = StringIO()
         with patch("builtins.input", return_value=""), redirect_stdout(out):
-            assert _choose_point(points, make_log()) is points[-1]
+            assert choose_point(points, make_log()) is points[-1]
         text = out.getvalue()
         assert "backup point" in text and "carried: hourly" in text
 
@@ -7089,7 +7092,7 @@ class TestRestorePoints:  # pylint: disable=missing-function-docstring
     def test_default_is_the_newest(self):
         points = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")
         with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
-            assert _choose_point(points, make_log()) is points[-1]
+            assert choose_point(points, make_log()) is points[-1]
 
     def test_invalid_selection_asks_again(self):
         points = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")
@@ -7097,7 +7100,7 @@ class TestRestorePoints:  # pylint: disable=missing-function-docstring
             patch("builtins.input", side_effect=["x", "9", "2"]),
             redirect_stdout(StringIO()),
         ):
-            assert _choose_point(points, make_log()) is points[1]
+            assert choose_point(points, make_log()) is points[1]
 
     def test_resolution_of_the_1700_point(self):
         snaps = _stick_snaps()
@@ -7293,15 +7296,15 @@ def _run_plan(cache: bool, empty: dict[str, bool] | None = None) -> RestorePlan:
 
     with (
         patch_sh(mock),
-        patch.object(recover_mod, "_probe_be", return_value=probe),
-        patch.object(recover_mod, "_referenced", side_effect=fake_referenced),
+        patch.object(restore_plan, "_probe_be", return_value=probe),
+        patch.object(restore_plan, "_referenced", side_effect=fake_referenced),
         patch.object(
-            recover_mod,
+            restore_plan,
             "_empty_root",
             side_effect=lambda full: (empty or {}).get(full.split("@")[0], False),
         ),
     ):
-        return _plan("backup", "/dev/sdb1", _BE, point, snaps, make_log())
+        return build_plan("backup", "/dev/sdb1", _BE, point, snaps, make_log())
 
 
 class TestRecoverPlan:  # pylint: disable=missing-function-docstring
@@ -7357,7 +7360,7 @@ class TestRecoverAnchorLabel:  # pylint: disable=too-few-public-methods
     def test_label(self) -> None:
         """Known GUID by its registry name, unknown by its GUID, others as they are."""
         name = repl.anchor_name("3277814611169134880", "zark_2026-10-11_12:22:15Z")
-        label = recover_mod._snapshot_label  # pylint: disable=protected-access
+        label = restore_plan._snapshot_label  # pylint: disable=protected-access
         assert label(name, {"3277814611169134880": "backup2"}) == (
             "zark_2026-10-11_12:22:15Z (bpool anchor of drive backup2)"
         )
@@ -7418,12 +7421,12 @@ class TestRecoverPlanArchived:  # pylint: disable=missing-function-docstring
 
         with (
             patch_sh(mock),
-            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
-            patch.object(recover_mod, "_referenced", side_effect=referenced),
-            patch.object(recover_mod, "_empty_root", side_effect=empty_root),
+            patch.object(restore_plan, "_probe_be", return_value=("", "", "")),
+            patch.object(restore_plan, "_referenced", side_effect=referenced),
+            patch.object(restore_plan, "_empty_root", side_effect=empty_root),
             redirect_stdout(StringIO()),
         ):
-            plan = _plan("backup", "/dev/sdb1", _BE, point, snaps, make_log())
+            plan = build_plan("backup", "/dev/sdb1", _BE, point, snaps, make_log())
         return plan, probed, sized
 
     def test_archived_snapshots_are_read_where_they_are_stored(self):
@@ -7476,14 +7479,14 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
         out = StringIO()
         with (
             patch_sh(mock),
-            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
+            patch.object(restore_plan, "_probe_be", return_value=("", "", "")),
             patch.object(
-                recover_mod, "_referenced", side_effect=lambda names: dict.fromkeys(names, 1000)
+                restore_plan, "_referenced", side_effect=lambda names: dict.fromkeys(names, 1000)
             ),
-            patch.object(recover_mod, "_empty_root", return_value=False),
+            patch.object(restore_plan, "_empty_root", return_value=False),
             redirect_stdout(out),
         ):
-            plan = _plan("backup", "/dev/sdb1", _BE, point, snaps, Log())
+            plan = build_plan("backup", "/dev/sdb1", _BE, point, snaps, Log())
         return plan, out.getvalue()
 
     def test_the_newest_monthly_before_the_point_is_the_base(self):
@@ -7523,7 +7526,7 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
         point = Snap(rel, self.P2, "2", 6, 6)
         archived = Snap(rel, self.MONTHLY, "1", 2, 2, source=f"{rel}.archived-20261001")
         row = RestoreRow(rel, point)
-        monthly_base = recover_mod._monthly_base  # pylint: disable=protected-access
+        monthly_base = restore_plan._monthly_base  # pylint: disable=protected-access
         assert monthly_base(row, [archived, point]) is None
         live = Snap(rel, self.MONTHLY, "1", 2, 2)
         assert monthly_base(row, [live, point]) == live
@@ -7534,7 +7537,7 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
         rel = "rpool/ROOT/x"
         older = Snap(rel, "autosnap_2026-08-01_00:00:00_monthly", "1", 2, 2)
         chosen = Snap(rel, self.MONTHLY, "2", 6, 6)
-        monthly_base = recover_mod._monthly_base  # pylint: disable=protected-access
+        monthly_base = restore_plan._monthly_base  # pylint: disable=protected-access
         assert monthly_base(RestoreRow(rel, chosen), [older, chosen]) is None
 
     def test_bases_that_do_not_fit_are_dropped_before_refusing(self):
@@ -7649,8 +7652,8 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
 
         The system.key copy goes below ``work``; Cleanup's atexit run is
         simulated after the command returns. ``calls``, when given, receives
-        the positional arguments of every ``_choose_point`` and ``_plan`` call.
-        ``snaps_fail`` leaves the real ``_list_snapshots`` in place with the
+        the positional arguments of every ``choose_point`` and ``build_plan`` call.
+        ``snaps_fail`` leaves the real ``list_snapshots`` in place with the
         engine's listing of the drive failing.
         """
         source_key = os.path.join(work, "source.key")
@@ -7699,9 +7702,9 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(recover_mod, "_find_be", return_value=_BE),
             patch.object(drive_marks, "drive_snapshots", side_effect=_marks_unreadable(snaps))
             if snaps_fail
-            else patch.object(recover_mod, "_list_snapshots", return_value=snaps),
-            patch.object(recover_mod, "_choose_point", side_effect=spy("_choose_point", point)),
-            patch.object(recover_mod, "_plan", side_effect=spy("_plan", plan)),
+            else patch.object(recover_mod, "list_snapshots", return_value=snaps),
+            patch.object(recover_mod, "choose_point", side_effect=spy("choose_point", point)),
+            patch.object(recover_mod, "build_plan", side_effect=spy("build_plan", plan)),
             patch.object(recover_mod, "_select_target", return_value="/dev/sda"),
             patch.object(recover_mod, "_preflight", side_effect=preflight),
             patch("builtins.input", side_effect=EOFError)
@@ -7753,7 +7756,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         calls: dict[str, list[tuple[object, ...]]] = {}
         with tempfile.TemporaryDirectory() as td:
             mock = self._run_in(td, "YES", calls=calls, snaps_fail=True)
-        assert "_choose_point" not in calls and "_plan" not in calls
+        assert "choose_point" not in calls and "build_plan" not in calls
         assert mock.was_not_called("wipefs") and mock.was_not_called("sgdisk")
 
     def test_completeness_reaches_the_menu_and_the_plan(self) -> None:
@@ -7767,8 +7770,8 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             patch.object(recover_mod, "complete_points", return_value=complete),
         ):
             _ = self._run_in(td, "NO", calls=calls)
-        (menu,) = calls["_choose_point"]
-        (plan,) = calls["_plan"]
+        (menu,) = calls["choose_point"]
+        (plan,) = calls["build_plan"]
         assert menu[-1] is complete
         assert plan[-1] is complete
 
@@ -8344,12 +8347,12 @@ class TestReviewFindings:  # pylint: disable=missing-function-docstring
         base.stdout = base.stdout + types_extra + "\n"
         with (
             patch_sh(mock),
-            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
-            patch.object(recover_mod, "_referenced", side_effect=lambda n: dict.fromkeys(n, 1)),
-            patch.object(recover_mod, "_empty_root", return_value=False),
+            patch.object(restore_plan, "_probe_be", return_value=("", "", "")),
+            patch.object(restore_plan, "_referenced", side_effect=lambda n: dict.fromkeys(n, 1)),
+            patch.object(restore_plan, "_empty_root", return_value=False),
             redirect_stdout(StringIO()),
         ):
-            plan = _plan("backup", "/dev/sdb1", _BE, point, snaps + extra, make_log())
+            plan = build_plan("backup", "/dev/sdb1", _BE, point, snaps + extra, make_log())
         rows = {r.rel: r for r in plan.rows}
         assert rows["rpool/USERDATA/home_cgx8je"].options[0] == "-o canmount=on"
         assert rows["rpool/USERDATA/home_zzz"].options[0] == "-o canmount=noauto"
@@ -14198,7 +14201,7 @@ class TestRecoverIncompletePoint:
             return default
 
         with patch.object(Log, "ask_choice", side_effect=choice), redirect_stdout(StringIO()):
-            chosen = _choose_point(points, make_log(), complete_points(snaps, ""))
+            chosen = choose_point(points, make_log(), complete_points(snaps, ""))
         assert chosen is points[0]
         options = shown["options"]
         assert isinstance(options, list)
@@ -14260,12 +14263,12 @@ class TestRecoverIncompletePoint:
         )
         with (
             patch_sh(mock),
-            patch.object(recover_mod, "_probe_be", return_value=("", "", "")),
-            patch.object(recover_mod, "_referenced", side_effect=lambda n: dict.fromkeys(n, 1)),
-            patch.object(recover_mod, "_empty_root", return_value=False),
+            patch.object(restore_plan, "_probe_be", return_value=("", "", "")),
+            patch.object(restore_plan, "_referenced", side_effect=lambda n: dict.fromkeys(n, 1)),
+            patch.object(restore_plan, "_empty_root", return_value=False),
             redirect_stdout(StringIO()),
         ):
-            plan = _plan("backup", "/dev/sdb1", _BE, newest, snaps, make_log(), {P1})
+            plan = build_plan("backup", "/dev/sdb1", _BE, newest, snaps, make_log(), {P1})
         row = plan.row(home)
         assert row is not None and row.restored, row
         assert row.snap is not None and row.snap.name.startswith("autosnap_")
@@ -14273,11 +14276,11 @@ class TestRecoverIncompletePoint:
 
     def _check_recover_view(self, fake: FakeZfs, last_point: str) -> None:
         with patch_sh(fake):
-            snaps = recover_mod._list_snapshots("backup", Log())  # pylint: disable=protected-access
+            snaps = restore_plan.list_snapshots("backup", Log())  # pylint: disable=protected-access
         complete = complete_points(snaps, last_point)
         points = restore_points(snaps, self.BE)
         with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
-            chosen = _choose_point(points, make_log(), complete)
+            chosen = choose_point(points, make_log(), complete)
         assert point_name(chosen) == P1
         newest = points[-1]
         assert point_name(newest) == P2
