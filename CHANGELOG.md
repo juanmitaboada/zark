@@ -28,9 +28,11 @@ development-tooling consolidation that preceded them.
   with `--stick <device>`, checks on a blank scratch stick what needs a
   real disk (8 checks: prepare's pool on a whole disk, udev's partition
   re-read and the lock that holds it off, purge's wipe); the stick must
-  be external, unregistered and blank, its kernel name is typed, and it is
-  left blank. Each check has an ID and a revision; a FAIL prints what was
-  expected, what came and what in zark depends on it. A signal stops the
+  be external, unregistered, blank and named under `/dev/disk/by-id`, its
+  kernel name is typed, and it is left blank as purge leaves a drive. Each
+  check has an ID and a revision; a FAIL prints what was expected, what
+  came and what in zark depends on it, with the commands' output in
+  zark.log only. A signal stops the
   run like any command: its pools are destroyed (only the ones whose GUID
   it recorded), its directory removed, and the run recorded as stopped.
 - **Reports, record and certificates** (M4s-5 to M4s-9, M4s-14). Every run
@@ -74,6 +76,94 @@ development-tooling consolidation that preceded them.
   clone sent from its origin is attached to that origin by GUID, and a
   resume token whose snapshot was recreated is "no longer the same
   snapshot".
+- **The review's fix round (M4sR-1 ... M4sR-4, M4sR-6).**
+  - A stopped run's report is masked as a complete one's: the masks of
+    the run's names (its directory and pools, the stick's by-id names and
+    serial) are taken when the benches are made, before the first check
+    (M4sR-1, M4sF-1 1a).
+  - A FAIL keeps what the check states (what it expected, a count, an
+    exit status, a value it read from its own pools) apart from the
+    command output behind it, which is printed under the FAIL and written
+    to zark.log but never to the report; an unexpected exception reports
+    its type only. Before, up to 300 characters of a command's output
+    reached the report, a system dataset in sanoid's stderr or the host's
+    mounts in MNT-03's listing among them (M4sR-1, M4sF-2 2a).
+  - The level-2 teardown wipes the stick with purge's own wipe, both ends
+    of the disk overwritten first: `wipefs` alone left part1's ZFS labels,
+    which `blkid -p` does not see on the whole disk. Nothing is written
+    while a pool is still imported from the stick (M4sR-2, M4sF-4 4a).
+  - A stick with no `/dev/disk/by-id` name is refused before the typed
+    question, as `prepare` refuses one (M4sR-3, M4sF-5 5a).
+  - A check that passes in a later run, `--only` included, leaves the
+    failures recorded for this platform, so "failed on this machine" goes;
+    coverage still needs a complete run (M4sR-4, M4sF-6 6a).
+
+#### Known limitations
+
+- The self-test does not check what needs a boot, a package operation, a
+  change to the running system or a hand on a cable: GRUB reading bpool
+  and the feature set it accepts; `update-grub`'s `10_linux_zfs` and the
+  grub guard; the APT hook; the Secure Boot chain; dracut; a USB bridge's
+  cache flushes (`zark health`'s destructive test is the tool for an
+  enclosure); chase.c:648 (its re-evaluation is M5); `zvol_inhibit_dev`;
+  the pause of `sanoid.timer` and the timer's cadence; logind ending a
+  session; `snap stop` of the live installer's probe; `zpool export bpool`
+  on an installed system and the initramfs importing every cached pool; a
+  pool last used by another host; notify-send and `pam_motd`; the uevents
+  after a USB power-down (health COLD).
+- Checked by unit tests only: a drive with features a live's ZFS cannot
+  read, a ZFS module and tools of different releases, each check's FAIL
+  path, a report too long for the link, the warning lines in `setup` and
+  `recover`, a stick with no by-id name.
+- On a live session the record and reports live in RAM: the report is
+  copied off before shutting down.
+- A run killed with SIGKILL (outside the stops the self-test handles)
+  leaves its pools imported under `/run/zark/altroot`, which `zark clean`
+  exports, and its sparse files in `/dev/shm/zark-selftest-*` until a
+  reboot; killed during KEY-02, its LUKS mapper `<pool>-ks` keeps `zark
+  clean` from exporting that pool until it is closed by hand (M4sR-5, M4c).
+- `zark mount` imports a drive without recover's feature check (M4c).
+- A `--only` run certifies nothing: where no shipped certificate covers
+  the platform, "no certificate covers this platform" stays until a
+  complete run.
+
+#### Rejected approaches
+
+- **`zark check` or `zark verify` as the command, or an option of
+  `health`** (M4s-1 1b, 1c): `check` reads as "check my backup", and
+  `health` is about a drive while level 1 needs none.
+- **A tmpfs the run mounts under `/run/zark/selftest`** (M4s-3 3b): one
+  more mount that `/run`'s shared propagation copies into every service
+  namespace. **A directory the operator names** (3c): one more way to put
+  the vdevs on a pool.
+- **Level 2 on a disk that is not blank, its content listed first**
+  (M4s-4 4b): a run that erases a disk zark never looked at.
+- **The record and the subscription in `known_drives.json`** (M4s-5 5b),
+  or the record next to it (5c): settings mixed with drives, and a
+  portable zark carrying one machine's record to another.
+- **One certificates file per platform series** (M4s-6 6b); **eli's
+  results in the next milestone's first commit** (M4s-7 7b): `main` would
+  carry an rc without its own entries.
+- **Comparing the exact ZFS version strings** (M4s-8 8b): a live, whose
+  module comes from the ISO, would always warn.
+- **A plain-text report in the issue's body** (M4s-9 9b): no field, and
+  the entries copied by hand.
+- **recover's check alone, without a `compatibility` in prepare** (M4s-10
+  10b): a full drive could activate `dynamic_gang_header` and become
+  unreadable by any live older than OpenZFS 2.4. **The check in
+  `import_backup_pool` for every command** (M4s-11 11b): only recover and
+  mount meet an older ZFS.
+- **Only the framework against the test model of ZFS** (M4s-12 12b): the
+  checks that run against it are what found eleven divergences.
+- **The MOTD line for a failure only** (M4s-15 15b).
+- **Filtering the report alone** (M4sF-2 2b), replacing every `came` that
+  is not one short token: the checks would still compose texts that are
+  not what they observed. **The source pools' names among the masks**
+  (M4sF-3 3b): a mask replaces a pool's name, not the dataset path after
+  it, and short names would be replaced inside ordinary words.
+- **`zpool labelclear` before the teardown's `wipefs`** (M4sF-4 4b): it
+  needs part1's node, which a stopped DSK-04, DSK-06 or DSK-07 has
+  already removed.
 
 ### M4b: interrupted runs and the engine's bases (2.0.0-rc5)
 

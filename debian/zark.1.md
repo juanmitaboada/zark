@@ -141,11 +141,14 @@ for the canonical end-to-end sequences.
     imported, changed or exported. It needs 1 GiB free in */dev/shm* and
     1.5 GiB of available memory. With **--stick**, it then runs the level-2
     checks on that whole disk, which it erases: the disk must be external,
-    unregistered and blank (**purge** wipes one), and its kernel name must
-    be typed to go on; it is left blank. **--only** repeats some checks; such
-    a run certifies nothing. Each check has an ID and a revision
-    (*POOL-01.1*); a FAIL says what was expected, what came and what in
-    **zark** depends on it. A signal stops the run like any command, its
+    unregistered, blank (**purge** wipes one) and named under
+    */dev/disk/by-id*, and its kernel name must be typed to go on; it is
+    left blank as **purge** leaves a drive, both ends overwritten. **--only**
+    repeats some checks; such a run certifies nothing, but a check it passes
+    no longer shows as failed on this machine. Each check has an ID and a
+    revision (*POOL-01.1*); a FAIL says what was expected, what came and
+    what in **zark** depends on it, with the commands' output in zark.log
+    and never in the report. A signal stops the run like any command, its
     pools destroyed and its directory removed, and the run is recorded as
     stopped. Exit status 0 when no check failed (a check that cannot run
     here, a missing tool, is a SKIP), 1 otherwise.
