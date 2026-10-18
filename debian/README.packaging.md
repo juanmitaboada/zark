@@ -1,4 +1,4 @@
-# zark — Debian/Ubuntu packaging guide
+# zark - Debian/Ubuntu packaging guide
 
 This document is for the maintainer (Juanmi). It explains how to build
 a `.deb` locally, how to sign source packages, and how to upload to the
@@ -95,7 +95,7 @@ sudo dpkg -P zark       # purge to clean up
 
 `debuild` also runs `lintian` against the resulting `.deb`; address any
 errors before declaring the build clean. Warnings should be reviewed
-case by case — some are legitimately suppressed in
+case by case - some are legitimately suppressed in
 `debian/zark.lintian-overrides`.
 
 ---
@@ -134,7 +134,7 @@ PPA covers the currently-supported Ubuntu releases. As of May 2026:
 noble (24.04 LTS, supported until 2036), questing (25.10, supported
 until 2026-07), and resolute (26.04 LTS, to be released). Each upload
 is distinguished by a `~ubuntuXX.YY.N` suffix on the version. The
-authoritative list lives in `Makefile`'s `PPA_SERIES` variable —
+authoritative list lives in `Makefile`'s `PPA_SERIES` variable -
 update it there when Ubuntu drops a release.
 
 The recommended workflow is:
@@ -169,8 +169,8 @@ make deb-ppa-resume   # uploads the remaining series (questing onwards)
 
 Together, `deb-ppa-test` + `deb-ppa-resume` cover the same ground as
 `deb-ppa`. The advantage is that if the first upload fails (broken
-GPG, wrong PPA path, network issue, Launchpad outage…), only one
-version slot is burned instead of five — the same `1.0.6-1~ubuntu24.04.1`
+GPG, wrong PPA path, network issue, Launchpad outage...), only one
+version slot is burned instead of five - the same `1.0.6-1~ubuntu24.04.1`
 identifier can be reused after a `Delete packages` action in the PPA
 web UI.
 
@@ -248,25 +248,25 @@ sudo apt purge zark         # also removes /etc/zark/
 ```
 
 `/var/log/zark.log` is **not** managed by the package and is left in
-place on uninstall — it may contain forensic information the user
+place on uninstall - it may contain forensic information the user
 wants to keep.
 
 ---
 
 ## 7. Troubleshooting
 
-* **`debuild` fails with `gpg: no default secret key`** — your default
+* **`debuild` fails with `gpg: no default secret key`** - your default
   GPG identity does not match the `Maintainer:` line. Either add
   `-k<KEY_ID>` to debuild, or set `DEBSIGN_KEYID` in your shell profile,
   or set the key as default with `gpg --default-key`.
-* **`dput` rejects the upload with "Bad signature"** — Launchpad has not
+* **`dput` rejects the upload with "Bad signature"** - Launchpad has not
   yet picked up your GPG key. Wait a few minutes after uploading the key
   and retry; allow up to 30 min on first registration.
-* **Lintian flags `bad-distribution-in-changes-file`** — the
+* **Lintian flags `bad-distribution-in-changes-file`** - the
   `Distribution:` line in `debian/changelog` says `UNRELEASED` (the
   default for development). Change it to the target Ubuntu series
   (e.g. `noble`) before building for upload.
-* **`No such file or directory: zark_X.Y.Z.orig.tar.gz`** — non-native
+* **`No such file or directory: zark_X.Y.Z.orig.tar.gz`** - non-native
   source format requires an `.orig.tar.gz`. `make deb` regenerates it
   from `make dist` automatically; if running `debuild` by hand, run
   `make dist && cp zark_X.Y.Z.tar.gz ../zark_X.Y.Z.orig.tar.gz` first.

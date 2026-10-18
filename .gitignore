@@ -221,7 +221,7 @@ etc/settings.json
 #
 # `dpkg-buildpackage` and `debuild` write transient files into debian/
 # during the build, and the produced binaries (.deb, .dsc, .changes,
-# etc.) into the parent directory. None of this should be committed —
+# etc.) into the parent directory. None of this should be committed -
 # `make deb` regenerates everything from the source tree.
 debian/.debhelper/
 debian/files

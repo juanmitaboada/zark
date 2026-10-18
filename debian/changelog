@@ -230,7 +230,7 @@ zark (1.0.12-1) stable; urgency=medium
     bridge VID:PID, dmesg) with issue-filing instructions and optional
     serial/GUID obfuscation. lib/health.py holds the extensible check
     and test logic. prepare runs the read-only check up front (warn +
-    confirm) and a read-back at the end — since prepare writes the full
+    confirm) and a read-back at the end - since prepare writes the full
     raw send, it confirms the bridge survives write load before
     registering the drive in known_drives.json.
   * eject prompt: optional per-drive auto-eject. A new `autoeject`
@@ -252,7 +252,7 @@ zark (1.0.12-1) stable; urgency=medium
     then -f) instead of aborting; and fix a tautological live-USB guard
     that never triggered. is_live_usb() is now a single mock-testable
     helper in lib/sh shared with recover.
-  * chroot: new command `zark chroot [device]` — import rpool/bpool
+  * chroot: new command `zark chroot [device]` - import rpool/bpool
     under an altroot from a live USB, unlock the keystore, mount the
     boot environment with the bind mounts a chroot needs (proc/sys/dev/
     dev-pts/run, efivars, ESP), and drop into a login shell inside the
@@ -270,7 +270,7 @@ zark (1.0.12-1) stable; urgency=medium
     09zark-zfs-backup-guard) that aborts a transaction before dpkg
     unpacks when a boot-critical package (linux-image/headers/modules,
     grub, shim, zfs) is installed while an external ZFS pool is
-    connected — closing the unattended-upgrades vector the grub guard
+    connected - closing the unattended-upgrades vector the grub guard
     catches too late. Standalone (detects pools with zpool, no zark
     dependency), with a ZARK_INTERNAL=1 escape for zark's own recovery
     flows and a login-time MOTD reminder. Installed by setup (running
@@ -300,7 +300,7 @@ zark (1.0.11-1) stable; urgency=medium
     are preserved without forced unplug/replug. EOF on stdin (cron,
     systemd, scripted) uses the default.
   * lib/log: new banner_safe_unplug() (green, after eject) and
-    banner_drive_attached() (cyan, after declined eject) — visually
+    banner_drive_attached() (cyan, after declined eject) - visually
     disjoint so the two states cannot be confused.
   * eject(1) from util-linux issues SCSI SYNCHRONIZE CACHE + STOP UNIT;
     no new package dependency.
@@ -319,7 +319,7 @@ zark (1.0.9-1) unstable; urgency=medium
 
   * Snapshot retention: `template_minimal` raised from `daily=2`
     (no weekly, no monthly) to `daily=14 weekly=8 monthly=3`
-    — roughly 3 months of guaranteed snapshot overlap. The old
+    - roughly 3 months of guaranteed snapshot overlap. The old
     values made any drive disconnected for more than 48 hours
     diverge on every container dataset (rpool, rpool/ROOT,
     rpool/var, bpool), even when the active leaves remained in
@@ -330,7 +330,7 @@ zark (1.0.9-1) unstable; urgency=medium
     expected values via the existing diff machinery and surfaces
     the migration through the same "Apply these changes?"
     prompt as regular rule changes. Saying no leaves the file
-    untouched and re-running setup offers the migration again —
+    untouched and re-running setup offers the migration again -
     the choice is not persisted by design. Saying yes regenerates
     sanoid.conf with `.backup.<timestamp>` written first,
     preserving any manual sections under non-managed prefixes
@@ -341,20 +341,20 @@ zark (1.0.9-1) unstable; urgency=medium
     WARNING: zfs destroy ... failed: 256" warnings on every other
     run. Root cause: syncoid's pruneoldsyncsnaps cleanup, run
     after each transfer, destroys the source's previous
-    @syncoid_<host>_* snapshot — which was still the anchor for
+    @syncoid_<host>_* snapshot - which was still the anchor for
     the other drive. With --no-sync-snap, syncoid no longer
     creates its own anchor snapshots and instead uses the most
     recent existing snapshot in source (the sanoid autosnap_*
     snapshots, taken in step 6 right before syncoid runs). The
     bug is fixed at its root; no log filtering. Existing
     @syncoid_carmen_* snapshots on connected drives are left in
-    place — they're inert with the new flag and die naturally
+    place - they're inert with the new flag and die naturally
     when the drive is purged.
   * Drive staleness reporting in `zark backup` and
     `zark repair-divergent`. A new `last_backup_at` field per
     drive in known_drives.json records the ISO-8601 UTC
     timestamp of every successful backup. Reporting is purely
-    informative — there is no FATAL based on staleness, because
+    informative - there is no FATAL based on staleness, because
     the actual divergence threshold depends on sanoid retention
     (which the operator can change) and a backup that has
     crossed the threshold may still succeed if some shared
@@ -384,7 +384,7 @@ zark (1.0.9-1) unstable; urgency=medium
     require typing the literal string DESTROY (case-sensitive)
     at a second prompt. Mid-flight zfs destroy failures prompt
     once for the rest-of-session policy (continue / abort / keep
-    state and abort) and the choice sticks — no reprompt per
+    state and abort) and the choice sticks - no reprompt per
     failure. Datasets at or below 64 MB are still auto-destroyed
     silently, matching backup's threshold.
   * Config: DriveInfo gains an optional `last_backup_at: str |
@@ -424,7 +424,7 @@ zark (1.0.8-1) unstable; urgency=medium
     (compares target size from lsblk -bdn -o SIZE against rpool.used
     plus 5% overhead for ESP, bpool, swap and metadata); reactive
     ENOSPC detection at every send/receive site (raw_send, bpool
-    send/receive, keystore final send) — every ENOSPC fatal because
+    send/receive, keystore final send) - every ENOSPC fatal because
     partial recovery is unbootable.
   * lib.sh.run_pipe() now reports a non-zero return code if either
     side of the pipeline failed. Previous implementation returned only
@@ -452,7 +452,7 @@ zark (1.0.8-1) unstable; urgency=medium
     proceeds with whatever snapshots already exist. Backup is now
     a 9-step process (was 8); the new step 6 sits between
     "Loading encryption key" and "Running syncoid".
-  * simulate: GL acceleration auto-detect — when the host has both
+  * simulate: GL acceleration auto-detect - when the host has both
     /dev/dri/renderD* and virtio-vga-gl in qemu-system-x86_64 -device
     help, uses -device virtio-vga-gl,edid=on -display gtk,gl=on for
     a resizable, hardware-accelerated GTK window. Falls back to
@@ -470,7 +470,7 @@ zark (1.0.8-1) unstable; urgency=medium
     guard (8), backup --no-snapshot parsing (3), recover disk-size
     check (9), and simulate --display parsing (extended from 5
     to 12). New `make test-enospc-real` target running
-    tests/test_enospc_real.sh — opt-in empirical calibration of
+    tests/test_enospc_real.sh - opt-in empirical calibration of
     the ENOSPC markers against the running kernel's actual ZFS
     error strings. Root-only, not invoked by `make fulltest`, not
     in CI; run after upgrading zfsutils-linux or moving to a new
@@ -494,7 +494,7 @@ zark (1.0.7-1) unstable; urgency=medium
   * bpool features pruned to the GRUB-compatible subset documented in
     /usr/share/zfs/compatibility.d/grub2. Earlier zark versions activated
     head_errlog and vdev_zaps_v2 on bpool, which GRUB 2.14 (Ubuntu 26.04)
-    cannot read — boot failed with "file not found" and "prohibited by
+    cannot read - boot failed with "file not found" and "prohibited by
     secure boot policy" for every kernel. Existing recoveries hit by
     this need a fresh `zark recover` with this version.
   * fix_grub_bpool_uuid now rewrites every --fs-uuid line in grub.cfg,
@@ -557,7 +557,7 @@ zark (1.0.5-1) unstable; urgency=medium
   * Initial Debian/Ubuntu packaging.
   * Distribution mechanism for zark on Ubuntu systems where the tool is
     used for day-to-day backups. The portable tarball workflow is
-    preserved unchanged for live-USB disaster recovery — the .deb
+    preserved unchanged for live-USB disaster recovery - the .deb
     package targets the "install on the productive host" use case only.
   * Installs sources under /usr/share/zark/, exposes the entry point as
     /usr/bin/zark via symlink, and ships an example known_drives.json
@@ -565,7 +565,7 @@ zark (1.0.5-1) unstable; urgency=medium
     lib/config.py (env override -> portable etc/ -> /etc/zark/) makes
     this layout work without code changes.
   * Depends: zfsutils-linux, sanoid, cryptsetup-bin, gdisk, grub2-common
-    and one of dracut | initramfs-tools — every external command zark
+    and one of dracut | initramfs-tools - every external command zark
     invokes outside the recover-only path. Recommends pulls in the
     recover dependencies (dosfstools, grub-efi-amd64-signed, shim-signed)
     and the simulate dependencies (qemu-system-x86, ovmf).

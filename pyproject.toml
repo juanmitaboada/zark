@@ -1,4 +1,4 @@
-# zark — project metadata and tool configuration.
+# zark - project metadata and tool configuration.
 #
 # Single source of truth for every tool zark uses: ruff (linter AND
 # formatter), mypy, pylint, basedpyright and the development dependency
@@ -60,7 +60,7 @@ types = [
     "basedpyright==1.40.1",
 ]
 
-# ── Ruff — linter and formatter ──────────────────────────────────────────
+# ── Ruff - linter and formatter ──────────────────────────────────────────
 [tool.ruff]
 line-length = 100
 # target-version is deduced from [project].requires-python above. Do NOT
@@ -80,7 +80,7 @@ line-length = 100
 # flake8's --max-complexity was commented out, so it never actually ran.
 #
 # RUF027 (missing-f-string-syntax) is the rule that caught the v1.0.4
-# regression — a log line that lost its `f` prefix and silently printed
+# regression - a log line that lost its `f` prefix and silently printed
 # `{var}` literally. It is still a preview rule, hence `preview = true`.
 # Measured on this codebase: enabling preview adds no other findings, so
 # the separate `ruff --select=RUF027` invocation the Makefile, tox and
@@ -124,7 +124,7 @@ check_untyped_defs = true
 #
 # Part of the lint gate: `make lint`, `make fulltest`, `tox` (the `types`
 # env, in envlist) and CI all run it, and it reports clean. It is kept out
-# of pre-commit on purpose — it is an npm-backed package that checks the
+# of pre-commit on purpose - it is an npm-backed package that checks the
 # whole project rather than the changed files, so it belongs in the gate
 # that runs once, not on every commit.
 #
@@ -143,7 +143,7 @@ typeCheckingMode = "standard"
 # "standard" turns this one off, but it was the most useful thing
 # basedpyright had to say about this codebase: it found 14 bare `dict` /
 # `list` / `set` annotations in lib/drives.py, lib/zfs.py and
-# commands/setup.py. Keep it on — mypy benefits from those annotations too.
+# commands/setup.py. Keep it on - mypy benefits from those annotations too.
 reportMissingTypeArgument = "error"
 
 # basedpyright's own strict preset demands full annotation of everything

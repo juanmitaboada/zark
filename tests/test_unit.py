@@ -15364,6 +15364,78 @@ class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
         assert "wipefs -a /dev/sdz" in self._teardown(mock)
 
 
+class TestTypography:  # pylint: disable=missing-function-docstring
+    """M4c-3: no em dash, en dash or U+2026 in any tracked text file."""
+
+    _REPO = Path(__file__).resolve().parent.parent
+    _CHARS = {"\u2014": "em dash", "\u2013": "en dash", "\u2026": "U+2026"}
+    # Without git (a tarball, an unpacked source package): the tracked
+    # top-level directories, and everything a build or a tool leaves out.
+    _TOP_DIRS = frozenset(
+        {".github", "certificates", "commands", "debian", "docs", "etc", "lib", "tests"},
+    )
+    _SKIP_DIRS = frozenset(
+        {".git", ".tox", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache"},
+    )
+    _SKIP_PATHS = frozenset({"debian/zark", "debian/.debhelper", "debian/tmp"})
+
+    def _files(self) -> list[Path]:
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(self._REPO), "ls-files", "-z"],
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            r = None
+        if r is not None and r.returncode == 0 and r.stdout:
+            names = [n for n in r.stdout.decode("utf-8", "surrogateescape").split("\0") if n]
+            return [self._REPO / n for n in names]
+        out: list[Path] = []
+        for root, dirs, files in os.walk(self._REPO):
+            rel = Path(root).relative_to(self._REPO)
+            if rel == Path("."):
+                dirs[:] = [d for d in dirs if d in self._TOP_DIRS]
+                # Generated or local-only top-level files (see .gitignore).
+                files = [
+                    f
+                    for f in files
+                    if f != "PROJECT-NOTES.md" and not f.endswith((".log", ".tar.gz"))
+                ]
+            else:
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if d not in self._SKIP_DIRS and str(rel / d) not in self._SKIP_PATHS
+                ]
+            out += [Path(root) / f for f in files]
+        return out
+
+    def test_no_typographic_dashes_or_ellipsis(self):
+        found: list[str] = []
+        for path in self._files():
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                continue  # binary
+            for n, line in enumerate(text.splitlines(), 1):
+                found += [
+                    f"{path.relative_to(self._REPO)}:{n}: {name}"
+                    for ch, name in self._CHARS.items()
+                    if ch in line
+                ]
+        assert not found, "\n".join(found)
+
+    def test_the_fallback_walk_sees_the_tracked_tree(self):
+        with patch("subprocess.run", side_effect=OSError("no git")):
+            walked = {str(p.relative_to(self._REPO)) for p in self._files()}
+        want = {"zark", "README.md", "lib/sh.py", "debian/changelog", "tests/test_unit.py"}
+        assert want <= walked
+        assert not [w for w in walked if w.startswith(("m4s-review/", ".git/", "debian/zark/"))]
+
+
 def _run_one(name: str, method: Callable[[], object]) -> str:
     """Run one test and print its line; return "passed", "skipped" or "failed".
 

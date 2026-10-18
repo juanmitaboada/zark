@@ -13,7 +13,7 @@ body:
         - The issue is in zark itself, not in upstream ZFS / sanoid /
           GRUB / dracut / cryptsetup. Bugs in those go to their
           respective projects.
-        - For **security** issues, do not file a public bug — see
+        - For **security** issues, do not file a public bug - see
           [SECURITY.md](../blob/main/SECURITY.md).
 
   - type: input
@@ -112,7 +112,7 @@ body:
     attributes:
       label: Anything else
       description: |
-        Anything that might help — a workaround you found, kernel oops in
+        Anything that might help - a workaround you found, kernel oops in
         `dmesg`, related upstream bugs, your `known_drives.json` (with
         GUIDs/serials redacted), etc.
     validations:

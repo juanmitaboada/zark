@@ -4,7 +4,7 @@
 
 # NAME
 
-zark — full bare-metal ZFS backup and recovery for Ubuntu with encrypted root
+zark - full bare-metal ZFS backup and recovery for Ubuntu with encrypted root
 
 # SYNOPSIS
 
@@ -29,8 +29,8 @@ unlock it. Every backup adds one restore point to the drive and removes
 none; the only thing **zark** keeps in the source pool between backups is a
 bookmark per drive.
 
-A full restore — partitioning, **rpool** + **bpool** recreation, LUKS keystore
-reconstruction, GRUB and initramfs regeneration — runs from an Ubuntu Live USB
+A full restore - partitioning, **rpool** + **bpool** recreation, LUKS keystore
+reconstruction, GRUB and initramfs regeneration - runs from an Ubuntu Live USB
 in roughly one minute and yields a system that is structurally identical to
 the original installation. No custom artefacts are introduced and the
 recovered system continues to receive normal **apt**(8) upgrades.
@@ -72,11 +72,11 @@ for the canonical end-to-end sequences.
 :   Non-destructively scan all connected block devices for ZFS pools and
     classify each one against the registry in **known_drives.json**:
 
-    - *known* — name and pool GUID match a registered drive;
-    - *GUID changed* — pool name matches but the GUID differs (typically
+    - *known* - name and pool GUID match a registered drive;
+    - *GUID changed* - pool name matches but the GUID differs (typically
       after a re-prepare);
-    - *renamed* — the GUID matches but the pool has been renamed;
-    - *unknown* — the drive is not registered.
+    - *renamed* - the GUID matches but the pool has been renamed;
+    - *unknown* - the drive is not registered.
 
     For drives in the last three categories, **explore** prints the exact
     JSON snippet that should be added to **known_drives.json** to register
@@ -197,7 +197,7 @@ for the canonical end-to-end sequences.
     auto-eject, the drive's retention window and maximum age; see
     **Retention** under **backup**) is asked before anything is written. **prepare** then
     creates an unencrypted ZFS pool on the drive (encryption is provided by
-    the raw send from the encrypted source pool — adding a second layer
+    the raw send from the encrypted source pool - adding a second layer
     here would just hide the failure of the inner one) on its by-id name
     with an alternate root, so it is never written to
     */etc/zfs/zpool.cache*, sends one backup point of **rpool** and
@@ -266,9 +266,9 @@ for the canonical end-to-end sequences.
     to 10 minutes and saying so, for a running snapshot or prune pass; a
     timer that an earlier **zark** run stopped and could not restart is
     started again at the end), takes one snapshot
-    **zark_YYYY-MM-DD_HH:MM:SSZ** (UTC) of every replicated dataset — one
+    **zark_YYYY-MM-DD_HH:MM:SSZ** (UTC) of every replicated dataset - one
     **zfs snapshot** per pool, so all of **rpool** is captured in the same
-    transaction group — and brings every dataset on the drive to it with
+    transaction group - and brings every dataset on the drive to it with
     **zfs send** \| **zfs receive**. The base of each transfer is the
     drive's newest snapshot of that dataset: when the source still has it,
     the transfer is **-I** and carries the **sanoid** snapshots taken since
@@ -299,8 +299,8 @@ for the canonical end-to-end sequences.
     confirmations for destroys):
 
     - a dataset that exists only on the drive: ask again next time (the
-      default), keep it (not asked again), destroy it, or — when the
-      source renamed it — rename it on the drive too;
+      default), keep it (not asked again), destroy it, or - when the
+      source renamed it - rename it on the drive too;
     - datasets whose only snapshot in common with the source is older than
       the drive's newest (the first run on a drive written by an older
       **zark**, or a source recovered from an older point): one prompt
@@ -487,8 +487,8 @@ for the canonical end-to-end sequences.
     registered it offers to remove the backup points left in the source. **fix** rewrites *drive_id* from the
     connected disk that carries the registered pool GUID and writes every
     missing key. **retention** shows or changes a drive's retention: the
-    window in days (1–3650), the maximum age in days (**off**, or more than
-    the window) and the free-space margin in percent of the drive (0–50).
+    window in days (1-3650), the maximum age in days (**off**, or more than
+    the window) and the free-space margin in percent of the drive (0-50).
     Every write is validated and atomic; a malformed file is
     reported with its line and column and never overwritten.
 
@@ -523,13 +523,13 @@ for the canonical end-to-end sequences.
     continue instead of sending everything again; when those snapshots do
     not fit on the disk, or a dataset has none, the point alone is
     restored, and a line says so. It then shows a table with
-    the snapshot every dataset will be restored from — never one newer
-    than the point — and the mount properties it will get. Only after a
+    the snapshot every dataset will be restored from - never one newer
+    than the point - and the mount properties it will get. Only after a
     full pre-flight (sizes of that point, keystore, bpool) and a typed
     **YES** does it partition the internal disk as EFI + bpool + rpool,
     recreate **rpool** *with* native encryption to match the Ubuntu
     installer, raw-receive every first-level dataset tree (not only
-    **ROOT** and **USERDATA**), restore the LUKS keystore zvol last (which is mandatory — restoring
+    **ROOT** and **USERDATA**), restore the LUKS keystore zvol last (which is mandatory - restoring
     it earlier triggers a kernel udev crash documented in the Debian
     **zfs-linux** issue tracker), reinstates **encryptionroot** with
     **zfs change-key -i**, repopulates **bpool**, chroots into the
@@ -580,7 +580,7 @@ for the canonical end-to-end sequences.
     and a full scan comes last. An import that did not go through
     */dev/disk/by-id* is named in a warning, since the pool then records
     those names.
-    **chroot** refuses to run when **rpool** is already imported — if that
+    **chroot** refuses to run when **rpool** is already imported - if that
     is the running system you are already inside it, and if it is a
     leftover from a previous run, **prune**
 :   Reclaim space, interactively, in the source or on a connected registered
@@ -650,13 +650,13 @@ for the canonical end-to-end sequences.
 
     **Read-only is the default.** QEMU is started with **-snapshot**
     so any writes are discarded at shutdown and the underlying disk
-    is never modified — the recommended mode for verifying that a
+    is never modified - the recommended mode for verifying that a
     freshly restored system can actually boot.
 
     **--rw** opts into read-write mode. QEMU writes to the physical
     disk just like a real boot would. This is occasionally useful (for
     example, to allow first-boot self-healing of the hostid issue
-    described in **NOTES**) but requires interactive confirmation —
+    described in **NOTES**) but requires interactive confirmation -
     the operator must re-type the target device path verbatim.
 
     **--display** *WxH* sets the QEMU display resolution. Default is
@@ -725,7 +725,7 @@ for the canonical end-to-end sequences.
     With no argument, scans for connected backup drives. With the
     *target* **local** (aliases **system**, **rpool**) it instead mounts
     the **installed system's** top-level **rpool**/**bpool** from a live
-    USB — useful for inspecting the local disk without a full **chroot**.
+    USB - useful for inspecting the local disk without a full **chroot**.
 
     The complementary command is **umount**.
 
@@ -744,7 +744,7 @@ for the canonical end-to-end sequences.
     the installed system's pools mounted by **mount local**, unmounting
     only the tree under their alternate root. As a safety
     measure it refuses to export any pool whose alternate root is not
-    under */mnt/zark/* — that is the guard against exporting the running
+    under */mnt/zark/* - that is the guard against exporting the running
     system's own **rpool**.
 
 **clean**
@@ -828,7 +828,7 @@ To verify a recovery without rebooting:
     and **autoeject** (boolean; optional, default false). When
     **autoeject** is true the eject prompt for that drive shows a
     10-second countdown and then applies the command's default
-    automatically — any keypress cancels it and restores the normal
+    automatically - any keypress cancels it and restores the normal
     blocking prompt. **prepare** asks whether to enable it; it can also
     be toggled by editing the file. An optional **retention** object holds
     the drive's **window_days**, **max_age_days** and **margin_pct**; see
@@ -989,12 +989,12 @@ recovered system) install a complementary, earlier line of defence:
 **DPkg::Pre-Install-Pkgs** hook via
 */etc/apt/apt.conf.d/09zark-zfs-backup-guard*. APT runs it before
 **dpkg**(1) unpacks anything; if a boot-critical package (**linux-image**,
-**linux-headers**, **grub**, **shim**, **zfs**, …) is being installed
+**linux-headers**, **grub**, **shim**, **zfs**, ...) is being installed
 *while an external ZFS pool is connected*, the hook aborts the whole
 transaction. An external pool is one **zpool import** lists, or an imported
 one detected as the update-grub guard does. This stops a background **unattended-upgrades**(8) run from
-half-applying a kernel upgrade — new kernel unpacked, **update-grub**
-blocked by the guard above, old kernel autoremoved — which would leave
+half-applying a kernel upgrade - new kernel unpacked, **update-grub**
+blocked by the guard above, old kernel autoremoved - which would leave
 **grub.cfg** pointing at a missing kernel and the system unbootable.
 
 The hook is standalone: it detects pools with **zpool**(8) directly and

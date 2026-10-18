@@ -1,12 +1,12 @@
-# zark — Continuous Integration.
+# zark - Continuous Integration.
 #
 # Runs on every push and pull request:
 #
-#   tests  — matrix of Python 3.12 / 3.13 / 3.14, each runs `tox -e py3X`
+#   tests  - matrix of Python 3.12 / 3.13 / 3.14, each runs `tox -e py3X`
 #            on the unit-test suite (tests/test_unit.py). Three parallel
 #            jobs so a per-version regression is visible immediately.
 #
-#   lint   — single job pinned to Python 3.12, runs `tox -e lint`
+#   lint   - single job pinned to Python 3.12, runs `tox -e lint`
 #            (mypy + pylint + ruff check + ruff format --check) and then
 #            `tox -e types` (basedpyright).
 #            Versions come from pyproject.toml under [dependency-groups]
@@ -47,7 +47,7 @@ jobs:
     name: tests (py${{ matrix.python }})
     runs-on: ubuntu-latest
     strategy:
-      # Keep every Python version running even if one fails — we want the
+      # Keep every Python version running even if one fails - we want the
       # full picture of which versions break, not just the first hit.
       fail-fast: false
       matrix:
@@ -97,7 +97,7 @@ jobs:
   #
   # Builds the .deb on release tags (vX.Y.Z), uploads it as a workflow
   # artefact, and attaches it to the GitHub Release. Does NOT sign and
-  # does NOT upload to the PPA — those steps require the maintainer's
+  # does NOT upload to the PPA - those steps require the maintainer's
   # GPG key and run locally via `make deb-ppa`. See
   # debian/README.packaging.md for the PPA flow.
   package:
@@ -125,13 +125,13 @@ jobs:
         run: make deb
 
       - name: Run lintian (informational)
-        # Don't fail the build on lintian warnings — the maintainer
+        # Don't fail the build on lintian warnings - the maintainer
         # reviews them locally before PPA upload. We suppress the same
         # tags as `make deb` / `make deb-source` (see Makefile's
         # LINTIAN_SUPPRESS_TAGS for the rationale): bad-distribution-
         # in-changes-file fires because the base changelog uses
         # "unstable", which is rewritten to a concrete Ubuntu series
-        # only at PPA upload time (`make deb-ppa`) — never on the
+        # only at PPA upload time (`make deb-ppa`) - never on the
         # CI-built .deb. This keeps the CI log clean while preserving
         # the warning at the moment that matters most.
         run: lintian -i --suppress-tags bad-distribution-in-changes-file ../zark_*.changes || true
@@ -139,7 +139,7 @@ jobs:
       - name: Smoke test the built .deb
         # Install the freshly-built .deb on the runner and verify zark
         # starts. This catches regressions in debian/control's Depends:
-        # — if a dependency is missing, apt fails here. We also check
+        # - if a dependency is missing, apt fails here. We also check
         # that the symlink layout works (/usr/bin/zark resolves to
         # /usr/share/zark/zark via realpath) and that --help / --version
         # produce output, which exercises the lib/ and commands/ imports.
@@ -172,7 +172,7 @@ jobs:
           # (we are root in the runner, but the entry point's adaptive
           # help logic should produce sensible output either way).
           # We capture --help and assert key content is present, rather
-          # than piping to head -N — head closes its read end after N
+          # than piping to head -N - head closes its read end after N
           # lines, killing zark with SIGPIPE, which trips up `set -e`
           # under pipefail.
           zark --version
@@ -200,8 +200,8 @@ jobs:
         # '..' for security reasons, so copy the artefacts into the
         # workspace under dist/ before publishing them.
         # `make dist` (invoked transitively by `make deb`) produces
-        # zark_X.Y.Z.tar.gz in the project root — the canonical portable
-        # form referenced by the README — so we stage it alongside.
+        # zark_X.Y.Z.tar.gz in the project root - the canonical portable
+        # form referenced by the README - so we stage it alongside.
         run: |
           mkdir -p dist
           cp ../zark_*_all.deb       dist/

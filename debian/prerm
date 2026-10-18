@@ -1,5 +1,5 @@
 #!/bin/sh
-# zark prerm — on removal, disable and remove the status alerts that
+# zark prerm - on removal, disable and remove the status alerts that
 # `zark setup` installed (MOTD script, zark-status.timer and its service).
 # Not on upgrade: the new version keeps them.
 

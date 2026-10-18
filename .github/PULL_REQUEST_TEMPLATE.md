@@ -5,7 +5,7 @@
 
 ## Why
 
-<!-- The reason for the change. The diff already shows what changed —
+<!-- The reason for the change. The diff already shows what changed -
      this section explains why it had to change. Link issues with
      "Fixes #123" or "Refs #123" if applicable. -->
 

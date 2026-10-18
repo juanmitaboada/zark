@@ -15,12 +15,12 @@
 #
 # Two directives, both needed:
 #
-#   tar-ignore        — patterns excluded when dpkg-source itself
+#   tar-ignore        - patterns excluded when dpkg-source itself
 #                       generates a tarball (mostly defensive; we use
 #                       `make dist` for that, but if anyone ever runs
 #                       dpkg-source -b without -sa, this kicks in).
 #
-#   extend-diff-ignore — regex of paths to ignore when generating the
+#   extend-diff-ignore - regex of paths to ignore when generating the
 #                       upstream diff. This is what actually silences
 #                       the "local changes detected" abort.
 #

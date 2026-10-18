@@ -23,7 +23,7 @@ DEB_VERSION := $(subst -,~,$(VERSION))
 # in sync.
 #
 # bad-distribution-in-changes-file:
-#   debian/changelog uses "unstable" as the base distribution — the
+#   debian/changelog uses "unstable" as the base distribution - the
 #   Debian convention for "no specific series, will be retargeted at
 #   upload time". `make deb-ppa` rewrites it to a concrete Ubuntu
 #   series (noble/oracular/...) per upload, so the actual files going
@@ -39,7 +39,7 @@ LINTIAN_SUPPRESS_TAGS := bad-distribution-in-changes-file
 
 help: ## Show this help
 	@echo ""
-	@echo "  zark — Full bare-metal ZFS recovery for Ubuntu Encrypted ZFS"
+	@echo "  zark - Full bare-metal ZFS recovery for Ubuntu Encrypted ZFS"
 	@echo "  v$(VERSION)"
 	@echo ""
 	@echo "  Usage:  make <target>"
@@ -55,7 +55,7 @@ test: ## Run unit tests (no root, no ZFS needed)
 
 test-deps: ## Install integration test dependencies (qemu, ovmf, genisoimage)
 	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "  test-deps installs system packages — run with sudo:"; \
+		echo "  test-deps installs system packages - run with sudo:"; \
 		echo "    sudo make test-deps"; \
 		exit 1; \
 	fi
@@ -73,7 +73,7 @@ test-phase2: ## Run Phase 2 only (recover from existing backup.img)
 	@test -n "$(ISO)" || { echo "  Usage: sudo make test-phase2 ISO=/path/to/ubuntu.iso"; exit 1; }
 	$(PYTHON) tests/test_integration.py --phase 2 --iso $(ISO)
 
-test-phase3: ## Run Phase 3 only (boot recovered target.img — no ISO needed)
+test-phase3: ## Run Phase 3 only (boot recovered target.img - no ISO needed)
 	$(PYTHON) tests/test_integration.py --phase 3
 
 test-cleanup: ## Remove all integration test artifacts (source/backup/target images)
@@ -112,7 +112,7 @@ check: ## Syntax-check all Python files (fast, no dependencies)
 	$(PYTHON) -m py_compile zark
 	@echo "  All files OK"
 
-mypy: ## Type-check with mypy (strict — fails on any error)
+mypy: ## Type-check with mypy (strict - fails on any error)
 	@command -v mypy >/dev/null || { \
 		echo "  mypy not installed. Install with: pip install mypy --break-system-packages"; \
 		exit 1; \
@@ -203,7 +203,7 @@ tox: ## Run unit tests on Python 3.12, 3.13, 3.14 + lint + types (in isolated ve
 # at build time (see debian/rules). These targets let you iterate on the
 # Markdown without going through a full `make deb` cycle each time.
 #
-# The pipeline mirrors debian/rules verbatim — keep the two in sync if
+# The pipeline mirrors debian/rules verbatim - keep the two in sync if
 # you ever change one. Both substitute @VERSION@ in the source against
 # lib/config.py so we don't have to bump the manpage header by hand.
 
@@ -215,7 +215,7 @@ manpage: ## Build debian/zark.1 from debian/zark.1.md (pandoc + sed + awk)
 	@# We pipe the Markdown source through `sed` to substitute @VERSION@
 	@# *before* pandoc sees it, rather than after. pandoc --ascii escapes
 	@# any literal '@' in roff output as '\[at]', so a post-pandoc sed
-	@# would have to match '\[at]VERSION\[at]' — fragile. Substituting
+	@# would have to match '\[at]VERSION\[at]' - fragile. Substituting
 	@# upstream of pandoc keeps the substitution as a plain ASCII match.
 	sed 's/@VERSION@/$(VERSION)/g' debian/zark.1.md \
 	  | pandoc -s -f markdown-smart -t man --ascii -o debian/zark.1.raw
@@ -243,7 +243,7 @@ manpage-view: manpage ## Render debian/zark.1 with man (after rebuilding it)
 	man -l debian/zark.1
 
 manpage-lint: manpage ## Validate the generated manpage with mandoc + groff
-	@# mandoc -Tlint and groff -ww -z catch different things — mandoc's
+	@# mandoc -Tlint and groff -ww -z catch different things - mandoc's
 	@# parser is stricter on macro semantics, groff's is the reference
 	@# rendering implementation. Both must be clean for the manpage to be
 	@# considered ready for shipping.
@@ -279,7 +279,7 @@ clean: ## Remove __pycache__ and temp files
 	# wildcard to our own version to avoid touching unrelated files.
 	# Covers: .deb, .dsc, .changes, .buildinfo, .build (build log),
 	# .tar.* (debian tarball, debian.tar.xz), .orig.tar.* (upstream),
-	# and .upload (dput's "already-uploaded" marker — it lingers from
+	# and .upload (dput's "already-uploaded" marker - it lingers from
 	# previous dput runs and would suppress legitimate re-uploads when
 	# the previous Launchpad-side outcome was a rejection that dput
 	# never observed locally).
@@ -295,7 +295,7 @@ clean: ## Remove __pycache__ and temp files
 	rm -f debian/zark.1 debian/zark.1.raw 2>/dev/null || true
 	# `dist/` is created by CI (.github/workflows/ci.yml) to stage build
 	# artefacts inside the workspace before upload. Cleaning it here is
-	# defensive — local builds drop artefacts in the parent directory.
+	# defensive - local builds drop artefacts in the parent directory.
 	rm -rf dist 2>/dev/null || true
 
 # ── Release ──────────────────────────────────────────────────────────────
@@ -329,9 +329,9 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 	@# That failure is the intended guard: an unknown untracked file
 	@# stops the build instead of leaking into the .orig.
 	@#
-	@# REPRODUCIBILITY: tar(1) defaults bake in volatile state — file
+	@# REPRODUCIBILITY: tar(1) defaults bake in volatile state - file
 	@# mtimes, the user's UID/GID, the order in which the filesystem
-	@# returns directory entries — that all produce a different
+	@# returns directory entries - that all produce a different
 	@# byte-for-byte tarball each run, even with identical source.
 	@# Launchpad rejects an .orig.tar.gz upload if the same filename
 	@# already exists with different contents:
@@ -345,16 +345,16 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 	@# same filename but different bytes.
 	@#
 	@# We pin everything tar(1) and gzip(1) can vary:
-	@#   --sort=name       — directory entries in stable order
+	@#   --sort=name       - directory entries in stable order
 	@#   --owner=0 --group=0 --numeric-owner
-	@#                     — strip the maintainer's UID/GID
-	@#   --mtime=@$$ts     — single timestamp for every entry, taken
+	@#                     - strip the maintainer's UID/GID
+	@#   --mtime=@$$ts     - single timestamp for every entry, taken
 	@#                       from the last git commit (SOURCE_DATE_EPOCH
 	@#                       convention). Falls back to debian/changelog
 	@#                       timestamp if the working tree isn't a git
 	@#                       checkout (release tarball downloaded via
 	@#                       `wget` from GitHub, etc.).
-	@#   gzip -n           — no original-filename / no mtime in the
+	@#   gzip -n           - no original-filename / no mtime in the
 	@#                       gzip header
 	@#
 	@# Net effect: `make dist` is byte-for-byte reproducible across
@@ -395,7 +395,7 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 	@#   - new tool caches in the working tree breaking dpkg-source
 	@#     ("unexpected upstream changes") when not in source/options
 	@#
-	@# All artefacts are removed at the end — the working tree is left
+	@# All artefacts are removed at the end - the working tree is left
 	@# exactly as it was found.
 	@command -v dpkg-source >/dev/null || { \
 		echo "  dpkg-source not installed. Install with: sudo apt install dpkg-dev"; \
@@ -405,7 +405,7 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 	@# Verify upstream-purity: zark-X.Y.Z/debian/ must NOT exist in the tarball
 	@# The tarball's top directory is zark/ (see dist), not zark-<version>/.
 	@if tar tzf zark_$(VERSION).tar.gz | grep -q '^zark/debian/'; then \
-		echo "  FAIL: zark_$(VERSION).tar.gz contains debian/ — this should not happen"; \
+		echo "  FAIL: zark_$(VERSION).tar.gz contains debian/ - this should not happen"; \
 		rm -f zark_$(VERSION).tar.gz; \
 		exit 1; \
 	fi
@@ -420,16 +420,16 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 	@# debian/.debhelper, debian/files, debian/debhelper-build-stamp.
 	@# dpkg-source -b would then complain about "unwanted binary file"s
 	@# (the gzipped manpage and changelog inside debian/zark/). Wipe
-	@# them — same logic as `make clean` but limited to the debian/
+	@# them - same logic as `make clean` but limited to the debian/
 	@# bookkeeping so we don't disturb caches the previous fulltest
 	@# steps just produced.
 	@rm -rf debian/.debhelper debian/files debian/zark debian/debhelper-build-stamp 2>/dev/null || true
 	@# `make dist` left zark_X.Y.Z.tar.gz in the repo root (CI consumes
 	@# it from there). dpkg-source -b sees that file as an unrepresented
 	@# change vs the .orig (which is the same bytes!) and aborts. Remove
-	@# it now — we've already captured it as ../zark_X.Y.Z.orig.tar.gz.
+	@# it now - we've already captured it as ../zark_X.Y.Z.orig.tar.gz.
 	@rm -f zark_$(VERSION).tar.gz
-	@# Run dpkg-source -b . — the same call debuild would make, without
+	@# Run dpkg-source -b . - the same call debuild would make, without
 	@# the build/lintian/sign overhead. Capture rc to clean up before
 	@# propagating it.
 	@dpkg-source -b . ; rc=$$? ; \
@@ -448,21 +448,21 @@ fulltest: check tox-ruff mypy pylint basedpyright test manpage-lint dist-check t
 	@# dependency fails, the rest is skipped.
 	@#
 	@# Order is fast→slow so failures surface early:
-	@#   check        — py_compile, milliseconds
+	@#   check        - py_compile, milliseconds
 	@#   tox-ruff     - tox -e ruff: the pinned ruff of pyproject.toml,
 	@#                  full ruleset incl. RUF027 and the format check;
 	@#                  never the ruff in PATH (M4c-2)
-	@#   mypy        — ~10-15s (cold) / ~2-3s (warm)
-	@#   basedpyright — ~4s
-	@#   pylint      — ~15-20s
-	@#   test        — 94 unit tests, ~1-2s
-	@#   manpage-lint — pandoc + sed + awk + mandoc + groff, ~1s
-	@#   dist-check  — make dist + dpkg-source -b, ~3-5s
-	@#   tox         — tests on python3.12/3.13/3.14 + lint + types in
+	@#   mypy        - ~10-15s (cold) / ~2-3s (warm)
+	@#   basedpyright - ~4s
+	@#   pylint      - ~15-20s
+	@#   test        - 94 unit tests, ~1-2s
+	@#   manpage-lint - pandoc + sed + awk + mandoc + groff, ~1s
+	@#   dist-check  - make dist + dpkg-source -b, ~3-5s
+	@#   tox         - tests on python3.12/3.13/3.14 + lint + types in
 	@#                 venvs, ~40-70s
 	@#                 (tox-uv downloads any missing interpreter; see the
 	@#                  `tox` target and tox.ini)
-	@#   deb         — full debuild -b (binary .deb), ~10-15s
+	@#   deb         - full debuild -b (binary .deb), ~10-15s
 	@#                 LAST on purpose: it stages the install tree under
 	@#                 debian/zark/, which would confuse mypy in tox -e lint
 	@#                 (duplicate-module error from debian/zark/commands/
@@ -481,7 +481,7 @@ fulltest: check tox-ruff mypy pylint basedpyright test manpage-lint dist-check t
 	@#
 	@# Leave the working tree exactly as we found it: tests, manpage-lint
 	@# and deb generated artefacts that we now clean up. The caches mypy
-	@# / ruff / pytest / tox leave behind are intentionally PRESERVED —
+	@# / ruff / pytest / tox leave behind are intentionally PRESERVED -
 	@# they speed up the next fulltest run dramatically.
 	@$(MAKE) --no-print-directory fulltest-clean
 	@echo ""
@@ -524,13 +524,13 @@ version: ## Show current version
 # Launchpad rejects uploads to EOL series with "<series> is obsolete and
 # will not accept new uploads." Update this list when adding/dropping
 # support for a release. As of May 2026:
-#   - noble    (24.04 LTS) — supported until 2036
-#   - questing (25.10)     — supported until 2026-07
-#   - resolute (26.04 LTS) — to be released, accepted as upcoming
+#   - noble    (24.04 LTS) - supported until 2036
+#   - questing (25.10)     - supported until 2026-07
+#   - resolute (26.04 LTS) - to be released, accepted as upcoming
 # Releases dropped along the way (do not re-add without checking
 # https://wiki.ubuntu.com/Releases first):
-#   - oracular (24.10) — EOL 2025-07
-#   - plucky   (25.04) — EOL 2026-01
+#   - oracular (24.10) - EOL 2025-07
+#   - plucky   (25.04) - EOL 2026-01
 PPA_SERIES   := noble questing resolute
 # Upload target. We use a named profile (`zark-ppa`) rather than the
 # canonical `ppa:juanmitaboada/zark` shorthand so the configuration
@@ -547,7 +547,7 @@ PPA_DPUT_TGT := zark-ppa
 # the .orig and the working tree to produce the debian tarball; if the
 # release tarball is sitting in the root at that point, dpkg-source
 # treats it as an unrepresentable binary change and aborts. Moving
-# (not copying) the file fixes that — the orig becomes the canonical
+# (not copying) the file fixes that - the orig becomes the canonical
 # upstream source, and there's nothing left in the working tree that
 # diverges from it.
 ORIG_TARBALL := ../zark_$(DEB_VERSION).orig.tar.gz
@@ -582,13 +582,13 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 	@# Some keyrings end up with several historical keys for the same
 	@# email (rotated yearly, expired, revoked, replaced...). The
 	@# 'sec' record's second column tells us per-key validity:
-	@#   - 'u' = ultimate trust — the maintainer's current key
+	@#   - 'u' = ultimate trust - the maintainer's current key
 	@#   - '-' = valid, secret available, but not marked as own key
 	@#   - 'r' = revoked
 	@#   - 'e' = expired
 	@# We require 'u' and fall back to '-' only when no 'u' exists,
 	@# because GPG defaults (e.g. `gpg --clearsign` with no -u) also
-	@# pick the 'u' key — keeping our build consistent with what the
+	@# pick the 'u' key - keeping our build consistent with what the
 	@# user sees interactively.
 	@#
 	@# We extract the full fingerprint (the `fpr` record immediately
@@ -597,7 +597,7 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 	$(eval GPG_KEYID := $(shell gpg --list-secret-keys --with-colons juanmi@juanmitaboada.com 2>/dev/null | awk -F: 'BEGIN{want=0;u="";v=""} $$1=="sec" {want=($$2=="u")?1:(($$2=="-")?2:0); next} $$1=="fpr" && want==1 && !u {u=$$10} $$1=="fpr" && want==2 && !v {v=$$10} END{print (u ? u : v)}'))
 	@test -n "$(GPG_KEYID)" || { \
 		echo "  No usable GPG secret key for juanmi@juanmitaboada.com"; \
-		echo "  (revoked/expired keys are ignored — see debian/README.packaging.md §1.2)"; \
+		echo "  (revoked/expired keys are ignored - see debian/README.packaging.md §1.2)"; \
 		exit 1; \
 	}
 	@echo "  Signing with GPG key: $(GPG_KEYID)"
@@ -664,7 +664,7 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 	$(eval GPG_KEYID := $(shell gpg --list-secret-keys --with-colons juanmi@juanmitaboada.com 2>/dev/null | awk -F: 'BEGIN{want=0;u="";v=""} $$1=="sec" {want=($$2=="u")?1:(($$2=="-")?2:0); next} $$1=="fpr" && want==1 && !u {u=$$10} $$1=="fpr" && want==2 && !v {v=$$10} END{print (u ? u : v)}'))
 	@test -n "$(GPG_KEYID)" || { \
 		echo "  No usable GPG secret key for juanmi@juanmitaboada.com"; \
-		echo "  (revoked/expired keys are ignored — see debian/README.packaging.md §1.2)"; \
+		echo "  (revoked/expired keys are ignored - see debian/README.packaging.md §1.2)"; \
 		exit 1; \
 	}
 	@echo "  This will build and upload one source package per series:"
@@ -680,7 +680,7 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 	@# IMPORTANT: the backup MUST live outside the package source tree.
 	@# dh_clean (run by `debian/rules clean`, invoked by every
 	@# dpkg-buildpackage) deletes any *.bak file under the working tree
-	@# by default — see the find(1) expression in dh_clean. Storing the
+	@# by default - see the find(1) expression in dh_clean. Storing the
 	@# backup at debian/changelog.bak meant the first series uploaded
 	@# fine, but `debuild -S` of that series wiped the backup, so the
 	@# second series failed with "cannot stat 'debian/changelog.bak'".
@@ -692,7 +692,7 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 	@# We refresh the .orig tarball before each series because dch
 	@# modifies debian/changelog (which is fine, debian/ isn't compared)
 	@# but ALSO because if the working tree has any uncommitted change
-	@# outside debian/, we need that to be reflected in .orig too —
+	@# outside debian/, we need that to be reflected in .orig too -
 	@# otherwise dpkg-source -b aborts with "unexpected upstream changes".
 	@set -e; \
 	changelog_backup=$$(mktemp -t zark-changelog-XXXXXX); \
@@ -722,7 +722,7 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 		: "writes that file when the SFTP transfer completes and refuses" ; \
 		: "to re-send the same .changes if it exists, even if the previous" ; \
 		: "Launchpad-side outcome was a rejection (which dput does not see" ; \
-		: "— rejections come as asynchronous emails). Our deb-ppa has its" ; \
+		: "- rejections come as asynchronous emails). Our deb-ppa has its" ; \
 		: "own version-bumping safeguards, so dput's lock adds no value" ; \
 		: "for us and only causes false 'already uploaded' failures." ; \
 		rm -f "../zark_$(DEB_VERSION)-1$${suffix}_source.$(PPA_DPUT_TGT).upload"; \

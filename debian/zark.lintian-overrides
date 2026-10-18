@@ -4,7 +4,7 @@
 # to acknowledge rather than fix. Each entry must include a comment
 # explaining why the override is justified.
 
-# zark is hosted on GitHub, not the Debian BTS — there are no Debian
+# zark is hosted on GitHub, not the Debian BTS - there are no Debian
 # bugs for the initial upload to close. Removing this warning would
 # require either filing a synthetic Debian bug or migrating issue
 # tracking, neither of which makes sense for a Launchpad PPA.

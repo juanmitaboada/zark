@@ -10,7 +10,7 @@ body:
 
         **Before submitting**, please review the project scope:
 
-        zark deliberately stays narrow — ZFS-on-root Ubuntu with
+        zark deliberately stays narrow - ZFS-on-root Ubuntu with
         full-disk encryption, UEFI Secure Boot, and portable
         invocation. Proposals that broaden this scope (other
         distributions, non-encrypted setups, non-ZFS filesystems)
@@ -19,7 +19,7 @@ body:
 
         For **questions or design discussions**, prefer
         [Discussions](https://github.com/juanmitaboada/zark/discussions)
-        over a feature request — it keeps issues focused on actionable
+        over a feature request - it keeps issues focused on actionable
         work.
 
   - type: textarea
@@ -60,11 +60,11 @@ body:
     attributes:
       label: Does this stay within project scope?
       description: |
-        Be honest — features that broaden the scope are usually
+        Be honest - features that broaden the scope are usually
         rejected, but knowing up front helps the discussion.
       options:
         - "Yes, fits ZFS-on-root + encryption + UEFI use case"
-        - "Borderline — not sure"
+        - "Borderline - not sure"
         - "No, it would broaden zark beyond its current scope"
     validations:
       required: true

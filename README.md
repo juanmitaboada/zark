@@ -53,7 +53,7 @@ zark automates the entire process:
 | `finish`           | Post-recovery finalization (run from the recovered system)   |
 | `repair-boot`      | Fix boot issues from a live USB without full recovery        |
 | `chroot`           | Open an interactive chroot into the installed system (live USB) |
-| `mount`            | Mount a backup pool — or the local system (`mount local`) — for inspection/chroot |
+| `mount`            | Mount a backup pool - or the local system (`mount local`) - for inspection/chroot |
 | `umount`           | Unmount a backup pool, or the local system (`umount local`)  |
 | `clean`            | Release what an interrupted zark run left mounted or imported |
 | `purge`            | Securely wipe a managed backup drive                         |
@@ -87,18 +87,18 @@ and creates `/etc/zark/` for `known_drives.json`. Logs go to `/var/log/zark.log`
 
 ### Standalone .deb download (when PPA isn't an option)
 
-If you cannot or prefer not to add a PPA — restricted networks, offline systems, or simply a one-shot install — every release ships a prebuilt `.deb` as a release asset on GitHub:
+If you cannot or prefer not to add a PPA - restricted networks, offline systems, or simply a one-shot install - every release ships a prebuilt `.deb` as a release asset on GitHub:
 
 ```bash
 wget https://github.com/juanmitaboada/zark/releases/latest/download/zark_<VERSION>-1_all.deb
 sudo apt install ./zark_*.deb
 ```
 
-Same package, same layout as the PPA install — only the delivery channel differs. Updates are manual: re-download when a new release is announced.
+Same package, same layout as the PPA install - only the delivery channel differs. Updates are manual: re-download when a new release is announced.
 
 ### Portable tarball (required for live-USB recovery)
 
-For disaster recovery from a live USB — when there is no installed system to `apt install` into — head to the [**Releases page**](https://github.com/juanmitaboada/zark/releases/latest) and
+For disaster recovery from a live USB - when there is no installed system to `apt install` into - head to the [**Releases page**](https://github.com/juanmitaboada/zark/releases/latest) and
 download the `zark_X.Y.Z.tar.gz` asset attached to the latest release. Then:
 
 ```bash
@@ -117,7 +117,7 @@ to `<zark_root>/zark.log` next to the script (which survives reboot, since the p
 
 ### First-time setup
 
-Once per machine — installs sanoid for automatic snapshots and registers your backup drive:
+Once per machine - installs sanoid for automatic snapshots and registers your backup drive:
 
 ```bash
 sudo ./zark setup     # install sanoid + zfs tooling, configure snapshots
@@ -166,7 +166,7 @@ sudo ./zark finish    # regenerate grub.cfg, finalize Secure Boot chain
 
 ### Fix a broken boot by hand (chroot)
 
-When the pools are intact but the boot chain is broken — and you want to run a few commands inside the real system rather than a full `recover` — drop into a chroot from a live USB:
+When the pools are intact but the boot chain is broken - and you want to run a few commands inside the real system rather than a full `recover` - drop into a chroot from a live USB:
 
 ```bash
 sudo ./zark chroot          # imports rpool/bpool, unlocks, mounts, chroots in
@@ -240,7 +240,7 @@ Block-level replication via `zfs send -w` (raw/encrypted) is fundamentally diffe
 
 ### Why not syncoid?
 
-zark 1.x replicated with syncoid. syncoid bases each incremental on the newest snapshot common to both sides and receives with `-F`, so every backup destroyed the drive's snapshots newer than that base — the previous backups' restore points — once the source had pruned them. zark 2 runs its own loop: the base is always the drive's newest snapshot, found in the source as a snapshot or, once pruned there, through this drive's bookmark; receives are never forced; anything that would destroy data on the drive is a question asked before the transfer starts.
+zark 1.x replicated with syncoid. syncoid bases each incremental on the newest snapshot common to both sides and receives with `-F`, so every backup destroyed the drive's snapshots newer than that base - the previous backups' restore points - once the source had pruned them. zark 2 runs its own loop: the base is always the drive's newest snapshot, found in the source as a snapshot or, once pruned there, through this drive's bookmark; receives are never forced; anything that would destroy data on the drive is a question asked before the transfer starts.
 
 ### The GRUB guard
 
@@ -250,7 +250,7 @@ zark installs `09_zfs_backup_guard`, a lightweight script that detects external 
 
 ### The apt guard
 
-The GRUB guard fires late: it can refuse to regenerate `grub.cfg`, but by then a kernel package upgrade has already unpacked the new kernel into `/boot` and autoremove may have pulled the old one — leaving a `grub.cfg` that points at a kernel which no longer exists. This is exactly how a background `unattended-upgrades` run, with a backup drive still connected, can brick a system.
+The GRUB guard fires late: it can refuse to regenerate `grub.cfg`, but by then a kernel package upgrade has already unpacked the new kernel into `/boot` and autoremove may have pulled the old one - leaving a `grub.cfg` that points at a kernel which no longer exists. This is exactly how a background `unattended-upgrades` run, with a backup drive still connected, can brick a system.
 
 To close that vector, `setup` (on the running system) and `recover`/`finish` (on a recovered system) install an apt guard: a standalone `/usr/local/lib/zark/apt-zfs-backup-guard` script wired in as a `DPkg::Pre-Install-Pkgs` hook. APT runs it *before* dpkg unpacks anything; when a boot-critical package (`linux-image-*`, `linux-headers-*`, `grub-*`, `shim-*`, `zfs-*`) is being installed while an external ZFS pool is connected (detected as the GRUB guard does), the hook aborts the entire transaction. It detects pools with `zpool` directly (no dependency on zark itself), so it keeps protecting a recovered system after the live USB is gone. zark's own recovery flows set `ZARK_INTERNAL=1` to bypass it; a login-time MOTD reminder (`/etc/update-motd.d/99-zark-external-pool`) warns when an external pool is attached.
 
@@ -277,18 +277,18 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 
 ## Compatibility
 
-- **Ubuntu 24.04 LTS** — uses initramfs-tools hooks for keystore unlock.
-- **Ubuntu 25.04 / 25.10** — uses dracut module (89keystore) with systemd-ask-password integration. zark detects which generator the system has at recovery time.
-- **Ubuntu 26.04 LTS** — same dracut path as 25.04+, plus shim 15.8 (`.signed.latest`) pinning during recovery to avoid the SBAT revocation that affects fresh subiquity installs left pointing at `.signed.previous`.
-- **Cross-host recovery** — backups are portable across machines: a backup taken on machine A can be restored onto machine B with a different drive layout / firmware. zark rewrites every `--fs-uuid` reference in `grub.cfg` (including those carrying `--hint-bios` / `--hint-efi` / `--hint-baremetal` options) so the recovered system boots regardless of where its disks land in the new BIOS enumeration.
-- **ZFS encryption** — AES-256-GCM with `keyformat=raw`, encryption key on a LUKS-encrypted zvol (the keystore).
-- **bpool features** — restricted to the GRUB-readable subset documented in `/usr/share/zfs/compatibility.d/grub2`. zark explicitly does not enable `head_errlog` or `vdev_zaps_v2` on bpool: even GRUB 2.14 (Ubuntu 26.04) cannot read either, and activating them produces an unbootable system. rpool is unaffected and uses whatever features the running ZFS supports.
+- **Ubuntu 24.04 LTS** - uses initramfs-tools hooks for keystore unlock.
+- **Ubuntu 25.04 / 25.10** - uses dracut module (89keystore) with systemd-ask-password integration. zark detects which generator the system has at recovery time.
+- **Ubuntu 26.04 LTS** - same dracut path as 25.04+, plus shim 15.8 (`.signed.latest`) pinning during recovery to avoid the SBAT revocation that affects fresh subiquity installs left pointing at `.signed.previous`.
+- **Cross-host recovery** - backups are portable across machines: a backup taken on machine A can be restored onto machine B with a different drive layout / firmware. zark rewrites every `--fs-uuid` reference in `grub.cfg` (including those carrying `--hint-bios` / `--hint-efi` / `--hint-baremetal` options) so the recovered system boots regardless of where its disks land in the new BIOS enumeration.
+- **ZFS encryption** - AES-256-GCM with `keyformat=raw`, encryption key on a LUKS-encrypted zvol (the keystore).
+- **bpool features** - restricted to the GRUB-readable subset documented in `/usr/share/zfs/compatibility.d/grub2`. zark explicitly does not enable `head_errlog` or `vdev_zaps_v2` on bpool: even GRUB 2.14 (Ubuntu 26.04) cannot read either, and activating them produces an unbootable system. rpool is unaffected and uses whatever features the running ZFS supports.
 - **Platform self-test** - `sudo zark selftest` checks, on file-backed pools that touch no disk, the ZFS, util-linux, systemd, kernel and Python behaviours zark relies on that a test can reach without a boot or a change to the running system (`--stick <device>` adds the checks that need a real disk, on a scratch stick it erases); what it leaves out (GRUB, Secure Boot, dracut, USB bridges' cache flushes, among others) is listed under the M4s "Known limitations" in `CHANGELOG.md`. Each release ships the results certified on the maintainer's machine; `zark selftest status` says whether they cover yours, and `zark selftest report` prints a link to share yours.
 - **Drives readable by older live sessions** - `prepare` creates new drives with `compatibility=openzfs-2.2`, so an Ubuntu 24.04 live (OpenZFS 2.2) can read them; `recover` names, before importing anything, any feature of a drive the live's ZFS cannot read.
-- **Secure Boot** — full compliance via signed GRUB chain (shimx64 → grubx64.signed → kernel).
+- **Secure Boot** - full compliance via signed GRUB chain (shimx64 → grubx64.signed → kernel).
 - **Hardware tested:**
-  - MINISFORUM UM890 (Ubuntu 24.04 + 25.10 + 26.04) — primary development system.
-  - Dell XPS 9315 with NVMe (Ubuntu 25.10) — secondary, used for cross-host validation against the MINISFORUM.
+  - MINISFORUM UM890 (Ubuntu 24.04 + 25.10 + 26.04) - primary development system.
+  - Dell XPS 9315 with NVMe (Ubuntu 25.10) - secondary, used for cross-host validation against the MINISFORUM.
   - Disk-failure recovery on a separate Ubuntu 24.04 system, restoring from a zark 1.x (syncoid) backup.
 - **CI/test:** end-to-end QEMU/OVMF integration harness validates Phase 1 (create + backup), Phase 2 (recover), and Phase 3 (boot the recovered disk).
 
@@ -335,7 +335,7 @@ Example:
 
 ## Drive rotation and retention policy
 
-zark supports rotating multiple backup drives — one at home, one off-site, an archival copy in a desk drawer — with no limit on how long a drive stays disconnected.
+zark supports rotating multiple backup drives - one at home, one off-site, an archival copy in a desk drawer - with no limit on how long a drive stays disconnected.
 
 ### Anchors
 
@@ -383,12 +383,12 @@ A dataset with nothing in common with the drive (recreated in the source, or its
 
 ## Safe USB disconnect
 
-ZFS issues writes with FUA (Force Unit Access) on critical metadata — uberblocks and the four redundant pool labels — meaning "do not acknowledge until this byte is on persistent media, not in volatile cache." Many cheap USB-SATA bridge chipsets ignore FUA and acknowledge from internal DRAM. ZFS believes the write is committed and `zpool export` reports success while the bridge still holds dirty pages; if the operator unplugs at that moment the kernel emits a last-ditch `SYNCHRONIZE CACHE` over the disconnecting cable, it fails with `DID_ERROR`, and the pending writes — possibly including the labels — are lost. Result: the pool comes back **FAULTED** on next import with `failed to unpack label 0/1/2/3`. Unrecoverable; not even `zpool import -FX` brings it back.
+ZFS issues writes with FUA (Force Unit Access) on critical metadata - uberblocks and the four redundant pool labels - meaning "do not acknowledge until this byte is on persistent media, not in volatile cache." Many cheap USB-SATA bridge chipsets ignore FUA and acknowledge from internal DRAM. ZFS believes the write is committed and `zpool export` reports success while the bridge still holds dirty pages; if the operator unplugs at that moment the kernel emits a last-ditch `SYNCHRONIZE CACHE` over the disconnecting cable, it fails with `DID_ERROR`, and the pending writes - possibly including the labels - are lost. Result: the pool comes back **FAULTED** on next import with `failed to unpack label 0/1/2/3`. Unrecoverable; not even `zpool import -FX` brings it back.
 
 zark protects against this in two layers at every point where a command finishes with a pool exported:
 
-1. **`sync(2)` + 2-second pause** — pushes the kernel page cache and dirty block-device buffers to the device, then gives the bridge firmware time to drain its internal queue. Always runs, no prompt.
-2. **Interactive `eject` prompt** — `eject(1)` issues SCSI `SYNCHRONIZE CACHE (0x35)` followed by `START STOP UNIT (stop=1)`. SYNCHRONIZE CACHE is the device's most authoritative flush primitive (the bridge sees it as a distinguished operation, distinct from inline FUA — most chipsets that cheat on FUA still honour it). STOP UNIT then powers the controller down.
+1. **`sync(2)` + 2-second pause** - pushes the kernel page cache and dirty block-device buffers to the device, then gives the bridge firmware time to drain its internal queue. Always runs, no prompt.
+2. **Interactive `eject` prompt** - `eject(1)` issues SCSI `SYNCHRONIZE CACHE (0x35)` followed by `START STOP UNIT (stop=1)`. SYNCHRONIZE CACHE is the device's most authoritative flush primitive (the bridge sees it as a distinguished operation, distinct from inline FUA - most chipsets that cheat on FUA still honour it). STOP UNIT then powers the controller down.
 
 The eject is **never automatic**. After the success banner, zark asks:
 
@@ -407,7 +407,7 @@ with a command-specific default chosen to match the typical next step:
 | `prepare`          | no            | Canonical follow-up is `backup` against the same drive. |
 | `repair-boot`      | n/a           | No removable drive involved; no prompt. |
 
-If the prompt is answered without input (script, cron, systemd timer), the default applies. There is no `--eject` / `--no-eject` flag — the prompt with a sensible default is the only knob.
+If the prompt is answered without input (script, cron, systemd timer), the default applies. There is no `--eject` / `--no-eject` flag - the prompt with a sensible default is the only knob.
 
 zark then emits one of two banners depending on the answer:
 
@@ -423,13 +423,13 @@ zark then emits one of two banners depending on the answer:
 
 The colours and icons are deliberately disjoint so the two states are never confused.
 
-**Side-effect of STOP UNIT**: after a successful eject the drive **disappears from `/dev`** until physically replugged. This is intentional and lines up with the workflow. If a follow-up command on the same drive is planned, answer `n` and the drive stays in `/dev` — the kernel-side flush has still run, so a clean `umount` or another zark command later will prompt again.
+**Side-effect of STOP UNIT**: after a successful eject the drive **disappears from `/dev`** until physically replugged. This is intentional and lines up with the workflow. If a follow-up command on the same drive is planned, answer `n` and the drive stays in `/dev` - the kernel-side flush has still run, so a clean `umount` or another zark command later will prompt again.
 
 `repair-boot` does not prompt: it touches only the internal rpool/bpool on the system disk, never a removable drive, and refuses to run with external pools imported.
 
 ### Read-back verification
 
-A clean `zpool export` is not proof that the pool survived. The same FUA-lying bridges can also lose **spacemaps** while the labels persist, so the pool scans as `ONLINE` but fails a real open deep in `vdev_load` with `metaslab_init failed [error=52]` — discovered only when you finally need the backup. To catch this immediately, `backup` re-imports the pool **read-only** after export (dropping the page cache first so the read comes from the device, not RAM) and requires `ONLINE` before declaring the backup safe. If the re-import fails, or the pool comes back with errors, it prints **`BACKUP NOT VERIFIED`** and stops short of the safe-to-unplug prompt: the data is not trustworthy even though the transfer and the export reported success. This is always on.
+A clean `zpool export` is not proof that the pool survived. The same FUA-lying bridges can also lose **spacemaps** while the labels persist, so the pool scans as `ONLINE` but fails a real open deep in `vdev_load` with `metaslab_init failed [error=52]` - discovered only when you finally need the backup. To catch this immediately, `backup` re-imports the pool **read-only** after export (dropping the page cache first so the read comes from the device, not RAM) and requires `ONLINE` before declaring the backup safe. If the re-import fails, or the pool comes back with errors, it prints **`BACKUP NOT VERIFIED`** and stops short of the safe-to-unplug prompt: the data is not trustworthy even though the transfer and the export reported success. This is always on.
 
 ### Known-bad enclosures and the UAS quirk
 
@@ -467,7 +467,7 @@ sudo make test-real ISO=/path/to/ubuntu.iso   # full run (all 3 phases)
 
 **Integration tests do not run in GitHub Actions.** GitHub-hosted runners lack nested KVM, the recovery flow needs root and the ZFS kernel modules, and the full run takes ~15 minutes per phase. They are intended for local validation on real hardware (or a workstation with KVM enabled) before tagging a release.
 
-The harness can also run individual phases — useful while iterating on a single phase without re-creating earlier artifacts:
+The harness can also run individual phases - useful while iterating on a single phase without re-creating earlier artifacts:
 
 ```bash
 sudo make test-phase1 ISO=/path/to/ubuntu.iso  # create test system + backup
@@ -501,9 +501,9 @@ Tool configuration lives in `pyproject.toml` (mypy, pyright, black, isort, flake
 
 Symptom: while running zark from the Ubuntu live USB, a small dialog appears with a question mark icon, the title `System program problem detected`, the question `Do you want to report the problem now?`, and two buttons: `Cancel` and `Report problem...`.
 
-Cause: this is **Apport**, Ubuntu's automatic crash-reporting agent. The popup is unrelated to zark — it's triggered when an unrelated background process on the live USB (typically `udisks2`, `systemd-udevd`, or one of the GNOME volume monitors) gets confused by the rapid disk activity zark performs (`zpool create`, `wipefs`, `sgdisk`, repeated mount/unmount cycles). Apport flags this as a system anomaly and asks the user whether to send a report to Canonical. **It does not mean zark has failed.** zark prints its own errors clearly in the terminal where you ran it, prefixed with `[FATAL]` or `[WARN]`.
+Cause: this is **Apport**, Ubuntu's automatic crash-reporting agent. The popup is unrelated to zark - it's triggered when an unrelated background process on the live USB (typically `udisks2`, `systemd-udevd`, or one of the GNOME volume monitors) gets confused by the rapid disk activity zark performs (`zpool create`, `wipefs`, `sgdisk`, repeated mount/unmount cycles). Apport flags this as a system anomaly and asks the user whether to send a report to Canonical. **It does not mean zark has failed.** zark prints its own errors clearly in the terminal where you ran it, prefixed with `[FATAL]` or `[WARN]`.
 
-What to do: the safest action is to **ignore the popup, send it to the background, and keep working in the terminal**. Don't click `Report problem...` (it tries to launch a web browser to upload the crash, which on a live USB without configured network can hang things further) and don't force-close the window (closing Apport abnormally can spawn another popup reporting Apport's own crash). The dialog is harmless — just leave it there until you finish the operation.
+What to do: the safest action is to **ignore the popup, send it to the background, and keep working in the terminal**. Don't click `Report problem...` (it tries to launch a web browser to upload the crash, which on a live USB without configured network can hang things further) and don't force-close the window (closing Apport abnormally can spawn another popup reporting Apport's own crash). The dialog is harmless - just leave it there until you finish the operation.
 
 If the popups become distracting during a long session, you can stop Apport for the rest of the live boot:
 
@@ -535,7 +535,7 @@ Since v1.0.7, `zark recover` proactively pins to `.latest` before reinstalling t
    ```
 4. Re-enable Secure Boot in firmware and reboot. The system should now start.
 
-After this rescue, your sanoid snapshots include the corrected boot chain — the next `zark backup` will be clean.
+After this rescue, your sanoid snapshots include the corrected boot chain - the next `zark backup` will be clean.
 
 To detect and fix the same issue on your live system before it's too late, run `zark setup`. Step 5 of setup now inspects the alternatives and offers (with confirmation) to switch them.
 

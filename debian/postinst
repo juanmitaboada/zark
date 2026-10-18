@@ -1,5 +1,5 @@
 #!/bin/sh
-# zark postinst — ensure /etc/zark/ exists with sane permissions.
+# zark postinst - ensure /etc/zark/ exists with sane permissions.
 # We deliberately do NOT auto-create /etc/zark/known_drives.json:
 # zark's onboarding flow guides the user through creating it from
 # the example file the first time they run an applicable command.

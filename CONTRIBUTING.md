@@ -1,7 +1,7 @@
 # Contributing to zark
 
 Thanks for your interest, thank you!. zark is a small project, so the process is
-informal — but a few conventions help keep contributions reviewable.
+informal - but a few conventions help keep contributions reviewable.
 
 ## Reporting bugs and requesting features
 
@@ -17,7 +17,7 @@ For bugs include:
 - For recovery issues: the QEMU command line if you reproduced inside
   the simulator, or the `dmesg` output around the failure
 
-For **security** issues do **not** open a public issue — see
+For **security** issues do **not** open a public issue - see
 [`SECURITY.md`](SECURITY.md) for the responsible disclosure process.
 
 ## Setting up a development environment
@@ -52,7 +52,7 @@ Specifically the bar is:
   use `tests/mock_sh.py` so they run without root or real ZFS.
 - **mypy**: `mypy .` reports zero errors in default mode.
 - **pylint**: `pylint lib commands tests zark` reports `10.00/10`.
-- **ruff**: in particular the `RUF027` rule must pass — it catches the
+- **ruff**: in particular the `RUF027` rule must pass - it catches the
   stripped-`f` bug that broke v1.0.4.
 
 Integration tests (`tests/test_integration.py`) require root, KVM, and
@@ -64,12 +64,12 @@ by the maintainer before each release.
 - One logical change per PR. Refactors and behavioural changes go in
   separate PRs whenever practical.
 - Commit messages: imperative mood subject under 72 chars, followed by
-  a blank line and a paragraph explaining the *why* (not the *what* —
+  a blank line and a paragraph explaining the *why* (not the *what* -
   the diff already shows that). See recent `git log` for the style.
 - Update `CHANGELOG.md` under the appropriate section
   (`### Security`, `### Tooling`, `### Distribution`, etc.) for any
   user-visible change.
-- Do not bump the version in `lib/config.py` — the maintainer does
+- Do not bump the version in `lib/config.py` - the maintainer does
   that as part of the release commit.
 
 ## Code style notes

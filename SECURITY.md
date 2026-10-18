@@ -11,7 +11,7 @@ release on the `main` branch receives security fixes.
 | Older   | :x:                |
 
 If you are running a release older than the current one, please upgrade
-before reporting — the issue may already be fixed.
+before reporting - the issue may already be fixed.
 
 ## Reporting a vulnerability
 
@@ -66,7 +66,7 @@ To help triage and reproduce, please provide:
 The following are **not** considered security vulnerabilities in zark:
 
 - Issues in upstream dependencies (ZFS, sanoid, GRUB, dracut,
-  cryptsetup) — please report those to the respective projects
+  cryptsetup) - please report those to the respective projects
 - Configuration mistakes by the operator (e.g. weak LUKS passphrase,
   unencrypted backup destination)
 - Issues that require physical access to a machine that is already

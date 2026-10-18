@@ -19,8 +19,8 @@ sd X:0:0:0: [sdX] Write cache: enabled, read cache: enabled, doesn't support DPO
 
 Such a bridge can acknowledge a cache-flush command (and therefore let
 `zpool export` return success) while the data backing that flush never actually
-reached the SSD's NAND. The pool's labels and uberblocks — written at fixed
-positions — may survive, but the **spacemaps** written during the closing burst
+reached the SSD's NAND. The pool's labels and uberblocks - written at fixed
+positions - may survive, but the **spacemaps** written during the closing burst
 of a transfer do not. The pool then looks exported-OK but is no longer
 importable.
 
@@ -38,7 +38,7 @@ spa_load(<pool>, config trusted): FAILED: vdev_load failed [error=52]
 ```
 
 `zpool import` (scan only, reading labels) reports the pool **ONLINE**, which
-is misleading — the labels are intact. The real failure only appears on a full
+is misleading - the labels are intact. The real failure only appears on a full
 open. `error=52` is `EBADE` ("Invalid exchange"); `zdb -e <pool>` surfaces the
 same as `can't open '<pool>': Invalid exchange`.
 
@@ -69,13 +69,13 @@ and targets the correct partition. See `pool_import` in `lib/zfs.py`.
 ### Distinguishing healthy from broken at disconnect
 
 The kernel always attempts a final cache flush when a USB device leaves the
-bus. On these bridges that final flush often *fails* — but the `hostbyte`
+bus. On these bridges that final flush often *fails* - but the `hostbyte`
 distinguishes harmless from harmful:
 
 | Context | Transport | `hostbyte` at flush | Meaning |
 |---|---|---|---|
-| During operation, under write load | UAS | `DID_ERROR` (+ `uas_eh_*` resets) | Transport stalled with dirty data in flight — this is what corrupts |
-| At unplug, pool already exported | usb-storage (quirked) | `DID_NO_CONNECT` | Device simply gone; nothing dirty pending — harmless |
+| During operation, under write load | UAS | `DID_ERROR` (+ `uas_eh_*` resets) | Transport stalled with dirty data in flight - this is what corrupts |
+| At unplug, pool already exported | usb-storage (quirked) | `DID_NO_CONNECT` | Device simply gone; nothing dirty pending - harmless |
 
 `Synchronize Cache(10) failed` on its own is **not** a usable health signal: it
 appears on every clean disconnect too. The only reliable signal is whether the
@@ -83,16 +83,16 @@ pool **reads back**. zark therefore re-imports the pool read-only after export
 and requires `ONLINE` before reporting the backup safe (see
 `verify_exported_pool_readback` in `lib/zfs.py`).
 
-## Mitigation 1 — read-back verification (always on)
+## Mitigation 1 - read-back verification (always on)
 
 After exporting, zark drops the page cache and re-imports the pool read-only,
 no-mount, by the exact device, and requires health `ONLINE`. If the re-import
 fails (the `error=52` signature) the backup is reported **NOT VERIFIED** and
 the operator is told not to rely on it. This converts a silent, deferred loss
-into an immediate, visible failure. It does not *prevent* the bridge lying — it
+into an immediate, visible failure. It does not *prevent* the bridge lying - it
 *detects* it while you can still act.
 
-## Mitigation 2 — force usb-storage instead of UAS (system-level)
+## Mitigation 2 - force usb-storage instead of UAS (system-level)
 
 For a known-bad bridge you can disable the UAS driver for that specific
 VID:PID, forcing the more conservative `usb-storage` transport. This is a
@@ -102,9 +102,9 @@ prevention.
 Observed offending bridges (same vendor, different products, both seen on
 Micron CT2000X10* SSDs in USB-SATA enclosures):
 
-  * `idVendor=0634 idProduct=5604` — CT2000X10PROSSD9 enclosure. Confirmed to
+  * `idVendor=0634 idProduct=5604` - CT2000X10PROSSD9 enclosure. Confirmed to
     corrupt a pool under write load (the original incident).
-  * `idVendor=0634 idProduct=5607` — CT2000X10SSD9 enclosure. Same family:
+  * `idVendor=0634 idProduct=5607` - CT2000X10SSD9 enclosure. Same family:
     reports no FUA, defaults to UAS, and shows `DID_ERROR` on the disconnect
     cache flush. Treated as corruption-prone for the same reasons, even though
     a given backup may happen to survive.
@@ -137,7 +137,7 @@ usb-storage X-X:1.0: Quirks match for vid 0634 pid 5604: 800000
 scsi hostN: usb-storage
 ```
 
-If you instead see `scsi hostN: uas`, the quirk did not take — recheck the file
+If you instead see `scsi hostN: uas`, the quirk did not take - recheck the file
 and that the modules were reloaded after the device was unplugged.
 
 With the quirk in place, the bridge stops stalling under write load: the
@@ -158,7 +158,7 @@ To assess an enclosure before trusting it, run `zark health` and choose the
 read-only check for a quick risk read, or the destructive write-and-verify
 test on a blank drive to reproduce the failure deliberately. The destructive
 test writes with transaction churn and re-imports the pool; its **cold** pass
-(power down, physically reconnect, re-import) is the most faithful — it forces
+(power down, physically reconnect, re-import) is the most faithful - it forces
 the read-back to come from NAND rather than the bridge's DRAM, which is where
 a lying bridge would otherwise hide a not-yet-persisted write. A `FAIL` there
 is strong evidence the enclosure should not be used for backups. When a risk

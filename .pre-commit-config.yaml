@@ -1,4 +1,4 @@
-# zark — pre-commit hooks.
+# zark - pre-commit hooks.
 #
 # NOTE on tooling versions: mypy, pylint and ruff are pinned both here
 # (by git rev) and in pyproject.toml under [dependency-groups] (dev, whose
@@ -9,8 +9,8 @@
 #
 # NOTE on basedpyright: deliberately NOT a hook, even though it now reports
 # clean. It is an npm-backed package that checks the whole project rather
-# than the files being committed, so it runs in the gate that runs once —
-# `make lint`, `make fulltest`, `tox -e types` and CI — instead of on every
+# than the files being committed, so it runs in the gate that runs once -
+# `make lint`, `make fulltest`, `tox -e types` and CI - instead of on every
 # commit. It is configured in pyproject.toml under [tool.pyright].
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
@@ -81,14 +81,14 @@ repos:
 # altroot. codespell reports one real typo and needs no system dictionary.
 #
 # -L is its ignore list. Every entry is a real term used in this repo, not a
-# mistake, so nothing here is a file-level exclusion — new text in these
+# mistake, so nothing here is a file-level exclusion - new text in these
 # files still gets checked:
-#   anc          — the `_nearest_recursive_ancestor` local in commands/setup.py
-#   ans          — the `read -r -p ... ans` shell variable in the Makefile
-#   fpr          — GPG's colon-format record type, parsed by the awk in
+#   anc          - the `_nearest_recursive_ancestor` local in commands/setup.py
+#   ans          - the `read -r -p ... ans` shell variable in the Makefile
+#   fpr          - GPG's colon-format record type, parsed by the awk in
 #                  the Makefile's deb-source / deb-ppa targets
-#   renderD      — the /dev/dri/renderD* DRM render nodes in commands/simulate.py
-#   unparseable  — the variant spelling used in test names
+#   renderD      - the /dev/dri/renderD* DRM render nodes in commands/simulate.py
+#   unparseable  - the variant spelling used in test names
 #                  (test_dataset_used_bytes_unparseable and friends)
 -   repo: https://github.com/codespell-project/codespell
     rev: v2.4.3
