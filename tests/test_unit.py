@@ -4667,6 +4667,32 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
             health_cmd.run([])
         assert "Pool black: exported, zpool import reports DEGRADED" in out.getvalue()
 
+    def test_a_test_pool_left_behind_is_printed(self):
+        # M4aV-3 V14: the destructive run's cleanup failure reaches the operator.
+        out = StringIO()
+        mock = MockShell()
+        mock.on_prefix("lsblk -no NAME /dev/sdb").succeeds("")
+        mock.on("blkid /dev/sdb").succeeds("")
+        test = HealthResult(
+            "fast", False, 1, 0.0, True, "ONLINE", cleanup_error="zpool destroy failed: x"
+        )
+        with (
+            patch_sh(mock),
+            patch.object(health_cmd, "_select_device", return_value="/dev/sdb"),
+            patch.object(health_cmd, "validate_external_block_device"),
+            patch.object(health_cmd, "measure_write_speed", return_value=0.0),
+            patch.object(health_cmd, "device_size_bytes", return_value=8 * 1024**3),
+            patch.object(health_cmd, "check_device", return_value=HealthReport("/dev/sdb")),
+            patch.object(health_cmd, "run_destructive_test", return_value=test),
+            patch.object(health_cmd, "generate_report", return_value=""),
+            patch.object(health_cmd, "write_report_file", return_value="/tmp/r.txt"),
+            patch.object(Log, "ask_choice", side_effect=[1, 0]),  # destructive, fast
+            patch.object(Log, "ask", side_effect=[False, True, False]),  # obfuscate, go, cold
+            redirect_stdout(out),
+        ):
+            health_cmd.run([])
+        assert "Test pool was not destroyed: zpool destroy failed: x" in out.getvalue()
+
     def test_imported_clean_pool_is_ok(self):
         mock = MockShell()
         mock.on("zpool list -H -o guid,name").succeeds("42\tblack")
@@ -4921,8 +4947,10 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
                 assert "cachefile=none" in c, c
 
     @staticmethod
-    def _stateful_pool(mock: MockShell, rw_import_ok: bool = True) -> None:
-        """``zpool list``/``readonly`` follow the imports, export and destroy."""
+    def _stateful_pool(mock: MockShell, rw_import_ok: bool = True, destroy: str = "ok") -> None:
+        """``zpool list``/``readonly`` follow the imports, export and destroy;
+        ``destroy``: "ok", "fails" (rc 1, still imported) or "noop" (rc 0,
+        still imported)."""
         state = {"imported": False, "ro": False}
         real = mock.mock_run
 
@@ -4937,6 +4965,10 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
                 if ok:
                     state.update(imported=True, ro="readonly=on" in cmd)
                 return RunResult(0 if ok else 1, "", "" if ok else "I/O error", cmd)
+            if cmd.startswith("zpool destroy -f zarktest_") and destroy != "ok":
+                return RunResult(
+                    *((1, "", "pool is busy") if destroy == "fails" else (0, "", "")), cmd
+                )
             if cmd.startswith(("zpool export zarktest_", "zpool destroy -f zarktest_")):
                 state["imported"] = False
             return recorded
@@ -4961,6 +4993,51 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         destroy = next(i for i, c in enumerate(calls) if c.startswith("zpool destroy"))
         assert ro < export < rw < destroy, calls
         assert calls.index("wipefs -a /dev/sdc 2>/dev/null") > destroy
+
+    def test_a_destroy_that_returns_0_but_leaves_the_pool_listed_is_a_failure(self):
+        # M4aV-3 V12: the `zpool list` after a destroy that returned 0.
+        mock = self._cold_mock()
+        self._stateful_pool(mock, destroy="noop")
+        result = self._cold(mock, back=True, now="/dev/sdc")
+        assert "zpool destroy failed: the pool is still imported" in result.cleanup_error, result
+
+    def test_a_failing_destroy_in_the_cleanup_is_a_failure(self):
+        # M4aV-3 V24: `zpool destroy -f` fails: not reported as done.
+        mock = self._cold_mock()
+        self._stateful_pool(mock, destroy="fails")
+        result = self._cold(mock, back=True, now="/dev/sdc")
+        assert "zpool destroy failed: pool is busy" in result.cleanup_error, result
+
+    def test_the_disk_link_after_the_reconnect_is_waited_for(self):
+        # M4aV-3 V25: the disk's by-id link appears late (after the settle):
+        # polled, not checked once; the run goes on to the read-back.
+        mock = self._cold_mock()
+        by_id = "/dev/disk/by-id/usb-Stick_SER-0:0"
+        seen: list[str] = []
+
+        def exists(p: object = None) -> bool:
+            seen.append(str(p))
+            return str(p) != by_id or seen.count(by_id) > 3
+
+        with (
+            patch_sh(mock),
+            patch("lib.health.Path.exists", autospec=True, side_effect=exists),
+            patch(
+                "lib.health.os.path.realpath", side_effect=lambda p: "/dev/sdc" if p == by_id else p
+            ),
+            patch("lib.health.time.sleep"),
+            redirect_stdout(StringIO()),
+        ):
+            result = run_destructive_test(
+                "/dev/sdb",
+                PROFILE_FAST,
+                True,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+                wait_for_reconnect=lambda: None,
+            )
+        assert "did not reappear" not in result.detail, result
+        assert any("readonly=on" in c for c in mock.calls), mock.calls
 
     def test_a_test_pool_that_was_not_destroyed_is_reported(self):
         mock = self._cold_mock()
@@ -6525,12 +6602,12 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert "backup" in data
 
     @staticmethod
-    def _udev(mock: MockShell, locking: bool = True) -> tuple[ExitStack, dict[str, bool]]:
+    def _udev(mock: MockShell, locking: bool = True) -> tuple[ExitStack, dict[str, int]]:
         """What udevd does on eli (checklist R4, M4aF-14): when a dd closes the
         disk, it re-reads the partition table, and the overwritten
         protective MBR takes part1 away, unless the disk is held with
         LOCK_EX. part1 is gone after wipefs in any case."""
-        state = {"held": False, "gone": False}
+        state = {"held": False, "gone": False, "released_at": -1}
         real = mock.mock_run
 
         def spy(cmd: str, **kw: Any) -> RunResult:
@@ -6548,6 +6625,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
                 yield
             finally:
                 state["held"] = False
+                state["released_at"] = len(mock.calls)  # calls made while held
 
         stack = ExitStack()
         _ = stack.enter_context(patch.object(mock, "mock_run", side_effect=spy))
@@ -6573,6 +6651,8 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert (
             second_dd < flush < calls.index(f"zdb -l {part1}") < calls.index("wipefs -a /dev/sdb")
         )
+        # M4aV-3 V3: read while the disk is still held from udev.
+        assert calls.index(f"zdb -l {part1}") < state["released_at"], (state, calls)
         assert "No ZFS label on the first partition after the overwrite" in out
 
     def test_without_the_lock_udev_takes_part1_and_purge_says_so(self):
@@ -12690,6 +12770,18 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert "Cannot read the key status of backup: fake: injected failure" in out.getvalue()
         assert "Key already loaded" not in out.getvalue()
         assert not _origin_points(fake)
+
+    def test_an_importable_bpool_elsewhere_does_not_stop_a_run_with_bpool_imported(self) -> None:
+        """M4aV-3 Q4 (and the M2 review's N55): this system's bpool is
+        imported and another disk's bpool is importable: require_boot_pool
+        returns at once, and the run goes on."""
+        fake = _fresh_fake()
+        assert "bpool" in fake.pools
+        fake.importable = {"bpool"}
+        out = StringIO()
+        _, rc = self._run(fake, redirect_stdout(out))
+        assert rc == 0, out.getvalue()
+        assert "bpool is not imported" not in out.getvalue()
 
     def test_a_drive_without_its_first_point_gets_it_at_the_next_backup(self) -> None:
         """M3P.25 (M4b-9): a drive whose first point was not recorded (prepared
