@@ -15476,7 +15476,9 @@ class TestSelftestReportPrivacy:  # pylint: disable=missing-function-docstring,t
                     bench = st_l2.StickBench(log, Cleanup(log), ident)
                     bench.dir = f"{td}/{c.cid}-stick"
                     bench.key, bench.mnt = f"{bench.dir}/key", f"{bench.dir}/mnt"
-                os.makedirs(bench.mnt)
+                # Benches made in one second share a directory one time in
+                # 65536 (stamp + 2 random bytes); nothing here writes to it (M4cF-1).
+                os.makedirs(bench.mnt, exist_ok=True)
                 res = stest.run_one(c, bench)
                 report = certs.build_report(
                     _facts(), certs.RunInfo(c.level, False), [res], bench.masks()
