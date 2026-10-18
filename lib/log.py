@@ -23,12 +23,104 @@ import getpass
 import os
 import re
 import select
+import shutil
 import stat
 import sys
-from collections.abc import Collection
+import unicodedata
+from collections.abc import Collection, Sequence
 from typing import NoReturn
 
 _YES_NO = ("y", "yes", "n", "no")
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+# What a continuation line is indented by: the line's own indent and its bullet.
+_HANG = re.compile(r" *(?:[•→✓✗-] |\d+\. )?")
+_RESET = "\033[0m"
+
+
+def text_width(s: str) -> int:
+    """Terminal columns of ``s``: colour codes none, wide characters (the
+    title emoji) 2, combining and format characters 0, the rest 1."""
+    n = 0
+    for ch in _SGR.sub("", s):
+        if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
+
+
+def wrap(line: str, width: int) -> list[str]:
+    """``line`` broken at spaces into lines of at most ``width`` columns.
+
+    Not textwrap: it measures with len(), which counts colour codes and wide
+    characters wrong. A continuation keeps the line's indent and bullet
+    width and the colour active at the break; a word wider than ``width``
+    (a by-id path people copy) stays whole on its own line.
+    """
+    if text_width(line) <= width:
+        return [line]
+    m = _HANG.match(_SGR.sub("", line))
+    hang = " " * (m.end() if m else 0)
+    lead = len(line) - len(line.lstrip(" "))
+    words = line[lead:].split(" ")
+    out: list[str] = []
+    current = line[:lead] + words[0]
+    for word in words[1:]:
+        if text_width(f"{current} {word}") <= width:
+            current = f"{current} {word}"
+            continue
+        codes = _SGR.findall(current)
+        active = codes[-1] if codes and codes[-1] != _RESET else ""
+        out.append(current + (_RESET if active else ""))
+        current = f"{hang}{active}{word}"
+    out.append(current)
+    return out
+
+
+def frame(  # pylint: disable=too-many-arguments,too-many-locals
+    body: Sequence[str],
+    *,
+    heavy: bool,
+    min_inner: int,
+    color: str,
+    head: Sequence[str] = (),
+    columns: int | None = None,
+) -> list[str]:
+    """The lines of one box (``heavy``: a banner; else a question's box).
+
+    The inner width fits the widest line, at least ``min_inner`` (the boxes'
+    width before M4d-21) and at most what the terminal has room for
+    (``shutil.get_terminal_size``: COLUMNS, then stdout, else 80); longer
+    lines are wrapped. ``head`` rows come above a rule (banner_ok/error).
+    """
+    if heavy:
+        tl, h, tr, v, bl, br, ml, mr = "╔", "═", "╗", "║", "╚", "╝", "╠", "╣"
+        indent, left, right = "", 2, 0
+    else:
+        tl, h, tr, v, bl, br, ml, mr = "┌", "─", "┐", "│", "└", "┘", "├", "┤"
+        indent, left, right = "  ", 1, 1
+    cols = columns or shutil.get_terminal_size().columns
+    room = max(min_inner, cols - len(indent) - 2)
+    widest = max((text_width(ln) for ln in (*head, *body)), default=0)
+    inner = min(max(widest + left + right, min_inner), room)
+    area = inner - left - right
+    edge = f"{color}{v}{_RESET}"
+
+    def rows(lines: Sequence[str]) -> list[str]:
+        out: list[str] = []
+        for line in lines:
+            for piece in wrap(line, area):
+                pad = area - text_width(piece)
+                tail = f"{' ' * (pad + right)}{edge}" if pad >= 0 else ""  # overflow: no edge
+                out.append(f"{indent}{edge}{' ' * left}{piece}{_RESET}{tail}")
+        return out
+
+    lines = [f"{indent}{color}{tl}{h * inner}{tr}{_RESET}"]
+    if head:
+        lines += rows(head)
+        lines.append(f"{indent}{color}{ml}{h * inner}{mr}{_RESET}")
+    lines += rows(body)
+    lines.append(f"{indent}{color}{bl}{h * inner}{br}{_RESET}")
+    return lines
 
 
 class Log:
@@ -151,43 +243,30 @@ class Log:
 
     def banner(self, title: str, subtitle: str = "", *, warn: bool = False):
         """Big colored banner for command start; ``warn`` shows the subtitle in yellow."""
-        w = 58
-        self.blank()
-        print(f"{self.BOLD}{self.C}╔{'═' * w}╗{self.N}")
-        print(
-            f"{self.BOLD}{self.C}║{self.N}  "
-            f"{self.W}{title}{self.N}{' ' * (w - len(title) - 2)}{self.BOLD}{self.C}║{self.N}",
-        )
+        body = [f"{self.W}{title}{self.N}"]
         if subtitle:
-            shown = f"{self.Y}{subtitle}{self.N}" if warn else subtitle
-            print(
-                f"{self.BOLD}{self.C}║{self.N}  "
-                f"{shown}{' ' * (w - len(subtitle) - 2)}{self.BOLD}{self.C}║{self.N}",
-            )
-        print(f"{self.BOLD}{self.C}╚{'═' * w}╝{self.N}")
-        self.blank()
+            body.append(f"{self.Y}{subtitle}{self.N}" if warn else subtitle)
+        self._show(frame(body, heavy=True, min_inner=58, color=self.BOLD + self.C))
         self._to_file(f"{'═' * 62}")
         self._to_file(f"  {title}  {subtitle}")
         self._to_file(f"{'═' * 62}")
 
+    @staticmethod
+    def _show(lines: list[str], *, after: bool = True, err: bool = False) -> None:
+        """Print a frame after a blank line, and one after it unless ``after`` is False."""
+        out = sys.stderr if err else sys.stdout
+        print(file=out)
+        for line in lines:
+            print(line, file=out)
+        if after:
+            print(file=out)
+
     def banner_ok(self, title: str, lines: list[str] | None = None):
         """Green success banner."""
-        w = 58
-        self.blank()
-        print(f"{self.BOLD}{self.G}╔{'═' * w}╗{self.N}")
-        print(
-            f"{self.BOLD}{self.G}║{self.N}  {self.G}✅ "
-            f"{title}{self.N}{' ' * max(0, w - len(title) - 5)}{self.BOLD}{self.G}║{self.N}",
+        head = [f"{self.G}✅ {title}{self.N}"]
+        self._show(
+            frame(lines or [], heavy=True, min_inner=58, color=self.BOLD + self.G, head=head)
         )
-        print(f"{self.BOLD}{self.G}╠{'═' * w}╣{self.N}")
-        for line in lines or []:
-            clean = self._strip(line)
-            print(
-                f"{self.BOLD}{self.G}║{self.N}  "
-                f"{line}{' ' * max(0, w - len(clean) - 2)}{self.BOLD}{self.G}║{self.N}",
-            )
-        print(f"{self.BOLD}{self.G}╚{'═' * w}╝{self.N}")
-        self.blank()
         self._verdict_to_file("OK", title, lines)
 
     def _verdict_to_file(self, kind: str, title: str, lines: list[str] | None) -> None:
@@ -213,21 +292,10 @@ class Log:
         consequence that the four pool labels never reach NAND and the
         pool comes back FAULTED on next import.
         """
-        w = 58
         text = f"💾  Safe to unplug drive '{drive}'"
-        # Line layout:  "║" + "  " + text + " "*pad + "║"
-        # Visible inner width must equal w. The 💾 emoji takes 2 terminal
-        # columns but Python's len() counts it as 1, so we subtract one
-        # extra column. The "  " leading indent accounts for 2 more.
-        pad = max(0, w - len(text) - 3)
-        self.blank()
-        print(f"{self.BOLD}{self.G}╔{'═' * w}╗{self.N}")
-        print(
-            f"{self.BOLD}{self.G}║{self.N}  "
-            f"{self.W}{text}{self.N}{' ' * pad}{self.BOLD}{self.G}║{self.N}",
+        self._show(
+            frame([f"{self.W}{text}{self.N}"], heavy=True, min_inner=58, color=self.BOLD + self.G)
         )
-        print(f"{self.BOLD}{self.G}╚{'═' * w}╝{self.N}")
-        self.blank()
         self._to_file(f"Safe to unplug drive '{drive}'")
 
     def banner_drive_attached(self, drive: str):
@@ -248,39 +316,23 @@ class Log:
         of ``banner_safe_unplug``) and the 🔌 icon reinforce
         "still plugged in" visually.
         """
-        w = 58
         text = f"🔌  Drive '{drive}' flushed, still attached"
-        # 🔌 occupies 2 terminal columns; see banner_safe_unplug.
-        pad = max(0, w - len(text) - 3)
-        self.blank()
-        print(f"{self.BOLD}{self.C}╔{'═' * w}╗{self.N}")
-        print(
-            f"{self.BOLD}{self.C}║{self.N}  "
-            f"{self.W}{text}{self.N}{' ' * pad}{self.BOLD}{self.C}║{self.N}",
+        self._show(
+            frame([f"{self.W}{text}{self.N}"], heavy=True, min_inner=58, color=self.BOLD + self.C)
         )
-        print(f"{self.BOLD}{self.C}╚{'═' * w}╝{self.N}")
-        self.blank()
         self._to_file(f"Drive '{drive}' flushed, still attached")
 
     def banner_error(self, title: str, lines: list[str] | None = None):
         """Red error banner."""
-        w = 58
-        self.blank()
-        print(f"{self.BOLD}{self.R}╔{'═' * w}╗{self.N}")
-        print(
-            f"{self.BOLD}{self.R}║{self.N}  {self.R}❌ "
-            f"{title}{self.N}{' ' * max(0, w - len(title) - 5)}{self.BOLD}{self.R}║{self.N}",
+        head = [f"{self.R}❌ {title}{self.N}"]
+        self._show(
+            frame(lines or [], heavy=True, min_inner=58, color=self.BOLD + self.R, head=head)
         )
-        print(f"{self.BOLD}{self.R}╠{'═' * w}╣{self.N}")
-        for line in lines or []:
-            clean = self._strip(line)
-            print(
-                f"{self.BOLD}{self.R}║{self.N}  "
-                f"{line}{' ' * max(0, w - len(clean) - 2)}{self.BOLD}{self.R}║{self.N}",
-            )
-        print(f"{self.BOLD}{self.R}╚{'═' * w}╝{self.N}")
-        self.blank()
         self._verdict_to_file("FAIL", title, lines)
+
+    def _box(self, *rows: str) -> list[str]:
+        """A question's box: magenta, 53 columns at least, as before M4d-21."""
+        return frame(rows, heavy=False, min_inner=53, color=self.M)
 
     def _answer_to_file(self, question: str, answer: str) -> None:
         """Record an interactive prompt and the operator's answer (I19)."""
@@ -301,10 +353,7 @@ class Log:
     def ask(self, question: str, default: bool = False) -> bool:
         """Yes/no question. Returns bool."""
         prompt = "[Y/n]" if default else "[y/N]"
-        print()
-        print(f"{self.M}  ┌─────────────────────────────────────────────────────┐{self.N}")
-        print(f"{self.M}  │ {self.Y}?{self.N} {question}")
-        print(f"{self.M}  └─────────────────────────────────────────────────────┘{self.N}")
+        self._show(self._box(f"{self.Y}?{self.N} {question}"), after=False)
         try:
             answer = input(f"    {prompt}: ").strip().lower()
         except EOFError:
@@ -326,10 +375,7 @@ class Log:
         Returns the boolean decision (True = yes/eject).
         """
         prompt = "[Y/n]" if default else "[y/N]"
-        print()
-        print(f"{self.M}  ┌─────────────────────────────────────────────────────┐{self.N}")
-        print(f"{self.M}  │ {self.Y}?{self.N} {question}")
-        print(f"{self.M}  └─────────────────────────────────────────────────────┘{self.N}")
+        self._show(self._box(f"{self.Y}?{self.N} {question}"), after=False)
 
         # No TTY: apply default immediately, like EOF in ask().
         if not sys.stdin.isatty():
@@ -372,21 +418,10 @@ class Log:
 
         The log gets the answer only when it is the default or in ``accept``.
         """
-        print(file=sys.stderr)
-        print(
-            f"{self.M}  ┌─────────────────────────────────────────────────────┐{self.N}",
-            file=sys.stderr,
-        )
-        print(f"{self.M}  │ {self.Y}?{self.N} {question}", file=sys.stderr)
+        rows = [f"{self.Y}?{self.N} {question}"]
         if default:
-            print(
-                f"{self.M}  │   (default: {self.W}{default}{self.N}{self.M}){self.N}",
-                file=sys.stderr,
-            )
-        print(
-            f"{self.M}  └─────────────────────────────────────────────────────┘{self.N}",
-            file=sys.stderr,
-        )
+            rows.append(f"  (default: {self.W}{default}{self.N})")
+        self._show(self._box(*rows), after=False, err=True)
         try:
             answer = input("    > ").strip()
         except EOFError:
@@ -415,10 +450,7 @@ class Log:
     def ask_password(self, question: str) -> str:
         """Password input (no echo)."""
 
-        print()
-        print(f"{self.M}  ┌─────────────────────────────────────────────────────┐{self.N}")
-        print(f"{self.M}  │ {self.Y}🔑{self.N} {question}")
-        print(f"{self.M}  └─────────────────────────────────────────────────────┘{self.N}")
+        self._show(self._box(f"{self.Y}🔑{self.N} {question}"), after=False)
         self._to_file(f"[PROMPT]  {self._strip(question)} → (passphrase, not logged)")
         # getpass writes to /dev/tty: piped (| tee) stdout must reach it first.
         sys.stdout.flush()

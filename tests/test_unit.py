@@ -226,7 +226,7 @@ from lib.keystore import (  # pylint: disable=wrong-import-position # noqa: E402
     Keystore,
     open_keystore,
 )
-from lib.log import Log  # pylint: disable=wrong-import-position # noqa: E402
+from lib.log import Log, frame, text_width, wrap  # pylint: disable=wrong-import-position # noqa: E402
 from lib.mount import (  # pylint: disable=wrong-import-position # noqa: E402
     find_system_root_dataset,
     kernel_named_vdevs,
@@ -297,9 +297,34 @@ from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-po
 # ═════════════════════════════════════════════════════════════════════════
 
 
+# The frames' width follows the terminal (M4d-21): the same on any terminal here.
+os.environ["COLUMNS"] = "80"
+
+
 def make_log() -> Log:
     """Create a Log that writes to /dev/null."""
     return Log(log_file="/dev/null")
+
+
+_EDGE = r"(?:\x1b\[[0-9;]*m)*[║│](?:\x1b\[[0-9;]*m)*"
+_FRAME_ROW = re.compile(rf"^ *{_EDGE} ?(.*?)(?:\x1b\[0m)? *(?:{_EDGE})?$")
+
+
+def unframed(text: str) -> str:
+    """``text`` with each frame's rows joined into one line, borders gone, so
+    a phrase the frame wrapped reads whole (M4d-21)."""
+    out: list[str] = []
+    rows: list[str] = []
+    for line in [*text.splitlines(), ""]:
+        m = _FRAME_ROW.match(line)
+        if m:
+            rows.append(m[1].strip())
+            continue
+        if rows:
+            out.append(" ".join(r for r in rows if r))
+            rows = []
+        out.append(line)
+    return "\n".join(out)
 
 
 # Commands under test build Log() with its default file: as root that is the
@@ -522,6 +547,54 @@ class TestConfig:
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/log.py
 # ═════════════════════════════════════════════════════════════════════════
+
+
+class TestFrame:  # pylint: disable=missing-function-docstring
+    """M4d-21 (I18, M3P.7): one frame for the banners and the question boxes."""
+
+    @staticmethod
+    def _plain(lines: list[str]) -> list[str]:
+        return [Log._STRIP_RE.sub("", ln) for ln in lines]  # pylint: disable=protected-access
+
+    def test_text_width_counts_columns(self):
+        assert text_width(f"{Log.G}✅ done{Log.N}") == 7  # the emoji is 2 columns
+        assert text_width("✓ ✗ ⚠ • →") == 9
+        assert text_width("e\u0301") == 1  # a combining accent takes none
+
+    def test_a_banner_is_at_least_as_wide_as_before_and_its_edges_line_up(self):
+        lines = self._plain(
+            frame(["short"], heavy=True, min_inner=58, color=Log.G, head=["✅ T"], columns=200)
+        )
+        assert lines[0] == "╔" + "═" * 58 + "╗" and lines[2] == "╠" + "═" * 58 + "╣"
+        assert {text_width(ln) for ln in lines} == {60}, lines
+
+    def test_it_grows_to_the_terminal_then_wraps_with_the_bullets_indent(self):
+        body = ["  • " + "word " * 30 + "end"]
+        lines = self._plain(frame(body, heavy=True, min_inner=58, color="", columns=80))
+        assert {text_width(ln) for ln in lines} == {80}, lines
+        assert lines[1].startswith("║    • word") and lines[2].startswith("║      word"), lines
+        assert lines[-2].rstrip(" ║").endswith("end"), lines
+        wide = frame(["x" * 70], heavy=True, min_inner=58, color="", columns=200)
+        assert text_width(wide[0]) == 74  # the widest line and its margins
+
+    def test_a_token_wider_than_the_frame_stays_whole(self):
+        path = "/dev/disk/by-id/usb-" + "X" * 90 + "-0:0-part1"
+        lines = self._plain(
+            frame([f"Drive: {path}"], heavy=True, min_inner=58, color="", columns=80)
+        )
+        assert lines[1].startswith("║  Drive:") and lines[2] == f"║  {path}", lines
+
+    def test_a_colour_goes_on_after_a_break(self):
+        got = wrap(f"{Log.Y}" + "warn " * 20 + f"{Log.N}", 40)
+        assert len(got) > 1 and got[0].endswith(Log.N) and got[1].startswith(Log.Y), got
+
+    def test_the_question_box_has_its_right_edge(self):
+        out = StringIO()
+        with redirect_stdout(out), patch("builtins.input", return_value="y"):
+            assert make_log().ask("Go on?")
+        box = [ln for ln in self._plain(out.getvalue().splitlines()) if ln.strip()][:3]
+        assert box[0] == "  ┌" + "─" * 53 + "┐" and box[1].endswith("│"), box
+        assert {text_width(ln) for ln in box} == {57}, box
 
 
 class TestLog:
@@ -6754,7 +6827,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
             redirect_stdout(out),
         ):
             purge_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
-        return out.getvalue()
+        return unframed(out.getvalue())
 
     def test_purge_drops_the_wiped_pools_anchors(self):
         """M2R-6 (E12a): the purged drive's anchors leave origin with it."""
@@ -6843,7 +6916,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
                 rc = int(e.code) if isinstance(e.code, int) else 1
         if rc:
             drop.assert_not_called()
-        return out.getvalue(), rc, json.loads((cfg_dir / "known_drives.json").read_text())
+        return unframed(out.getvalue()), rc, json.loads((cfg_dir / "known_drives.json").read_text())
 
     def test_all_steps_and_a_blank_disk_complete(self):
         mock = MockShell()
@@ -7183,7 +7256,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         out, rc, data = self._purge(mock)
         assert rc == 1 and "signature still on /dev/sdb" in out
         assert "The disk may still hold the pool. Purge again, or look:" in out
-        assert "  blkid -p /dev/sdb; lsblk /dev/sdb" in out
+        assert "blkid -p /dev/sdb; lsblk /dev/sdb" in out
         assert "backup" in data
 
 
@@ -9435,7 +9508,7 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
                 finish_mod.run([])
             except SystemExit:
                 exited = True
-        return buf.getvalue(), exited, order
+        return unframed(buf.getvalue()), exited, order
 
     def test_all_good_is_complete(self):
         out, exited, order = self._run()
@@ -10849,7 +10922,7 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
                     assert not export_ok and e.code == 1, e.code
                 else:
                     assert export_ok, "a failed export must end with exit status 1"
-        return mock, buf.getvalue()
+        return mock, unframed(buf.getvalue())
 
     def test_umount_cleans_directories_only_after_the_export(self):
         # Review §8: with the pool still imported, find would delete inside the backup.
@@ -14127,7 +14200,7 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
             try:
                 survey.require_boot_pool(make_log())
             except SystemExit:
-                return out.getvalue()
+                return unframed(out.getvalue())
         raise AssertionError("expected a refusal")
 
     @staticmethod
