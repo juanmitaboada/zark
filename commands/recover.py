@@ -464,6 +464,22 @@ def anchor_bpool(row: RestoreRow, pool: str, disk_guid: str, log: Log) -> str:
     return _not_anchored(row.rel, pool)
 
 
+def drop_prepare_snapshot(keystore_snap: str, log: Log) -> None:
+    """M4c-14 (M4bP.8): the keystore arrives with the ``@prepare_<stamp>``
+    snapshot prepare takes on the drive, which prepare destroys in origin
+    (I-B); left here, backup lists it as a residue. A zvol snapshot has no
+    device node (snapdev=hidden), so its destroy touches no device; it runs
+    after the backup pool's final export. A failure is a warning."""
+    name = keystore_snap.split("@", 1)[-1]
+    if not name.startswith("prepare_"):
+        return
+    r = sh.run(f"zfs destroy rpool/keystore@{name}", log=log)
+    if r.ok:
+        log.ok(f"rpool/keystore@{name} removed (prepare's snapshot, not origin's)")
+    else:
+        log.warn(f"Could not remove rpool/keystore@{name}: {r.stderr.strip()}")
+
+
 def _export_verified(pool: str, log: Log) -> None:
     """Export the backup pool and prove its zvols are gone (hallazgo 9)."""
     _ = sh.run(f"zfs unload-key -r {pool}")
@@ -817,6 +833,7 @@ def run(
     log.info(f"Exporting backup pool {pool_name} (final)...")
     _export_verified(pool_name, log)
     cleanup.untrack_pool(pool_name)
+    drop_prepare_snapshot(plan.keystore_snap, log)
 
     # ── 13. Mount system ─────────────────────────────────────────────────
     log.step(13, TOTAL_STEPS, "Mounting system...")

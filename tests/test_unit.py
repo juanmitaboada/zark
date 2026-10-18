@@ -8016,6 +8016,27 @@ class TestRecoverAnchors:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("zfs bookmark")
 
 
+class TestRecoverKeystoreSnapshot:  # pylint: disable=missing-function-docstring
+    """M4c-14: prepare's keystore snapshot is not left in the recovered origin."""
+
+    def test_prepare_snapshot_is_destroyed(self):
+        mock = MockShell()
+        mock.on("zfs destroy rpool/keystore@prepare_20261001_100000").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            recover_mod.drop_prepare_snapshot("backup/keystore@prepare_20261001_100000", make_log())
+        assert mock.calls == ["zfs destroy rpool/keystore@prepare_20261001_100000"]
+
+    def test_failure_is_a_warning_and_other_names_are_left(self):
+        mock = MockShell()
+        mock.on_prefix("zfs destroy").fails("dataset is busy")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            recover_mod.drop_prepare_snapshot("backup/keystore@prepare_1", make_log())
+            recover_mod.drop_prepare_snapshot("backup/keystore@autosnap_x_daily", make_log())
+        assert mock.calls == ["zfs destroy rpool/keystore@prepare_1"]
+        assert "Could not remove rpool/keystore@prepare_1" in out.getvalue()
+
+
 class TestInitrd:  # pylint: disable=missing-function-docstring
     """P0-7: only installed kernels; dracut failures are reported."""
 
