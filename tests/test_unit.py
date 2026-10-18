@@ -7974,6 +7974,48 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         ]
 
 
+class TestRecoverAnchors:  # pylint: disable=missing-function-docstring
+    """M4c-12 (M4bF-2): recover anchors what it restored for the drive it read."""
+
+    @staticmethod
+    def _row(rel: str, name: str, creation: int) -> RestoreRow:
+        return RestoreRow(rel, Snap(rel, name, "g", 1, creation))
+
+    def test_rpool_rows_are_bookmarked_with_the_drive_anchor_names(self):
+        stamp = int(datetime(2026, 10, 7, 10, 0, tzinfo=UTC).timestamp())
+        rows = [
+            self._row("rpool/ROOT/be", P1, stamp),
+            self._row("rpool/srv", "autosnap_2026-10-07_08:00:00_hourly", stamp - 7200),
+        ]
+        mock = MockShell()
+        mock.on_prefix("zfs bookmark rpool/ROOT/be@").succeeds()
+        mock.on_prefix("zfs bookmark rpool/srv@").fails("dataset is busy")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            errors = recover_mod.anchor_restored(rows, "backup", "111", make_log())
+        assert mock.calls == [
+            f"zfs bookmark rpool/ROOT/be@{P1} rpool/ROOT/be#zark_111_2026-10-07_10:00:00Z",
+            "zfs bookmark rpool/srv@autosnap_2026-10-07_08:00:00_hourly "
+            + "rpool/srv#zark_111_2026-10-07_08:00:00Z",
+        ]
+        assert errors == [
+            "rpool/srv: not anchored for backup: its next backup of it resends it in full",
+        ]
+
+    def test_bpool_is_renamed_never_bookmarked(self):
+        stamp = int(datetime(2026, 10, 7, 10, 0, tzinfo=UTC).timestamp())
+        mock = MockShell()
+        mock.on_prefix("zfs rename").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            got = recover_mod.anchor_bpool(
+                self._row("bpool/BOOT/be", P1, stamp), "backup", "111", make_log()
+            )
+        assert not got
+        assert mock.calls == [
+            f"zfs rename bpool/BOOT/be@{P1} bpool/BOOT/be@zark_111_2026-10-07_10:00:00Z",
+        ]
+        assert mock.was_not_called("zfs bookmark")
+
+
 class TestInitrd:  # pylint: disable=missing-function-docstring
     """P0-7: only installed kernels; dracut failures are reported."""
 
@@ -11136,6 +11178,25 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert f"kept rpool/USERDATA/home@{P2}: partial receive to resume" in text
         assert f"removed rpool/ROOT/be@{P2}: on the backup, anchored as" in text
         assert f"removed rpool/ROOT/be#{repl.anchor_name('111', P1)}: superseded by" in text
+
+    def test_a_point_the_drive_never_held_names_no_drive(self) -> None:
+        """M4c-12: a recovered system's point is not "on the backup" of
+        another drive: its line says what it is."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        recovered = "zark_2026-10-01_09:00:00Z"
+        # Older than anything this drive holds: no stream of it carries it.
+        made = fake.snap("rpool/ROOT/be", recovered)
+        fake.ds["rpool/ROOT/be"].snaps.remove(made)
+        made.txg = 0
+        fake.ds["rpool/ROOT/be"].snaps.insert(0, made)
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out), redirect_stderr(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            _ = engine.execute(eng, Cleanup(Log()), lambda _p, _r: True)
+        text = out.getvalue()
+        assert f"removed rpool/ROOT/be@{recovered}: not on backup; it names no drive" in text
+        assert f"removed rpool/ROOT/be@{P2}: on the backup, anchored as" in text
 
     def test_drop_disk_anchors(self) -> None:
         """registry forget: one disk's anchors go, the other's stay."""

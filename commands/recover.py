@@ -53,10 +53,11 @@ import os
 import re
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
-from lib import certificates, drive_marks, sh, survey, zfs_features
+from lib import certificates, drive_marks, replication, sh, survey, zfs_features
 from lib.backup_layout import find_be as _find_be
 from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
 from lib.cleanup import Cleanup, prompt_eject_or_attach
@@ -415,6 +416,54 @@ def _receive_row(pool: str, row: RestoreRow, raw: bool, log: Log) -> str:
     return f"{row.rel}: left at @{row.base.name}, older than the point (the point's receive failed)"
 
 
+def _anchor_for(disk_guid: str, row: RestoreRow) -> str:
+    """The drive's anchor name for the row's restored snapshot: the name
+    ``anchor_held`` gives a held snapshot, the run's own anchor name when
+    the snapshot is the point (M4c-12)."""
+    assert row.snap is not None
+    stamp = replication.point_name(datetime.fromtimestamp(row.snap.creation, UTC))
+    return replication.anchor_name(disk_guid, stamp)
+
+
+def _not_anchored(rel: str, pool: str) -> str:
+    return f"{rel}: not anchored for {pool}: its next backup of it resends it in full"
+
+
+def anchor_restored(rows: list[RestoreRow], pool: str, disk_guid: str, log: Log) -> list[str]:
+    """M4c-12 (M4bF-2): bookmark every restored rpool dataset's snapshot as
+    the anchor of the drive it came from, so that drive's next backup
+    continues from it instead of resending in full. No key is needed; a
+    failure is an error line, never fatal."""
+    errors: list[str] = []
+    for row in rows:
+        assert row.snap is not None
+        name = _anchor_for(disk_guid, row)
+        r = sh.run(f"zfs bookmark {row.rel}@{row.snap.name} {row.rel}#{name}", log=log)
+        if r.ok:
+            log.dbg(f"  {row.rel}: anchored {row.snap.name} for {pool}")
+        else:
+            log.warn(f"  {row.rel}: could not anchor {row.snap.name}: {r.stderr.strip()}")
+            errors.append(
+                f"{row.rel}: not anchored for {pool}: its next backup of it resends it in full"
+            )
+    if rows and not errors:
+        log.ok(f"{len(rows)} rpool dataset(s) anchored for {pool} ✓")
+    return errors
+
+
+def anchor_bpool(row: RestoreRow, pool: str, disk_guid: str, log: Log) -> str:
+    """M4c-12: the restored bpool snapshot renamed to the drive's bpool
+    anchor (I-B; I-F: no bookmark on bpool). "" or the error line."""
+    assert row.snap is not None
+    name = _anchor_for(disk_guid, row)
+    r = sh.run(f"zfs rename {row.rel}@{row.snap.name} {row.rel}@{name}", log=log)
+    if r.ok:
+        log.ok(f"{row.rel}: {row.snap.name} kept as the anchor of {pool} ({name}) ✓")
+        return ""
+    log.warn(f"  {row.rel}: could not anchor {row.snap.name}: {r.stderr.strip()}")
+    return _not_anchored(row.rel, pool)
+
+
 def _export_verified(pool: str, log: Log) -> None:
     """Export the backup pool and prove its zvols are gone (hallazgo 9)."""
     _ = sh.run(f"zfs unload-key -r {pool}")
@@ -677,7 +726,7 @@ def run(
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/USERDATA", log=log)
 
     be_ds = f"rpool/ROOT/{ubuntu_name}"
-    reached = 0
+    reached: list[RestoreRow] = []
     for row in plan.rpool_rows:
         failure = _receive_row(pool_name, row, raw=True, log=log)
         if failure:
@@ -685,12 +734,14 @@ def run(
                 log.fatal("Failed to raw send root dataset")
             errors.append(failure)
         else:
-            reached += 1
+            reached.append(row)
     total = len(plan.rpool_rows)
-    if reached == total:
-        log.ok(f"{reached} of {total} rpool dataset(s) restored ✓")
+    if len(reached) == total:
+        log.ok(f"{total} of {total} rpool dataset(s) restored ✓")
     else:
-        log.warn(f"{reached} of {total} rpool dataset(s) restored")
+        log.warn(f"{len(reached)} of {total} rpool dataset(s) restored")
+    # Before the backup pool goes: the anchors are for the drive just read.
+    errors += anchor_restored(reached, pool_name, drive.guid, log)
 
     # ── 9. Export backup pool (removes its zvols) ────────────────────────
     log.step(9, TOTAL_STEPS, "Exporting backup pool (prevents kernel crash)...")
@@ -734,6 +785,9 @@ def run(
         bpool_received = not _receive_row(pool_name, bpool_row, raw=False, log=log)
         if not bpool_received:
             errors.append("bpool: receive failed - kernels need reinstallation")
+        elif failure := anchor_bpool(bpool_row, pool_name, drive.guid, log):
+            # Before the keystore: the keystore stays the last zfs operation.
+            errors.append(failure)
     else:
         errors.append("bpool: not in backup at this point - kernels need reinstallation")
 

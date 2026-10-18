@@ -638,9 +638,13 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 elif verified:
                     owner = owners.get(target, "")
                     other = owner if owner != self.disk_guid and s is not point_snap else ""
-                    verdicts.append(
-                        Verdict(target, True, f"on the backup, anchored as {keep}", other)
-                    )
+                    if s is not point_snap and s.guid not in on_backup:
+                        # e.g. a recovered system's points (M4c-12): this
+                        # drive never held them, and no drive is named.
+                        why = f"not on {self.pool}" + ("" if other else "; it names no drive")
+                    else:
+                        why = f"on the backup, anchored as {keep}"
+                    verdicts.append(Verdict(target, True, why, other))
                 else:
                     verdicts.append(Verdict(target, False, "may be the base of the next run"))
             for name in old_anchors([a.name for a in new], self.disk_guid, keep):
