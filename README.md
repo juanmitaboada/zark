@@ -162,7 +162,7 @@ Once the recovered system boots successfully:
 sudo ./zark finish    # regenerate grub.cfg, finalize Secure Boot chain
 ```
 
-`finish` is idempotent and safe to re-run. It runs `update-grub` internally, so you don't need to invoke it separately.
+`finish` is idempotent and safe to re-run. It never exports or re-imports a pool. It rebuilds the initrd of every installed kernel, then runs `update-grub`, so you don't need to invoke it separately, and it checks that `grub.cfg` has an entry for each kernel, that `/boot/efi` is the ESP of rpool's disk and holds the signed shim and GRUB, and that every `canmount=on` dataset is mounted. Its banner names anything that failed, and names what `setup` would still do, if anything.
 
 ### Fix a broken boot by hand (chroot)
 
@@ -176,7 +176,7 @@ dpkg-reconfigure grub-efi-amd64-signed
 exit                        # zark unmounts and exports both pools cleanly
 ```
 
-For a quick look at the installed disk without a working shell, `sudo ./zark mount local` mounts it read-only (and `sudo ./zark umount local` releases it). `repair-boot` remains the one-shot, non-interactive option for the common grub-regeneration case.
+For a quick look at the installed disk without a working shell, `sudo ./zark mount local` mounts it read-only (and `sudo ./zark umount local` releases it). Read-only imports both pools `readonly=on`: the live session writes nothing to them, not even their labels, and a dataset whose mountpoint directory is missing is listed as not mounted. `repair-boot` remains the one-shot, non-interactive option for the common grub-regeneration case.
 
 ### Test the recovered boot without rebooting
 
@@ -563,7 +563,8 @@ sudo ./zark repair-boot
 
 ## Security notes
 
-- zark handles ZFS encryption passphrases and raw key material at runtime. Passphrases are never written to disk or echoed to stdout. If you suspect a leak (e.g. from `set -x` debug output added during local development), rotate the passphrase via `zfs change-key`.
+- zark handles ZFS encryption passphrases and raw key material at runtime. Passphrases are never written to disk or echoed to stdout. If you suspect a leak (e.g. from `set -x` debug output added during local development), rotate the key, and then retire and re-prepare every backup drive (see the next point).
+- A backup drive's keystore is the copy `prepare` made of the source's keystore: its LUKS passphrase and its `system.key`. A later `cryptsetup luksChangeKey` in the source leaves the drive asking the old passphrase. A later `zfs change-key` of rpool makes the next backup rewrap the drive's datasets to the new key; the drive's keystore then no longer opens them, the following backup stops at the key load and `recover` from that drive cannot load its keys. After either change, run `zark purge` and `zark prepare` for each drive.
 - Backup drives contain full copies of your encrypted datasets. Anyone with physical access to a backup drive **and** the passphrase can decrypt all data. Store backup drives physically secured.
 - The keystore zvol holds the raw encryption key in a LUKS-encrypted volume. Its security ultimately reduces to the strength of the LUKS passphrase you set during `zark recover`.
 - zark does not transmit data over the network. All operations are local to the machine and the connected backup drive.

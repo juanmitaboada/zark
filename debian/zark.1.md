@@ -150,7 +150,10 @@ for the canonical end-to-end sequences.
     what in **zark** depends on it, with the commands' output in zark.log
     and never in the report. A signal stops the run like any command, its
     pools destroyed and its directory removed, and the run is recorded as
-    stopped. Exit status 0 when no check failed (a check that cannot run
+    stopped. A run killed with SIGKILL leaves its directory; the next run
+    removes every such directory that no imported pool uses and with
+    nothing mounted below it, and **clean** exports its pools and closes
+    its keystore mapper. Exit status 0 when no check failed (a check that cannot run
     here, a missing tool, is a SKIP), 1 otherwise.
 
     Every run writes a JSON report (*/var/lib/zark/selftest/*): the
@@ -241,6 +244,12 @@ for the canonical end-to-end sequences.
     and the run that accepts it records this system as its owner. With
     nothing in common it is refused; **purge** and **prepare** make it this
     system's drive.
+
+    **backup** then asks the drive's keystore passphrase and loads the
+    drive's keys, unless they are already loaded: the passphrase is the
+    recurring proof that the drive's keystore still opens the drive's
+    datasets (see **The drive's keystore** under **NOTES**). A failed read
+    of the keys' status stops the run.
 
     Before the transfer, **backup** checks the health of the source pool
     and of the drive. A pool that is DEGRADED, or ONLINE with non-zero
@@ -511,7 +520,11 @@ for the canonical end-to-end sequences.
     point, those of a backup that did not reach every dataset as
     **INCOMPLETE**, and the **sanoid** snapshots carried between them as
     carried points, each with how many datasets it holds. The default is
-    the newest complete backup point. A dataset is not restored for a point
+    the newest complete backup point. A backup point whose run was
+    complete but that lost datasets on the drive since (a prune, a rollback
+    or a destroy) is labelled **PARTLY REMOVED** and is not the default
+    either. The drive's metadata is read strictly: a failed read stops
+    before the menu. A dataset is not restored for a point
     when it no longer existed then (a complete backup point at or before it
     lacks the dataset and nothing of it follows); when a backup simply did
     not reach it, its newest earlier snapshot is used and shown with its
@@ -529,14 +542,21 @@ for the canonical end-to-end sequences.
     **YES** does it partition the internal disk as EFI + bpool + rpool,
     recreate **rpool** *with* native encryption to match the Ubuntu
     installer, raw-receive every first-level dataset tree (not only
-    **ROOT** and **USERDATA**), restore the LUKS keystore zvol last (which is mandatory - restoring
+    **ROOT** and **USERDATA**), bookmarks each restored dataset as the
+    anchor of the drive it read (and renames the restored **bpool**
+    snapshot to that drive's **bpool** anchor), so that drive's next
+    backup continues from them instead of resending everything, restores the LUKS keystore zvol last (which is mandatory - restoring
     it earlier triggers a kernel udev crash documented in the Debian
     **zfs-linux** issue tracker), reinstates **encryptionroot** with
     **zfs change-key -i**, repopulates **bpool**, chroots into the
     recovered system, reinstalls a Secure-Boot-capable GRUB chain via the
     **dpkg-reconfigure**(8) sequence described in **NOTES**, regenerates
     the initramfs (**dracut**(8) on Ubuntu 25.04+, **initramfs-tools**(8)
-    on 24.04) and exports both pools cleanly.
+    on 24.04) and exports both pools cleanly. The keystore's
+    *@prepare_\** snapshot, which **prepare** leaves on the drive, is
+    removed from the recovered system. A failed receive, anchor, ESP
+    record in **debconf** or missing EFI binary makes the banner RECOVERY
+    COMPLETED WITH ERRORS, naming it.
 
     The recovered system boots without **zark** present and receives
     normal **apt**(8) upgrades thereafter. **zark** is needed only for
@@ -631,15 +651,34 @@ for the canonical end-to-end sequences.
 
 **finish**
 :   Post-recovery finalisation, intended to be run *from inside the
-    recovered system* on its first boot. Resets the hostid, refreshes the
-    ZFS cachefile, ensures the ZFS systemd services are enabled and runs
-    a final **update-grub**(8) and initramfs regeneration without the
-    backup drive present, so the resulting **grub.cfg** is clean. If
-    **update-grub** fails (the grub guard refuses while an external pool
-    is visible) or produces no kernel entries, the previous **grub.cfg**
-    is kept, the banner reads FINISH INCOMPLETE and the exit status is 1;
-    the same applies to a failed initramfs update or a pool not ONLINE.
-    Disconnect the backup drive and run **finish** again.
+    recovered system* on its first boot, without the backup drive present.
+    It never exports or re-imports a pool. In order: it enables the ZFS
+    systemd services; writes */etc/zfs/zpool.cache* for **rpool** and
+    **bpool**; reads, without changing anything, the hostid in each pool's
+    label (**zdb -l**) against */etc/hostid* (a difference is rewritten by
+    the next boot's import); installs the guards without overwriting them;
+    rebuilds the initrd of every installed kernel (**dracut**(8) with its
+    output path, or **update-initramfs**(8) per kernel); runs
+    **update-grub**(8); fixes the ESP's UUID in */etc/fstab* from the ESP
+    of the disk that holds **rpool**; checks that */boot/efi* is that ESP
+    and holds *shimx64.efi* and *grubx64.efi*, running the signed packages'
+    reconfigure when one is missing; and mounts, once, every
+    **canmount=on** dataset that is not mounted.
+
+    **grub.cfg** counts as regenerated only when **update-grub** succeeded
+    and it has an entry for every installed kernel; otherwise the previous
+    one is kept. A failed initrd, a kernel without an entry, an ESP that is
+    not mounted or not rpool's disk's, EFI binaries still missing after the
+    reconfigure or a pool not ONLINE make the banner FINISH INCOMPLETE and
+    the exit status 1, with the advice for each: **repair-boot** from the
+    live USB for a kernel without an initrd or an entry, disconnecting the
+    drives when the grub guard refused. A dataset left unmounted is a
+    warning. When something that **setup** guarantees is missing
+    (**sanoid.timer** enabled and active, its policy in
+    */etc/sanoid/sanoid.conf*, **feature@bookmark_v2** on **rpool**, the
+    alerts timer, the guards and alerts files of this **zark**), the banner
+    names each with "setup would:"; otherwise it does not mention
+    **setup**.
 
 **simulate** \[*device*\] \[**--rw**\] \[**--display** *WxH*\]
 :   Boot a recovered (or live) disk in **qemu-system-x86_64**(1) under
@@ -707,16 +746,25 @@ for the canonical end-to-end sequences.
     alternate root of */mnt/zark/<poolname>/*. Asks interactively whether
     to mount read-only (recommended, and the default) or read-write.
 
+    Before importing, **mount** lists the drive with **zpool import -d**,
+    as **recover** does: a drive this system's ZFS cannot read stops there,
+    naming each feature; one it can only read is a line in read-only mode,
+    and in read-write mode a stop that says to mount it read-only.
+
     Read-only imports the pool read-only and rebuilds the backed-up
     system's tree under */mnt/zark/<poolname>/* the way **recover** would
     restore it: the boot environment at the top (with several on the drive,
     chosen from a menu, the newest the default), */home*, */boot* and every
     other dataset at the origin's mountpoint (from the origin's
     *zfs-list.cache* inside the backup, else the Ubuntu layout). Nothing
-    is written to the drive; a dataset whose mountpoint directory does not
-    exist, or whose path resolves outside */mnt/zark/<poolname>/* (through
-    a symbolic link or *..* inside the backup), is listed as not mounted.
-    Read-write mounts the same tree, writable; mounting changes every
+    is written to the drive. A symbolic link or *..* inside the backup is
+    resolved within */mnt/zark/<poolname>/*, as a **chroot**(1) there
+    would (an absolute */var/run* -> */run* is the tree's */run*), and the
+    dataset is mounted at the resolved path; one whose mountpoint
+    directory does not exist, that resolves to the tree's root or that
+    passes 40 links is listed as not mounted. Read-write mounts the same
+    tree, writable, and lists as not mounted a dataset whose path resolves
+    outside the tree; mounting changes every
     mounted dataset, even with nothing written, and the next **backup**
     asks whether to skip those datasets or discard the changes. Archived
     datasets (*\<name\>.archived-YYYYMMDD*) are not part of the tree; the
@@ -726,6 +774,12 @@ for the canonical end-to-end sequences.
     *target* **local** (aliases **system**, **rpool**) it instead mounts
     the **installed system's** top-level **rpool**/**bpool** from a live
     USB - useful for inspecting the local disk without a full **chroot**.
+    Read-only imports both pools **readonly=on** and opens the keystore
+    read-only: nothing is written to them, their labels included. Their
+    datasets mount read-only without the intent log replayed (the last
+    writes before an unclean shutdown are not seen), and a dataset whose
+    mountpoint directory is missing cannot have it created: it is listed
+    as not mounted.
 
     The complementary command is **umount**.
 
@@ -752,8 +806,9 @@ for the canonical end-to-end sequences.
     nothing else. It lists what **zark** owns: mounts below */mnt/zark*,
     */mnt/recover*, */mnt/repair*, */run/zark/altroot* and
     */run/zark/probe*; pools imported with an alternate root below them;
-    keystore mappings */dev/mapper/zark_ks_\**, and a mount on top of
-    */run/keystore/rpool* that comes from one; a **sanoid** timer left
+    keystore mappings */dev/mapper/zark_ks_\**, and the **selftest**'s
+    *\<pool\>-ks* on the keystore zvol of one of those pools, and a mount
+    on top of */run/keystore/rpool* that comes from one; a **sanoid** timer left
     stopped by an interrupted **backup**; **zvol_inhibit_dev=1** left by
     **fix-rpool-mountpoint**. It also names the imported pools it leaves
     alone (a pool without an alternate root, such as the running system's
@@ -956,6 +1011,18 @@ this mode. Before a command that imports pools, **zark** stops the
 installer's **ubuntu-desktop-bootstrap.subiquity-server** for the session
 (**snap stop**, nothing changes for the next boot): it probes the disks on
 every change and pops up a crash report after each import.
+
+## The drive's keystore
+
+A backup drive's keystore is the copy **prepare** made of the source's
+keystore: its LUKS passphrase and its *system.key*. Nothing updates it
+later. A **cryptsetup luksChangeKey** in the source leaves the drive asking
+the old passphrase. A **zfs change-key** of **rpool** in the source makes
+the next **backup** rewrap the drive's datasets to the new key (each raw
+incremental carries the sender's wrapping of the key): the drive's keystore
+then no longer opens them, the following **backup** stops at the key load,
+and **recover** from that drive cannot load its keys. After either change,
+retire and re-prepare every drive: **zark purge**, then **zark prepare**.
 
 ## First-boot hostid
 

@@ -67,7 +67,7 @@ def _origin(b: Bench, cid: str, kib: int = 256) -> str:
 
 
 def _send_full(b: Bench, src: str, dst: str) -> None:
-    """The engine's NEW transfer (lib/engine.py:672-689)."""
+    """The engine's NEW transfer (lib/engine.py:444-461)."""
     _ = b.pipe_ok(f"zfs send -w {_q(src)}", f"zfs receive -s -u {_recv_props()} {_q(dst)}")
 
 
@@ -93,7 +93,7 @@ def _load_key(b: Bench, ds: str) -> None:
     1,
     "create and import with -R leave zpool.cache alone",
     depends=(
-        "I-G: ZFS.import_backup_pool (lib/zfs.py:273)",
+        "I-G: ZFS.import_backup_pool (lib/zfs.py:292)",
         "prepare's zpool create -R",
         "health's test pool",
     ),
@@ -469,7 +469,7 @@ def _zfs_userland(b: Bench) -> str:
     1,
     1,
     "one zfs snapshot call is one txg, and one pool",
-    depends=("I-C: Run.take_point (lib/engine.py:415)",),
+    depends=("I-C: Run.take_point (lib/engine.py:187)",),
     fake=True,
 )
 def snp_01(b: Bench) -> None:
@@ -492,7 +492,7 @@ def snp_01(b: Bench) -> None:
     1,
     1,
     "zfs snapshot -o sets a user property on every snapshot",
-    depends=("points that name their drive (M4b-4)", "release_point (lib/engine.py:1001)"),
+    depends=("points that name their drive (M4b-4)", "release_point (lib/anchors.py:71)"),
     fake=True,
 )
 def snp_02(b: Bench) -> None:
@@ -600,7 +600,7 @@ def snp_05(b: Bench) -> None:
     "partial receive state: hidden child, token on the parent",
     depends=(
         "RESUME and stale detection",
-        "apply_prune naming what a -r takes (lib/engine.py:1408)",
+        "apply_prune naming what a -r takes (lib/reclaim.py:132)",
     ),
     fake=True,
 )
@@ -657,7 +657,7 @@ def snd_01(b: Bench) -> None:
     1,
     1,
     "receive -u -o/-x: local properties, nothing mounted",
-    depends=("Run._recv (lib/engine.py:674)", "I-G", "the at-rest protection"),
+    depends=("Run._recv (lib/engine.py:446)", "I-G", "the at-rest protection"),
     fake=True,
 )
 def snd_02(b: Bench) -> None:
@@ -699,7 +699,7 @@ def snd_02(b: Bench) -> None:
     1,
     1,
     "-I carries intermediates; bookmarks as incremental sources",
-    depends=("VIA_BOOKMARK's two steps (lib/engine.py:474-489)", "anchors (I-B, D16, F5)"),
+    depends=("VIA_BOOKMARK's two steps (lib/engine.py:246-261)", "anchors (I-B, D16, F5)"),
     fake=True,
 )
 def snd_03(b: Bench) -> None:
@@ -785,7 +785,7 @@ def snd_04(b: Bench) -> None:
     1,
     1,
     "a cut receive -s resumes with send -t",
-    depends=("RESUME (lib/engine.py:466-467, :676-677)",),
+    depends=("RESUME (lib/engine.py:238-239, :448-449)",),
     fake=True,
 )
 def snd_05(b: Bench) -> None:
@@ -821,7 +821,7 @@ def snd_05(b: Bench) -> None:
     1,
     1,
     "a stale token is refused by name; receive -A drops only the partial state",
-    depends=("M2R-10's discard (lib/engine.py:720-725)", "abort_partial (:746)"),
+    depends=("M2R-10's discard (lib/engine.py:492-497)", "abort_partial (lib/engine.py:518)"),
     fake=True,
 )
 def snd_06(b: Bench) -> None:
@@ -854,7 +854,7 @@ def snd_06(b: Bench) -> None:
     1,
     1,
     "a resume onto a written head fails at its end; abort, roll back, resend",
-    depends=("M2V-1's DISCARD (Run.discard_changes, lib/engine.py:523)",),
+    depends=("M2V-1's DISCARD (Run.discard_changes, lib/engine.py:295)",),
     fake=True,
 )
 def snd_07(b: Bench) -> None:
@@ -889,7 +889,7 @@ def snd_07(b: Bench) -> None:
     1,
     1,
     "rollback: to the newest without -r, older only with -r",
-    depends=("DISCARD", "ROLLBACK's roll back option (lib/engine.py:517-521)"),
+    depends=("DISCARD", "ROLLBACK's roll back option (lib/engine.py:289-293)"),
     fake=True,
 )
 def snd_08(b: Bench) -> None:
@@ -924,7 +924,7 @@ def snd_08(b: Bench) -> None:
     1,
     1,
     "send -nvP sizes; a clone estimated from its origin with -i",
-    depends=("Run.estimate (lib/engine.py:491) and its -i for a clone (M3 7a)", "the space check"),
+    depends=("Run.estimate (lib/engine.py:263) and its -i for a clone (M3 7a)", "the space check"),
     fake=True,
 )
 def snd_09(b: Bench) -> None:
@@ -957,7 +957,7 @@ def _size(b: Bench, cmd: str) -> int:
     1,
     1,
     "a clone sent from its origin is attached to that origin by GUID",
-    depends=("O3 (lib/engine.py:468-471, :679-681)",),
+    depends=("O3 (lib/engine.py:240-243, :451-453)",),
     fake=True,
 )
 def snd_10(b: Bench) -> None:
@@ -999,7 +999,7 @@ def snd_10(b: Bench) -> None:
     1,
     "recover's receive shapes, the keystore's included",
     depends=(
-        "recover's _receive and _receive_row (commands/recover.py:1033)",
+        "recover's _receive and _receive_row (commands/recover.py:377)",
         "its keystore",
         "M4b-6",
     ),
@@ -1096,7 +1096,7 @@ def snd_12(b: Bench) -> None:
     1,
     1,
     "destroy -nvp lists exact names and what it frees",
-    depends=("the retention dry run (lib/engine.py:1327-1332)",),
+    depends=("the retention dry run (lib/reclaim.py:51-56)",),
     fake=True,
 )
 def dst_01(b: Bench) -> None:
@@ -1132,7 +1132,7 @@ def dst_01(b: Bench) -> None:
     1,
     "grouped destroys are all or nothing; -r takes a name everywhere",
     depends=(
-        "grouped destroys and their retry (M4b-10, lib/engine.py:1347-1390)",
+        "grouped destroys and their retry (M4b-10, lib/reclaim.py:71-114)",
         "retention's pins",
     ),
     fake=True,
@@ -1196,7 +1196,7 @@ def dst_03(b: Bench) -> None:
     1,
     1,
     "branch a raw lineage with its key unloaded",
-    depends=("ROLLBACK's keep (Run.branch, lib/engine.py:554; M4b-5, M4bF-9)",),
+    depends=("ROLLBACK's keep (Run.branch, lib/engine.py:326; M4b-5, M4bF-9)",),
     fake=True,
 )
 def cln_01(b: Bench) -> None:
@@ -1237,7 +1237,7 @@ def cln_01(b: Bench) -> None:
     1,
     1,
     "a raw-received root takes its parent's key with change-key -i",
-    depends=("recover's key load and _restore_encryption_root (commands/recover.py:1296)",),
+    depends=("recover's key load and _restore_encryption_root (commands/recover.py:499)",),
 )
 def key_01(b: Bench) -> None:
     """``zfs load-key -L file://`` on a raw-received encryption root, then

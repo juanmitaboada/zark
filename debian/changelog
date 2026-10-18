@@ -1,3 +1,26 @@
+zark (2.0.0~rc7-1) UNRELEASED; urgency=medium
+
+  * Milestone M4c of zark 2 (recover, finish and the boot chain). Not for
+    release: nothing is published until the final 2.0.0.
+  * finish no longer exports and re-imports the running system's pools; it
+    reads the hostid in their labels instead, rebuilds every installed
+    kernel's initrd before update-grub, checks that grub.cfg has an entry
+    for each, that /boot/efi is the ESP of rpool's disk with the signed
+    binaries, mounts canmount=on datasets left unmounted, and names what
+    setup would still do.
+  * dracut is given the initrd's path, as Ubuntu's wrapper does.
+  * recover anchors what it restored for the drive it read, records the
+    ESP in debconf with the right owner and type and reads it back, and
+    removes the keystore's prepare snapshot.
+  * mount local read-only imports the installed pools readonly=on; zark
+    mount checks a drive's features before importing it and resolves the
+    backup's symlinks inside its tree.
+  * backup stops when the keys' status cannot be read.
+  * The self-test cleans up after a killed run and has three new checks.
+  * No em dash, en dash or ellipsis character in the tree.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Sun, 18 Oct 2026 21:00:00 +0200
+
 zark (2.0.0~rc6-1) UNRELEASED; urgency=medium
 
   * Milestone M4s of zark 2 (platform self-test). Not for release: nothing

@@ -10,9 +10,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M4s (2.0.0-rc6)** on top of M4b (2.0.0-rc5),
-M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1 (2.0.0-rc1) and the
-development-tooling consolidation that preceded them.
+The tree currently carries **M4c (2.0.0-rc7)** on top of M4s (2.0.0-rc6),
+M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1
+(2.0.0-rc1) and the development-tooling consolidation that preceded them.
+
+### M4c: recover, finish and the boot chain (2.0.0-rc7)
+
+#### Changed
+
+- **`finish` no longer exports and re-imports the pools** (M4c-4). On the
+  running system `zpool export rpool` unmounts every dataset that is not
+  busy and then fails on `/`; both exit statuses were ignored and "Pool
+  hostid synced" was printed, although a pool's labels take the importing
+  system's hostid at every import, the boot's included. In its place a
+  read-only line per pool: the hostid in its label (`zdb -l`) against
+  `/etc/hostid`.
+- **`finish` rebuilds the initrds before `update-grub`, and checks the
+  result** (M4c-5 to M4c-8, M4c-10, M4c-11). zpool.cache first (the
+  initrds carry it), then the initrd of every installed kernel, then
+  `update-grub`, which writes no entry for a kernel without one. grub.cfg
+  counts as regenerated only with an entry for every installed kernel
+  (`10_linux_zfs` exits 0 even when it stops half way). The ESP fixed in
+  fstab is the one on rpool's disk (it was the first NVMe disk's), and
+  `/boot/efi` must be that ESP, mounted, with the signed shim and GRUB.
+  Every `canmount=on` dataset left unmounted is mounted once, or named.
+  "Run setup" is printed only when something setup guarantees is missing,
+  and says what.
+- **dracut is given the initrd's path** (M4c-5): `dracut --force
+  /boot/initrd.img-<v> <v>`, as Ubuntu's own wrapper runs it, for recover,
+  repair-boot and finish. With `--kver` alone, an ESP with a
+  `loader/entries` directory received the initrd, where GRUB never looks.
+- **`recover` anchors what it restored for the drive it read** (M4c-12,
+  M4bF-2): a bookmark of every restored rpool dataset, and the restored
+  bpool snapshot renamed to that drive's bpool anchor, so that drive's next
+  backup continues instead of resending in full. Another drive's run names
+  such a point "not on <pool>; it names no drive" when it removes it.
+- **`recover` records the ESP in debconf for real** (M4c-9): the line
+  lacked its owner and type, and `debconf-set-selections` skipped it with a
+  warning and exit 0. It is read back now. A missing signed EFI binary is
+  an error of the recovery (M4c-7), the kernel count no longer counts the
+  `vmlinuz` links (M1P.8), a dataset left at its monthly base by a failed
+  point is named so (M4c-13), the keystore's `@prepare_*` snapshot is
+  removed from the recovered system (M4c-14), a backup point that lost
+  datasets since its run is PARTLY REMOVED in the menu (M4c-16), the delta
+  column counts days from 48 hours on (M4c-17), and the drive's metadata
+  is read strictly (M4c-18).
+- **`backup` stops when the keys' status cannot be read** (M4c-19): it was
+  taken for "Key already loaded".
+- **`mount local` read-only writes nothing to the installed pools**
+  (M4c-21): they are imported `readonly=on` and the keystore opened
+  read-only, instead of a read-write import remounted read-only.
+- **`zark mount` read-only resolves a symlink of the backup inside the
+  tree** (M4c-22): `/var/run -> /run` is the tree's `/run`, and the dataset
+  under it is mounted there instead of being skipped.
+- **`zark mount` checks the drive's features before its import** (M4c-23),
+  as recover does; in read-write mode, a drive this ZFS can only read is
+  refused with the advice to mount it read-only.
+- **The read-back's import belongs to the run's cleanup** (M4c-25): a stop
+  between the read-back's import and its export exports the drive.
+- **A self-test killed with SIGKILL is cleaned up** (M4c-26): the next run
+  removes its directory in `/dev/shm`, and `zark clean` closes its
+  keystore mapper.
+- **The self-test resolves the stick's vdevs to their disks** (M4c-27)
+  before it blanks the stick.
+- **Three new self-test checks** (M4c-28): SND-12 (a recovered snapshot's
+  bookmark, and a renamed one, are bases of the drive), POOL-12 (the label
+  carries the importing system's hostid), MNT-04 (a read-only import
+  mounts and cannot create a mountpoint). Level 1 has 46 checks.
+- **`lib/engine.py` and `commands/recover.py` are split** (M4c-1),
+  without changing what they do: `lib/survey.py`, `lib/drive_marks.py`,
+  `lib/anchors.py`, `lib/reclaim.py`, `lib/restore_plan.py` and
+  `lib/boot_chain.py`.
+- **`make fulltest` runs the pinned ruff** (M4c-2), from its own tox env,
+  not the one in PATH.
+- **No em dash, en dash or U+2026 in the tree** (M4c-3), the old entries
+  of this file and of `debian/changelog` included; a test keeps it so. The
+  scripts zark installs change with it: the next `setup` rewrites the APT
+  hook, its MOTD reminder, the grub guard and the alerts' MOTD script once,
+  and says so.
+
+#### Known limitations
+
+- A drive's keystore is the copy `prepare` made of the source's keystore
+  (M4c-20). A later `cryptsetup luksChangeKey` in the source leaves the
+  drive asking the old passphrase; a later `zfs change-key` of rpool makes
+  the next backup rewrap the drive's datasets to the new key, after which
+  the drive's keystore no longer opens them, the following backup stops at
+  the key load and recover from that drive cannot load its keys. After
+  either change: `zark purge` and `zark prepare` of each drive.
+- After the child of a stopped command has exited, zark waits for its
+  process group by polling it every 20 ms (M4c-24, M4bV-1): a new process
+  group that took the same number inside one of those gaps (a pid wrap,
+  `pid_max` is 4194304 on Ubuntu 26.04) would be waited for and killed, and
+  a zombie counts as a member until its parent reaps it.
+- Not checked by the self-test, as each would change the running system's
+  `/boot`, ESP, NVRAM or debconf: debconf's `install_devices`,
+  `grub-multi-install`, the signed packages' postinsts, `update-grub` and
+  `10_linux_zfs`, dracut and the kernel's `/boot` links. eli's recover,
+  finish and boot verify them.
+- `mount local` read-only does not see the last writes of an unclean
+  shutdown (the intent log is not replayed), and lists as not mounted a
+  dataset whose mountpoint directory is missing.
+
+#### Rejected approaches
+
+- **Re-exports from `lib/engine.py`** (M4c-1): the callers would not show
+  where a name lives; **one public `quote` in `lib/sh.py`** instead of each
+  module's two-line `_q`: it changes every caller's AST, which the move's
+  check compares.
+- **Dropping ruff from fulltest and relying on `tox -e lint`** (M4c-2 2b):
+  ruff would report after the suite and the Debian checks;
+  **`uvx` with the pin read from pyproject.toml** (2c): `uv` is in tox-uv's
+  environment, not necessarily in PATH.
+- **Leaving the old CHANGELOG and debian/changelog entries as they were**
+  (M4c-3 3b): a test with exceptions keeps the characters.
+- **Dropping finish's sync step without a replacement** (M4c-4 4b): the
+  removed line pretended to show something the hostid line shows.
+- **Keeping `--kver` and skipping the `mkdir` only without an ESP**
+  (M4c-5 5b): an ESP restored with `loader/entries` would still get the
+  initrd.
+- **One entry for any kernel enough** (M4c-6 6b): finish rebuilds every
+  initrd first, so a missing entry is a real failure.
+- **`org.zark:point-for` on the restored points as well** (M4c-12 12b):
+  redundant with the bookmark.
+- **Leaving the keystore's `prepare_*` snapshot** (M4c-14 14b).
+- **A warning and a wait before recover's passphrase in a graphical
+  session** (M4c-15 15b): the dialog's cause, the installer's probe, is
+  stopped since rc4 (M4aF-6).
+- **No more passphrase and key loading on drives prepared by rc2 or
+  later** (M4c-19 19b): the passphrase is the recurring proof that the
+  drive's keystore still opens the drive's datasets.
+- **zark as a child subreaper** (M4c-24 24a): every orphan of every child
+  would become zark's to reap, on every path.
+- **Documenting the self-test's leftovers only** (M4c-26 26b).
 
 ### M4s: platform self-test (2.0.0-rc6)
 

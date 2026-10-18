@@ -50,7 +50,7 @@ SANOID_DEFAULTS = ("/usr/share/sanoid/sanoid.defaults.conf", "/etc/sanoid/sanoid
     1,
     1,
     "explicit ZFS mounts: snapshots anywhere, zfsutil, read-only pools",
-    depends=("zark mount (commands/mount.py:121)", "backup_layout.root_is_empty"),
+    depends=("zark mount (commands/mount.py:181)", "backup_layout.root_is_empty"),
 )
 def mnt_01(b: Bench) -> None:
     """In its own namespace: ``mount -t zfs -o ro <ds>@<snap> <dir>`` mounts a
