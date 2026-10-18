@@ -485,10 +485,12 @@ for the canonical end-to-end sequences.
     the disk locked against **udev**(7), which would otherwise re-read the
     partition table and remove the partition (and again after
     **wipefs**(8), if it left the table); then any partition left and any
-    signature **blkid -p** finds are checked. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
+    signature **blkid -p** finds are checked. When the disk cannot be
+    locked for 10 seconds (another program holds it), nothing is
+    overwritten. Any failure ends **PURGE INCOMPLETE** with exit status 1, and
     the registry entries and the anchors in the source are kept, since the
-    disk may still hold the pool. The banner lists every step and check as
-    done, failed or not done, so it shows what state the disk is in.
+    disk may still hold the pool. Both banners list every step and check as
+    done, failed or not done, so they show what state the disk is in.
 
 **registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\] | **retention** *name* \[**window=***N*\] \[**max_age=***N*|**off**\] \[**margin=***N*\]\]
 :   Inspect and repair **known_drives.json** without editing it by hand.

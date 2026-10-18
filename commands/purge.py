@@ -140,20 +140,21 @@ def _label_mark(part1: str, when: str, log: Log) -> Mark:
 
 
 @contextmanager
-def _held_from_udev(disk: str, log: Log) -> Iterator[None]:
-    """Hold a BSD LOCK_EX on the whole disk while the body runs.
+def _held_from_udev(disk: str, log: Log) -> Iterator[bool]:
+    """Hold a BSD LOCK_EX on the whole disk while the body runs; yield whether it is held.
 
-    udevd takes LOCK_SH|LOCK_NB on a disk before it processes it and skips
-    it, partition-table re-read included, while that fails
-    (src/shared/reread-partition-table.c:256-270). The lock is waited for up
-    to 10 s (udevd may be probing); without it the body still runs. The
-    descriptor is read-only, so closing it triggers no new event.
+    When a writer closes the disk, udev re-reads its partition table only if
+    it can take LOCK_EX|LOCK_NB on it, and gives up the re-read while that
+    fails (src/shared/reread-partition-table.c:255-271); its workers'
+    LOCK_SH|LOCK_NB requeues the event (src/udev/udev-worker.c:124-136). The
+    lock is waited for up to 10 s (udevd may be probing). The descriptor is
+    read-only, so closing it triggers no new event.
     """
     try:
         fd = os.open(disk, os.O_RDONLY | os.O_CLOEXEC)
     except OSError as e:
         log.warn(f"Cannot open {disk} to hold it from udev: {e}")
-        yield
+        yield False
         return
     try:
         for _ in range(100):
@@ -163,8 +164,11 @@ def _held_from_udev(disk: str, log: Log) -> Iterator[None]:
             except BlockingIOError:
                 time.sleep(0.1)
         else:
-            log.warn(f"Cannot lock {disk}: udev may remove its partitions during the overwrite")
-        yield
+            log.warn(f"Cannot lock {disk}: another program held it for 10 s")
+            yield False
+            return
+        log.dbg(f"Holding {disk} from udev (LOCK_EX)")
+        yield True
     finally:
         os.close(fd)
 
@@ -173,7 +177,8 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     """Overwrite both ends, wipe signatures and the partition table, verify.
 
     Every step runs even when an earlier one failed (more erased is never
-    worse); the report has one line per step and per check.
+    worse); the report has one line per step and per check. Nothing is
+    written when the disk cannot be held from udev.
     """
     marks: list[Mark] = []
     # The ZFS labels live in part1, and zdb -l reads them at offsets of the
@@ -184,8 +189,14 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
     # watch.c), and the first dd destroys the protective MBR, so part1's node
     # would go at once; the disk is held with LOCK_EX meanwhile, which makes
     # udevd leave it alone (systemd docs/BLOCK_DEVICE_LOCKING.md).
-    had_part1 = _present(part1)
-    with _held_from_udev(target_dev, log):
+    with _held_from_udev(target_dev, log) as held:
+        if not held:
+            # Unheld, udev would take part1 at the first dd's close and the
+            # label check could not run; a second purge then has no part1 to
+            # check either (M4aV-1). The contention is transient: stop here.
+            marks.append((False, f"nothing overwritten: {target_dev} could not be held from udev"))
+            return marks
+        had_part1 = _present(part1)
         log.step(2, 5, "Overwriting first 10MB...")
         _ = _step(
             f"dd if=/dev/urandom of={target_dev} bs=1M count=10 conv=fsync",
@@ -213,9 +224,10 @@ def _wipe(target_dev: str, part1: str, log: Log) -> list[Mark]:
         if _present(part1):
             marks.append(_label_mark(part1, "after the overwrite", log))
         elif had_part1:
-            marks.append(
-                (None, "labels on the first partition not read: it went away during the overwrite")
-            )
+            # Held, part1 still goes if the drive resets during the dd.
+            text = "labels on the first partition not read: it went away during the overwrite"
+            log.warn(text[0].upper() + text[1:])
+            marks.append((None, text))
 
     log.step(4, 5, "Wiping filesystem signatures...")
     _ = _step(f"wipefs -a {target_dev}", "signatures wiped", "wipefs -a", marks, log)
@@ -356,6 +368,8 @@ def run(
     log.banner_ok(
         "DRIVE PURGED",
         [
+            *_report_lines(marks),
+            "",
             f"Device: {target_dev} ({ident.model})",
             "Drive is blank and ready for reuse.",
             *([anchors_left] if anchors_left else []),

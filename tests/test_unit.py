@@ -47,6 +47,7 @@ from contextlib import (
     AbstractContextManager,
     ExitStack,
     contextmanager,
+    nullcontext,
     redirect_stderr,
     redirect_stdout,
 )
@@ -6542,6 +6543,15 @@ def _wipe_succeeds(mock: MockShell, failing: str = "") -> None:
     mock.on("blkid -p /dev/sdb").returns(2)
 
 
+@contextmanager
+def _held_taken(_disk: str, _log: Log) -> Iterator[bool]:
+    """purge's disk lock, taken: the tests' disks are not there to lock (M4aV-1)."""
+    yield True
+
+
+_real_held_from_udev = purge_mod._held_from_udev  # pylint: disable=protected-access
+
+
 class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
     """I21: purge recognises the registered drive and removes its entries."""
 
@@ -6550,6 +6560,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
             patch_sh(mock),
             patch.object(Config, "default_config_dir", return_value=cfg_dir),
             patch.object(purge_mod, "validate_external_block_device", return_value=ident),
+            patch.object(purge_mod, "_held_from_udev", _held_taken),
             patch("builtins.input", side_effect=["yes", "sdb", "n"]),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(StringIO()),
@@ -6657,11 +6668,18 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         ident = _purge_ident(PoolLabel("backup", "3446866051930726346"))
         out = StringIO()
         rc = 0
+        # Taken, unless the test's own udev model (_udev) answers for it.
+        hold: AbstractContextManager[object] = (
+            patch.object(purge_mod, "_held_from_udev", _held_taken)
+            if purge_mod._held_from_udev is _real_held_from_udev  # pylint: disable=protected-access
+            else nullcontext()
+        )
         with (
             patch_sh(mock),
             patch.object(Config, "default_config_dir", return_value=cfg_dir),
             patch.object(purge_mod, "validate_external_block_device", return_value=ident),
             patch.object(purge_mod.forensics, "capture", return_value=""),
+            hold,
             patch.object(purge_mod.anchors, "drop_anchors_of", return_value="") as drop,
             # Only part1's presence: a global os.path.exists patch also hides the
             # registry from Path.exists on Python 3.14.
@@ -6688,6 +6706,18 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         _wipe_succeeds(mock)
         out, rc, data = self._purge(mock)
         assert rc == 0 and "DRIVE PURGED" in out and not data
+        # M4aV-1 9a: DRIVE PURGED lists every line too.
+        purged = out.split("DRIVE PURGED", 1)[1]
+        for line in (
+            "✓ pool backup destroyed",
+            "✓ first 10MB overwritten",
+            "✓ last 10MB overwritten",
+            "✓ signatures wiped",
+            "✓ partition table destroyed",
+            "✓ no partition left",
+            "✓ no signature found (blkid -p)",
+        ):
+            assert line in purged, line
 
     def test_failing_wipefs_is_incomplete(self):
         mock = MockShell()
@@ -6786,27 +6816,30 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert "backup" in data
 
     @staticmethod
-    def _udev(mock: MockShell, locking: bool = True) -> tuple[ExitStack, dict[str, int]]:
+    def _udev(
+        mock: MockShell, locking: bool = True, reset: bool = False
+    ) -> tuple[ExitStack, dict[str, int]]:
         """What udevd does on eli (checklist R4, M4aF-14): when a dd closes the
         disk, it re-reads the partition table, and the overwritten
         protective MBR takes part1 away, unless the disk is held with
-        LOCK_EX. part1 is gone after wipefs in any case."""
+        LOCK_EX. part1 is gone after wipefs in any case. ``reset``: the
+        drive re-enumerates during the first dd, so part1 goes even held."""
         state = {"held": False, "gone": False, "released_at": -1}
         real = mock.mock_run
 
         def spy(cmd: str, **kw: Any) -> RunResult:
             r = real(cmd, **kw)
-            if cmd.startswith("dd if=/dev/urandom of=/dev/sdb") and not state["held"]:
+            if cmd.startswith("dd if=/dev/urandom of=/dev/sdb") and (reset or not state["held"]):
                 state["gone"] = True
             if cmd.startswith("wipefs -a /dev/sdb"):
                 state["gone"] = True
             return r
 
         @contextmanager
-        def held(_disk: str, _log: Log) -> Iterator[None]:
+        def held(_disk: str, _log: Log) -> Iterator[bool]:
             state["held"] = locking
             try:
-                yield
+                yield locking
             finally:
                 state["held"] = False
                 state["released_at"] = len(mock.calls)  # calls made while held
@@ -6839,31 +6872,53 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert calls.index(f"zdb -l {part1}") < state["released_at"], (state, calls)
         assert "No ZFS label on the first partition after the overwrite" in out
 
-    def test_without_the_lock_udev_takes_part1_and_purge_says_so(self):
-        # What eli showed in R4 before M4aF-14: the label read never ran, silently.
+    def test_an_unheld_disk_is_not_overwritten(self):
+        # M4aV-1 9c: unheld, udev would take part1 at the first dd's close and
+        # the label check could not run; nothing is written, and purge again
+        # finds part1 and runs it.
         mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
         _wipe_succeeds(mock)
-        part1 = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
         stack, state = self._udev(mock, locking=False)
-        with (
-            stack,
-            patch_sh(mock),
-            patch.object(purge_mod, "_present", side_effect=lambda _p: not state["gone"]),
-            redirect_stdout(StringIO()),
-        ):
-            marks = purge_mod._wipe("/dev/sdb", part1, make_log())  # pylint: disable=protected-access
+        with stack:
+            out, rc, data = self._purge(mock, lambda _p: not state["gone"])
+        assert rc == 1 and "PURGE INCOMPLETE" in out
+        assert "✗ nothing overwritten: /dev/sdb could not be held from udev" in out
+        assert not [c for c in mock.calls if c.startswith(("dd ", "wipefs", "sgdisk"))], mock.calls
+        assert "backup" in data
+
+    def test_part1_gone_under_the_lock_is_warned_and_in_drive_purged(self):
+        # M4aV-1 9a: a reset during the dd takes part1 even held; the label
+        # check did not run, and the success banner says so.
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock)
+        stack, state = self._udev(mock, reset=True)
+        probed_held: list[int] = []
+
+        def present(_p: str) -> bool:
+            probed_held.append(state["held"])
+            return not state["gone"]
+
+        with stack:
+            out, rc, _ = self._purge(mock, present)
         assert mock.was_not_called("zdb -l"), mock.calls
-        assert (
-            None,
-            "labels on the first partition not read: it went away during the overwrite",
-        ) in marks, marks
+        line = "labels on the first partition not read: it went away during the overwrite"
+        assert rc == 0 and f"- {line}" in out.split("DRIVE PURGED", 1)[1], out
+        assert f"[WARN]{Log.N}    Labels on the first partition not read" in out, out
+        # had_part1 is read under the lock, not before it.
+        assert probed_held and probed_held[0], probed_held
 
     def test_the_disk_is_held_from_udev_while_the_body_runs(self):
-        # udevd takes LOCK_SH|LOCK_NB before it re-reads the partition table.
+        # udev's re-read takes LOCK_EX|LOCK_NB, its workers LOCK_SH|LOCK_NB.
         with tempfile.NamedTemporaryFile() as disk:
             probe = os.open(disk.name, os.O_RDONLY)
             try:
-                with redirect_stdout(StringIO()), purge_mod._held_from_udev(disk.name, make_log()):  # pylint: disable=protected-access
+                with (
+                    redirect_stdout(StringIO()),
+                    purge_mod._held_from_udev(disk.name, make_log()) as held,  # pylint: disable=protected-access
+                ):
+                    assert held
                     try:
                         fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
                     except BlockingIOError:
@@ -6873,6 +6928,33 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
                 fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)  # released on exit
             finally:
                 os.close(probe)
+
+    def test_a_disk_another_program_holds_is_not_held(self):
+        # M4aV-3 V6: waited for 10 s, warned, and the caller is told.
+        with tempfile.NamedTemporaryFile() as disk:
+            other = os.open(disk.name, os.O_RDONLY)
+            fcntl.flock(other, fcntl.LOCK_SH)  # another open file description
+            out = StringIO()
+            try:
+                with (
+                    patch.object(purge_mod.time, "sleep") as sleep,
+                    redirect_stdout(out),
+                    purge_mod._held_from_udev(disk.name, make_log()) as held,  # pylint: disable=protected-access
+                ):
+                    assert not held
+            finally:
+                os.close(other)
+        assert sleep.call_count == 100
+        assert f"Cannot lock {disk.name}: another program held it for 10 s" in out.getvalue()
+
+    def test_a_disk_that_cannot_be_opened_is_not_held(self):
+        out = StringIO()
+        with (
+            redirect_stdout(out),
+            purge_mod._held_from_udev("/nonexistent/sdz", make_log()) as held,  # pylint: disable=protected-access
+        ):
+            assert not held
+        assert "Cannot open /nonexistent/sdz to hold it from udev" in out.getvalue()
 
     def test_a_label_left_by_the_overwrite_is_incomplete(self):
         mock = MockShell()
@@ -6926,6 +7008,7 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
                 purge_mod, "validate_external_block_device", return_value=_purge_ident(None)
             ),
             patch.object(purge_mod, "_present", return_value=False),
+            patch.object(purge_mod, "_held_from_udev", _held_taken),
             patch("builtins.input", side_effect=["y", "yes", "sdb", "n"]),
             redirect_stdout(out),
         ):
@@ -16884,7 +16967,11 @@ class TestSelftestStick:  # pylint: disable=missing-function-docstring,too-few-p
         mock = MockShell()
         mock.on_prefix("blkid -p").returns(2)
         mock.on("zpool list -vHP").succeeds("")
-        with patch_sh(mock), redirect_stdout(StringIO()):
+        with (
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch("commands.purge._held_from_udev", _held_taken),
+        ):
             bench = st_l2.StickBench(make_log(), Cleanup(make_log()), ident)
             other = DiskIdentity(disk="/dev/sdy", by_id="usb-S_1-0:0", serial="S1")
             with patch("lib.identity.resolve_disk", return_value=other):
@@ -16916,7 +17003,7 @@ class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
             redirect_stdout(StringIO()),
             patch("lib.identity.resolve_disk", return_value=self.IDENT),
             patch("commands.purge._present", return_value=False),
-            patch("commands.purge.os.open", side_effect=OSError("no device")),
+            patch("commands.purge._held_from_udev", _held_taken),
         ):
             st_l2.StickBench(make_log(), Cleanup(make_log()), self.IDENT).teardown()
         return mock.calls

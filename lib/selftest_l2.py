@@ -283,7 +283,7 @@ def dsk_05(b: Bench) -> None:
     --zap-all``) on a stick with a pool: every step and check succeeds, and
     the label is gone from part1 after the overwrite (four 256 KiB labels,
     two at each end of the partition). OpenZFS module/zfs/vdev_label.c:162-170,
-    include/sys/vdev_impl.h:535-562; commands/purge.py:188-207."""
+    include/sys/vdev_impl.h:535-562; commands/purge.py:192-218."""
     from commands import purge  # pylint: disable=import-outside-toplevel # the code certified
 
     s = _stick(b)
