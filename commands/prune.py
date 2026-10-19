@@ -133,6 +133,14 @@ def _by_age(inv: Inventory, log: Log) -> None:
     if not items:
         log.info(f"No sanoid snapshot is older than {raw} days")
         return
+    # M4d-32: a drive with no zark 2 anchor on a dataset the cut touches has
+    # a sanoid snapshot there as its base; its next backup would roll back.
+    touched = {i.target.partition("@")[0] for i in items}
+    for name in sorted({d for rel in touched for d in inv.unanchored.get(rel, [])}):
+        log.warn(
+            f"{name} has not had a zark 2 backup yet: its base is a sanoid snapshot "
+            + "this can remove; back up to it first"
+        )
     freed = reclaim.reclaim_names([i.target for i in items])
     log.warn(
         f"{len(items)} sanoid snapshot(s) older than {raw} days; "

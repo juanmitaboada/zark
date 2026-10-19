@@ -649,7 +649,10 @@ for the canonical end-to-end sequences.
     datasets back to a shared **sanoid** snapshot, which removes its newest
     backup point on them, or to archive them and resend them in full).
     Backups impose no floor: the drives' anchors on **rpool** are
-    bookmarks, which no snapshot removal touches. On a drive (no passphrase
+    bookmarks, which no snapshot removal touches. A registered drive with
+    no anchor on a dataset the age cut touches (no backup by **zark** 2 to
+    it yet) has a **sanoid** snapshot there as its base: the cut names it
+    before the count, with the advice to back up to it first. On a drive (no passphrase
     needed): what its retention removes now (yes/no), then the oldest
     monthly backup points that still have something to remove and the
     history from before its first **zark** 2 backup point (typed **PRUNE**).

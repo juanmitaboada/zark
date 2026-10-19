@@ -15640,6 +15640,7 @@ class TestPruneCommand:
             patch.object(prune_mod.time, "time", return_value=float(now)),
         )
         assert "sanoid daily" in out
+        assert "has not had a zark 2 backup yet" not in out  # M4d-32: anchored everywhere
         destroys = [
             c for c in fake.calls[before:] if c.startswith("zfs destroy ") and "-nvp" not in c
         ]
@@ -15652,6 +15653,31 @@ class TestPruneCommand:
             assert eng.take_point()
             plans = {p.rel: p.state for p in eng.survey()}
         assert plans["rpool/USERDATA/home"] is repl.State.VIA_BOOKMARK
+
+    def test_a_drive_without_a_zark_2_anchor_is_warned_of(self) -> None:
+        """M4d-32 (carmen, 2026-10-19): a 1.x drive's base on each dataset is a
+        sanoid snapshot the age cut can remove; it is named before the count."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        cfg.known_drives["black"] = DriveInfo("black", "222", "e")  # never had a zark 2 backup
+        now = fake.clock + 10 * ret.DAY
+        out = self._origin(
+            fake,
+            cfg,
+            *self._answers([1, 0], ["5"], "no", False),
+            patch.object(prune_mod.time, "time", return_value=float(now)),
+        )
+        text = " ".join(Log._STRIP_RE.sub("", out).split())  # pylint: disable=protected-access
+        warning = (
+            "black has not had a zark 2 backup yet: its base is a sanoid snapshot this can "
+            + "remove; back up to it first"
+        )
+        assert warning in text, text
+        assert text.index(warning) < text.index("sanoid snapshot(s) older than 5 days")
+        assert "backup has not had" not in text
 
     def test_mistyped_word_removes_nothing(self) -> None:
         """A typed word that is not PRUNE removes nothing."""

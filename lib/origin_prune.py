@@ -15,9 +15,13 @@
 What `zark prune` can remove in origin, by kind (M3 decisions 9a-11a).
 
 Pure functions over the origin listing (no shell). There is no floor
-imposed by the backups: rpool's anchors are bookmarks, which no snapshot
+imposed by zark 2 drives: rpool's anchors are bookmarks, which no snapshot
 destroy touches (redesign F5), and an incremental from a bookmark needs
 only one origin snapshot after it, which the next backup's own point is.
+A registered drive with no anchor on a dataset (no zark 2 backup to it
+yet, a 1.x drive) has a sanoid snapshot there as its base, which an age
+cut can remove: ``unanchored`` names those drives, and prune warns
+(M4d-32).
 
 Kinds:
   * sanoid's snapshots (``autosnap_*``), by type, removed by age;
@@ -35,7 +39,15 @@ Kinds:
 import re
 from dataclasses import dataclass, field
 
-from lib.replication import KEYSTORE, POINT_RE, STRUCTURAL, Origin, anchor_disk, is_bpool
+from lib.replication import (
+    KEYSTORE,
+    POINT_RE,
+    STRUCTURAL,
+    Origin,
+    anchor_disk,
+    expected,
+    is_bpool,
+)
 
 AUTOSNAP_TYPE = re.compile(r"^autosnap_.*_(frequently|hourly|daily|weekly|monthly|yearly)$")
 SYNCOID = re.compile(r"^syncoid_")
@@ -60,14 +72,21 @@ class Inventory:
     residues_kept: list[Item] = field(default_factory=list)  # a drive may depend on them
     points: list[Item] = field(default_factory=list)  # left in origin (see the module docstring)
     anchors: dict[str, list[Item]] = field(default_factory=dict)  # drive GUID → bpool anchors
+    unanchored: dict[str, list[str]] = field(
+        default_factory=dict
+    )  # dataset → drives with no anchor
 
 
 def inventory(origin: dict[str, Origin], drives: dict[str, str]) -> Inventory:
     """Classify origin's snapshots. ``drives`` maps each registered drive's
     pool GUID to its name."""
     inv = Inventory()
+    backed_up = set(expected(origin))  # where a drive has a base at all
     for rel, o in sorted(origin.items()):
         anchored = {anchor_disk(r.name) for r in [*o.bookmarks, *o.snaps]} - {""}
+        missing_here = sorted(name for guid, name in drives.items() if guid not in anchored)
+        if missing_here and rel in backed_up:
+            inv.unanchored[rel] = missing_here
         for s in o.snaps:
             target = f"{rel}@{s.name}"
             if m := AUTOSNAP_TYPE.match(s.name):
