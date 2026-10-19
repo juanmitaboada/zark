@@ -6266,6 +6266,32 @@ class TestSetupSnapshotsAndBootEnvironment:  # pylint: disable=missing-function-
         assert typed.call_count == 1  # only the FATAL's "Press Enter"
 
 
+class TestOnlyThePackagesZarkUses:  # pylint: disable=missing-function-docstring
+    """M2P.2, M2P.3 (M4d-30): no syncoid-era packages in setup or recover."""
+
+    def test_setup_checks_only_what_zark_runs(self):
+        assert set(setup_mod.DEPS) == {"zfs", "zpool", "sgdisk", "sanoid"}
+        assert not {"syncoid", "bc", "pv", "mbuffer", "lzop"} & set(setup_mod.DEPS)
+
+    def test_recover_installs_the_packages_of_the_missing_tools_only(self):
+        mock = MockShell()
+        for tool in ("zfs", "zgenhostid", "sgdisk", "cryptsetup"):
+            mock.on(f"which {tool}").succeeds(f"/usr/sbin/{tool}")
+        mock.on("which mkfs.vfat").fails()
+        mock.on("which partprobe").fails()
+        mock.on_prefix("apt-get install").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            recover_mod._install_missing_tools(make_log())  # pylint: disable=protected-access
+        assert [c for c in mock.calls if c.startswith("apt-get")] == [
+            "apt-get install -y dosfstools parted"
+        ]
+        mock = MockShell()
+        mock.on_prefix("which ").succeeds("/usr/bin/x")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            recover_mod._install_missing_tools(make_log())  # pylint: disable=protected-access
+        assert mock.was_not_called("apt-get")
+
+
 class TestSetupInstallsBothGuards:  # pylint: disable=missing-function-docstring
     """M4a-4: setup brings both guards up to date on the running system."""
 
@@ -8922,7 +8948,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
     def test_no_wipe_when_not_confirmed(self):
         mock = self._run("NO")
         assert mock.was_not_called("wipefs")
-        assert mock.was_not_called("sgdisk")
+        assert not [c for c in mock.calls if c.startswith("sgdisk")]  # `which sgdisk` runs
         assert mock.was_not_called("zpool destroy")
 
     def test_no_wipe_when_preflight_fails(self):
@@ -8932,7 +8958,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
     def test_no_wipe_when_terminal_closes_at_yes(self):
         mock = self._run(None)
         assert mock.was_not_called("wipefs")
-        assert mock.was_not_called("sgdisk")
+        assert not [c for c in mock.calls if c.startswith("sgdisk")]  # `which sgdisk` runs
 
     def test_a_failed_read_of_the_marks_stops_before_the_menu(self) -> None:
         """M3R-9: the drive's snapshots and marks are read strictly; a failed
@@ -8941,7 +8967,8 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         with tempfile.TemporaryDirectory() as td:
             mock = self._run_in(td, "YES", calls=calls, snaps_fail=True)
         assert "choose_point" not in calls and "build_plan" not in calls
-        assert mock.was_not_called("wipefs") and mock.was_not_called("sgdisk")
+        assert mock.was_not_called("wipefs")
+        assert not [c for c in mock.calls if c.startswith("sgdisk")]
 
     def test_completeness_reaches_the_menu_and_the_plan(self) -> None:
         """M2V-5 (N12a, N12b): the complete points read from the drive are

@@ -100,6 +100,26 @@ _BPOOL_PART_BYTES = 2 * 1024**3
 _RECOVER_TARGET_OVERHEAD_PCT = 5
 
 
+# The tools recover runs on the live, by the package that has them (M2P.3):
+# no syncoid, pv, mbuffer, lzop, bc or sanoid, which recover never runs.
+RECOVER_TOOLS = {
+    "zfs": "zfsutils-linux",
+    "zgenhostid": "zfsutils-linux",
+    "sgdisk": "gdisk",
+    "cryptsetup": "cryptsetup-bin",
+    "mkfs.vfat": "dosfstools",
+    "partprobe": "parted",
+}
+
+
+def _install_missing_tools(log: Log) -> None:
+    """Install the packages of the tools the live lacks, only those."""
+    missing = sorted({pkg for t, pkg in RECOVER_TOOLS.items() if not sh.run(f"which {t}").ok})
+    if missing:
+        log.info(f"Installing required packages: {' '.join(missing)}")
+        _ = sh.run(f"apt-get install -y {' '.join(missing)}", log=log)
+
+
 def _is_live_usb() -> bool:
     # Thin wrapper kept for call-site readability; the detection logic now
     # lives in lib.sh as the single source of truth (also used by repair-boot).
@@ -362,8 +382,7 @@ def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
             causes=held,
             solutions=[*(f"sudo umount -R {t}" for t in tops), "Or reboot the live USB"],
         )
-    tools = ("sgdisk", "mkfs.vfat", "cryptsetup", "zgenhostid", "partprobe")
-    missing = [t for t in tools if not sh.run(f"which {t}").ok]
+    missing = [t for t in RECOVER_TOOLS if not sh.run(f"which {t}").ok]
     if missing:
         log.fatal(f"Missing tools in the live session: {' '.join(missing)}")
     be_row = plan.row(f"rpool/ROOT/{plan.be}")
@@ -641,12 +660,7 @@ def run(
         if confirm != "IUNDERSTAND":
             return
 
-    if not sh.run("which syncoid").ok:
-        log.info("Installing required packages...")
-        _ = sh.run(
-            "apt-get install -y sanoid zfsutils-linux gdisk bc pv mbuffer lzop",
-            log=log,
-        )
+    _install_missing_tools(log)
 
     # ── 1. Find backup drive ─────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for backup drives...")

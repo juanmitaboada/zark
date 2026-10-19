@@ -46,15 +46,12 @@ from lib.log import Log
 from lib.survey import bookmark_feature
 from lib.zfs import ZFS, DatasetInfo, ZFSQuery
 
+# What zark runs, by its package. zark 2 runs no syncoid, pv, mbuffer, lzop
+# or bc (M2P.2); sanoid's own package depends on what it needs.
 DEPS = {
-    "syncoid": "sanoid",
     "zfs": "zfsutils-linux",
     "zpool": "zfsutils-linux",
     "sgdisk": "gdisk",
-    "bc": "bc",
-    "pv": "pv",
-    "mbuffer": "mbuffer",
-    "lzop": "lzop",
     "sanoid": "sanoid",
 }
 
