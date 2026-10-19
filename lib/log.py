@@ -98,6 +98,10 @@ def frame(  # pylint: disable=too-many-arguments,too-many-locals
     else:
         tl, h, tr, v, bl, br, ml, mr = "┌", "─", "┐", "│", "└", "┘", "├", "┤"
         indent, left, right = "  ", 1, 1
+    # A line with a newline in it is several rows: measured and wrapped one by
+    # one, so the box keeps its right edge (M4dR-2).
+    head = [piece for ln in head for piece in ln.split("\n")]
+    body = [piece for ln in body for piece in ln.split("\n")]
     cols = columns or shutil.get_terminal_size().columns
     room = max(min_inner, cols - len(indent) - 2)
     widest = max((text_width(ln) for ln in (*head, *body)), default=0)

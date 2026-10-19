@@ -633,6 +633,21 @@ class TestFrame:  # pylint: disable=missing-function-docstring
         heavy = self._plain(frame(body, heavy=True, min_inner=58, color="", columns=70))
         assert {text_width(ln) for ln in heavy} == {70}, heavy
 
+    def test_a_line_with_a_newline_keeps_the_right_edge(self):
+        # M4dR-2: chroot, mount and umount refuse with a body line that holds
+        # a "\n"; it printed as one row and the edge landed after the last piece.
+        body = ["rpool is already imported.\n  If this is your running system, do not chroot it."]
+        for heavy in (True, False):
+            lines = self._plain(frame(body, heavy=heavy, min_inner=58, color="", columns=80))
+            assert len(lines) == 4, lines  # top, two rows, bottom
+            assert len({text_width(ln) for ln in lines}) == 1, lines
+            assert lines[1].rstrip().endswith(("║", "│")) and lines[2].rstrip().endswith(("║", "│"))
+            assert lines[2].lstrip(" ║│").startswith("If this is your running system"), lines
+        head_lines = self._plain(
+            frame(["x"], heavy=True, min_inner=58, color="", head=["T\nU"], columns=80)
+        )
+        assert len({text_width(ln) for ln in head_lines}) == 1, head_lines
+
     def test_below_the_minimum_width_the_minimum_wins(self):
         # M4dR-9: a terminal narrower than the box's minimum gets the minimum
         # (the terminal wraps the row); recorded, not changed.
