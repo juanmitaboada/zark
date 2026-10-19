@@ -142,6 +142,19 @@ def _list_origin(cfg: Config, log: Log) -> None:
         log.warn(f"  drive GUID {guid}: {n} anchor(s) in origin, no registry entry")
         log.raw(f"      drop them: {zark_command()} registry forget {guid}")
     left = anchors.leftover_points(origin)
+    try:
+        owned = anchors.point_owners(pools)
+    except survey.ReadError:
+        owned = {}  # unknown owners: none is taken for a recovery's
+    restored = anchors.restored_points(origin, owned)
+    names = {info.guid: name for name, info in cfg.known_drives.items()}
+    for guid in sorted(set(restored.values())):
+        n = sum(1 for g in restored.values() if g == guid)
+        log.info(
+            f"  {n} backup point(s) restored by recover (anchored for {names.get(guid, guid)}): "
+            + "the next complete backup of a registered drive removes them"
+        )
+    left = [p for p in left if p not in restored]
     if left:
         log.info(
             f"  {len(left)} backup point(s) left in origin (interrupted runs, or a run whose "

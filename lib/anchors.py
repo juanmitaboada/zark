@@ -20,6 +20,7 @@ drive each one names, and their removal when a drive leaves the registry.
 """
 
 import shlex
+from collections.abc import Collection
 
 from lib import sh
 from lib.config import zark_command
@@ -143,6 +144,28 @@ def leftover_points(origin: dict[str, Origin]) -> list[str]:
     return [
         f"{rel}@{s.name}" for rel, o in sorted(origin.items()) for s in o.snaps if is_point(s.name)
     ]
+
+
+def restored_points(origin: dict[str, Origin], owned: Collection[str] = ()) -> dict[str, str]:
+    """``rel@point`` -> drive GUID for the points recover restored (M2X.6).
+
+    recover restores a drive's point into the new origin with no owner
+    (:data:`POINT_FOR`) and bookmarks it as that drive's anchor, same guid
+    (M4c-12); a run's own point carries an owner (``owned``, from
+    :func:`point_owners`), and its anchor's snapshot is destroyed.
+    """
+    out: dict[str, str] = {}
+    for rel, o in sorted(origin.items()):
+        for s in o.snaps:
+            target = f"{rel}@{s.name}"
+            if not is_point(s.name) or target in owned:
+                continue
+            for b in o.bookmarks:
+                guid = anchor_disk(b.name)
+                if guid and b.guid == s.guid and b.name == anchor_name(guid, s.name):
+                    out[target] = guid
+                    break
+    return out
 
 
 def is_point(name: str) -> bool:

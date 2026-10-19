@@ -452,9 +452,15 @@ class Log:
 
         self._show(self._box(f"{self.Y}🔑{self.N} {question}"), after=False)
         self._to_file(f"[PROMPT]  {self._strip(question)} → (passphrase, not logged)")
-        # getpass writes to /dev/tty: piped (| tee) stdout must reach it first.
+        # The prompt goes through stdout, after the box: getpass writes it to
+        # /dev/tty otherwise, a second writer a piped (| tee) stdout's reader
+        # can overtake (M2V-6). Input is still read from /dev/tty, echo off
+        # (CPython Lib/getpass.py:52-58).
         sys.stdout.flush()
-        return getpass.getpass("    Passphrase: ")
+        try:
+            return getpass.getpass("    Passphrase: ", stream=sys.stdout)
+        finally:
+            sys.stdout.flush()  # getpass writes its closing newline unflushed (:101)
 
     def ask_choice(self, question: str, options: list[str], default: int = 0) -> int:
         """Numbered choice. Returns 0-based index. Enter = default."""

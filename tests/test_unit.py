@@ -624,13 +624,17 @@ class TestLog:
         out = Piped()
         seen: list[str] = []
 
-        def prompt(_text: str) -> str:
+        streams: list[object] = []
+
+        def prompt(_text: str, stream: object = None) -> str:
             seen.append(out.shown)
+            streams.append(stream)
             return "secret"
 
         with patch("lib.log.getpass.getpass", side_effect=prompt), redirect_stdout(out):
             assert make_log().ask_password("Passphrase for backup") == "secret"
         assert "Passphrase for backup" in seen[0]
+        assert streams == [out]  # M2V-6: the prompt follows the box through stdout
 
     def test_strip_ansi(self):
         """Log strips ANSI codes for file output."""
@@ -7827,6 +7831,36 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
         _ = self._registry(fake, d, ["forget", "1"])
         assert fake.bookmarks("rpool/ROOT/be") == [repl.anchor_name("2", P2)]
         assert list(json.loads((d / "known_drives.json").read_text())) == ["blue"]
+
+    def test_list_tells_points_recover_restored_from_left_ones(self):
+        """M2X.6 (M4d-24): a recovered point names no drive and has its
+        drive's anchor bookmark, same guid."""
+        fake = _fresh_fake(("blue",))
+        assert _engine_run(fake, "blue", "2", P1).ok
+        bm = next(b for b in fake.ds["rpool/ROOT/be"].bookmarks if b.name.startswith("zark_2_"))
+        fake.ds["rpool/ROOT/be"].snaps.append(FSnap(P1, bm.guid, bm.txg, bm.creation))
+        fake.ds["rpool/var"].snaps.append(FSnap(P2, "99999", 999, 1))  # a run left it
+        d = self._cfg_dir({"blue": {"guid": "2", "drive_id": "b"}})
+        out = " ".join(self._registry(fake, d, ["list"]).split())
+        assert (
+            "1 backup point(s) restored by recover (anchored for blue): the next complete "
+            + "backup of a registered drive removes them"
+        ) in out, out
+        assert "1 backup point(s) left in origin (interrupted runs" in out, out
+
+    def test_a_restored_point_needs_its_anchors_guid_and_no_owner(self):
+        anchor = repl.anchor_name("2", P1)
+        o = repl.Origin(
+            "rpool/a",
+            snaps=[repl.Ref(P1, "7", 1, 1)],
+            bookmarks=[repl.Ref(anchor, "7", 1, 1)],
+        )
+        other = repl.Origin(
+            "rpool/b", snaps=[repl.Ref(P1, "8", 1, 1)], bookmarks=[repl.Ref(anchor, "9", 1, 1)]
+        )
+        origin = {"rpool/a": o, "rpool/b": other}
+        assert anchors.restored_points(origin) == {f"rpool/a@{P1}": "2"}
+        assert not anchors.restored_points(origin, owned={f"rpool/a@{P1}": "2"})
 
     def test_forget_by_the_guid_of_a_registered_drive(self):
         """A registered drive's GUID forgets its entry like its name."""
@@ -15393,8 +15427,8 @@ class TestPruneCommand:
 
         def pick(_q: str, options: list[str], _d: int = 0) -> int:
             wanted = (
-                "remove backup points left in origin (interrupted runs, or a run whose anchor "
-                + "failed)"
+                "remove backup points left in origin (interrupted runs, a run whose anchor "
+                + "failed, or a recovery)"
             )
             if wanted in options and not picked:
                 picked.append(wanted)
@@ -15429,7 +15463,8 @@ class TestPruneCommand:
         fake.fail_cmds.clear()
         guid = next(s.guid for s in fake.ds["rpool/USERDATA/home"].snaps if s.name == P2)
         wanted = (
-            "remove backup points left in origin (interrupted runs, or a run whose anchor failed)"
+            "remove backup points left in origin (interrupted runs, a run whose anchor failed, "
+            + "or a recovery)"
         )
         picked: list[str] = []
 

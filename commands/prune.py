@@ -226,8 +226,8 @@ def _prune_origin(cfg: Config, log: Log) -> None:
             actions.append(("remove the legacy residues", partial(_residues, inv, log)))
         if inv.points:
             label = (
-                "remove backup points left in origin (interrupted runs, or a run whose anchor "
-                + "failed)"
+                "remove backup points left in origin (interrupted runs, a run whose anchor "
+                + "failed, or a recovery)"
             )
             actions.append((label, partial(_points, inv, log)))
         if inv.anchors:
