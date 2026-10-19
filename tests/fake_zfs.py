@@ -336,6 +336,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
 
     def _list(self, args: list[str]) -> RunResult:  # pylint: disable=too-many-branches
         types, fields, root, recursive = ["filesystem", "volume"], ["name"], "", False
+        depth = -1  # -d N: N levels below the root
         i = 0
         while i < len(args):
             a = args[i]
@@ -345,6 +346,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 fields, i = args[i + 1].split(","), i + 2
             elif a == "-r":
                 recursive, i = True, i + 1
+            elif a == "-d":
+                recursive, depth, i = True, int(args[i + 1]), i + 2
             elif a.startswith("-"):
                 i += 1
             else:
@@ -352,7 +355,14 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         if root not in self.ds:
             return _err(f"cannot open '{root}': dataset does not exist")
         names = [
-            n for n in sorted(self.ds) if n == root or (recursive and n.startswith(root + "/"))
+            n
+            for n in sorted(self.ds)
+            if n == root
+            or (
+                recursive
+                and n.startswith(root + "/")
+                and (depth < 0 or n.count("/") - root.count("/") <= depth)
+            )
         ]
         rows: list[str] = []
         for n in names:

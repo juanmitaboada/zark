@@ -489,7 +489,8 @@ class Run:  # pylint: disable=too-many-instance-attributes
         d = self.dest.get(rel)
         if d is None or not d.token:
             return ""
-        r = sh.run(f"zfs send -nvP -t {_q(d.token)}")
+        # The texts below are libzfs's in English (M2V-7 e).
+        r = sh.run(f"env LC_ALL=C zfs send -nvP -t {_q(d.token)}")
         if r.ok:
             return ""
         msg = last_message(r.stderr)

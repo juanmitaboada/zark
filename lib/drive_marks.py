@@ -292,8 +292,9 @@ def record_complete(pool: str, point: str, rels: list[str], log: Log) -> bool:
         if not r.ok:
             ok = False
             log.warn(
-                f"Could not mark complete points on {pool}: {r.stderr.strip()} "
-                + "(recover will list them as incomplete)"
+                # zfs set sets every target it can open (cmd/zfs/zfs_iter.c:516-536).
+                f"Could not mark every complete point on {pool}: {r.stderr.strip()} "
+                + "(recover lists the unmarked ones as incomplete)"
             )
     return ok
 

@@ -1119,8 +1119,10 @@ M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1
   leaves such a gap, so the points taken meanwhile stay unmarked and
   recover calls them incomplete; and one whose lineage on the drive starts
   after a point (sent again in full) shows none, so a legacy point that
-  missed it may be marked complete. Points taken from now on are marked
-  by the run that took them.
+  missed it may be marked complete; and a point whose snapshot was
+  destroyed on the drive later (a rollback, by hand) while its dataset
+  stayed is left unmarked too. Points taken from now on are marked by the
+  run that took them.
 - An anchor that could not be created leaves that dataset on its previous
   anchor and point (reported in the table and the log); the next backup
   continues from the point.

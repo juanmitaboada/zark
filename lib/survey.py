@@ -112,10 +112,15 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
     """
     dest: dict[str, Dest] = {}
     strip = f"{pool}/"
+    children: list[str] | None = None
     if strict:
-        _ = checked(sh.run(f"zfs list -H -o name {_q(pool)}"), strict)
+        # One listing: a root is missing only when it is not in it, never
+        # because its own probe failed for another reason (M2V-7 d).
+        children = checked(sh.run(f"zfs list -H -o name -d 1 {_q(pool)}"), strict).lines
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        if not sh.run(f"zfs list -H -o name {root}").ok:
+        if children is not None and root not in children:
+            continue
+        if children is None and not sh.run(f"zfs list -H -o name {root}").ok:
             continue
         r = sh.run(
             "zfs list -Hp -t filesystem,volume "

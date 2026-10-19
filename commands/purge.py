@@ -371,10 +371,16 @@ def run(
         log.banner_error("PURGE INCOMPLETE", [*_report_lines(marks), "", *advice, kept])
         raise SystemExit(1)
 
-    # The wiped pool's anchors in origin (M2R-6): nothing can use them now.
-    anchors_left = ""
-    if ident.label and ident.label.name not in SYSTEM_POOLS:
-        anchors_left = anchors.drop_anchors_of(ident.label.guid, log)
+    # The wiped pool's anchors in origin (M2R-6): nothing can use them now,
+    # nor those of every entry removed below, matched by drive ID with
+    # another GUID (M2V-7 a).
+    guids = [ident.label.guid] if ident.label and ident.label.name not in SYSTEM_POOLS else []
+    guids += [cfg.known_drives[name].guid for name in matched]
+    anchors_left = [
+        left
+        for guid in dict.fromkeys(g for g in guids if g)
+        if (left := anchors.drop_anchors_of(guid, log))
+    ]
 
     # Remove every registry entry that described this disk
     if matched:
@@ -404,7 +410,7 @@ def run(
             "",
             f"Device: {target_dev} ({ident.model})",
             "Drive is blank and ready for reuse.",
-            *([anchors_left] if anchors_left else []),
+            *anchors_left,
         ],
     )
 

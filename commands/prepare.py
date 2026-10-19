@@ -115,7 +115,11 @@ def run(
     replace: set[str] = set()
     if stale:
         log.warn(f"Registry entries for this same drive (stale): {', '.join(stale)}")
-        if log.ask(f"Remove {', '.join(stale)} from the registry when preparing?", default=True):
+        question = (
+            f"Remove {', '.join(stale)} from the registry (and their anchors in origin) "
+            + "when preparing?"
+        )
+        if log.ask(question, default=True):
             replace = set(stale)
 
     # ── Pool name ────────────────────────────────────────────────────────

@@ -182,6 +182,7 @@ class DatasetPlan:  # pylint: disable=too-many-instance-attributes
     clone_from: str = ""  # NEW clone: its origin snapshot on the drive ("ds@name"); base: origin's
     kept: bool = False  # ORPHAN already marked "kept"
     partial: bool = False  # MODIFIED that also holds partial receive state (M2V-1)
+    after: State | None = None  # partial: the plan once that state is discarded (M3R-15)
     used: int = 0  # destination bytes (ORPHAN, DIVERGED, ROLLBACK; MODIFIED: written)
     note: str = ""
 
@@ -246,7 +247,7 @@ def plan_dataset(o: Origin, d: Dest | None, point: str) -> DatasetPlan:
         # Planned as what the dataset needs without its partial state, and
         # asked about with the other written datasets.
         p = _plan_dataset(o, replace(d, token=""), point)
-        p.partial = True
+        p.partial, p.after = True, p.state
         if p.state not in (State.INCREMENTAL, State.VIA_BOOKMARK):
             p.base = ""  # nothing to estimate: the next survey decides
     if d is not None and d.written > 0 and p.state in (State.INCREMENTAL, State.VIA_BOOKMARK):

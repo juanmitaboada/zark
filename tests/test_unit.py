@@ -7001,13 +7001,18 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
 class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
     """M4a-13: a failed step or a disk that is not blank keeps the entry and anchors."""
 
+    dropped: list[str]  # the GUIDs whose anchors the last _purge dropped
+
     def _purge(
-        self, mock: MockShell, part1_exists: bool | Callable[[str], bool] = False
+        self,
+        mock: MockShell,
+        part1_exists: bool | Callable[[str], bool] = False,
+        entries: dict[str, dict[str, str]] | None = None,
     ) -> tuple[str, int, dict[str, object]]:
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(
             cfg_dir / "known_drives.json",
-            {"backup": {"guid": "3446866051930726346", "drive_id": _KINGSTON_ID}},
+            entries or {"backup": {"guid": "3446866051930726346", "drive_id": _KINGSTON_ID}},
         )
         mock.on("zpool list backup").fails()
         mock.on_prefix("zpool import -N -R /run/zark/altroot/backup").succeeds()
@@ -7044,6 +7049,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
                 rc = int(e.code) if isinstance(e.code, int) else 1
         if rc:
             drop.assert_not_called()
+        self.dropped = [c.args[0] for c in drop.call_args_list]
         return unframed(out.getvalue()), rc, json.loads((cfg_dir / "known_drives.json").read_text())
 
     def test_all_steps_and_a_blank_disk_complete(self):
@@ -7067,6 +7073,19 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         # M4aX.4: the import's altroot goes with the pool.
         destroy = mock.calls.index("zpool destroy backup")
         assert mock.calls.index("rmdir /run/zark/altroot/backup") > destroy, mock.calls
+
+    def test_the_anchors_of_every_entry_removed_go_too(self):
+        # M2V-7 (a): an entry matched by drive ID names an older pool's GUID.
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock)
+        entries = {
+            "backup": {"guid": "3446866051930726346", "drive_id": _KINGSTON_ID},
+            "old": {"guid": "222", "drive_id": _KINGSTON_ID},
+        }
+        _, rc, data = self._purge(mock, entries=entries)
+        assert rc == 0 and not data
+        assert self.dropped == ["3446866051930726346", "222"], self.dropped
 
     def test_failing_wipefs_is_incomplete(self):
         mock = MockShell()
@@ -7452,6 +7471,8 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
 class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
     """I16/I22/I23 + I-G in prepare."""
 
+    asked: list[str]  # the yes/no questions of the last _prepare
+
     def _prepare(
         self,
         fake: FakeZfs,
@@ -7462,8 +7483,15 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
     ) -> int:
         """Run prepare; ``answers`` by the first word of an input question
         (Pool, Days); anything not given takes the default. ``readback`` is
-        the drive's read-back (ONLINE when not given); ``out`` gets stdout."""
+        the drive's read-back (ONLINE when not given); ``out`` gets stdout;
+        ``self.asked`` the yes/no questions, each answered yes."""
         answers = {"Pool": "blue", **answers}
+        self.asked = []
+
+        def ask(q: str, **_k: object) -> bool:
+            self.asked.append(q)
+            return True
+
         ident = _purge_ident(None)
         report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
         if readback is None:
@@ -7478,7 +7506,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
                 patch.object(prepare_mod.Path, "exists", return_value=True),
                 patch.object(ZFS, "verify_exported_pool_readback", return_value=readback),
                 patch.object(ZFS, "pool_guid", return_value="777"),
-                patch("lib.log.Log.ask", return_value=True),
+                patch("lib.log.Log.ask", side_effect=ask),
                 patch(
                     "lib.log.Log.ask_input",
                     side_effect=lambda q, d="", **_k: answers.get(q.split()[0], d),
@@ -7508,6 +7536,11 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         )
         fake = _fresh_fake(())
         assert self._prepare(fake, cfg_dir) == 0
+        # M2V-7 (b): the question says the anchors go too.
+        assert (
+            "Remove blue from the registry (and their anchors in origin) when preparing?"
+            in self.asked
+        ), self.asked
         create = next(c for c in fake.calls if c.startswith("zpool create"))
         assert "-R /run/zark/altroot/blue" in create
         assert create.endswith(f"blue /dev/disk/by-id/{_KINGSTON_ID}")
@@ -12563,9 +12596,21 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         fake.fail_cmds.add("zfs send -nvP -t")
         res = _engine_run(fake, "backup", "111", P3)
         assert not any(c.startswith("zfs receive -A") for c in fake.calls)
+        # M2V-7 (e): the texts matched are libzfs's in English.
+        assert any(c.startswith("env LC_ALL=C zfs send -nvP -t ") for c in fake.calls), fake.calls
         assert res.ok, res
         home = fake.names("backup/rpool/USERDATA/home")
         assert P2 in home and P3 in home
+
+    def test_a_failed_probe_of_a_root_is_not_a_missing_root(self) -> None:
+        """M2V-7 (d): strict, a root is missing only when the pool's listing
+        lacks it; its own probe failing (I/O) read as missing."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.fail_cmds.add("zfs list -H -o name backup/rpool")
+        with patch_sh(fake):
+            dest = survey.read_dest("backup", strict=True)
+        assert "rpool/ROOT/be" in dest, sorted(dest)
 
     def test_a_pool_that_is_gone_is_not_an_empty_one(self) -> None:
         """M2R-3 (E3b): the backup pool exported under the run before the final
@@ -13990,6 +14035,22 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert not home.token and not home.written
         assert repl.POINT_RE.match(home.snaps[-1].name)
 
+    def test_a_partial_whose_dataset_then_needs_a_decision_says_so(self) -> None:
+        """M3R-15: without its partial state the dataset needs a decision this
+        run no longer asks: the line says it is asked again next time."""
+        fake = self._interrupted_then_written()
+        home = fake.ds["rpool/USERDATA/home"]
+        home.bookmarks.clear()  # every base the drive shares is gone from origin
+        home.snaps = [x for x in home.snaps if "hourly" not in x.name]
+        out = StringIO()
+        with patch.object(Log, "ask_text", return_value="DISCARD"):
+            _cfg, rc = self._run(
+                fake, patch.object(Log, "ask_choice", return_value=1), redirect_stdout(out)
+            )
+        text = " ".join(out.getvalue().split())
+        assert "(a partial transfer is discarded too, then asked again next time)" in text, text
+        assert rc == 1, text
+
     def test_partial_transfer_on_a_written_dataset_skipped_asks_again(self) -> None:
         """M2V-1: skipping (the default) keeps everything and says the next
         backup asks again, not that it resumes."""
@@ -14480,6 +14541,22 @@ def _marked(fake: FakeZfs, pool: str = "backup") -> set[str]:
     """Names of the backup points complete on a drive, as recover reads them."""
     with patch_sh(fake):
         return complete_points(drive_marks.drive_snapshots(pool), "")
+
+
+class TestRecordCompleteWarning:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M2V-7 (c): zfs set marks every target it can open, so only some are unmarked."""
+
+    def test_the_warning_says_every_and_the_unmarked_ones(self):
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        fake.fail_cmds.add("zfs set org.zark:point-complete")
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            rels = repl.expected(survey.read_origin(["rpool", "bpool"]))
+            assert not drive_marks.record_complete("backup", P1, rels, Log())
+        text = " ".join(out.getvalue().split())
+        assert "Could not mark every complete point on backup:" in text, text
+        assert "(recover lists the unmarked ones as incomplete)" in text, text
 
 
 def _record(fake: FakeZfs, point: str, pool: str = "backup") -> None:
