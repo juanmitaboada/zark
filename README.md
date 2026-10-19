@@ -193,37 +193,77 @@ Useful as a coherence check after `recover` (or any boot-chain change) without c
 
 ```
 zark/
-├── zark                 # Entry point (#!/usr/bin/env python3)
+├── zark                       # Entry point (#!/usr/bin/env python3)
 ├── lib/
-│   ├── config.py        # Centralized version and configuration
-│   ├── log.py           # Colored output, banners, logging
-│   ├── sh.py            # Shell command runner with logging
-│   ├── zfs.py           # ZFS/zpool operations
-│   ├── keystore.py      # Encryption key management
-│   ├── drives.py        # Drive detection and GUID verification
-│   ├── mount.py         # Mount/unmount orchestration
-│   ├── replication.py   # Backup planner: what each dataset needs (pure)
-│   ├── engine.py        # Backup executor: point, send/receive, anchors
-│   ├── lock.py          # One lock for every command that changes state
-│   ├── forensics.py     # Pool state captured before it is changed
-│   └── cleanup.py       # Trap handler, safe teardown
+│   ├── alerts.py              # Space and backup-age alerts: MOTD script, timer
+│   ├── anchors.py             # Anchors and backup points in origin, outside a run
+│   ├── apt_guard.py           # The apt/dpkg guard against kernel upgrades with a drive in
+│   ├── backup_layout.py       # What a backup pool holds, read by recover and mount
+│   ├── boot_chain.py          # A restored system's boot chain: mounts, GRUB, initrd scripts
+│   ├── certificates.py        # Self-test reports, the local record, certificates
+│   ├── cleanup.py             # Cleanup and safe teardown
+│   ├── config.py              # Version, paths and configuration
+│   ├── drive_marks.py         # What zark records on a backup drive and reads back
+│   ├── drives.py              # Drive detection and identification
+│   ├── engine.py              # Backup executor: point, send/receive, anchors
+│   ├── forensics.py           # Pool state captured before it is changed
+│   ├── grub_cfg.py            # grub.cfg regeneration with an honest verdict
+│   ├── grub_guard.py          # The update-grub guard
+│   ├── health.py              # Drive health checks and the destructive test
+│   ├── identity.py            # Device identity: how every command names a disk
+│   ├── initrd.py              # initrd regeneration for a mounted target system
+│   ├── keystore.py            # The LUKS keystore and the key loads
+│   ├── live.py                # The live session's installer probe
+│   ├── lock.py                # One lock for every command that changes state
+│   ├── log.py                 # Colored output, frames, logging
+│   ├── mount.py               # Mounting the installed system's pools from a live USB
+│   ├── mount_props.py         # Where a restored dataset's mount properties come from
+│   ├── notify.py              # Desktop notifications from root
+│   ├── origin_prune.py        # What `zark prune` can remove in origin
+│   ├── platform_facts.py      # The platform, as the self-test records it
+│   ├── reclaim.py             # What removing snapshots from a drive frees
+│   ├── registry.py            # known_drives.json: parsing, validation, atomic writes
+│   ├── replication.py         # Backup planner: what each dataset needs (pure)
+│   ├── restore_plan.py        # recover's plan: the point and what each dataset gets
+│   ├── restore_points.py      # Restore points of a backup pool
+│   ├── retention.py           # Destination retention: which snapshots may go
+│   ├── sanoid_retention.py    # sanoid's retention, read for the drive's window
+│   ├── selftest.py            # The platform self-test: checks, bench, runner
+│   ├── selftest_host.py       # Level-1 checks on the host's own tools
+│   ├── selftest_l1.py         # Level-1 checks on ZFS, file-backed pools
+│   ├── selftest_l2.py         # Level-2 checks on a scratch stick
+│   ├── sh.py                  # Shell command runner with logging
+│   ├── signals.py             # How every command stops on a signal
+│   ├── status.py              # What status reports, the MOTD shows, the timer notifies
+│   ├── survey.py              # Reads of origin and of a drive, and the checks before a run
+│   ├── zfs.py                 # ZFS pool and dataset operations
+│   └── zfs_features.py        # OpenZFS pool features and their first release
 ├── commands/
-│   ├── backup.py            # Incremental encrypted backup
-│   ├── recover.py           # Full bare-metal recovery
-│   ├── repair_boot.py       # Boot chain repair from live USB
-│   ├── finish.py            # Post-recovery finalization
-│   ├── explore.py           # Pool and drive scanner
-│   ├── setup.py             # Dependency installation, Secure Boot pre-check
-│   ├── prepare.py           # New drive initialization
-│   ├── mount.py             # Backup pool mounting (+ `mount local` for the system)
-│   ├── umount.py            # Backup pool unmounting (+ `umount local`)
-│   ├── chroot.py            # Interactive chroot into the installed system (live USB)
-│   ├── clean.py             # Release what an interrupted run left
-│   ├── purge.py             # Secure drive wipe
-│   ├── monitor.py           # Live progress display
-│   └── simulate.py          # QEMU boot test (read-only by default)
+│   ├── alerts.py              # Install or remove the alerts
+│   ├── backup.py              # Back up this system to a registered drive
+│   ├── chroot.py              # Interactive chroot into the installed system (live USB)
+│   ├── clean.py               # Release what an interrupted run left
+│   ├── explore.py             # Scan for ZFS pools and show their status
+│   ├── finish.py              # Post-recovery finalization
+│   ├── fix_rpool_mountpoint.py  # Give a restored rpool back mountpoint=/
+│   ├── health.py              # Drive analysis: read-only and destructive
+│   ├── monitor.py             # Live progress display
+│   ├── mount.py               # Backup pool mounting (+ `mount local` for the system)
+│   ├── prepare.py             # New drive initialization
+│   ├── prune.py               # Reclaim space in origin or on a drive
+│   ├── purge.py               # Secure drive wipe
+│   ├── recover.py             # Full bare-metal recovery
+│   ├── registry.py            # Inspect and repair known_drives.json
+│   ├── repair_boot.py         # Boot chain repair from live USB
+│   ├── selftest.py            # Check that this platform behaves as zark relies on
+│   ├── setup.py               # Dependencies, sanoid policy, guards, alerts
+│   ├── simulate.py            # QEMU boot test (read-only by default)
+│   ├── status.py              # How full the pools are and how old each backup is
+│   └── umount.py              # Backup pool unmounting (+ `umount local`)
+├── certificates/
+│   └── selftest.json          # Platforms the self-test has certified
 └── etc/
-    └── known_drives.json  # Registered backup drives (by GUID)
+    └── known_drives.json.example  # The registry's format (the real one is local)
 ```
 
 ---
@@ -445,14 +485,14 @@ zark has two layers of automated testing.
 
 ### Unit tests
 
-Pure Python, no root, no ZFS, no real disks. Every shell call is intercepted by a mock framework (`tests/mock_sh.py`).
+Pure Python, no ZFS, no real disks. Every shell call is intercepted by a mock framework (`tests/mock_sh.py`); the few tests that need root and mount namespaces run in a namespace of their own and are skipped without them.
 
 ```bash
 make test       # fast path: invokes the test runner directly
 make tox        # full path: runs the suite under Python 3.12, 3.13 and 3.14
 ```
 
-Currently 147 tests covering config loading, drive detection, ZFS operations, keystore handling, the recovery abort path when a keystore is missing from backup, dataset-layout drift detection, grub.cfg manipulation including cross-host UUID rewriting, and the cleanup trap handler.
+The suite covers every command and module: the planner and the engine on a model of ZFS (`tests/fake_zfs.py`), the recovery path, the boot chain, the guards, signals and cleanup, and the self-test checks that model can run.
 
 GitHub Actions runs the unit-test suite on every push and pull request, with one job per supported Python version plus a separate lint job (mypy + pylint + ruff). See `.github/workflows/ci.yml`.
 
