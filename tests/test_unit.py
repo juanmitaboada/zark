@@ -5742,6 +5742,83 @@ class TestSystemMountHelpers:  # pylint: disable=missing-function-docstring
         assert not mock.was_called("mount -t zfs")
         assert [c.args[0] for c in each.call_args_list] == ["rpool/USERDATA", "bpool/BOOT/ubuntu_x"]
 
+    @staticmethod
+    def _system_mock(listing: str) -> MockShell:
+        """Both pools to import, by-id finding nothing, the hint working."""
+        mock = MockShell()
+        mock.on("zpool list rpool").fails()
+        mock.on("zpool list bpool").fails()
+        for pool in ("rpool", "bpool"):
+            mock.on_prefix(f"zpool import -N -R /mnt/zark/chroot -d /dev/disk/by-id {pool}").fails()
+            mock.on_prefix(
+                f"zpool import -f -N -R /mnt/zark/chroot -d /dev/disk/by-id {pool}"
+            ).fails()
+            mock.on(rf"^zpool import -N .*-d /dev/sda4 {pool}$", regex=True).succeeds()
+        mock.on(
+            "zfs list -H -o name,mountpoint,used,refer,canmount,type -t filesystem,volume -r rpool",
+        ).succeeds(listing)
+        mock.on_prefix("zfs mount ").succeeds()
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x").succeeds("/mnt/zark/chroot")
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/ubuntu_x/var").succeeds(
+            "/mnt/zark/chroot/var"
+        )
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/zt5b").succeeds("/mnt/zark/chroot")
+        mock.on("zfs get -H -o value mountpoint rpool/ROOT/zt5b/var").succeeds(
+            "/mnt/zark/chroot/var"
+        )
+        mock.on("zfs list bpool/BOOT/ubuntu_x").succeeds("bpool/BOOT/ubuntu_x")
+        mock.on("zfs get -H -o value mountpoint bpool/BOOT/ubuntu_x").succeeds(
+            "/mnt/zark/chroot/boot"
+        )
+        return mock
+
+    def _mount(self, mock: MockShell, readonly: bool = False) -> str:
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            redirect_stdout(out),
+            patch.object(lib_mount, "find_system_root_dataset", return_value="rpool/ROOT/ubuntu_x"),
+        ):
+            res = mount_system_pools(
+                "/mnt/zark/chroot",
+                "pp",
+                make_log(),
+                ZFS(make_log()),
+                _FakeKeystore(),  # type: ignore[arg-type]
+                Cleanup(make_log()),
+                readonly=readonly,
+                device="/dev/sda4",
+            )
+        assert res == ("/mnt/zark/chroot", "ubuntu_x")
+        return out.getvalue()
+
+    _TWO_BES = (
+        "rpool/ROOT\tnone\t1G\t1G\toff\tfilesystem\n"
+        "rpool/ROOT/ubuntu_x\t/\t1G\t1G\tnoauto\tfilesystem\n"
+        "rpool/ROOT/ubuntu_x/var\t/var\t1G\t1G\ton\tfilesystem\n"
+        "rpool/ROOT/zt5b\t/\t1G\t1G\tnoauto\tfilesystem\n"
+        "rpool/ROOT/zt5b/var\t/var\t1G\t1G\ton\tfilesystem\n"
+    )
+
+    def test_the_device_hint_reaches_bpool_too(self):
+        # M5a-12 (M4d plan 15 (1)): bpool went to the scan although the
+        # operator named the disk.
+        mock = self._system_mock(self._TWO_BES)
+        _ = self._mount(mock)
+        assert mock.was_called("zpool import -N -R /mnt/zark/chroot -d /dev/sda4 bpool"), mock.calls
+
+    def test_other_boot_environments_are_skipped_and_said_once(self):
+        # M4dR-5: their root has mountpoint=/, which resolves to this tree's
+        # root and warned on every command.
+        for readonly in (False, True):
+            mock = self._system_mock(self._TWO_BES)
+            out = self._mount(mock, readonly)
+            assert "resolves to the root" not in out and "zt5b not mounted" not in out, out
+            assert "Other boot environments are not mounted: zt5b" in out, out
+            assert not mock.was_called("zfs mount rpool/ROOT/zt5b"), mock.calls
+            assert mock.was_called("zfs mount rpool/ROOT/ubuntu_x/var")  # the root's own child
+            assert mock.was_called("zfs mount bpool/BOOT/ubuntu_x")
+
     def test_a_link_in_the_installed_tree_is_resolved_inside_it(self):
         # M4c plan 14 (1): libzfs mounts at altroot + mountpoint, and the
         # kernel follows the tree's /var/run -> /run onto the live's /run.

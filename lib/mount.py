@@ -146,6 +146,15 @@ def _mount_in_tree(ds: str, altroot: str, zfs: ZFS, log: Log, readonly: bool) ->
     return target if ok else ""
 
 
+def _in_other_boot_environment(name: str, root_ds: str) -> bool:
+    """Whether ``name`` is a boot environment's root, or below one, other than
+    ``root_ds`` (``rpool/ROOT/<be>[/...]``)."""
+    parent = root_ds.rsplit("/", 1)[0] + "/"
+    if not name.startswith(parent):
+        return False
+    return name != root_ds and not name.startswith(root_ds + "/")
+
+
 def mount_system_pools(
     altroot: str,
     passphrase: str | None,
@@ -238,8 +247,15 @@ def mount_system_pools(
         mount_points.append(root_mp)
 
     not_mounted: list[str] = []
+    other_bes: list[str] = []
     for ds in zfs.list_datasets("rpool", recursive=True):
         if ds.name in ("rpool", root_ds) or "keystore" in ds.name:
+            continue
+        if _in_other_boot_environment(ds.name, root_ds):
+            # Its root has mountpoint=/, which would land on this tree's root
+            # (M4dR-5): the whole subtree stays unmounted, said once below.
+            if ds.name.count("/") == root_ds.count("/"):
+                other_bes.append(ds.name.rsplit("/", 1)[-1])
             continue
         if ds.canmount == "off" or ds.mountpoint in ("none", "-", "legacy"):
             continue
@@ -250,9 +266,16 @@ def mount_system_pools(
         elif readonly:
             not_mounted.append(ds.name)
 
+    if other_bes:
+        log.info(f"Other boot environments are not mounted: {', '.join(other_bes)}")
+
     # ── Import + mount bpool (/boot) ──────────────────────────────────────
     if not zfs.pool_exists("bpool"):
-        if zfs.pool_import("bpool", altroot=altroot, no_mount=True, readonly=readonly):
+        # The operator's hint reaches bpool as it reaches rpool (M5a-12); the
+        # by-id scan still goes first.
+        if zfs.pool_import(
+            "bpool", device=device, altroot=altroot, no_mount=True, readonly=readonly
+        ):
             cleanup.track_pool("bpool")
         else:
             log.warn("Could not import bpool - /boot will be unavailable in the chroot")
