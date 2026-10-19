@@ -624,6 +624,21 @@ class TestFrame:  # pylint: disable=missing-function-docstring
         assert box[0] == "  ┌" + "─" * 53 + "┐" and box[1].endswith("│"), box
         assert {text_width(ln) for ln in box} == {57}, box
 
+    def test_a_box_with_an_indent_fits_a_narrow_terminal(self):
+        # M4dR-9: the room is the terminal's columns less the indent and the
+        # two edges, so the whole row (indent included) is within them.
+        body = ["word " * 40]
+        light = self._plain(frame(body, heavy=False, min_inner=53, color="", columns=60))
+        assert {text_width(ln) for ln in light} == {60}, light
+        heavy = self._plain(frame(body, heavy=True, min_inner=58, color="", columns=70))
+        assert {text_width(ln) for ln in heavy} == {70}, heavy
+
+    def test_below_the_minimum_width_the_minimum_wins(self):
+        # M4dR-9: a terminal narrower than the box's minimum gets the minimum
+        # (the terminal wraps the row); recorded, not changed.
+        lines = self._plain(frame(["short"], heavy=False, min_inner=53, color="", columns=40))
+        assert {text_width(ln) for ln in lines} == {57}, lines
+
 
 class TestLog:
     """Tests for Log ANSI stripping and fatal error handling."""
@@ -1216,6 +1231,17 @@ class TestKeystore:
 
 class TestCleanup:
     """Tests for Cleanup tracking and execution logic with mocked shell commands."""
+
+    def test_a_disabled_cleanup_has_nothing_pending(self):
+        """M4dR-9: after disable() a later track is not run by it (the
+        resource is the user's), and the stop line must not say otherwise."""
+        cleanup = Cleanup(make_log())
+        cleanup.track_dir("/tmp/x")
+        assert cleanup.pending()
+        cleanup.disable()
+        assert not cleanup.pending()
+        cleanup.track_dir("/tmp/y")  # tracked after the disable
+        assert not cleanup.pending()
 
     def test_track_and_run(self):
         """Cleanup exports pools and unmounts in reverse order."""
