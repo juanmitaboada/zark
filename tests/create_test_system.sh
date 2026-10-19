@@ -441,8 +441,10 @@ echo ""
 ZARK_WORK="/tmp/zark"
 [ -d "$ZARK_WORK" ] || cp -a /mnt/zark "$ZARK_WORK"
 
-# Import rpool to access system.key
+# Import rpool to access system.key, and bpool: prepare's first point
+# covers both pools (it is the backup; M2P.1: no hand sends after it).
 zpool import -N rpool
+zpool import -N bpool
 sleep 1
 ZD_DEV=$(printf '%s\n' /dev/zd* 2>/dev/null | head -1)
 echo -n "$PASSPHRASE" | cryptsetup open "$ZD_DEV" zark_ks_test -
@@ -453,76 +455,13 @@ cd "$ZARK_WORK"
 ./zark prepare "$BACKUP_DISK"
 
 # ═══════════════════════════════════════════════════════════════════
-#  12. Backup via raw zfs send
-# ═══════════════════════════════════════════════════════════════════
-
-echo ""
-echo -e "${B}╔══════════════════════════════════════════════════════════╗${N}"
-echo -e "${B}║  Backing up via zfs send/receive (raw)                  ║${N}"
-echo -e "${B}╚══════════════════════════════════════════════════════════╝${N}"
-echo ""
-
-BACKUP_POOL=$(zpool import 2>/dev/null | awk '/pool:/{print $2}' | grep -v rpool | grep -v bpool | head -1)
-[ -n "$BACKUP_POOL" ] || fail "No backup pool found on $BACKUP_DISK"
-info "Backup pool: $BACKUP_POOL"
-
-zpool import -N "$BACKUP_POOL" || fail "Cannot import $BACKUP_POOL"
-zpool import -N bpool 2>/dev/null || true
-zfs load-key -a -L file:///run/keystore/rpool/system.key 2>/dev/null || true
-ok "Pools imported, keys loaded"
-
-# Send rpool datasets
-info "Sending rpool datasets..."
-zfs create -o canmount=off -o mountpoint=none "$BACKUP_POOL/rpool"
-zfs create -o canmount=off -o mountpoint=none "$BACKUP_POOL/rpool/ROOT"
-zfs create -o canmount=off -o mountpoint=none "$BACKUP_POOL/rpool/USERDATA" 2>/dev/null || true
-
-DATASETS=$(zfs list -H -o name -r rpool | grep -v "^rpool$" | grep -v "^rpool/ROOT$" | grep -v "^rpool/USERDATA$" | grep -v "^rpool/keystore$")
-for ds in $DATASETS; do
-    snap=$(zfs list -H -o name -t snapshot "$ds" 2>/dev/null | tail -1)
-    if [ -n "$snap" ]; then
-        relative="${ds#rpool/}"
-        info "  $relative @ ${snap##*@}"
-        if zfs send -w "$snap" | zfs receive -F "$BACKUP_POOL/rpool/$relative" 2>/dev/null; then
-            log_ok "..."
-        else
-            log_warn "..."
-        fi
-    fi
-done
-
-# Send bpool
-info "Sending bpool..."
-zfs create -o canmount=off -o mountpoint=none "$BACKUP_POOL/bpool" 2>/dev/null || true
-zfs create -o canmount=off -o mountpoint=none "$BACKUP_POOL/bpool/BOOT" 2>/dev/null || true
-BPOOL_DS=$(zfs list -H -o name -r bpool | grep "BOOT/" | head -1)
-if [ -n "$BPOOL_DS" ]; then
-    BPOOL_SNAP=$(zfs list -H -o name -t snapshot "$BPOOL_DS" 2>/dev/null | tail -1)
-    if [ -n "$BPOOL_SNAP" ]; then
-        BPOOL_REL="${BPOOL_DS#bpool/}"
-        info "  $BPOOL_REL @ ${BPOOL_SNAP##*@}"
-        zfs send "$BPOOL_SNAP" | zfs receive -F "$BACKUP_POOL/bpool/$BPOOL_REL"
-        ok "  bpool ✓"
-    fi
-fi
-
-# Send keystore
-info "Sending keystore zvol..."
-KS_SNAP=$(zfs list -H -o name -t snapshot rpool/keystore 2>/dev/null | tail -1)
-if [ -n "$KS_SNAP" ]; then
-    zfs send -w "$KS_SNAP" | zfs receive -o encryption=off "$BACKUP_POOL/rpool/keystore"
-    ok "  keystore ✓"
-fi
-
-# ═══════════════════════════════════════════════════════════════════
-#  13. Final cleanup
+#  12. Final cleanup
 # ═══════════════════════════════════════════════════════════════════
 
 info "Final cleanup..."
 umount /run/keystore/rpool 2>/dev/null || true
 cryptsetup close zark_ks_test 2>/dev/null || true
 zpool export bpool 2>/dev/null || true
-zpool export "$BACKUP_POOL" 2>/dev/null || true
 zpool export rpool 2>/dev/null || true
 
 echo ""
