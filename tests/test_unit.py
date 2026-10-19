@@ -16755,6 +16755,22 @@ class TestAlerts:
         )
         assert "/usr/share/zark/zark setup --remove ||" in prerm  # prerm goes on
 
+    def test_setup_remove_with_another_argument_is_a_usage_error(self) -> None:
+        """M4dR-4: it used to fall through to the full interactive setup."""
+        for args in (["--remove", "--foo"], ["--foo", "--remove"], ["--remove", "--remove"]):
+            with (
+                patch.object(setup_mod, "remove_installed") as removed,
+                patch.object(setup_mod, "ZFS") as zfs_cls,
+                redirect_stdout(StringIO()),
+            ):
+                try:
+                    setup_mod.run(args)
+                except SystemExit as e:
+                    assert e.code == 2, args
+                else:
+                    raise AssertionError(f"setup {args} went on")
+            assert not removed.called and not zfs_cls.called, args  # nothing ran
+
 
 class TestCompletePoints:
     """M2R-1: which backup points are complete is recorded on the drive."""

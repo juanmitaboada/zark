@@ -772,6 +772,11 @@ def run(
     log = Log()
     if args == ["--remove"]:
         raise SystemExit(remove_installed(log))
+    if "--remove" in args:
+        # Not the full setup after being asked to remove things (M4dR-4).
+        log.error("--remove takes no other argument")
+        log.info("Usage: zark setup [--remove]")
+        raise SystemExit(2)
     # cfg = Config.load()
     zfs = ZFS(log)
 
