@@ -15710,6 +15710,27 @@ class TestPruneCommand:
         assert text.index(warning) < text.index("sanoid snapshot(s) older than 5 days")
         assert "backup has not had" not in text
 
+    def test_the_warning_names_only_drives_unanchored_where_the_cut_touches(self) -> None:
+        """M4dR-7: ``unanchored`` lists a drive for every dataset it lacks an
+        anchor on; the cut warns of the ones whose snapshots it removes."""
+        inv = oprune.Inventory(
+            autosnaps={"daily": [oprune.Item("rpool/A@autosnap_2026-01-01_00:00:01_daily", 100)]},
+            unanchored={"rpool/A": ["amber"], "rpool/B": ["black"]},
+        )
+        out = StringIO()
+        with (
+            patch_sh(MockShell()),
+            redirect_stdout(out),
+            patch.object(Log, "ask_input", return_value="1"),
+            patch.object(prune_mod, "_typed", return_value=False),
+            patch.object(prune_mod.reclaim, "reclaim_names", return_value=0),
+            patch.object(prune_mod.time, "time", return_value=float(10 * ret.DAY)),
+        ):
+            prune_mod._by_age(inv, Log())  # pylint: disable=protected-access
+        text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
+        assert "amber has not had a zark 2 backup yet" in text, text
+        assert "black" not in text, text
+
     @staticmethod
     def _capacity(freeing: list[int], settle: bool) -> tuple[str, list[str]]:
         """rpool's freeing figures in order (the last one repeats); output, calls."""
@@ -17526,6 +17547,13 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
         host = socket.gethostname()
         if len(host) > 1:
             assert certs.sanitize(f"on {host}_x", {}) == "on <host>_x"
+
+    def test_the_longest_name_is_masked_first(self):
+        # M4dR-7: a name that is the start of a longer one (a by-id name and
+        # the same name with its serial) must not leave the longer one's tail.
+        masks = {"usb-S": "<short>", "usb-S_1-0:0": "<by-id>"}
+        assert certs.sanitize("on usb-S_1-0:0 now", masks) == "on <by-id> now"
+        assert certs.sanitize("on usb-S now", masks) == "on <short> now"
 
     def test_the_record_keeps_a_complete_run_beside_a_partial_one(self):
         with tempfile.TemporaryDirectory() as td:
