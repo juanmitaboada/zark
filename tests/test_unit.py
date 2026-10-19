@@ -18153,6 +18153,53 @@ class TestSelftestStick:  # pylint: disable=missing-function-docstring,too-few-p
         assert bench.by_id == "/dev/disk/by-id/usb-S_1-0:0"
 
 
+class TestSelftestStickCreate:  # pylint: disable=missing-function-docstring
+    """M4dR-1: a stop between the stick pool's create and its GUID."""
+
+    IDENT = DiskIdentity(disk="/dev/sdz", by_id="usb-S_1-0:0", serial="S1")
+
+    def _forget(self, vdev: str, cut_short: bool = True) -> tuple[MockShell, st_l2.StickBench]:
+        mock = MockShell()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            bench = st_l2.StickBench(make_log(), Cleanup(make_log()), self.IDENT)
+            mock.on(f"zpool list -vHP {bench.s}").succeeds(f"{bench.s}\t1G\n\t{vdev}\n")
+            mock.on(f"lsblk -nrs -o NAME,TYPE {vdev}").succeeds(
+                "sdza1 part\nsdza disk\n" if "sdza" in vdev else "sdz1 part\nsdz disk\n"
+            )
+            mock.on(f"zpool get -Hp -o value guid {bench.s}").succeeds("4242\n")
+            if cut_short:
+                bench.creating.add(bench.s)
+            bench.forget()
+        return mock, bench
+
+    def test_a_pool_whose_create_was_cut_short_is_destroyed(self):
+        mock, bench = self._forget("/dev/sdz1")
+        assert mock.was_called(f"zpool destroy -f {bench.s}"), mock.calls
+        assert not bench.creating
+
+    def test_a_pool_that_is_not_the_runs_is_left_alone(self):
+        # The same name on another disk is not the stick's pool.
+        mock, bench = self._forget("/dev/sdza1")
+        assert mock.was_not_called(f"zpool destroy -f {bench.s}"), mock.calls
+        assert not bench.creating
+
+    def test_without_a_create_in_flight_nothing_is_destroyed(self):
+        mock, bench = self._forget("/dev/sdz1", cut_short=False)
+        assert mock.was_not_called(f"zpool destroy -f {bench.s}"), mock.calls
+
+    def test_prepare_clears_the_mark_once_the_guid_is_read(self):
+        mock = MockShell()
+        mock.on_prefix("mkdir -p").succeeds()
+        mock.on_prefix("zpool create").succeeds()
+        mock.on_prefix("zpool get -Hp -o value guid").succeeds("77\n")
+        mock.on_prefix("zpool export").succeeds()
+        mock.on_prefix("udevadm settle").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            bench = st_l2.StickBench(make_log(), Cleanup(make_log()), self.IDENT)
+            assert bench.prepare() == "77"
+        assert not bench.creating
+
+
 class TestSelftestStickBlank:  # pylint: disable=missing-function-docstring
     """M4sR-2: the level-2 teardown clears part1's ZFS labels, as purge does."""
 

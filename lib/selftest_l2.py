@@ -80,8 +80,10 @@ class StickBench(Bench):
         self.forget()
         altroot = backup_altroot(self.s)
         _ = sh.run(f"mkdir -p {altroot}")
+        self.creating.add(self.s)  # a stop between the create and the GUID (M4dR-1)
         _ = self.ok(create_command(self.s, self.by_id, altroot, ""))
         self.guids[self.s] = self.pool_value("guid", self.s)
+        self.creating.discard(self.s)
         _ = self.ok(f"zpool export {self.s}")
         _ = self.ok(SETTLE)
         return self.guids[self.s]
@@ -89,8 +91,27 @@ class StickBench(Bench):
     def forget(self) -> None:
         """Destroy the stick's pool if it is imported (and the run's)."""
         guid = self.guids.pop(self.s, "")
+        if not guid and self.s in self.creating:
+            guid = self._guid_if_on_stick()
+        self.creating.discard(self.s)
         if guid and sh.run(f"zpool get -Hp -o value guid {self.s}").output == guid:
             _ = self.run(f"zpool destroy -f {self.s}")
+
+    def _guid_if_on_stick(self) -> str:
+        """The GUID of the stick's pool when its create was cut short (the
+        run stopped before the GUID was read): the run's only when a vdev of
+        the pool of that name is on the stick, as ``_destroy_created`` does
+        for the bench's own pools. A pool of that name elsewhere is not."""
+        listing = sh.run(f"zpool list -vHP {self.s}", log=self.log)
+        if not listing.ok:
+            return ""  # the create never ended
+        for line in listing.lines:
+            path = line.strip().split("\t")[0]
+            if path.startswith("/dev/") and self.disk in identity.disks_under(path):
+                guid = sh.run(f"zpool get -Hp -o value guid {self.s}", log=self.log)
+                return guid.output if guid.ok else ""
+        self.log.warn(f"Pool {self.s} is not on {self.disk}: left alone")
+        return ""
 
     def pool_on_stick(self) -> bool:
         """Whether an imported pool has a vdev on the stick (or the listing
