@@ -1467,6 +1467,13 @@ class TestZarkCommand:  # pylint: disable=missing-function-docstring,too-few-pub
         # The MOTD's lines (read at login) and the installed scripts say `zark`.
         allowed = {"lib/status.py", "lib/certificates.py", "lib/alerts.py"}
         allowed |= {"lib/apt_guard.py", "lib/grub_guard.py", "lib/config.py"}
+        # Sentences that name a command without telling to run it (M4dF-5).
+        named = (
+            "Mounted with 'zark mount",
+            "A backup mounted with 'zark mount'",
+            "browsed with 'zark mount'",
+            "`zark prepare` always creates",
+        )
         root = Path(__file__).resolve().parent.parent
         found: list[str] = []
         for path in sorted([*root.glob("lib/*.py"), *root.glob("commands/*.py"), root / "zark"]):
@@ -1487,7 +1494,9 @@ class TestZarkCommand:  # pylint: disable=missing-function-docstring,too-few-pub
                 if isinstance(n, ast.Constant)
                 and isinstance(n.value, str)
                 and id(n) not in docs
-                and re.search(r"sudo (\./)?zark\b", n.value)
+                and not any(x in n.value for x in named)
+                # M4dF-5: also a command quoted in a sentence, 'zark setup'.
+                and re.search(r"sudo (\./)?zark\b|['`](\./)?zark [a-z]", n.value)
             ]
         assert not found, found
 

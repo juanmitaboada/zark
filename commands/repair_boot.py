@@ -68,7 +68,7 @@ def run(
         log.info("repair-boot is meant to run from live media; on the running")
         log.info(f"installed system use '{zark_command()} finish' instead.")
         if not log.ask("Continue anyway?", default=False):
-            log.fatal("Aborted - boot a live USB and retry, or use 'zark finish'.")
+            log.fatal(f"Aborted - boot a live USB and retry, or use '{zark_command()} finish'.")
 
     # ── 1. Check for external pools ───────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Checking for external ZFS pools...")

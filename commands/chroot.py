@@ -146,7 +146,7 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
             "Type 'exit' (or Ctrl-D) to leave. On exit, zark unmounts",
             "everything and exports rpool/bpool cleanly. If a later boot",
             "ever asks to force-import a pool, that is benign - boot",
-            "through and, if needed, run 'zark repair-boot'.",
+            f"through and, if needed, run '{zark_command()} repair-boot'.",
         ],
     )
 

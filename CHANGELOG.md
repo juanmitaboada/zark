@@ -88,8 +88,10 @@ preceded them.
   at words with their indent and colour; a by-id path or other long word
   stays whole. The question boxes have a right edge.
 - **Tips name the command as it runs** (M4d-22): `sudo zark` installed,
-  `sudo ./zark` from a checkout or a stick. The eject line names the
-  drive, and purge names an unregistered disk by its label or model.
+  `sudo ./zark` from a checkout or a stick, also in the sentences that
+  tell to run one (chroot, setup, repair-boot, recover, the eject; M4dF-5).
+  The eject line names the drive, and purge names an unregistered disk by
+  its label or model.
 - **setup counts sanoid's snapshots on both pools** (M4d-23) and stops
   when `rpool/ROOT` has no boot environment, instead of asking for a name
   no answer could make right; repair-boot shows one step for importing,

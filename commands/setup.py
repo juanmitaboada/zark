@@ -662,7 +662,7 @@ def _check_secure_boot_alternatives(log: Log) -> None:
         "(default NO; choose Y if your firmware is up to date)",
         default=False,
     ):
-        log.warn("Boot chain left as-is. Re-run 'zark setup' anytime to revisit.")
+        log.warn(f"Boot chain left as-is. Re-run '{zark_command()} setup' anytime to revisit.")
         return
 
     for alt_name, pkg, _, latest in needs_fix:

@@ -41,6 +41,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from lib import signals
+from lib.config import zark_command
 from lib.keystore import KeystoreLike
 from lib.log import Log
 from lib.sh import run
@@ -193,7 +194,7 @@ def prompt_eject_or_attach(
     if device is None:
         log.warn(
             f"Device path for drive '{pool}' could not be resolved; "
-            "eject skipped - use 'zark umount' for a clean disconnect later.",
+            f"eject skipped - use '{zark_command()} umount' for a clean disconnect later.",
         )
         log.banner_drive_attached(pool)
         return
