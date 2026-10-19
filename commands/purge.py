@@ -47,6 +47,7 @@ class Wiped(NamedTuple):
 
     marks: list[Mark]
     checks_clean: bool
+    held: bool = True  # False: another program held the disk, nothing overwritten
 
 
 class Stop(NamedTuple):
@@ -213,7 +214,7 @@ def _wipe(target_dev: str, part1: str, log: Log, steps: bool = True) -> Wiped:
             # label check could not run; a second purge then has no part1 to
             # check either (M4aV-1). The contention is transient: stop here.
             marks.append((False, f"nothing overwritten: {target_dev} could not be held from udev"))
-            return Wiped(marks, checks_clean=False)
+            return Wiped(marks, checks_clean=False, held=False)
         had_part1 = _present(part1)
         say(2, "Overwriting first 10MB...")
         _ = _step(
@@ -355,6 +356,12 @@ def run(
         look = f"  blkid -p {target_dev}; lsblk {target_dev}"
         if stop:
             advice = [stop.advice]
+        elif not wiped.held:
+            # Nothing was checked either, so neither rule below fits (M4dF-4).
+            advice = [
+                f"Nothing was overwritten: another program holds {target_dev}",
+                f"(see: sudo fuser -v {target_dev}). Close it and purge again.",
+            ]
         elif wiped.checks_clean and (ident.label is None or first[0] is True):
             # M4aP.11: only a step failed, and no pool is left to find.
             advice = ["Purge again to run the failed step."]

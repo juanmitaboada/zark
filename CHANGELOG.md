@@ -55,8 +55,10 @@ preceded them.
   that did not run (the drive reset during the overwrite) is warned.
 - **purge's advice follows what failed** (M4d-10): only a step with every
   check clean and no pool left is "Purge again to run the failed step.";
-  no label and a check failed is "Something is left on the disk". The
-  empty `/run/zark/altroot/<pool>` goes after the destroy.
+  no label and a check failed is "Something is left on the disk"; a disk
+  another program holds is "Nothing was overwritten: another program
+  holds <disk>", with the `fuser` line to find it (M4dF-4). The empty
+  `/run/zark/altroot/<pool>` goes after the destroy.
 - **health ends 1 when the destructive test fails or its test pool is
   not destroyed** (M4d-11), after the report is written, as every other
   command ends a red verdict. This reverses M4aF-10's choice to keep 0.

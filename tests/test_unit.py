@@ -7422,6 +7422,10 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert "✗ nothing overwritten: /dev/sdb could not be held from udev" in out
         assert not [c for c in mock.calls if c.startswith(("dd ", "wipefs", "sgdisk"))], mock.calls
         assert "backup" in data
+        # M4dF-4: the advice names the holder, not something left or a pool.
+        assert "Nothing was overwritten: another program holds /dev/sdb" in out, out
+        assert "sudo fuser -v /dev/sdb" in out and "Close it and purge again." in out
+        assert "Something is left" not in out and "may still hold the pool" not in out
 
     def test_part1_gone_under_the_lock_is_warned_and_in_drive_purged(self):
         # M4aV-1 9a: a reset during the dd takes part1 even held; the label
