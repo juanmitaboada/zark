@@ -613,7 +613,9 @@ for the canonical end-to-end sequences.
     system. Inside, ordinary tools (**apt**(8), **update-grub**(8),
     **dpkg-reconfigure**(8)) behave as on a booted system. On exit the
     command unmounts everything and exports both pools cleanly, so the next
-    real boot imports them without **-f**.
+    real boot imports them without **-f**; a pool it cannot export (a
+    process started inside keeps it busy) ends **CHROOT NOT CLOSED** with
+    exit status 1.
 
     **rpool** and **bpool** are looked for in */dev/disk/by-id* first; the
     optional *device* (for example */dev/nvme0n1*) is a hint tried next,
@@ -622,7 +624,9 @@ for the canonical end-to-end sequences.
     those names.
     **chroot** refuses to run when **rpool** is already imported - if that
     is the running system you are already inside it, and if it is a
-    leftover from a previous run, **prune**
+    leftover from a previous run, **clean** releases it first.
+
+**prune**
 :   Reclaim space, interactively, in the source or on a connected registered
     drive. Nothing goes without a confirmation; every snapshot is destroyed
     by its exact name and logged, and what each choice frees is measured
@@ -666,8 +670,6 @@ for the canonical end-to-end sequences.
     --notify** every hour and two minutes after boot, with the **zark**
     that installed it. **setup** installs them; **setup --remove** and
     removing the Debian package remove them.
-
-**clean** releases it first.
 
 **finish**
 :   Post-recovery finalisation, intended to be run *from inside the
@@ -953,7 +955,10 @@ To verify a recovery without rebooting:
 
 */run/keystore/rpool/system.key*
 :   In-memory location of the unlocked rpool key on a running system.
-    Created by the **dracut**(8) keystore module at boot.
+    Created by the **dracut**(8) keystore module at boot. While **zark**
+    has a drive's keystore open, that keystore is mounted on top of this
+    one at the same path; the system's own reappears when **zark** closes
+    it.
 
 # ENVIRONMENT
 
@@ -1072,7 +1077,10 @@ other than **rpool** and **bpool**, with an alternate root or carrying
 **org.zark:format** (a **zark** drive imported by hand). A permanent data
 pool imported without an alternate root does not block it. This prevents the most
 common cause of post-update boot failure: **update-grub** picking up the
-backup pool and writing its UUIDs into **grub.cfg**.
+backup pool and writing its UUIDs into **grub.cfg**. When the guard
+aborts it, **grub-mkconfig** (run under **set -e**) leaves the old
+**grub.cfg** in place and may leave a partial *grub.cfg.new* next to it,
+which the next successful run replaces.
 
 ## apt guard
 

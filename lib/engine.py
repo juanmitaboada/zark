@@ -448,8 +448,12 @@ class Run:  # pylint: disable=too-many-instance-attributes
         if resume:
             return f"zfs receive -s -u {dst}"
         o = self.origin[rel]
-        # A clone of the drive's copy of its origin; the kernel refuses an
-        # origin whose guid is not the stream's (ENODEV, dmu_recv.c:791-796).
+        # A clone of the drive's copy of its origin. `send -w -I <origin>
+        # <clone>@<point>` is a compound stream: libzfs finds the origin on the
+        # drive by the stream's from-GUID and ignores `-o origin=`, which only
+        # has to name an existing dataset (libzfs_sendrecv.c:5467-5472, :3998,
+        # :4614-4632); the kernel's ENODEV check (dmu_recv.c:791-796) applies
+        # only when an origin is given. SND-10 certifies it (M4sP.1).
         clone = [f"-o origin={_q(self._dst(clone_from))}"] if clone_from else []
         props = [
             *clone,

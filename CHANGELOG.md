@@ -285,6 +285,8 @@ M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1
   mount meet an older ZFS.
 - **Only the framework against the test model of ZFS** (M4s-12 12b): the
   checks that run against it are what found eleven divergences.
+- **The live's kernel release alone in the report** (M4s-14 14b): it
+  does not say which ISO the live booted, which `/cdrom/.disk/info` does.
 - **The MOTD line for a failure only** (M4s-15 15b).
 - **Filtering the report alone** (M4sF-2 2b), replacing every `came` that
   is not one short token: the checks would still compose texts that are

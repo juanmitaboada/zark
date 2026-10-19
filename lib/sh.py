@@ -107,7 +107,9 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
         log.cmd(cmd_str)
 
     # A process group of its own: zark passes a signal on to the whole group
-    # (lib.signals), shell included. Without `input`, stdin is /dev/null, so
+    # (lib.signals), shell included. dash 0.5.12 does not exec the last
+    # command of `sh -c` (it stays the parent), so a quoted command relies on
+    # the group, not on being sh's only process (M4bP.4). Without `input`, stdin is /dev/null, so
     # a child of a background group never stops reading the terminal.
     try:
         proc = subprocess.Popen(
