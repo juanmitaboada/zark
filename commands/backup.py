@@ -1103,6 +1103,8 @@ def run(
     if residues:
         log.info(status.residue_line(len(residues)))
 
+    # Before the eject question, which waits for the user (M4dF-3).
+    _notify("✅ Backup completed", f"Duration: {mins}m {secs}s")
     prompt_eject_or_attach(
         device,
         pool_name,
@@ -1110,5 +1112,3 @@ def run(
         default_eject=True,
         autoeject=cfg.drive_autoeject(pool_name),
     )
-
-    _notify("✅ Backup completed", f"Duration: {mins}m {secs}s")

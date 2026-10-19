@@ -37,7 +37,9 @@ preceded them.
 - **backup's notifications through `lib/notify`** (M4d-6): they reach
   Wayland desktops (the `who` line they looked for exists on X11 only),
   every active user session, never a greeter, and a hung session bus
-  stops a notification after 10 s instead of the backup.
+  stops a notification after 10 s instead of the backup. "Backup
+  completed" goes out before the eject question, which waits for the user
+  (M4dF-3).
 - **One residue line** (M4d-8): backup, `zark status` and the MOTD say
   "In origin: N snapshot(s) no registered drive needs (`syncoid_*` left
   by zark 1.x, keystore `prepare_*`): sudo zark prune removes them".

@@ -14025,6 +14025,22 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
                 rc = int(e.code or 0)
         return cfg, rc
 
+    def test_the_completed_notification_comes_before_the_eject_question(self) -> None:
+        """M4dF-3: the eject question waits for the user; the notification
+        that the backup is done goes out before it, not after the answer."""
+        seen: list[str] = []
+        _, rc = self._run(
+            _fresh_fake(),
+            patch.object(backup_mod, "_notify", side_effect=lambda t, _m: seen.append(t)),
+            patch.object(
+                backup_mod,
+                "prompt_eject_or_attach",
+                side_effect=lambda *_a, **_k: seen.append("eject?"),
+            ),
+        )
+        assert rc == 0, seen
+        assert seen[-2:] == ["\u2705 Backup completed", "eject?"], seen
+
     def test_a_failed_read_back_says_the_drive_already_records_the_point(self) -> None:
         """M2X.2 (M4b-13): the drive's metadata is written before the export,
         so BACKUP NOT VERIFIED says the drive records the point while the
