@@ -18132,6 +18132,20 @@ class TestTypography:  # pylint: disable=missing-function-docstring
                 ]
         assert not found, "\n".join(found)
 
+    def test_every_script_carries_the_apache_header(self):
+        # H22 (M4d-27): the shell scripts had none, and one named another licence.
+        found: list[str] = []
+        for path in self._files():
+            rel = str(path.relative_to(self._REPO))
+            if not (rel.endswith((".py", ".sh")) or rel == "zark") or not path.is_file():
+                continue
+            head = "\n".join(path.read_text("utf-8").splitlines()[:16])
+            if "Licensed under the Apache License, Version 2.0" not in head:
+                found.append(f"{rel}: no Apache header")
+            if re.search("GPL" + r"-\d", path.read_text("utf-8")):
+                found.append(f"{rel}: names a GPL version")
+        assert not found, found
+
     def test_the_fallback_walk_sees_the_tracked_tree(self):
         with patch("subprocess.run", side_effect=OSError("no git")):
             walked = {str(p.relative_to(self._REPO)) for p in self._files()}
