@@ -18223,15 +18223,30 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
     runs: tests/selftest_stop_harness.py, in its own mount namespace, on fake
     zpool and zfs tools. Needs root and mount namespaces; skipped otherwise."""
 
-    def _run(self, case: str) -> dict[str, Any]:
-        TestUmountPropagation._skip_unless_possible()  # pylint: disable=protected-access
-        if _sh.is_live_usb():
-            raise SkipTest("on a live session zark.log is the checkout's, outside the tmpfs")
-        avail = stest._mem_available()  # pylint: disable=protected-access
-        if avail is not None and avail < stest.MIN_MEM_AVAILABLE:
-            raise SkipTest("too little memory for the bench")
-        harness = Path(__file__).parent / "selftest_stop_harness.py"
-        with tempfile.TemporaryDirectory() as td:
+    @staticmethod
+    def _lock_path() -> Path:
+        # One lock file for every suite on the host (M4dR-10): /run/lock is
+        # shared by all processes, the temp dir is the fallback without it.
+        base = Path("/run/lock") if Path("/run/lock").is_dir() else Path(tempfile.gettempdir())
+        return base / "zark-tests-host-dirs.lock"
+
+    @classmethod
+    @contextmanager
+    def _host_dirs_lock(cls) -> Iterator[None]:
+        """Exclusive lock around the harness and the removal of the mount
+        points it made: they are on the host, shared by every suite as root.
+        Two suites at once otherwise remove each other's directories while
+        the other's namespace uses them. The kernel drops it on any death."""
+        fd = os.open(cls._lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def _run_harness(self, case: str) -> dict[str, Any]:
+        with self._host_dirs_lock(), tempfile.TemporaryDirectory() as td:
+            harness = Path(__file__).parent / "selftest_stop_harness.py"
             r = subprocess.run(
                 [sys.executable, str(harness), td, case],
                 capture_output=True,
@@ -18240,11 +18255,63 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
                 timeout=120,
                 check=False,
             )
-        assert r.returncode == 0, (case, r.returncode, r.stderr[-2000:])
-        result: dict[str, Any] = json.loads(r.stdout.strip().splitlines()[-1])
-        for d in result["made"]:  # empty mount points the harness had to make
-            os.rmdir(d)
+            assert r.returncode == 0, (case, r.returncode, r.stderr[-2000:])
+            result: dict[str, Any] = json.loads(r.stdout.strip().splitlines()[-1])
+            for d in result["made"]:  # empty mount points the harness had to make
+                os.rmdir(d)
         return result
+
+    def _run(self, case: str) -> dict[str, Any]:
+        TestUmountPropagation._skip_unless_possible()  # pylint: disable=protected-access
+        if _sh.is_live_usb():
+            raise SkipTest("on a live session zark.log is the checkout's, outside the tmpfs")
+        avail = stest._mem_available()  # pylint: disable=protected-access
+        if avail is not None and avail < stest.MIN_MEM_AVAILABLE:
+            raise SkipTest("too little memory for the bench")
+        return self._run_harness(case)
+
+    def test_the_host_directories_are_made_and_removed_under_a_lock(self):
+        # M4dR-10: needs no root (the harness call is replaced). A second
+        # opener of the lock file must be refused for as long as the
+        # harness runs and the made directories are removed, and admitted
+        # after.
+        seen: list[bool] = []
+
+        def other_can_lock() -> bool:
+            fd = os.open(self._lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return True
+            except BlockingIOError:
+                return False
+            finally:
+                os.close(fd)
+
+        def fake_run(*_a: Any, **_k: Any) -> Any:
+            seen.append(other_can_lock())
+            out = json.dumps({"made": ["/nonexistent/zark-made"]})
+            return subprocess.CompletedProcess([], 0, out, "")
+
+        real_rmdir = os.rmdir
+
+        def fake_rmdir(d: str, *a: Any, **k: Any) -> None:
+            if d == "/nonexistent/zark-made":
+                seen.append(other_can_lock())
+            else:  # the temporary directory's own cleanup
+                real_rmdir(d, *a, **k)
+
+        # A lock file of its own: another suite on the host may hold the real
+        # one at this very moment (that is what the lock is for).
+        with tempfile.TemporaryDirectory() as td:
+            private = Path(td, "host-dirs.lock")
+            with (
+                patch.object(type(self), "_lock_path", staticmethod(lambda: private)),
+                patch("subprocess.run", fake_run),
+                patch("os.rmdir", fake_rmdir),
+            ):
+                self._run_harness("sig:INT")
+                assert seen == [False, False], seen
+                assert other_can_lock()  # released afterwards
 
     def _stopped(self, name: str) -> None:
         r = self._run(f"sig:{name}")
