@@ -603,7 +603,7 @@ class TestFrame:  # pylint: disable=missing-function-docstring
         assert lines[1].startswith("║    • word") and lines[2].startswith("║      word"), lines
         assert lines[-2].rstrip(" ║").endswith("end"), lines
         wide = frame(["x" * 70], heavy=True, min_inner=58, color="", columns=200)
-        assert text_width(wide[0]) == 74  # the widest line and its margins
+        assert text_width(wide[0]) == 75  # the widest line and its margins
 
     def test_a_token_wider_than_the_frame_stays_whole(self):
         path = "/dev/disk/by-id/usb-" + "X" * 90 + "-0:0-part1"
@@ -632,6 +632,16 @@ class TestFrame:  # pylint: disable=missing-function-docstring
         assert {text_width(ln) for ln in light} == {60}, light
         heavy = self._plain(frame(body, heavy=True, min_inner=58, color="", columns=70))
         assert {text_width(ln) for ln in heavy} == {70}, heavy
+
+    def test_a_full_width_line_does_not_touch_the_border(self):
+        # M5a-24 (eli B2, K1): a banner's line of exactly the inner width had
+        # no space before the right edge, as a question box always has one.
+        for width in (53, 54, 55, 56):
+            lines = self._plain(
+                frame(["x" * width], heavy=True, min_inner=58, color="", columns=80)
+            )
+            assert lines[1].endswith(" ║"), lines
+            assert len({text_width(ln) for ln in lines}) == 1, lines
 
     def test_a_line_with_a_newline_keeps_the_right_edge(self):
         # M4dR-2: chroot, mount and umount refuse with a body line that holds

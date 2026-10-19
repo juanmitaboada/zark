@@ -94,7 +94,7 @@ def frame(  # pylint: disable=too-many-arguments,too-many-locals
     """
     if heavy:
         tl, h, tr, v, bl, br, ml, mr = "╔", "═", "╗", "║", "╚", "╝", "╠", "╣"
-        indent, left, right = "", 2, 0
+        indent, left, right = "", 2, 1  # a full-width line keeps a space before the edge
     else:
         tl, h, tr, v, bl, br, ml, mr = "┌", "─", "┐", "│", "└", "┘", "├", "┤"
         indent, left, right = "  ", 1, 1
