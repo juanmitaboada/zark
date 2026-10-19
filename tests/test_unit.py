@@ -8873,7 +8873,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         with tempfile.TemporaryDirectory() as td:
             return self._run_in(td, answer, preflight_fails)
 
-    def _run_in(  # pylint: disable=too-many-locals
+    def _run_in(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
         self,
         work: str,
         answer: str | None,
@@ -8883,6 +8883,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         meta_fail: bool = False,
         shell_setup: Callable[[MockShell], None] | None = None,
         extra: Sequence[AbstractContextManager[object]] = (),
+        everything_succeeds: bool = False,
     ) -> MockShell:
         """``answer`` None simulates a closed terminal (EOF) at the YES prompt.
 
@@ -8902,6 +8903,8 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             shell_setup(mock)
         meta = mock.on("zfs get -H -s local -o property,value all backup")
         _ = meta.fails() if meta_fail else meta.succeeds("org.zark:format\t2\n")
+        if everything_succeeds:  # last: the first match wins
+            _ = mock.on_prefix("").succeeds()
         snaps = _stick_snaps()
         point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
         plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [], "k@k", 1, "617fca2c")
@@ -8966,6 +8969,46 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             for c in cleanups:  # what atexit would do
                 c.run()
         return mock
+
+    def test_a_bpool_left_at_its_monthly_is_mounted_and_its_kernels_checked(self):
+        """M4dR-6 (P8): ``run`` mounts bpool explicitly whenever the restore
+        put something there, a bpool left at its monthly included, and names
+        the kernels that monthly lacks."""
+        monthly = "autosnap_2026-09-01_00:00:00_monthly"
+        seen: dict[str, list[object]] = {"mount": [], "gaps": []}
+
+        def mount(*args: object) -> None:
+            seen["mount"].append(args[:2])
+
+        def gaps(*args: object) -> list[str]:
+            seen["gaps"].append(args[1])
+            return []
+
+        real_exists = Path.exists
+
+        def exists(self: Path) -> bool:  # the target disk's partitions
+            return str(self).startswith("/dev/sda") or real_exists(self)
+
+        with tempfile.TemporaryDirectory() as td:
+            extra: list[AbstractContextManager[object]] = [
+                patch.object(recover_mod, "RECOVER_MNT", os.path.join(td, "mnt")),
+                patch.object(Path, "exists", exists),
+                patch.object(recover_mod, "restore_rpool_rows", return_value=[]),
+                patch.object(recover_mod, "_restore_encryption_root", return_value=[]),
+                patch.object(recover_mod, "restore_bpool", return_value=(monthly, [])),
+                patch.object(recover_mod, "_export_verified"),
+                patch.object(recover_mod, "_refuse_imported_system_pools"),
+                patch.object(recover_mod, "_stable_vdev", return_value="/dev/x"),
+                patch.object(recover_mod, "drop_prepare_snapshot"),
+                patch.object(recover_mod, "_install_missing_tools"),
+                patch.object(recover_mod, "mount_restored_system", side_effect=mount),
+                patch.object(recover_mod, "kernel_gaps", side_effect=gaps),
+                patch.object(recover_mod, "install_boot_chain", return_value=[]),
+                patch.object(recover_mod, "regenerate_initrd", return_value=[]),
+            ]
+            _ = self._run_in(td, "YES", extra=extra, everything_succeeds=True)
+        assert seen["mount"] == [(_BE, True)], seen
+        assert seen["gaps"] == [monthly], seen
 
     def test_system_key_copy_is_private_and_removed_on_a_fatal(self):
         # Review §8: the /tmp copy used to survive every failure path.
@@ -9313,10 +9356,14 @@ class TestRecoverLeftAtTheMonthly:  # pylint: disable=missing-function-docstring
     def test_an_rpool_dataset_left_at_its_monthly_is_bookmarked_there(self):
         mock = self._mock(True, True, True, False)
         rows = [self._row("rpool/ROOT/be"), self._row("rpool/srv")]
-        with patch_sh(mock), redirect_stdout(StringIO()):
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
             errors = recover_mod.restore_rpool_rows(
                 "backup", rows, "rpool/ROOT/be", "111", make_log()
             )
+        # M4dR-6 (P6): one at its point, one at its monthly: one restored of two.
+        assert "1 of 2 rpool dataset(s) restored" in out.getvalue(), out.getvalue()
+        assert "2 of 2" not in out.getvalue()
         assert errors == [
             f"rpool/srv: left at @{self.MONTHLY}, older than the point (the point's receive failed)"
         ]
