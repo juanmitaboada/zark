@@ -16581,6 +16581,31 @@ class TestAlerts:
         assert left == [], left
         assert "systemctl disable --now zark-status.timer" in mock.calls
 
+    def test_setup_remove_ends_1_when_a_file_is_not_zarks(self) -> None:
+        """M4dR-8: a file that is not zark's stays and is named, and the
+        status is 1 (the package's prerm goes on, it does not fail on it)."""
+        mock = MockShell()
+        mock.on_prefix("systemctl").succeeds("")
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as root, patch_sh(mock), redirect_stdout(out):
+            apt_guard.install(target_root=root, log=make_log())
+            hook = Path(root, apt_guard.HOOK_RELATIVE_PATH)
+            hook.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+            assert setup_mod.remove_installed(make_log(), root) == 1
+            assert hook.read_text(encoding="utf-8") == "#!/bin/sh\necho mine\n"
+        assert "Left, not zark's" in out.getvalue()
+        with patch.object(setup_mod, "remove_installed", return_value=1):
+            try:
+                setup_mod.run(["--remove"])
+            except SystemExit as e:
+                assert e.code == 1
+            else:
+                raise AssertionError("setup --remove ended 0 with a file left")
+        prerm = (Path(__file__).resolve().parent.parent / "debian/prerm").read_text(
+            encoding="utf-8"
+        )
+        assert "/usr/share/zark/zark setup --remove ||" in prerm  # prerm goes on
+
 
 class TestCompletePoints:
     """M2R-1: which backup points are complete is recorded on the drive."""
