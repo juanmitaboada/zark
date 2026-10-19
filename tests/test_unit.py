@@ -32,6 +32,7 @@ import atexit
 import fcntl
 import importlib.machinery
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -303,6 +304,27 @@ from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-po
 os.environ["COLUMNS"] = "80"
 
 
+def exists_only(*present: str, absent: Sequence[str] = ()) -> Any:
+    """Patch ``Path.exists`` per path (M4d-31): True for ``present``, False for
+    ``absent`` (an entry ending in "/" is a prefix), the real answer for any
+    other path. Any patch of ``<module>.Path.exists`` replaces the one class
+    attribute, for every Path in the process (CPython 3.14.4
+    Lib/pathlib/__init__.py:663-672), the registry's included."""
+    real = Path.exists
+
+    def match(path: str, entries: Sequence[str]) -> bool:
+        return any(path == e or (e.endswith("/") and path.startswith(e)) for e in entries)
+
+    def exists(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if match(str(self), present):
+            return True
+        if match(str(self), absent):
+            return False
+        return real(self, *args, **kwargs)
+
+    return patch.object(Path, "exists", autospec=True, side_effect=exists)
+
+
 def make_log() -> Log:
     """Create a Log that writes to /dev/null."""
     return Log(log_file="/dev/null")
@@ -511,7 +533,9 @@ class TestConfig:
                 patch.object(Config, "zark_root", return_value=sys_install_root),
                 # Make every "exists()" return False so neither portable
                 # nor system have a known_drives.json yet.
-                patch.object(Path, "exists", return_value=False),
+                exists_only(
+                    absent=("/etc/zark/known_drives.json", "/usr/share/zark/etc/known_drives.json")
+                ),
                 patch.object(Path, "is_dir", return_value=False),
             ):
                 result = Config.default_config_dir()
@@ -534,7 +558,9 @@ class TestConfig:
         try:
             with (
                 patch.object(Config, "zark_root", return_value=portable_root),
-                patch.object(Path, "exists", return_value=False),
+                exists_only(
+                    absent=("/etc/zark/known_drives.json", "/home/user/zark/etc/known_drives.json")
+                ),
                 patch.object(Path, "is_dir", return_value=False),
             ):
                 result = Config.default_config_dir()
@@ -1941,7 +1967,7 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
     def _run(mock: MockShell, dev: str, realpath: str) -> DiskIdentity:
         with (
             patch_sh(mock),
-            patch("pathlib.Path.exists", return_value=True),
+            exists_only("/dev/"),
             patch("pathlib.Path.is_block_device", return_value=True),
             patch("lib.identity.os.path.realpath", return_value=realpath),
             patch("builtins.input", return_value=""),
@@ -1992,7 +2018,7 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
         mock.on("test -b /dev/nvme0n1").succeeds()
 
         with patch_sh(mock):
-            with patch("pathlib.Path.exists", return_value=True):
+            with exists_only("/dev/nvme0n1"):
                 with patch("pathlib.Path.is_block_device", return_value=True):
                     with patch("builtins.input", return_value=""):
                         try:
@@ -2009,7 +2035,7 @@ class TestValidateExternalBlockDevice:  # pylint: disable=missing-function-docst
         """Refuses non-existent devices."""
         log = make_log()
 
-        with patch("pathlib.Path.exists", return_value=False):
+        with exists_only(absent=("/dev/sdz",)):
             with patch("builtins.input", return_value=""):
                 try:
                     validate_external_block_device(
@@ -5010,7 +5036,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("zpool import").succeeds()
         mock.on("zpool destroy").succeeds()
         mock.on("rm -rf").succeeds()
-        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
+        with patch_sh(mock), exists_only("/dev/sda"):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -5036,7 +5062,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("zpool import -o cachefile=none").succeeds()  # the cleanup's read-write import
         mock.on("zpool destroy").succeeds()
         mock.on("rm -rf").succeeds()
-        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
+        with patch_sh(mock), exists_only("/dev/sda"):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -5064,7 +5090,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("zpool import").succeeds()
         mock.on("zpool destroy").succeeds()
         mock.on("rm -rf").succeeds()
-        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
+        with patch_sh(mock), exists_only("/dev/disk/by-id/"):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -5100,7 +5126,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
             "[ 200.5] sd 0:0:0:0: [sda] Synchronize Cache(10) failed: "
             "Result: hostbyte=DID_ERROR driverbyte=DRIVER_OK\n",
         )
-        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
+        with patch_sh(mock), exists_only("/dev/sda"):
             result = run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -5127,7 +5153,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         mock.on("wipefs").succeeds()
         mock.on("sgdisk").succeeds()
         mock.on("dmesg").succeeds("")
-        with patch_sh(mock), patch("lib.health.Path.exists", return_value=True):
+        with patch_sh(mock), exists_only("/dev/sda"):
             run_destructive_test(
                 "/dev/sda",
                 PROFILE_FAST,
@@ -5158,7 +5184,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         )
         with (
             patch_sh(mock),
-            patch("lib.health.Path.exists", return_value=True),
+            exists_only("/dev/disk/by-id/"),
             patch.object(health_mod, "_dmesg_now_ts", side_effect=marks),
         ):
             return run_destructive_test(
@@ -6522,7 +6548,7 @@ class TestIdentity:  # pylint: disable=missing-function-docstring
         with (
             patch_sh(mock),
             patch("lib.identity.os.path.realpath", return_value="/dev/sdb"),
-            patch("lib.identity.Path.exists", return_value=True),
+            exists_only("/dev/disk/by-id/"),
         ):
             ident = resolve_disk(f"/dev/disk/by-id/{_KINGSTON_ID}")
         assert ident.disk == "/dev/sdb"
@@ -6551,7 +6577,7 @@ class TestIdentity:  # pylint: disable=missing-function-docstring
         with (
             patch_sh(mock),
             patch("lib.identity.os.path.realpath", return_value="/dev/sdb1"),
-            patch("lib.identity.Path.exists", return_value=True),
+            exists_only("/dev/disk/by-id/"),
         ):
             ident = resolve_disk("/dev/sdb1", allow_partition=True)
         assert ident.disk == "/dev/sdb"
@@ -6812,7 +6838,7 @@ class TestKeystoreReadonlyAndRetry:  # pylint: disable=missing-function-docstrin
             patch_sh(mock),
             redirect_stdout(StringIO()),
             patch("lib.keystore.Path.mkdir"),
-            patch("lib.keystore.Path.exists", return_value=True),
+            exists_only("/run/keystore/rpool/system.key"),
         ):
             assert ks.mount("backup", "pw", readonly=True)
         assert mock.was_called("cryptsetup open --readonly /dev/zd0")
@@ -7623,7 +7649,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
                 patch.object(Config, "default_config_dir", return_value=cfg_dir),
                 patch.object(prepare_mod, "validate_external_block_device", return_value=ident),
                 patch.object(prepare_mod, "check_device", return_value=report),
-                patch.object(prepare_mod.Path, "exists", return_value=True),
+                exists_only("/run/keystore/rpool/system.key"),
                 patch.object(ZFS, "verify_exported_pool_readback", return_value=readback),
                 patch.object(ZFS, "pool_guid", return_value="777"),
                 patch("lib.log.Log.ask", side_effect=ask),
@@ -7836,7 +7862,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         ident = DiskIdentity(disk="/dev/sdb", by_id="")
         with (
             patch.object(prepare_mod, "validate_external_block_device", return_value=ident),
-            patch.object(prepare_mod.Path, "exists", return_value=True),
+            exists_only(),
             patch("builtins.input", return_value=""),
             redirect_stdout(StringIO()),
         ):
@@ -9516,7 +9542,7 @@ class TestInitrd:  # pylint: disable=missing-function-docstring
         with (
             patch_sh(mock),
             patch.object(initrd_mod, "installed_kernels", return_value=["7.0.0-34-generic"]),
-            patch.object(initrd_mod.Path, "exists", return_value=True),
+            exists_only("/usr/bin/dracut"),
             redirect_stdout(StringIO()),
         ):
             assert not regenerate_initrd("", make_log())
@@ -10228,7 +10254,7 @@ class TestReviewFindings:  # pylint: disable=missing-function-docstring
         mock.on("zfs mount -a").succeeds()
         with (
             patch_sh(mock),
-            patch.object(boot_chain.Path, "exists", return_value=True),
+            exists_only("/mnt/recover/usr/bin/bash"),
             patch.object(boot_chain.Path, "glob", return_value=[]),
             redirect_stdout(StringIO()),
         ):
@@ -11536,7 +11562,9 @@ class TestStableVdevs:  # pylint: disable=missing-function-docstring
         buf = StringIO()
         with (
             patch_sh(mock),
-            patch.object(recover_mod.Path, "exists", return_value=exists),
+            exists_only("/dev/disk/by-id/")
+            if exists
+            else exists_only(absent=("/dev/disk/by-id/",)),
             redirect_stdout(buf),
         ):
             path = recover_mod._stable_vdev("/dev/sda", 4, make_log())  # pylint: disable=protected-access
@@ -13934,6 +13962,18 @@ class TestIncompleteBanner:
 _REAL_DATASETS_NEEDING_KEY = ZFS.datasets_needing_key
 
 
+class _TickingClock:  # pylint: disable=too-few-public-methods
+    """backup's ``datetime``, one second later at each call (M4aP.5): points
+    are named to the second, so two runs of one test never share a name."""
+
+    _ticks = itertools.count()
+
+    @classmethod
+    def now(cls, tz: Any = None) -> datetime:
+        """The real time, plus one second more than at the previous call."""
+        return datetime.now(tz) + timedelta(seconds=next(cls._ticks))
+
+
 class TestBackupCommand:  # pylint: disable=too-many-public-methods
     """`zark backup` end to end on FakeZfs (drive discovery and keystore stubbed)."""
 
@@ -13959,6 +13999,7 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
                 patch.object(backup_mod, "_heal_drive_id"),
                 patch.object(backup_mod, "_notify"),
                 patch.object(backup_mod, "prompt_eject_or_attach"),
+                patch.object(backup_mod, "datetime", _TickingClock),
                 # No atexit/SIGTERM hook outliving the test: a refused run
                 # leaves its Cleanup armed, and at exit it would act on a
                 # real pool of the same name.
@@ -14306,6 +14347,16 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert rc == 1
         assert not any(c.startswith("zfs snapshot") for c in fake.calls)
         assert "backup/rpool" not in fake.ds
+
+    def test_two_runs_in_one_second_take_two_points(self) -> None:
+        """M4aP.5: with the ticking clock the second run's point is its own."""
+        fake = _fresh_fake()
+        newest: list[str] = []
+        with patch.object(_TickingClock, "_ticks", itertools.count()):
+            for _ in range(2):
+                assert self._run(fake)[1] == 0
+                newest.append(fake.names("backup/rpool/ROOT/be")[-1])
+        assert newest[0] != newest[1] and all(repl.POINT_RE.match(n) for n in newest), newest
 
     def test_a_system_without_bpool_backs_up(self) -> None:
         """No bpool anywhere: the backup runs without it."""
@@ -16798,6 +16849,31 @@ class TestRunner:
             assert _run_one("t", skips) == "skipped"
             assert _run_one("t", fails) == "failed"
 
+    def test_a_tests_output_is_shown_only_when_it_fails(self) -> None:
+        """M1P.20 (M4d-31): log lines and FATAL boxes stay off the terminal."""
+
+        def noisy() -> None:
+            print("[OK]      a log line")
+
+        def noisy_failure() -> None:
+            print("[FATAL]   what went wrong")
+            raise AssertionError("no")
+
+        out = StringIO()
+        with redirect_stdout(out):
+            assert _run_one("t", noisy) == "passed"
+        assert "a log line" not in out.getvalue()
+        out = StringIO()
+        with redirect_stdout(out):
+            assert _run_one("t", noisy_failure) == "failed"
+        assert "        | [FATAL]   what went wrong" in out.getvalue()
+
+    def test_exists_only_answers_per_path(self) -> None:
+        """M4d-31: the listed paths are answered, every other one is real."""
+        with tempfile.TemporaryDirectory() as td, exists_only("/dev/zark-none", absent=(f"{td}/",)):
+            assert Path("/dev/zark-none").exists() and Path("/dev/zark-none/x").exists() is False
+            assert not Path(td, "a").exists() and Path(td).exists()  # td itself is real
+
     def test_summary_survives_an_escaping_exception(self) -> None:
         """An interrupt still prints the summary and counts the run as failed."""
         out = StringIO()
@@ -18186,20 +18262,32 @@ def _run_one(name: str, method: Callable[[], object]) -> str:
 
     A ``SystemExit`` escaping a test is a failure: caught by nothing else, it
     would end the whole run with that exit status and no summary line.
+    What the test prints and does not capture itself (log lines, a FATAL
+    box) is kept off the terminal and shown only when it fails (M1P.20).
     """
+    seen = StringIO()
     try:
-        method()
+        with redirect_stdout(seen), redirect_stderr(seen):
+            method()
     except SkipTest as e:
         print(f"    \033[0;33m-\033[0m {name}: skipped ({e})")
         return "skipped"
     except SystemExit as e:
         print(f"    \033[0;31m✗\033[0m {name}: raised SystemExit({e.code!r})")
+        _show_output(seen)
         return "failed"
     except Exception as e:  # pylint: disable=broad-except
         print(f"    \033[0;31m✗\033[0m {name}: {e}")
+        _show_output(seen)
         return "failed"
     print(f"    \033[0;32m✓\033[0m {name}")
     return "passed"
+
+
+def _show_output(seen: StringIO) -> None:
+    """A failed test's own output, indented under its line."""
+    for line in seen.getvalue().splitlines()[-40:]:
+        print(f"        | {line}")
 
 
 def main() -> int:
