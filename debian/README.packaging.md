@@ -75,11 +75,13 @@ Useful for iterating on `debian/` without touching the PPA.
 make deb
 ```
 
-Equivalent to:
-
-```sh
-debuild -us -uc -b
-```
+It builds the binary from the source package, not from the working
+tree: `make dist` packs the tracked files into the `.orig.tar.gz`,
+`dpkg-source -b` adds the tracked `debian/`, and `debuild -us -uc -b`
+runs in a directory unpacked from that `.dsc` (the same input Launchpad
+gets), so nothing untracked (a `__pycache__`, a local config) can reach
+the `.deb`. The `.deb`, `.changes` and `.buildinfo` land in the parent
+directory.
 
 Result: `../zark_X.Y.Z-1_all.deb` and the artefacts of the build process
 (`.changes`, `.buildinfo`, `.dsc`, `.tar.xz`) sitting next to the source
@@ -142,6 +144,10 @@ The recommended workflow is:
 ```sh
 make deb-ppa
 ```
+
+It refuses to start (`make release-guard`) unless the tree has no
+uncommitted or untracked file and `HEAD` is the tag `v<version>`, so
+what is uploaded is exactly the tagged commit.
 
 This iterates over the configured Ubuntu series, regenerates
 `debian/changelog` for each one with the appropriate `~ubuntuXX.YY.1`

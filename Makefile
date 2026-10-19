@@ -4,7 +4,7 @@
         setup clean version \
         check mypy pylint ruff format format-check basedpyright pre-commit lint tox tox-ruff \
         manpage manpage-view manpage-lint manpage-clean \
-        dist dist-check fulltest fulltest-clean deb deb-source deb-ppa deb-ppa-test deb-ppa-resume
+        dist dist-check fulltest fulltest-clean deb deb-source release-guard deb-ppa deb-ppa-test deb-ppa-resume
 
 SHELL  := /bin/bash
 ZARK   := ./zark
@@ -361,8 +361,8 @@ dist: ## Build upstream release tarball: zark_<version>.tar.gz (no debian/)
 	@# runs of the same source revision.
 	@# CONTENT: only files git tracks, as they are in the working tree
 	@# (`git ls-files`), so uncommitted edits to tracked files still reach
-	@# the .orig (deb-ppa relies on that) but nothing untracked or ignored
-	@# ever does: a `cp -a .` shipped .venv/, PROJECT-NOTES.md and the
+	@# the .orig of a local `make deb` (deb-ppa refuses a dirty tree, see
+	@# release-guard) but nothing untracked or ignored ever does: a `cp -a .` shipped .venv/, PROJECT-NOTES.md and the
 	@# private etc/known_drives.json. A tracked file deleted but not yet
 	@# `git rm`-ed is skipped (--ignore-failed-read), as in the tree.
 	@git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { \
@@ -556,12 +556,27 @@ $(ORIG_TARBALL): dist
 	@mv zark_$(VERSION).tar.gz $(ORIG_TARBALL)
 	@echo "  Orig tarball ready: $(ORIG_TARBALL)"
 
-deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally (-us -uc)
+deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally from the source package (-us -uc)
 	@command -v debuild >/dev/null || { \
 		echo "  debuild not installed. Install with: sudo apt install devscripts debhelper"; \
 		exit 1; \
 	}
-	debuild -us -uc -b --lintian-opts --suppress-tags $(LINTIAN_SUPPRESS_TAGS)
+	@# M1P.6: a binary-only build in the working tree never runs
+	@# dpkg-source's check, so whatever lies under lib/, commands/ or
+	@# certificates/ (__pycache__ included) would ship. The binary is
+	@# built from the source package instead: the .orig (tracked files
+	@# only, see dist) plus the tracked debian/, packed by dpkg-source and
+	@# unpacked in a directory of its own, the same input Launchpad gets.
+	@set -e; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	cp $(ORIG_TARBALL) "$$tmp/"; \
+	mkdir "$$tmp/src"; \
+	tar -xzf $(ORIG_TARBALL) -C "$$tmp/src" --strip-components=1; \
+	git ls-files -z debian | tar --null -T - -cf - | tar -xf - -C "$$tmp/src"; \
+	(cd "$$tmp/src" && dpkg-source -b .); \
+	dpkg-source -x "$$tmp"/zark_$(DEB_VERSION)-*.dsc "$$tmp/build"; \
+	(cd "$$tmp/build" && debuild -us -uc -b --lintian-opts --suppress-tags $(LINTIAN_SUPPRESS_TAGS)); \
+	cp "$$tmp"/zark_$(DEB_VERSION)-*_all.deb "$$tmp"/zark_$(DEB_VERSION)-*.changes \
+	   "$$tmp"/zark_$(DEB_VERSION)-*.buildinfo ..
 	@# Make the upstream tarball available in cwd for downstream steps
 	@# (CI's "stage release artefacts" step in .github/workflows/ci.yml
 	@# expects to find zark_$(VERSION).tar.gz in the project root). The
@@ -656,7 +671,19 @@ deb-ppa-resume: ## Upload remaining series after a deb-ppa-test (skips first ser
 	@# default series list ever changes.
 	@$(MAKE) --no-print-directory deb-ppa PPA_SERIES="$(wordlist 2,$(words $(PPA_SERIES)),$(PPA_SERIES))"
 
-deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to the PPA
+release-guard: ## Refuse to release a tree that is dirty or not at the tag v$(VERSION)
+	@# M1P.7: what goes to the PPA is exactly the tagged commit.
+	@test -z "$$(git status --porcelain)" || { \
+		echo "  The tree has uncommitted or untracked files: commit or remove them first"; \
+		git status --short; \
+		exit 1; \
+	}
+	@test "$$(git describe --exact-match --tags HEAD 2>/dev/null)" = "v$(VERSION)" || { \
+		echo "  HEAD is not the tag v$(VERSION): tag the release commit first"; \
+		exit 1; \
+	}
+
+deb-ppa: release-guard $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to the PPA
 	@command -v dput >/dev/null || { \
 		echo "  dput not installed. Install with: sudo apt install dput-ng"; \
 		exit 1; \
@@ -689,11 +716,10 @@ deb-ppa: $(ORIG_TARBALL) ## Upload a signed source package per Ubuntu series to 
 	@# DEBEMAIL/DEBFULLNAME tell dch which identity to record in the new
 	@# changelog entry. Without these dch falls back to whoami@hostname.
 	@#
-	@# We refresh the .orig tarball before each series because dch
-	@# modifies debian/changelog (which is fine, debian/ isn't compared)
-	@# but ALSO because if the working tree has any uncommitted change
-	@# outside debian/, we need that to be reflected in .orig too -
-	@# otherwise dpkg-source -b aborts with "unexpected upstream changes".
+	@# release-guard has checked the tree is clean and at the tag, so the
+	@# .orig is the tagged commit's; dch then only rewrites
+	@# debian/changelog per series (debian/ is not compared with the .orig),
+	@# and the trap puts it back.
 	@set -e; \
 	changelog_backup=$$(mktemp -t zark-changelog-XXXXXX); \
 	cp debian/changelog "$$changelog_backup"; \
