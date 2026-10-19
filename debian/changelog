@@ -1,3 +1,28 @@
+zark (2.0.0~rc8-1) UNRELEASED; urgency=medium
+
+  * Milestone M4d of zark 2 (status, alerts, purge and health, the
+    self-test, cosmetics, docs, tests and packaging). Not for release:
+    nothing is published until the final 2.0.0.
+  * New zark setup --remove; the package's prerm runs it, so removing the
+    package also removes the guards and the alerts.
+  * backup's notifications reach Wayland desktops and never a greeter.
+  * purge writes nothing when it cannot hold the disk from udev, lists
+    every step and check, and advises by what failed.
+  * health ends with exit status 1 when the destructive test fails; errors
+    at a cold pass's unplug are listed apart.
+  * recover names, mounts and anchors a dataset left at its monthly;
+    chroot, mount local and repair-boot resolve symlinks inside the
+    installed tree; chroot reports a pool it could not export.
+  * Keys are loaded only for encryption roots; new self-test check KEY-03.
+  * Banners and question boxes fit their text and wrap; tips name the
+    command as it runs.
+  * prune warns before an age cut can remove a 1.x drive's base, and shows
+    the capacity once the pool has freed its removals.
+  * make deb builds from the source package; deb-ppa refuses a dirty or
+    untagged tree; setup and recover no longer install syncoid-era tools.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Mon, 19 Oct 2026 02:49:34 +0200
+
 zark (2.0.0~rc7-1) UNRELEASED; urgency=medium
 
   * Milestone M4c of zark 2 (recover, finish and the boot chain). Not for

@@ -50,7 +50,7 @@ SANOID_DEFAULTS = ("/usr/share/sanoid/sanoid.defaults.conf", "/etc/sanoid/sanoid
     1,
     1,
     "explicit ZFS mounts: snapshots anywhere, zfsutil, read-only pools",
-    depends=("zark mount (commands/mount.py:181)", "backup_layout.root_is_empty"),
+    depends=("zark mount (commands/mount.py:121)", "backup_layout.root_is_empty"),
 )
 def mnt_01(b: Bench) -> None:
     """In its own namespace: ``mount -t zfs -o ro <ds>@<snap> <dir>`` mounts a
@@ -163,7 +163,7 @@ umount -R $W
     1,
     1,
     "copies in another namespace: findmnt --task, nsenter umount -R",
-    depends=("release_elsewhere and _namespaces (commands/umount.py:169, :125)", "clean (M4b-3)"),
+    depends=("release_elsewhere and _namespaces (commands/umount.py:162, :125)", "clean (M4b-3)"),
 )
 def mnt_02(b: Bench) -> None:
     """Two namespaces sharing propagation: a copy with a mount below it
@@ -210,7 +210,7 @@ umount -R $M
     1,
     1,
     "umount -R stops at a busy child; findmnt -r escapes and bind roots",
-    depends=("_unmount_tree (commands/umount.py:92)", "clean", "W-2's tell by SOURCE"),
+    depends=("_unmount_tree (commands/umount.py:85)", "clean", "W-2's tell by SOURCE"),
 )
 def mnt_03(b: Bench) -> None:
     """``umount -R`` unmounts children first and stops at a busy child,
@@ -293,7 +293,7 @@ def prc_01(_b: Bench) -> None:
     1,
     1,
     "a process group of its own reaches the command behind sh -c",
-    depends=("signals.stop_children (lib/signals.py:228)", "sh.run and sh.run_pipe"),
+    depends=("signals.stop_children (lib/signals.py:242)", "sh.run and sh.run_pipe"),
 )
 def prc_02(_b: Bench) -> None:
     """``Popen(process_group=0)`` puts ``sh -c "sleep 'N'"`` in its own
@@ -379,7 +379,7 @@ time.sleep(60)
     1,
     1,
     "flock: exclusive, gone with a killed holder, not kept by children",
-    depends=("zark's lock (lib/lock.py:57)", "purge's disk lock (_held_from_udev)"),
+    depends=("zark's lock (lib/lock.py:66)", "purge's disk lock (_held_from_udev)"),
 )
 def prc_04(b: Bench) -> None:
     """``flock(LOCK_EX|LOCK_NB)`` from a second open of the same file fails

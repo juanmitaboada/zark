@@ -35,7 +35,7 @@ from lib.retention import Policy
 if TYPE_CHECKING:
     from lib.log import Log
 
-VERSION = "2.0.0-rc7"
+VERSION = "2.0.0-rc8"
 
 
 def zark_command() -> str:

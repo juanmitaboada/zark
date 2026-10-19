@@ -67,7 +67,7 @@ def _origin(b: Bench, cid: str, kib: int = 256) -> str:
 
 
 def _send_full(b: Bench, src: str, dst: str) -> None:
-    """The engine's NEW transfer (lib/engine.py:444-461)."""
+    """The engine's NEW transfer (lib/engine.py:444-465)."""
     _ = b.pipe_ok(f"zfs send -w {_q(src)}", f"zfs receive -s -u {_recv_props()} {_q(dst)}")
 
 
@@ -93,7 +93,7 @@ def _load_key(b: Bench, ds: str) -> None:
     1,
     "create and import with -R leave zpool.cache alone",
     depends=(
-        "I-G: ZFS.import_backup_pool (lib/zfs.py:292)",
+        "I-G: ZFS.import_backup_pool (lib/zfs.py:293)",
         "prepare's zpool create -R",
         "health's test pool",
     ),
@@ -492,7 +492,7 @@ def snp_01(b: Bench) -> None:
     1,
     1,
     "zfs snapshot -o sets a user property on every snapshot",
-    depends=("points that name their drive (M4b-4)", "release_point (lib/anchors.py:71)"),
+    depends=("points that name their drive (M4b-4)", "release_point (lib/anchors.py:73)"),
     fake=True,
 )
 def snp_02(b: Bench) -> None:
@@ -555,7 +555,7 @@ def snp_03(b: Bench) -> None:
     1,
     1,
     "written: numeric always, unchanged by a snapshot property",
-    depends=("MODIFIED detection after the marks (lib/replication.py:234)",),
+    depends=("MODIFIED detection after the marks (lib/replication.py:235)",),
     fake=True,
 )
 def snp_04(b: Bench) -> None:
@@ -579,7 +579,7 @@ def snp_04(b: Bench) -> None:
     1,
     1,
     "a received snapshot keeps its GUID and creation",
-    depends=("the planner's GUID matching (lib/replication.py:261)", "restore points by creation"),
+    depends=("the planner's GUID matching (lib/replication.py:262)", "restore points by creation"),
     fake=True,
 )
 def snp_05(b: Bench) -> None:
@@ -821,7 +821,7 @@ def snd_05(b: Bench) -> None:
     1,
     1,
     "a stale token is refused by name; receive -A drops only the partial state",
-    depends=("M2R-10's discard (lib/engine.py:492-497)", "abort_partial (lib/engine.py:518)"),
+    depends=("M2R-10's discard (lib/engine.py:497-502)", "abort_partial (lib/engine.py:523)"),
     fake=True,
 )
 def snd_06(b: Bench) -> None:
@@ -999,7 +999,7 @@ def snd_10(b: Bench) -> None:
     1,
     "recover's receive shapes, the keystore's included",
     depends=(
-        "recover's _receive and _receive_row (commands/recover.py:377)",
+        "recover's _receive and _receive_row (commands/recover.py:401)",
         "its keystore",
         "M4b-6",
     ),
@@ -1237,7 +1237,7 @@ def cln_01(b: Bench) -> None:
     1,
     1,
     "a raw-received root takes its parent's key with change-key -i",
-    depends=("recover's key load and _restore_encryption_root (commands/recover.py:499)",),
+    depends=("recover's key load and _restore_encryption_root (commands/recover.py:599)",),
 )
 def key_01(b: Bench) -> None:
     """``zfs load-key -L file://`` on a raw-received encryption root, then

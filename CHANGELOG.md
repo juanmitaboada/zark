@@ -10,9 +10,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M4c (2.0.0-rc7)** on top of M4s (2.0.0-rc6),
-M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2 (2.0.0-rc2), M1
-(2.0.0-rc1) and the development-tooling consolidation that preceded them.
+The tree currently carries **M4d (2.0.0-rc8)** on top of M4c (2.0.0-rc7),
+M4s (2.0.0-rc6), M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2
+(2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling consolidation that
+preceded them.
+
+### M4d: status, alerts, purge and health, the self-test, cosmetics, docs, tests and packaging (2.0.0-rc8)
+
+#### Added
+
+- **`zark setup --remove`** (M4d-7): removes what setup installed, the
+  alerts, the APT guard (its `apt.conf.d` entry before the hook, so APT
+  never points at a hook that is gone), the external-pool MOTD script and
+  the update-grub guard. A file goes only when it holds zark's content or
+  carries zark's header; anything else is left and named. The package's
+  prerm runs it on `remove`, without the lock, and a file it leaves is
+  named. The only way to undo setup for a portable zark.
+- **KEY-03** (M4d-20), a level-1 check: an encryption root, a child that
+  inherits its key and a clone of the child; only the root takes a key,
+  and loading it makes all three available. Level 1 has 47 checks.
+- **`make release-guard`** (M4d-28), a prerequisite of `deb-ppa`: no
+  uncommitted or untracked file, and HEAD is the tag `v<version>`.
+
+#### Changed
+
+- **backup's notifications through `lib/notify`** (M4d-6): they reach
+  Wayland desktops (the `who` line they looked for exists on X11 only),
+  every active user session, never a greeter, and a hung session bus
+  stops a notification after 10 s instead of the backup.
+- **One residue line** (M4d-8): backup, `zark status` and the MOTD say
+  "In origin: N snapshot(s) no registered drive needs (`syncoid_*` left
+  by zark 1.x, keystore `prepare_*`): sudo zark prune removes them".
+  BACKUP COMPLETED shows the pool root's zfs used and available, the
+  figures the space plan uses, not `zpool list`'s alloc and free (up to
+  the slop space, 128 GiB, apart). `zark status` prints the critical CAP
+  level as `[ERROR]`. A second `zark setup` says the alerts are already
+  current and runs no enable.
+- **purge writes nothing when it cannot hold the disk from udev for
+  10 s** (M4d-9): PURGE INCOMPLETE, exit 1, registry and anchors kept;
+  purging again then checks the labels, which a run without the lock
+  could not. DRIVE PURGED lists every step and check, and a label check
+  that did not run (the drive reset during the overwrite) is warned.
+- **purge's advice follows what failed** (M4d-10): only a step with every
+  check clean and no pool left is "Purge again to run the failed step.";
+  no label and a check failed is "Something is left on the disk". The
+  empty `/run/zark/altroot/<pool>` goes after the destroy.
+- **health ends 1 when the destructive test fails or its test pool is
+  not destroyed** (M4d-11), after the report is written, as every other
+  command ends a red verdict. This reverses M4aF-10's choice to keep 0.
+  In a cold pass, the kernel's errors between the eject and the reconnect
+  are listed as at the unplug and are not transport errors (M4d-12).
+- **The self-test** (M4d-13, M4d-15, M4d-16): its masks replace whole
+  names only (a short serial no longer changes `SND-01`); a level-2 bench
+  names no `/dev/shm` directory; purge's steps inside it are unnumbered;
+  on a live session only `selftest run` stops the installer's probe. A
+  run stopped right after a `zpool create` of one of its pools ended,
+  before the pool's GUID was read, no longer leaves that pool and the
+  bench's directory behind: the teardown destroys it when it sits on the
+  run's own file (M4dF-1).
+- **recover: a dataset whose point failed after its monthly arrived**
+  (M4d-17) is named as left at that monthly, mounted (bpool) and anchored
+  there for the drive; for bpool, each kernel the restored root has and
+  `/boot` lacks is named with the command that reinstalls it.
+- **`zark chroot`, `mount local` and repair-boot resolve a symlink of the
+  installed tree inside it** (M4d-18), as the backup mount does since
+  M4c-22: a dataset under the tree's `/var/run` mounts on the tree's
+  `/run`, never the live session's.
+- **Keys: only encryption roots are loaded** (M4d-19): the same keys as
+  before, without the failed attempts on every inheriting child.
+- **One frame for the banners and the question boxes** (M4d-21): wide
+  enough for the text, up to the terminal's width, longer lines wrapped
+  at words with their indent and colour; a by-id path or other long word
+  stays whole. The question boxes have a right edge.
+- **Tips name the command as it runs** (M4d-22): `sudo zark` installed,
+  `sudo ./zark` from a checkout or a stick. The eject line names the
+  drive, and purge names an unregistered disk by its label or model.
+- **setup counts sanoid's snapshots on both pools** (M4d-23) and stops
+  when `rpool/ROOT` has no boot environment, instead of asking for a name
+  no answer could make right; repair-boot shows one step for importing,
+  unlocking and mounting.
+- **registry list tells a point recover restored** (M4d-24) from one an
+  interrupted run left; the passphrase prompt follows its box through
+  stdout, in order under `| tee`.
+- **M2V-7's items and M3R-15** (M4d-25): purge drops the anchors of every
+  registry entry it removes; the strict read of a drive takes a root as
+  missing only when the pool's listing lacks it; the resume check reads
+  libzfs in English; a written dataset whose discarded partial leads to a
+  decision says it is asked again next time.
+- **CHROOT NOT CLOSED** (M4d-26): `zark chroot` ends 1 when a pool stays
+  imported; a Ctrl-C with nothing to clean up says so.
+- **prune** (M4d-32, M4d-33): before an age cut that touches a dataset
+  where a registered drive has no zark 2 anchor (a 1.x drive), it names
+  that drive, whose base there is a sanoid snapshot the cut can remove;
+  after a removal it shows the pools' capacity once they have freed it
+  (up to about a minute), or says they are still freeing.
+- **Packaging** (M4d-28, M4d-30): `make deb` builds the binary from the
+  source package (tracked files only), so nothing untracked reaches the
+  .deb; setup and recover no longer install syncoid, pv, mbuffer, lzop or
+  bc, and recover installs only the packages of the tools the live lacks.
+- **Docs** (M4d-27): the keystore's FILES entry, chroot's lost sentence
+  and the prune entry's term restored in the manpage, the update-grub
+  guard's `grub.cfg.new`, and the source notes on dash and on the
+  clone's `-o origin=`.
+- **Tests** (M4d-2 to M4d-5, M4d-14, M4d-31): the review gaps closed with
+  tests that fail without what they guard; `zark selftest` stopped by a
+  signal end to end, in a mount namespace of its own; the self-test's
+  reads checked to name only the bench's objects; quiet output, a ticking
+  clock, and `Path.exists` answered per path.
+
+#### Known limitations
+
+- purge cannot read the labels of a disk that loses its partition table
+  during the overwrite (a drive reset with the lock held): the check is
+  listed as not done.
+- `zark monitor` still shows `zpool list`'s alloc and free.
+- recover's `zfs mount -a` on the restored tree does not resolve its
+  symlinks in the tree as M4d-18 does for the installed one.
+
+#### Rejected approaches
+
+- **Counting purge's skipped label check as a failure** (M4d-9 9b): the
+  first run's `sgdisk --zap-all` removed the table, so purging again has
+  no partition to check either.
+- **The test model's udev re-reading the table at the lock's release**
+  (M4d-4 4a): systemd 259.5 gives up that re-read while the disk is held
+  and does not retry it.
+- **Keeping health's exit status 0** (M4d-11 11b): the one command whose
+  red verdict ended 0.
+- **Only `Synchronize Cache` lines in the unplug window** (M4d-12 12b),
+  or none apart (12c).
+- **Dropping `BEYOND_2_2_STREAM` instead of moving it** (M4d-13 13b): the
+  feature module is the table the test checks it against.
+- **Refusing every dataset whose path crosses a link** (M4d-18 18b): a
+  relative link inside the tree is harmless.
+- **`textwrap` for the frames** (M4d-21 21b): it measures with `len()`,
+  so colours and wide characters break the edges.
+- **Keeping setup's prompt for the boot environment** (M4d-23 23b): with
+  `rpool/ROOT` empty no name is right.
+- **Blocking prune's age cut until every drive has a zark 2 backup**
+  (M4d-32 32b): the user may give a 1.x drive up knowingly, and PRUNE is
+  typed anyway; **the capacity line without the wait** (M4d-33 33b).
+- **A pylint bump** (M4d-29 29a): 4.1.3 finds nothing 4.0.8 does not.
 
 ### M4c: recover, finish and the boot chain (2.0.0-rc7)
 
