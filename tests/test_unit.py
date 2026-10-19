@@ -12220,6 +12220,31 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         )
         assert home.token == token
 
+    def test_fake_writes_a_bookmark_token_as_the_kernel_reads_it(self) -> None:
+        """M4d plan 15 (9): a stream cut after being sent against a bookmark
+        names it ``#name`` in its token; the resume check then finds it."""
+        fake = self._fresh()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        _prune_all_autosnaps(fake)  # the next base is a bookmark
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not _engine_run(fake, "backup", "111", P2).ok
+        token = fake.ds["backup/rpool/USERDATA/home"].token
+        assert token.split("|")[3].startswith("#"), token
+        assert fake._resume_check(token) == ""  # pylint: disable=protected-access
+
+    def test_fake_get_recursive_reads_the_options_as_options(self) -> None:
+        """M4d plan 15 (9): ``zfs get -H keystatus -r <root>`` lists the root
+        and what is below it; ``-r`` was read as the property."""
+        fake = self._fresh()
+        fake.ds["rpool/USERDATA/home"].props["keystatus"] = "unavailable"
+        fake.ds["rpool/var"].props["keystatus"] = "available"
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            zfs = ZFS(make_log())
+            assert zfs.datasets_needing_key("rpool") == ["rpool/USERDATA/home"]
+            assert not zfs.datasets_needing_key("rpool/var")
+            assert zfs.datasets_needing_key("rpool/USERDATA") == ["rpool/USERDATA/home"]
+
     def test_stale_token_is_discarded_not_snapshots(self) -> None:
         """M2R-10: a partial receive whose stream snapshot is gone from
         origin is aborted (receive -A); the dataset is planned again and no

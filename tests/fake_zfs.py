@@ -232,7 +232,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _ok(f"9{abs(hash(pool)) % 10**8}\n")
         return _ok(self.features[pool] + "\n") if prop == "feature@bookmark_v2" else _err("?")
 
-    def _get(self, args: list[str]) -> RunResult:
+    def _get(self, args: list[str]) -> RunResult:  # pylint: disable=too-many-return-statements
         """``zfs get -H [-p] [-s local] -o value|source|property,value <prop|all>
         <target>...``, and ``zfs get -H -p -r -s local -t snapshot -o
         name,value <prop> <root>``."""
@@ -241,6 +241,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             if ds not in self.ds:
                 return _err("does not exist")
             return self._get_snapshots(ds, prop, local="local" in args)
+        if "-r" in args:
+            return self._get_recursive(args)
         field_ = args[args.index("-o") + 1] if "-o" in args else "value"
         named = [a for a in args if "@" in a or "#" in a]
         if named:
@@ -253,6 +255,31 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _ok("".join(f"{k}\t{v}\n" for k, v in sorted(props.items()) if ":" in k))
         value, source = self._value(ds, None, prop)
         return _ok((source if field_ == "source" else value) + "\n")
+
+    def _get_recursive(self, args: list[str]) -> RunResult:
+        """``zfs get -H -r <prop> <ds>...``: the dataset and every dataset
+        below it, one ``name<TAB>property<TAB>value<TAB>source`` line each
+        (snapshots are not listed; callers skip the names with an ``@``).
+        The options are read as options, not as the property (M4d plan 15 (9))."""
+        positional: list[str] = []
+        skip = False
+        for a in args:
+            if skip:
+                skip = False
+            elif a in ("-o", "-t", "-s"):
+                skip = True
+            elif not a.startswith("-"):
+                positional.append(a)
+        prop, roots = positional[0], positional[1:]
+        out: list[str] = []
+        for root in roots:
+            if root not in self.ds:
+                return _err("does not exist")
+            for n in sorted(self.ds):
+                if n == root or n.startswith(root + "/"):
+                    value, source = self._value(n, None, prop)
+                    out.append(f"{n}\t{prop}\t{value}\t{source}\n")
+        return _ok("".join(out))
 
     def _value(self, name: str, s: FSnap | None, prop: str) -> tuple[str, str]:
         """(value, source) of one property of a dataset or snapshot, as zfs get
@@ -820,7 +847,10 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 if k:
                     frm = stream[k - 1].name
                 else:
+                    # A bookmark is named "#name" in the token, as the kernel's
+                    # resume check reads it (M4d plan 15 (9)).
                     frm = "" if mode == "full" else frm.split("@")[-1] if "@" in frm else frm
+                    frm = "#" + frm.partition("#")[2] if "#" in frm else frm
                 d.token = f"tok|{src_ds}|{s.name}|{frm}|{s.guid}"
                 return _err("cannot receive: connection reset (stream truncated)")
             d.snaps.append(FSnap(s.name, s.guid, self._dtxg(), s.creation))
