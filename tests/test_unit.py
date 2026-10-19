@@ -17865,7 +17865,8 @@ class TestSelftestCommand:  # pylint: disable=missing-function-docstring,protect
             "/dev/sdz",
             ["POOL-01", "DSK-01"],
         )
-        for bad in (["--bogus"], ["--stick"]):
+        # M4dF-2: an empty --stick (an unset shell variable) would run level 1.
+        for bad in (["--bogus"], ["--stick"], ["--stick", ""], ["--stick", " "]):
             try:
                 _ = selftest_cmd._parse_run(bad, make_log())
             except SystemExit as e:

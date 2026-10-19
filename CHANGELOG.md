@@ -67,7 +67,8 @@ preceded them.
   run stopped right after a `zpool create` of one of its pools ended,
   before the pool's GUID was read, no longer leaves that pool and the
   bench's directory behind: the teardown destroys it when it sits on the
-  run's own file (M4dF-1).
+  run's own file (M4dF-1). `--stick` with an empty value is refused (exit
+  2) instead of running level 1 only (M4dF-2).
 - **recover: a dataset whose point failed after its monthly arrived**
   (M4d-17) is named as left at that monthly, mounted (bpool) and anchored
   there for the drive; for bpool, each kernel the restored root has and

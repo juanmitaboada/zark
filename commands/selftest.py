@@ -74,7 +74,12 @@ def _parse_run(args: list[str], log: Log) -> tuple[str, list[str]]:
     i = 0
     while i < len(args):
         if args[i] == "--stick" and i + 1 < len(args):
-            stick, i = args[i + 1], i + 2
+            stick, i = args[i + 1].strip(), i + 2
+            if not stick:
+                # An unset variable in `--stick "$DEV"` would run level 1 only (M4dF-2).
+                log.error("--stick needs a device")
+                log.info(USAGE)
+                raise SystemExit(2)
         elif args[i] == "--only" and i + 1 < len(args):
             only, i = [x.strip().upper() for x in args[i + 1].split(",") if x.strip()], i + 2
         elif args[i] == "--debug":
