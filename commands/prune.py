@@ -162,11 +162,18 @@ def _by_age(inv: Inventory, log: Log) -> None:
         return
     # M4d-32: a drive with no zark 2 anchor on a dataset the cut touches has
     # a sanoid snapshot there as its base; its next backup would roll back.
+    # One line per drive naming the datasets (M4dR-3): the drive may have
+    # had zark 2 backups and skipped these, not only be a 1.x drive.
     touched = {i.target.partition("@")[0] for i in items}
-    for name in sorted({d for rel in touched for d in inv.unanchored.get(rel, [])}):
+    lacking: dict[str, list[str]] = {}
+    for rel in sorted(touched):
+        for name in inv.unanchored.get(rel, []):
+            lacking.setdefault(name, []).append(rel)
+    for name, rels in sorted(lacking.items()):
+        shown = ", ".join(rels[:3]) + (f" and {len(rels) - 3} more" if len(rels) > 3 else "")
         log.warn(
-            f"{name} has not had a zark 2 backup yet: its base is a sanoid snapshot "
-            + "this can remove; back up to it first"
+            f"{name} has no zark 2 anchor on {shown}: its base there is a sanoid "
+            + "snapshot this can remove; back up to it first"
         )
     freed = reclaim.reclaim_names([i.target for i in items])
     log.warn(

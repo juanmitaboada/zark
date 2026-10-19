@@ -15792,7 +15792,7 @@ class TestPruneCommand:
             patch.object(prune_mod.time, "time", return_value=float(now)),
         )
         assert "sanoid daily" in out
-        assert "has not had a zark 2 backup yet" not in out  # M4d-32: anchored everywhere
+        assert "has no zark 2 anchor" not in out  # M4d-32: anchored everywhere
         # M4d-33: after the removal, the capacity waits for the pool to free it.
         assert "zpool get -Hp -o value freeing rpool" in fake.calls[before:]
         destroys = [
@@ -15825,13 +15825,15 @@ class TestPruneCommand:
             patch.object(prune_mod.time, "time", return_value=float(now)),
         )
         text = " ".join(Log._STRIP_RE.sub("", out).split())  # pylint: disable=protected-access
-        warning = (
-            "black has not had a zark 2 backup yet: its base is a sanoid snapshot this can "
-            + "remove; back up to it first"
+        assert (
+            "black has no zark 2 anchor on bpool/BOOT/be, rpool/ROOT/be, rpool/USERDATA/home"
+            + " and 3 more: its base there is a sanoid snapshot this can remove; "
+            + "back up to it first"
+        ) in text, text
+        assert text.index("black has no zark 2 anchor") < text.index(
+            "sanoid snapshot(s) older than 5 days"
         )
-        assert warning in text, text
-        assert text.index(warning) < text.index("sanoid snapshot(s) older than 5 days")
-        assert "backup has not had" not in text
+        assert "backup has no" not in text
 
     def test_the_warning_names_only_drives_unanchored_where_the_cut_touches(self) -> None:
         """M4dR-7: ``unanchored`` lists a drive for every dataset it lacks an
@@ -15851,8 +15853,32 @@ class TestPruneCommand:
         ):
             prune_mod._by_age(inv, Log())  # pylint: disable=protected-access
         text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
-        assert "amber has not had a zark 2 backup yet" in text, text
+        assert "amber has no zark 2 anchor on rpool/A: its base there" in text, text
         assert "black" not in text, text
+
+    def test_the_warning_is_one_line_per_drive_with_at_most_three_datasets(self) -> None:
+        """M4dR-3: a drive that lacks an anchor on many datasets is one line."""
+        rels = [f"rpool/d{i}" for i in range(5)]
+        inv = oprune.Inventory(
+            autosnaps={
+                "daily": [oprune.Item(f"{r}@autosnap_2026-01-01_00:00:01_daily", 100) for r in rels]
+            },
+            unanchored={r: ["amber", "black"] if r != "rpool/d4" else ["black"] for r in rels},
+        )
+        out = StringIO()
+        with (
+            patch_sh(MockShell()),
+            redirect_stdout(out),
+            patch.object(Log, "ask_input", return_value="1"),
+            patch.object(prune_mod, "_typed", return_value=False),
+            patch.object(prune_mod.reclaim, "reclaim_names", return_value=0),
+            patch.object(prune_mod.time, "time", return_value=float(10 * ret.DAY)),
+        ):
+            prune_mod._by_age(inv, Log())  # pylint: disable=protected-access
+        text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
+        assert text.count("amber has no zark 2 anchor") == 1, text
+        assert "amber has no zark 2 anchor on rpool/d0, rpool/d1, rpool/d2 and 1 more:" in text
+        assert "black has no zark 2 anchor on rpool/d0, rpool/d1, rpool/d2 and 2 more:" in text
 
     @staticmethod
     def _capacity(freeing: list[int], settle: bool) -> tuple[str, list[str]]:
