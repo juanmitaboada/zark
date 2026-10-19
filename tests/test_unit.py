@@ -15641,6 +15641,8 @@ class TestPruneCommand:
         )
         assert "sanoid daily" in out
         assert "has not had a zark 2 backup yet" not in out  # M4d-32: anchored everywhere
+        # M4d-33: after the removal, the capacity waits for the pool to free it.
+        assert "zpool get -Hp -o value freeing rpool" in fake.calls[before:]
         destroys = [
             c for c in fake.calls[before:] if c.startswith("zfs destroy ") and "-nvp" not in c
         ]
@@ -15678,6 +15680,55 @@ class TestPruneCommand:
         assert warning in text, text
         assert text.index(warning) < text.index("sanoid snapshot(s) older than 5 days")
         assert "backup has not had" not in text
+
+    @staticmethod
+    def _capacity(freeing: list[int], settle: bool) -> tuple[str, list[str]]:
+        """rpool's freeing figures in order (the last one repeats); output, calls."""
+        mock = MockShell()
+        mock.on("zpool list -Hp -o name,capacity,size,free rpool").succeeds(
+            f"rpool\t60\t{100 << 30}\t{40 << 30}"
+        )
+        values = iter(freeing)
+        last = {"v": freeing[-1]}
+        real = mock.mock_run
+
+        def spy(cmd: str, **kw: Any) -> RunResult:
+            if cmd == "zpool get -Hp -o value freeing rpool":
+                mock._calls.append(cmd)  # pylint: disable=protected-access
+                last["v"] = next(values, last["v"])
+                return RunResult(0, f"{last['v']}\n", "", cmd)
+            return real(cmd, **kw)
+
+        clock = itertools.count(0, 10)  # ten seconds per read of the clock
+        out = StringIO()
+        with (
+            patch.object(mock, "mock_run", side_effect=spy),
+            patch_sh(mock),
+            patch.object(prune_mod.survey, "source_pools", return_value=["rpool"]),
+            patch.object(prune_mod.time, "sleep"),
+            patch.object(prune_mod.time, "monotonic", side_effect=lambda: next(clock)),
+            redirect_stdout(out),
+        ):
+            prune_mod._capacity(Log(), settle=settle)  # pylint: disable=protected-access
+        return Log._STRIP_RE.sub("", out.getvalue()), mock.calls  # pylint: disable=protected-access
+
+    def test_the_capacity_after_a_removal_waits_for_the_pool_to_free_it(self) -> None:
+        """M4d-33: `zpool list` right after the destroys lags the async free."""
+        out, calls = self._capacity([5 << 30, 1 << 30, 0], settle=True)
+        assert "Waiting for rpool to free what was removed..." in out
+        assert "rpool: 60% full (40.0G free of 100.0G)" in out and "still freeing" not in out
+        assert calls.count("zpool get -Hp -o value freeing rpool") == 3
+        assert calls.index("zpool list -Hp -o name,capacity,size,free rpool") == len(calls) - 1
+
+    def test_a_pool_still_freeing_at_the_cap_is_said_so(self) -> None:
+        """M4d-33: at about 60 s the line says the figure will grow."""
+        out, _ = self._capacity([5 << 30], settle=True)
+        assert "still freeing in the background, the free space will grow" in out
+
+    def test_no_wait_before_any_removal(self) -> None:
+        """M4d-33: the menu's first figures are read at once."""
+        out, calls = self._capacity([5 << 30], settle=False)
+        assert not [c for c in calls if "freeing" in c] and "Waiting" not in out
 
     def test_mistyped_word_removes_nothing(self) -> None:
         """A typed word that is not PRUNE removes nothing."""

@@ -88,12 +88,39 @@ def _typed(log: Log, what: str) -> bool:
     return answer == WORD
 
 
-def _capacity(log: Log) -> None:
-    for pool in survey.source_pools():
+# How long prune waits for a pool to free what it removed (M4d-33).
+FREEING_WAIT_SEC = 60
+
+
+def _freeing(pool: str) -> int:
+    """Bytes ``pool`` still frees in the background after destroys, 0 when
+    it cannot be read."""
+    r = sh.run(f"zpool get -Hp -o value freeing {pool}")
+    return int(r.output) if r.ok and r.output.isdigit() else 0
+
+
+def _capacity(log: Log, settle: bool = False) -> None:
+    """Each source pool's fill level; ``settle``: after removals, once the
+    pool has freed them. A destroy frees in the background, so `zpool list`
+    right after it lags (78.9G shown on carmen, 105G a minute later)."""
+    pools = survey.source_pools()
+    busy: list[str] = []
+    if settle:
+        end = time.monotonic() + FREEING_WAIT_SEC
+        busy = [p for p in pools if _freeing(p)]
+        if busy:
+            log.info(f"Waiting for {', '.join(busy)} to free what was removed...")
+        while busy and time.monotonic() < end:
+            time.sleep(1)
+            busy = [p for p in busy if _freeing(p)]
+    for pool in pools:
         r = sh.run(f"zpool list -Hp -o name,capacity,size,free {pool}")
         f = r.output.strip().split("\t") if r.ok else []
         if len(f) == 4 and f[2].isdigit() and f[3].isdigit():
-            log.info(f"{pool}: {f[1]}% full ({_gib(int(f[3]))} free of {_gib(int(f[2]))})")
+            line = f"{pool}: {f[1]}% full ({_gib(int(f[3]))} free of {_gib(int(f[2]))})"
+            if pool in busy:
+                line += "; still freeing in the background, the free space will grow"
+            log.info(line)
 
 
 def _summary(inv: Inventory, drives: dict[str, str], log: Log) -> None:
@@ -217,8 +244,9 @@ def _anchors(inv: Inventory, drives: dict[str, str], log: Log) -> None:
 def _prune_origin(cfg: Config, log: Log) -> None:
     """The origin menu, until the user is done."""
     drives = {info.guid: name for name, info in cfg.known_drives.items()}
+    acted = False
     while True:
-        _capacity(log)
+        _capacity(log, settle=acted)
         try:
             origin = survey.read_origin(survey.source_pools(), strict=True)
         except survey.ReadError as e:
@@ -245,6 +273,7 @@ def _prune_origin(cfg: Config, log: Log) -> None:
         if act is None:
             return
         act()
+        acted = True
 
 
 def _legacy_history(dest: dict[str, Dest], pins: dict[str, str], first: str = "") -> Prune:

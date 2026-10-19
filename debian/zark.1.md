@@ -630,7 +630,9 @@ for the canonical end-to-end sequences.
 :   Reclaim space, interactively, in the source or on a connected registered
     drive. Nothing goes without a confirmation; every snapshot is destroyed
     by its exact name and logged, and what each choice frees is measured
-    first. In the source: each pool's fill level and, per kind of
+    first. In the source: each pool's fill level (after a removal, once
+    the pool has freed it, up to about a minute, or a line that it is still
+    freeing in the background) and, per kind of
     snapshot, how many there are, the oldest and what removing them frees;
     then **sanoid**'s snapshots older than a number of days (typed
     **PRUNE**; */etc/sanoid/sanoid.conf* is not changed), the legacy
