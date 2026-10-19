@@ -39,6 +39,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from types import FrameType
 from typing import TextIO, cast
 
@@ -54,6 +55,9 @@ _teardown: list[bool] = []
 _interactive: list[bool] = []
 _running: list[str] = []
 _installed: list[bool] = []
+# Whether a registered Cleanup has anything left (M4bX.6): the stop line
+# says so. None registered: the command's own cleanup is unknown here.
+_pending: list[Callable[[], bool]] = []
 
 
 def received() -> int | None:
@@ -73,13 +77,23 @@ def _on_signal(signum: int, _frame: FrameType | None) -> None:
     for sig in EXIT_SIGNALS:
         _ = signal.signal(sig, signal.SIG_IGN)
     _received.append(signum)
-    doing = f"stopping {_running[0]}, then cleaning up" if _running else "cleaning up"
+    left = not _pending or any(p() for p in _pending)
+    if _running:
+        doing = f"stopping {_running[0]}" + (", then cleaning up" if left else "")
+    else:
+        doing = "cleaning up" if left else "stopping, nothing left to clean up"
     (_log[0] if _log else Log()).warn(
         f"Interrupted by {signal.Signals(signum).name}: {doing} (further signals are ignored)"
     )
     if signum == signal.SIGINT:
         raise KeyboardInterrupt
     raise SystemExit(128 + signum)
+
+
+def track_pending(probe: Callable[[], bool]) -> None:
+    """Ask ``probe`` at a signal whether there is still something to clean up."""
+    if probe not in _pending:
+        _pending.append(probe)
 
 
 def install(log: Log | None = None) -> None:

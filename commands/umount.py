@@ -24,20 +24,13 @@ from collections.abc import Collection
 from pathlib import Path
 
 from lib import sh
-from lib.cleanup import flush_device_cache, prompt_eject_or_attach
+from lib.cleanup import BUSY_HINT, flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.keystore import Keystore
 from lib.log import Log
 
 MNT_BASE = "/mnt/zark"
 SYSTEM_TARGETS = ("local", "system", "rpool")
-# Why an export can still fail once zark released what it could, here and in
-# the other mount namespaces it could enter (W-1, X-5).
-BUSY_HINT = [
-    "A dataset may still be in use (fuser -vm <path>), or held",
-    "in a mount namespace zark could not enter. Reboot to",
-    "release it (the live session, or the installed system).",
-]
 # The live's reboot leaves rpool/bpool marked as its own (seen on eli).
 SYSTEM_REBOOT_HINT = [
     "The installed system may then stop at an emergency",

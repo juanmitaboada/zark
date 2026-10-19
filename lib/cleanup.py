@@ -45,6 +45,14 @@ from lib.keystore import KeystoreLike
 from lib.log import Log
 from lib.sh import run
 
+# Why an export can still fail once zark released what it could, here and in
+# the other mount namespaces it could enter (W-1, X-5).
+BUSY_HINT = [
+    "A dataset may still be in use (fuser -vm <path>), or held",
+    "in a mount namespace zark could not enter. Reboot to",
+    "release it (the live session, or the installed system).",
+]
+
 # Window between `sync` and any subsequent device-level action. The
 # pause gives a USB-SATA bridge with broken FUA a chance to drain its
 # internal write queue once the kernel has emitted all dirty buffers.
@@ -234,8 +242,15 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         if self._registered:
             return
         atexit.register(self.run)
+        signals.track_pending(self.pending)  # what the stop line says (M4bX.6)
         self._registered = True
         self._disabled = False
+
+    def pending(self) -> bool:
+        """Whether run() has anything left to do."""
+        if self._disabled:
+            return False
+        return bool(self._mounts or self._keystores or self._pools or self._dirs or self._actions)
 
     def disable(self):
         """Disable cleanup - use when leaving resources mounted for the user."""
@@ -311,9 +326,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         The three exit signals are ignored while it runs and, when no signal
         stopped the run, handled again afterwards (M4bR-2, M4bF-5 5a).
         """
-        if getattr(self, "_disabled", False):
-            return
-        if not (self._mounts or self._keystores or self._pools or self._dirs or self._actions):
+        if not self.pending():
             return
         signals.teardown()
         try:

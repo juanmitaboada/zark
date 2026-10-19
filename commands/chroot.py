@@ -31,7 +31,7 @@ for the single internal disk.
 """
 
 from lib import sh, signals
-from lib.cleanup import Cleanup
+from lib.cleanup import BUSY_HINT, Cleanup
 from lib.config import zark_command
 from lib.keystore import Keystore
 from lib.log import Log
@@ -158,6 +158,19 @@ def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statemen
 
     # ── Teardown (explicit; atexit would also catch it) ───────────────────
     cleanup.run()
+    # Cleanup only warns when an export fails (M4bR-8): repair-boot's check.
+    exported = cleanup.exported_pools()
+    still = [p for p in ("rpool", "bpool") if p not in exported and zfs.pool_exists(p)]
+    if still:
+        log.banner_error(
+            "CHROOT NOT CLOSED",
+            [
+                *(f"✗ {p} is still imported - run: sudo zpool export {p}" for p in still),
+                "",
+                *BUSY_HINT,
+            ],
+        )
+        raise SystemExit(1)
     log.banner_ok(
         "CHROOT CLOSED",
         [

@@ -5843,7 +5843,7 @@ class TestUmountLocalSafety:  # pylint: disable=missing-function-docstring
                 raise AssertionError("a pool left imported must end with exit status 1")
         out = buf.getvalue()
         assert "SYSTEM NOT UNMOUNTED" in out and "still imported: bpool, rpool" in out
-        assert "exported cleanly" not in out
+        assert "exported cleanly" not in out, out
 
     def test_copies_held_elsewhere_are_released_then_the_system_export_retried(self):
         # W-1 (M4b-3 3b; mutation U7): umount local, like umount of a backup,
@@ -5963,6 +5963,100 @@ class TestChrootSafety:  # pylint: disable=missing-function-docstring,too-few-pu
             except SystemExit:
                 return
         raise AssertionError("Expected SystemExit when rpool is already imported")
+
+
+class TestChrootClose:  # pylint: disable=missing-function-docstring
+    """M4bR-8 (M4d-26): CHROOT CLOSED only when both pools were exported."""
+
+    @staticmethod
+    def _run(rpool_export_ok: bool) -> tuple[str, int]:
+        mock = MockShell()
+        mock.on_prefix("zpool import").succeeds("")
+        mock.on("zpool export bpool").succeeds()
+        export = mock.on("zpool export rpool")
+        _ = export.succeeds() if rpool_export_ok else export.fails("pool is busy")
+        mock.on("zpool export -f rpool").fails("pool is busy")
+        state = {"shell": False}
+
+        def mount(_alt, _pw, _log, _zfs, _ks, cleanup, **_k):
+            cleanup.track_pool("rpool")
+            cleanup.track_pool("bpool")
+            return ("/mnt/zark/chroot", "ubuntu_x")
+
+        def shell(_argv: list[str]) -> int:
+            state["shell"] = True
+            return 0
+
+        def exists(pool: str) -> bool:  # after the shell, a busy rpool stays
+            return state["shell"] and pool == "rpool" and not rpool_export_ok
+
+        out = StringIO()
+        rc = 0
+        with (
+            patch_sh(mock),
+            patch.object(chroot_mod.Cleanup, "register"),
+            patch.object(chroot_mod.sh, "is_live_usb", return_value=True),
+            patch.object(chroot_mod, "mount_system_pools", side_effect=mount),
+            patch.object(chroot_mod, "_setup_bind_mounts"),
+            patch.object(chroot_mod.signals, "run_interactive", side_effect=shell),
+            patch.object(ZFS, "pool_exists", side_effect=exists),
+            patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+            redirect_stdout(out),
+        ):
+            try:
+                chroot_mod.run([])
+            except SystemExit as e:
+                rc = int(e.code) if isinstance(e.code, int) else 1
+        return unframed(out.getvalue()), rc
+
+    def test_a_pool_left_imported_is_not_closed(self):
+        out, rc = self._run(rpool_export_ok=False)
+        assert rc == 1 and "CHROOT NOT CLOSED" in out, out
+        assert "rpool is still imported - run: sudo zpool export rpool" in out, out
+        assert "exported cleanly" not in out, out
+
+    def test_both_exported_is_closed(self):
+        out, rc = self._run(rpool_export_ok=True)
+        assert rc == 0 and "CHROOT CLOSED" in out and "NOT CLOSED" not in out, out
+
+
+class TestStopLine:  # pylint: disable=missing-function-docstring
+    """M4bX.6 (M4d-26): the stop line says when nothing is left to clean up."""
+
+    @staticmethod
+    def _line(running: list[str], pending: list[Callable[[], bool]]) -> str:
+        out = StringIO()
+        with (
+            patch.object(_signals, "_running", running),
+            patch.object(_signals, "_pending", pending),
+            patch.object(_signals, "_received", []),
+            patch.object(_signals, "_log", [make_log()]),
+            patch.object(_signals.signal, "signal"),
+            redirect_stdout(out),
+        ):
+            try:
+                _signals._on_signal(signal.SIGINT, None)  # pylint: disable=protected-access
+            except KeyboardInterrupt:
+                pass
+        return out.getvalue()
+
+    def test_the_line_by_what_is_left(self):
+        idle = make_log()
+        empty = Cleanup(idle)
+        busy = Cleanup(idle)
+        busy.track_pool("backup")
+        line = self._line([], [empty.pending])
+        assert "Interrupted by SIGINT: stopping, nothing left to clean up" in line, line
+        assert "cleaning up (further" in self._line([], [empty.pending, busy.pending])
+        assert "stopping zfs send (further" in self._line(["zfs send"], [empty.pending])
+        assert "stopping zfs send, then cleaning up" in self._line(["zfs send"], [busy.pending])
+        assert "SIGINT: cleaning up" in self._line([], [])  # no Cleanup known: as before
+
+    def test_a_registered_cleanup_is_asked(self):
+        cleanup = Cleanup(make_log())
+        with patch.object(_signals, "_pending", []), patch("lib.cleanup.atexit.register"):
+            cleanup.register()
+            assert cleanup.pending in _signals._pending  # pylint: disable=protected-access
 
 
 class TestAptGuard:  # pylint: disable=missing-function-docstring
