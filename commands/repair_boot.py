@@ -32,7 +32,7 @@ from lib.mount import kernel_named_vdevs, mount_system_pools
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 REPAIR_MNT = "/mnt/repair"
-TOTAL_STEPS = 7
+TOTAL_STEPS = 5
 
 
 def run(
@@ -88,16 +88,15 @@ def run(
         if answer != "y":
             log.fatal("Aborted - disconnect external drives and retry.")
 
-    # ── 2-4. Import rpool + bpool, unlock, mount (all tracked by Cleanup) ──
+    # ── 2. Import rpool + bpool, unlock, mount (all tracked by Cleanup) ───
     # mount_system_pools imports under the altroot (clean first, then -f for
     # a pool left "in use" by the unclean shutdown that brought the operator
     # here), asks the passphrase with retries, and registers every pool,
     # mount and the keystore with Cleanup, so the final export unmounts
     # /boot and every dataset before exporting rpool (P0-6). Mountpoints are
     # never changed: the stored ones are mounted under the altroot.
-    log.step(2, TOTAL_STEPS, "Importing pools...")
-    log.step(3, TOTAL_STEPS, "Loading encryption keys...")
-    log.step(4, TOTAL_STEPS, "Mounting system...")
+    # One call since M1, so one step (M1P.10).
+    log.step(2, TOTAL_STEPS, "Importing pools, unlocking and mounting the system...")
     result = mount_system_pools(REPAIR_MNT, None, log, zfs, Keystore(log), cleanup)
     if result is None:
         log.fatal("Could not import and mount the system - see messages above.")
@@ -112,10 +111,10 @@ def run(
     else:
         log.fatal(f"No kernels found in {REPAIR_MNT}/boot - bpool may not be mounted")
 
-    # ── 5. Chroot setup, grub guard, initrd ──────────────────────────────
+    # ── 3. Chroot setup, grub guard, initrd ──────────────────────────────
     # Before update-grub: 10_linux_zfs only lists kernels that have an
     # initrd, and the guard is itself a grub.d script.
-    log.step(5, TOTAL_STEPS, "Installing grub guard and regenerating initrd...")
+    log.step(3, TOTAL_STEPS, "Installing grub guard and regenerating initrd...")
 
     # Bind mounts
     for d in ("proc", "sys", "dev", "dev/pts", "run"):
@@ -148,8 +147,8 @@ def run(
 
     initrd_failures = regenerate_initrd(REPAIR_MNT, log)
 
-    # ── 6. update-grub ────────────────────────────────────────────────────
-    log.step(6, TOTAL_STEPS, "Regenerating grub.cfg...")
+    # ── 4. update-grub ────────────────────────────────────────────────────
+    log.step(4, TOTAL_STEPS, "Regenerating grub.cfg...")
 
     grub_cfg = Path(f"{REPAIR_MNT}/boot/grub/grub.cfg")
     grub_failure = regenerate_grub_cfg(
@@ -166,8 +165,8 @@ def run(
         bpool_hex = format(int(bpool_guid), "016x")
         _ = fix_grub_bpool_uuid(grub_cfg, bpool_hex, log)
 
-    # ── 7. Cleanup ────────────────────────────────────────────────────────
-    log.step(7, TOTAL_STEPS, "Cleanup...")
+    # ── 5. Cleanup ────────────────────────────────────────────────────────
+    log.step(5, TOTAL_STEPS, "Cleanup...")
 
     cleanup.run()
 

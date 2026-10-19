@@ -6096,6 +6096,78 @@ class TestAptGuard:  # pylint: disable=missing-function-docstring
             assert proc.returncode == 0
 
 
+class TestSetupSnapshotsAndBootEnvironment:  # pylint: disable=missing-function-docstring
+    """P0-1 and M1P.21 (M4d-23): both pools counted; no placeholder dataset."""
+
+    @staticmethod
+    def _mock(rpool: str, bpool: str) -> MockShell:
+        mock = MockShell()
+        mock.on("zpool list rpool").succeeds("rpool")
+        mock.on("zpool list bpool").succeeds("bpool")
+        mock.on("zfs list -H -o name -t snapshot -r rpool").succeeds(rpool)
+        mock.on("zfs list -H -o name -t snapshot -r bpool").succeeds(bpool)
+        return mock
+
+    def test_both_pools_by_the_snapshots_name(self):
+        rpool = "rpool/ROOT/u@autosnap_2026-10-19_00:00:01_daily\nrpool/autosnap_x@manual\n"
+        bpool = "bpool/BOOT/u@autosnap_2026-10-19_00:00:01_daily\n"
+        out = StringIO()
+        with patch_sh(self._mock(rpool, bpool)), redirect_stdout(out):
+            setup_mod._initial_snapshots(ZFS(make_log()), make_log())  # pylint: disable=protected-access
+        assert "2 sanoid snapshots exist (rpool 1, bpool 1)" in out.getvalue()
+
+    def test_the_first_ones_are_counted_on_both_pools(self):
+        mock = self._mock("", "")
+        taken = {"done": False}
+
+        def spy(cmd: str, **kw: Any) -> RunResult:
+            if cmd == "sanoid --take-snapshots":
+                taken["done"] = True
+                return RunResult(0, "", "", cmd)
+            if taken["done"] and cmd.startswith("zfs list -H -o name -t snapshot -r "):
+                pool = cmd.rsplit(" ", 1)[1]
+                n = 91 if pool == "rpool" else 11
+                return RunResult(
+                    0, "".join(f"{pool}/d@autosnap_{i}_daily\n" for i in range(n)), "", cmd
+                )
+            return real(cmd, **kw)
+
+        real = mock.mock_run
+        out = StringIO()
+        with (
+            patch.object(mock, "mock_run", side_effect=spy),
+            patch_sh(mock),
+            patch("builtins.input", return_value="y"),
+            redirect_stdout(out),
+        ):
+            setup_mod._initial_snapshots(ZFS(make_log()), make_log())  # pylint: disable=protected-access
+        assert "Created 102 snapshots (rpool 91, bpool 11)" in out.getvalue()
+
+    def test_no_boot_environment_is_fatal_not_a_prompt(self):
+        # M1P.21: Enter took the placeholder ubuntu_XXXXXX, which names nothing.
+        mock = MockShell()
+        mock.on_prefix("which ").succeeds("/usr/bin/x")
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(setup_mod.certificates, "show_warnings"),
+            patch.object(setup_mod, "_detect_ubuntu_ds", return_value=""),
+            patch.object(setup_mod, "_discover_rules") as discover,
+            patch("builtins.input", return_value="") as typed,
+            redirect_stdout(out),
+            redirect_stderr(StringIO()),
+        ):
+            try:
+                setup_mod.run([])
+            except SystemExit as e:
+                assert e.code == 1
+            else:
+                raise AssertionError("setup went on")
+        assert "No boot environment under rpool/ROOT" in unframed(out.getvalue())
+        discover.assert_not_called()
+        assert typed.call_count == 1  # only the FATAL's "Press Enter"
+
+
 class TestSetupInstallsBothGuards:  # pylint: disable=missing-function-docstring
     """M4a-4: setup brings both guards up to date on the running system."""
 
@@ -9344,6 +9416,14 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
             except SystemExit:
                 exited = True
         return mock, buf.getvalue(), exited, order
+
+    def test_every_step_has_something_under_it(self):
+        # M1P.10: [2/7] and [3/7] printed with nothing under them.
+        _, out, _, _ = self._run(export_rpool_ok=True)
+        lines = [ln for ln in Log._STRIP_RE.sub("", out).splitlines() if ln.strip()]  # pylint: disable=protected-access
+        steps = [i for i, ln in enumerate(lines) if re.match(r"\[\d/5\] ", ln)]
+        assert len(steps) == 5, lines
+        assert steps[1] + 1 not in steps, lines  # the mount's lines are under its step
 
     def test_boot_unmounted_before_rpool_export_and_success_banner(self):
         mock, out, exited, _ = self._run(export_rpool_ok=True)

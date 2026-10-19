@@ -736,6 +736,37 @@ def remove_installed(log: Log, root: str = "") -> int:
     return 0
 
 
+def _autosnaps(zfs: ZFS) -> dict[str, int]:
+    """sanoid's snapshots on rpool and bpool (both are in sanoid.conf), by
+    the snapshot's own name, not a substring of the dataset's (P0-1)."""
+    return {
+        pool: sum(
+            1 for s in zfs.list_snapshots(pool) if s.partition("@")[2].startswith("autosnap_")
+        )
+        for pool in ("rpool", "bpool")
+        if zfs.pool_exists(pool)
+    }
+
+
+def _per_pool(counts: dict[str, int]) -> str:
+    return ", ".join(f"{pool} {n}" for pool, n in counts.items())
+
+
+def _initial_snapshots(zfs: ZFS, log: Log) -> None:
+    """Step 4: offer sanoid's first snapshots when there are none."""
+    counts = _autosnaps(zfs)
+    if sum(counts.values()):
+        log.ok(f"{sum(counts.values())} sanoid snapshots exist ({_per_pool(counts)})")
+        return
+    if not log.ask("No sanoid snapshots found. Take the first ones now?", default=True):
+        return
+    if sh.run("sanoid --take-snapshots", log=log).ok:
+        counts = _autosnaps(zfs)
+        log.ok(f"Created {sum(counts.values())} snapshots ({_per_pool(counts)})")
+    else:
+        log.warn("sanoid --take-snapshots had errors")
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
@@ -781,8 +812,12 @@ def run(
 
     ubuntu_name = _detect_ubuntu_ds()
     if not ubuntu_name:
-        log.warn("Could not detect rpool/ROOT/ubuntu_XXXXXX dataset")
-        ubuntu_name = log.ask_input("Enter ubuntu dataset name", "ubuntu_XXXXXX")
+        # Nothing typed could be right: rpool/ROOT has no child (M1P.21).
+        log.fatal(
+            "No boot environment under rpool/ROOT",
+            causes=["rpool is not imported, or it is not Ubuntu's ZFS layout"],
+            solutions=["Check: zfs list -r -d 1 rpool/ROOT"],
+        )
 
     # Discover and classify
     rules = _discover_rules(zfs, ubuntu_name)
@@ -854,18 +889,7 @@ def run(
 
     # ── 4. Initial snapshots ─────────────────────────────────────────────
     log.step(4, 6, "Checking snapshots...")
-    snap_count = len(zfs.list_snapshots("rpool", "autosnap"))
-
-    if snap_count == 0:
-        if log.ask("No autosnap snapshots found. Take first snapshots now?", default=True):
-            r = sh.run("sanoid --take-snapshots", log=log)
-            if r.ok:
-                snap_count = len(zfs.list_snapshots("rpool", "autosnap"))
-                log.ok(f"Created {snap_count} snapshots")
-            else:
-                log.warn("sanoid --take-snapshots had errors")
-    else:
-        log.ok(f"{snap_count} autosnap snapshots exist")
+    _initial_snapshots(zfs, log)
 
     # ── 5. Bookmark anchors ──────────────────────────────────────────────
     log.step(5, 6, "Checking bookmark support on rpool...")
