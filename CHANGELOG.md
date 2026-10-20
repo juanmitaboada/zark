@@ -79,6 +79,60 @@ preceded them.
 - A destroy returns before its blocks are free; the waits are read from
   OpenZFS source and were not run on a pool (no self-test check, M5a-27).
 
+#### Rejected approaches
+
+- **Leaving the host directories of the stop tests in place, or a unique
+  directory per run** (M5a-2 2b, 2c): the first leaves three empty
+  directories in `/var` and `/run` after a root run; the second is
+  impossible, the paths are the ones zark itself uses.
+- **Destroying whatever pool `pool_on_stick` finds** (M5a-3 3b): wider than
+  the finding; it could destroy a pool the run did not create.
+- **Removing the embedded newlines from the three refusals** (M5a-4 4b):
+  the next caller meets the same box.
+- **One prune warning line per drive and dataset** (M5a-5 5a): 28 lines for
+  a 1.x drive.
+- **Rejecting every unknown flag in `setup`** (M5a-6 6b): wider than the
+  finding; no other flag is documented.
+- **The same warning for other boot environments at debug level** (M5a-7
+  7b): keeps the children of a boot environment that cannot be mounted.
+- **The absolute path of the checkout in the MOTD and the notifications**
+  (M5a-9 9b): one more rule to keep.
+- **The banner's Available read again without the wait, or the banner left
+  with "(before retention)"** (M5a-10 10b, 10c): a lagging figure, or a
+  figure that is known to be wrong.
+- **No wait before the transfer, or a retry of the receive on ENOSPC**
+  (M5a-11 11b, 11c): the first leaves the case to the operator; the second
+  adds code to the engine's resume paths for a case the wait prevents.
+- **Leaving bpool's import without the device hint** (M5a-12 12b).
+- **Only logging the answers of the four bare prompts** (M5a-13 13b): the
+  unattended QEMU install would remain.
+- **Per-dataset mounts in recover's `zfs mount -a`** (M5a-14 14a): the
+  benefit is a case Ubuntu's layout does not have, the risk a change in the
+  boot path that no hardware run checks.
+- **Leaving the empty altroot directories to `zark clean`** (M5a-15 15b).
+- **`zark monitor` reading `zfs get`** (M5a-16 16a): a behaviour change on
+  a screen nothing tests; M4d-8 rejected the same change.
+- **Only the two health fixes that can leave the system in a state**
+  (M5a-17 17b): the other two miscount transport errors.
+- **Dropping the dead `reset SuperSpeed` pattern, or matching it on any
+  `usb` line** (M5a-18 18b, 18c): the first gives up the check, the second
+  counts another device's resets.
+- **Keeping chroot's ESP guess as a fallback** (M5a-19 19b): it can mount
+  the wrong one.
+- **Only the PPA series, leaving the UNRELEASED entry a ritual note**
+  (M5a-21 21b).
+- **Leaving the notification urgency alone** (M5a-22 22b); **leaving
+  `files_current` on content alone** (M5a-23 23b).
+- **Asking `snap services` before logging the probe's stop** (M5a-24 24a,
+  alternative): it relies on that command's output format.
+- **A `tox-lint` target before the tests** (M5a-25 25b): the lint and the
+  types would run twice.
+- **M4d's `.orig` block with the versions guessed** (M5a-26 26b): the pool's
+  own listing names every file.
+- **A level-1 check for `freeing`** (M5a-27 27a): it would change the
+  checks and need certificates for rc9.
+- **Splitting the docs across the code commits** (M5a-28 28b).
+
 ### M4d: status, alerts, purge and health, the self-test, cosmetics, docs, tests and packaging (2.0.0-rc8)
 
 #### Added
