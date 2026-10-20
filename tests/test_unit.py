@@ -287,6 +287,7 @@ from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     drive_compatibility as zfs_drive_compatibility,
     fix_grub_bpool_uuid,
     parse_damage,
+    remove_altroot_dir,
 )
 from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     FakeZfs,
@@ -1033,6 +1034,46 @@ class TestZFS:  # pylint: disable=missing-function-docstring
             assert zfs.pool_export("backup")
             assert mock.was_called("zpool set cachefile=none")
 
+    def test_the_empty_altroot_directory_goes_after_a_successful_export(self):
+        # M5a-15 (M4d plan 15 (4)): the import's mkdir -p left it behind.
+        for force in (False, True):
+            with tempfile.TemporaryDirectory() as td, patch("lib.zfs.BACKUP_ALTROOT_BASE", td):
+                mock, zfs = make_mock_zfs()
+                mock.on("zpool list backup").succeeds()
+                mock.on("zpool set cachefile=none backup").succeeds()
+                mock.on("sleep 1").succeeds()
+                if force:
+                    mock.on("zpool export backup").fails("pool is busy")
+                    mock.on("zpool export -f backup").succeeds()
+                else:
+                    mock.on("zpool export backup").succeeds()
+                mock.on("sync").succeeds()
+                d = Path(td, "backup")
+                d.mkdir()
+                with patch_sh(mock):
+                    assert zfs.pool_export("backup")
+                assert not d.exists(), force
+
+    def test_the_altroot_directory_stays_after_a_failed_export(self):
+        with tempfile.TemporaryDirectory() as td, patch("lib.zfs.BACKUP_ALTROOT_BASE", td):
+            mock, zfs = make_mock_zfs()
+            mock.on("zpool list backup").succeeds()
+            mock.on("zpool set cachefile=none backup").succeeds()
+            mock.on("sleep 1").succeeds()
+            mock.on("zpool export backup").fails("pool is busy")
+            mock.on("zpool export -f backup").fails("pool is busy")
+            d = Path(td, "backup")
+            d.mkdir()
+            with patch_sh(mock):
+                assert not zfs.pool_export("backup")
+            assert d.exists()
+
+    def test_a_directory_with_something_in_it_stays(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "x").write_text("", encoding="utf-8")
+            remove_altroot_dir(td)  # an error is ignored
+            assert Path(td, "x").exists()
+
     def test_pool_export_not_imported(self):
         mock, zfs = make_mock_zfs()
         mock.on("zpool list gone").fails()
@@ -1406,6 +1447,27 @@ class TestCleanup:
         assert mock.was_not_called("eject")
         # `sync` may or may not have been issued (it is not on the
         # failed-export branch); the critical guarantee is "no eject".
+
+    def test_cleanup_removes_the_empty_altroot_directory_of_an_exported_pool(self):
+        """M5a-15: Cleanup removes it only after the export succeeded."""
+        for ok in (True, False):
+            with tempfile.TemporaryDirectory() as td, patch("lib.zfs.BACKUP_ALTROOT_BASE", td):
+                mock = MockShell()
+                cleanup = Cleanup(make_log())
+                mock.on("zpool list backup").succeeds()
+                mock.on("zfs unload-key -r backup").succeeds()
+                if ok:
+                    mock.on("zpool export backup").succeeds()
+                else:
+                    mock.on("zpool export backup").fails(stderr="busy", rc=1)
+                    mock.on("zpool export -f backup").fails(stderr="busy", rc=1)
+                mock.on("sync").succeeds()
+                d = Path(td, "backup")
+                d.mkdir()
+                cleanup.track_pool("backup")
+                with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0), patch_sh(mock):
+                    cleanup.run()
+                assert d.exists() is not ok, ok
 
     def test_exported_pools_query(self):
         """exported_pools() reports drives that were successfully exported
@@ -7735,6 +7797,20 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
             return r
 
         mock.mock_run = spy  # type: ignore[method-assign,assignment]
+
+    def test_the_zark_mount_directory_goes_once_the_read_only_pool_is_exported(self):
+        # M5a-15 (M4d plan 15 (7)): `zark mount` imported it under /mnt/zark/<pool>.
+        for export_ok in (True, False):
+            mock = MockShell()
+            self._found_read_only(mock, export_ok=export_ok)
+            mock.on("zpool destroy backup").succeeds()
+            _wipe_succeeds(mock)
+            with patch.object(purge_mod, "remove_altroot_dir") as gone:
+                _ = self._purge(mock)
+            if export_ok:
+                gone.assert_any_call("/mnt/zark/backup")
+            else:
+                assert not any(c.args == ("/mnt/zark/backup",) for c in gone.call_args_list)
 
     def test_a_read_only_pool_is_destroyed_read_write(self):
         # M4aR-1: a read-only pool's destroy returns 0 and leaves its labels.

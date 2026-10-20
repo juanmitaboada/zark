@@ -365,6 +365,7 @@ class ZFS:
         if r.ok:
             self.log.ok(f"Pool {name} exported")
             run("sync")
+            remove_altroot_dir(backup_altroot(name))
             return True
 
         # Force export
@@ -372,6 +373,7 @@ class ZFS:
         if r.ok:
             self.log.ok(f"Pool {name} exported (forced)")
             run("sync")
+            remove_altroot_dir(backup_altroot(name))
             return True
 
         self.log.warn(f"Could not export {name}")
@@ -702,6 +704,17 @@ BACKUP_ALTROOT_BASE = "/run/zark/altroot"
 def backup_altroot(pool: str) -> str:
     """Altroot used for a backup pool when the command does not mount it."""
     return f"{BACKUP_ALTROOT_BASE}/{pool}"
+
+
+def remove_altroot_dir(path: str) -> None:
+    """Remove the empty directory an import used as its altroot, once the pool
+    was exported: a successful export means no mount below it in this
+    namespace, and a busy copy in another one makes the export fail first
+    (M5a-15). Only an empty directory goes; any error is ignored."""
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
 
 
 # Where `zpool create -o compatibility=<name>` looks, in order (OpenZFS 2.4.1

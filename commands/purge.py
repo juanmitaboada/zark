@@ -34,7 +34,7 @@ from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
 from lib.identity import match_registry, read_pool_label
 from lib.log import Log
-from lib.zfs import ZFS, backup_altroot
+from lib.zfs import ZFS, backup_altroot, remove_altroot_dir
 
 # One line of purge's report (M4aF-4): True done, False failed, None not done
 # (with the reason). The final banner lists every line, so it says what
@@ -98,6 +98,8 @@ def _destroy_labelled_pool(  # pylint: disable=too-many-return-statements
                 False,
                 f"pool {name} is imported read-only and could not be exported: {_error(r)}",
             ), export_first
+        # `zark mount` imported it under /mnt/zark/<pool> (M5a-15).
+        remove_altroot_dir(f"/mnt/zark/{name}")
         if not zfs.import_backup_pool(name, vdev, guid=guid):
             return (
                 False,
