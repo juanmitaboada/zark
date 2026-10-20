@@ -6317,6 +6317,54 @@ class TestChrootSafety:  # pylint: disable=missing-function-docstring,too-few-pu
         raise AssertionError("Expected SystemExit when rpool is already imported")
 
 
+class TestReleaseGuard:  # pylint: disable=missing-function-docstring
+    """M5a-21: `make release-guard` refuses an UNRELEASED top changelog entry."""
+
+    @staticmethod
+    def _guard(top: str) -> tuple[int, str]:
+        root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / "lib").mkdir()
+            (repo / "debian").mkdir()
+            shutil.copy(root / "Makefile", repo / "Makefile")
+            (repo / "lib" / "config.py").write_text('VERSION = "9.9.9"\n')
+            (repo / "debian" / "changelog").write_text(f"zark (9.9.9-1) {top}; urgency=medium\n")
+            env = {
+                **os.environ,
+                "PYTHONDONTWRITEBYTECODE": "1",  # the Makefile imports lib.config in the clone
+                "PYTHONPATH": str(repo),  # not the checkout under test (the gate sets it)
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.org",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.org",
+            }
+            for cmd in (
+                ["git", "init", "-q"],
+                ["git", "add", "-A"],
+                ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "x"],
+                ["git", "-c", "tag.gpgsign=false", "tag", "v9.9.9"],
+            ):
+                subprocess.run(cmd, cwd=repo, env=env, check=True, capture_output=True)
+            r = subprocess.run(
+                ["make", "--no-print-directory", "release-guard"],
+                cwd=repo,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return r.returncode, r.stdout + r.stderr
+
+    def test_a_released_entry_passes(self):
+        rc, out = self._guard("noble")
+        assert rc == 0, out
+
+    def test_an_unreleased_entry_is_refused(self):
+        rc, out = self._guard("UNRELEASED")
+        assert rc != 0 and "top entry is UNRELEASED" in out, out
+
+
 class TestChrootEsp:  # pylint: disable=missing-function-docstring
     """M5a-19 (M4d plan 15 (8)): the chroot mounts the ESP of rpool's disk."""
 

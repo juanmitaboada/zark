@@ -132,9 +132,8 @@ GPG keyring.
 ## 4. Upload to the PPA
 
 Launchpad needs **one source package per target Ubuntu series**. The
-PPA covers the currently-supported Ubuntu releases. As of May 2026:
-noble (24.04 LTS, supported until 2036), questing (25.10, supported
-until 2026-07), and resolute (26.04 LTS, to be released). Each upload
+PPA covers the currently-supported Ubuntu releases. As of October 2026:
+noble (24.04 LTS, supported until 2036) and resolute (26.04 LTS). Each upload
 is distinguished by a `~ubuntuXX.YY.N` suffix on the version. The
 authoritative list lives in `Makefile`'s `PPA_SERIES` variable -
 update it there when Ubuntu drops a release.
@@ -146,8 +145,9 @@ make deb-ppa
 ```
 
 It refuses to start (`make release-guard`) unless the tree has no
-uncommitted or untracked file and `HEAD` is the tag `v<version>`, so
-what is uploaded is exactly the tagged commit.
+uncommitted or untracked file, `HEAD` is the tag `v<version>` and the top
+entry of `debian/changelog` is released (run `dch -r` and commit before
+tagging), so what is uploaded is exactly the tagged commit.
 
 This iterates over the configured Ubuntu series, regenerates
 `debian/changelog` for each one with the appropriate `~ubuntuXX.YY.1`
@@ -170,7 +170,7 @@ If `deb-ppa-test` succeeds (Launchpad emails an "Accepted" notice
 within a minute or two), you can complete the rollout with:
 
 ```sh
-make deb-ppa-resume   # uploads the remaining series (questing onwards)
+make deb-ppa-resume   # uploads the remaining series (every series after the first)
 ```
 
 Together, `deb-ppa-test` + `deb-ppa-resume` cover the same ground as

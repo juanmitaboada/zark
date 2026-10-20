@@ -523,15 +523,16 @@ version: ## Show current version
 # Series covered by the PPA. Only currently-supported Ubuntu releases:
 # Launchpad rejects uploads to EOL series with "<series> is obsolete and
 # will not accept new uploads." Update this list when adding/dropping
-# support for a release. As of May 2026:
+# support for a release. As of October 2026:
 #   - noble    (24.04 LTS) - supported until 2036
-#   - questing (25.10)     - supported until 2026-07
-#   - resolute (26.04 LTS) - to be released, accepted as upcoming
+#   - resolute (26.04 LTS) - released 2026-04
 # Releases dropped along the way (do not re-add without checking
 # https://wiki.ubuntu.com/Releases first):
 #   - oracular (24.10) - EOL 2025-07
 #   - plucky   (25.04) - EOL 2026-01
-PPA_SERIES   := noble questing resolute
+#   - questing (25.10) - EOL 2026-07 (add it back to the case table below
+#     together with the series, if it is ever supported again)
+PPA_SERIES   := noble resolute
 # Upload target. We use a named profile (`zark-ppa`) rather than the
 # canonical `ppa:juanmitaboada/zark` shorthand so the configuration
 # travels with the repo (./dput.cf) and any maintainer can clone+upload
@@ -671,7 +672,7 @@ deb-ppa-resume: ## Upload remaining series after a deb-ppa-test (skips first ser
 	@# default series list ever changes.
 	@$(MAKE) --no-print-directory deb-ppa PPA_SERIES="$(wordlist 2,$(words $(PPA_SERIES)),$(PPA_SERIES))"
 
-release-guard: ## Refuse to release a tree that is dirty or not at the tag v$(VERSION)
+release-guard: ## Refuse to release a tree that is dirty, not at the tag v$(VERSION), or UNRELEASED
 	@# M1P.7: what goes to the PPA is exactly the tagged commit.
 	@test -z "$$(git status --porcelain)" || { \
 		echo "  The tree has uncommitted or untracked files: commit or remove them first"; \
@@ -680,6 +681,12 @@ release-guard: ## Refuse to release a tree that is dirty or not at the tag v$(VE
 	}
 	@test "$$(git describe --exact-match --tags HEAD 2>/dev/null)" = "v$(VERSION)" || { \
 		echo "  HEAD is not the tag v$(VERSION): tag the release commit first"; \
+		exit 1; \
+	}
+	@# M5a-21: the series entries are written above the tree's own top entry;
+	@# an UNRELEASED one would be uploaded below them.
+	@head -1 debian/changelog | grep -qv ' UNRELEASED;' || { \
+		echo "  debian/changelog's top entry is UNRELEASED: run 'dch -r' and commit before tagging"; \
 		exit 1; \
 	}
 
@@ -729,7 +736,6 @@ deb-ppa: release-guard $(ORIG_TARBALL) ## Upload a signed source package per Ubu
 			noble)     suffix="~ubuntu24.04.1" ;; \
 			oracular)  suffix="~ubuntu24.10.1" ;; \
 			plucky)    suffix="~ubuntu25.04.1" ;; \
-			questing)  suffix="~ubuntu25.10.1" ;; \
 			resolute)  suffix="~ubuntu26.04.1" ;; \
 			*)         echo "  Unknown series: $$series"; exit 1 ;; \
 		esac; \
