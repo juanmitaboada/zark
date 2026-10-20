@@ -3073,19 +3073,26 @@ class TestLock:  # pylint: disable=missing-function-docstring,protected-access
     def test_a_lock_file_that_cannot_be_opened_says_so(self):
         # M4aR-9: not "another zark run"; the exit status stays 75 (try later).
         out = StringIO()
-        with (
-            patch.object(lock_mod.os, "open", side_effect=PermissionError(13, "Permission denied")),
-            patch.dict(lock_mod._STATE, clear=True),
-            redirect_stdout(out),
-        ):
-            try:
-                lock_mod.guard("backup", [])
-            except SystemExit as e:
-                assert e.code == lock_mod.EX_TEMPFAIL
-            else:
-                raise AssertionError("expected a refusal")
+        # M5aR-4: a lock path of its own, so acquire() never makes the
+        # host's /run/zark before the patched open fails.
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "run-zark", "zark.lock")
+            with (
+                patch.object(lock_mod, "LOCK_PATH", path),
+                patch.object(
+                    lock_mod.os, "open", side_effect=PermissionError(13, "Permission denied")
+                ),
+                patch.dict(lock_mod._STATE, clear=True),
+                redirect_stdout(out),
+            ):
+                try:
+                    lock_mod.guard("backup", [])
+                except SystemExit as e:
+                    assert e.code == lock_mod.EX_TEMPFAIL
+                else:
+                    raise AssertionError("expected a refusal")
         text = out.getvalue()
-        assert f"Cannot take the lock {lock_mod.LOCK_PATH}: [Errno 13] Permission denied" in text
+        assert f"Cannot take the lock {path}: [Errno 13] Permission denied" in text
         assert "Another zark run" not in text
 
     def test_the_lock_file_is_private(self):
