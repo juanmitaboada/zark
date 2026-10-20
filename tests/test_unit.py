@@ -3703,7 +3703,7 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
 
     UBUNTU = "ubuntu_jqqq5u"
 
-    def _run_discovery(self, names_and_types):
+    def _run_discovery(self, names_and_types, drained=frozenset()):
         """Stub _discover_rules using a fake ZFS that returns the given list."""
 
         class FakeZFS:
@@ -3720,7 +3720,55 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
                     if n == root or n.startswith(root + "/")
                 ]
 
-        return _discover_rules(FakeZFS(), self.UBUNTU)
+        return _discover_rules(FakeZFS(), self.UBUNTU, drained)
+
+    LAYOUT = (
+        ("rpool", "filesystem"),
+        ("rpool/ROOT", "filesystem"),
+        ("rpool/ROOT/ubuntu_jqqq5u", "filesystem"),
+        ("rpool/USERDATA", "filesystem"),
+        ("rpool/USERDATA/home_x", "filesystem"),
+        ("rpool/USERDATA/home_x/Downloads", "filesystem"),
+        ("rpool/USERDATA/home_x/Downloads/tmp", "filesystem"),
+        ("rpool/USERDATA/home_x/Docs", "filesystem"),
+        ("rpool/USERDATA/home_y", "filesystem"),
+        ("rpool/var", "filesystem"),
+        ("rpool/var/lib", "filesystem"),
+        ("rpool/keystore", "volume"),
+    )
+
+    def test_a_drained_subtree_is_inside_no_recursive_rule(self):
+        """M5b-6 6a (sanoid's section order, S1): the recursive rule above the
+        excluded dataset is split down to it; the rest keep their template."""
+        downloads = "rpool/USERDATA/home_x/Downloads"
+        rules = dict(self._run_discovery(list(self.LAYOUT), frozenset({downloads})))
+        assert rules[downloads]["template"] == "drained" and rules[downloads]["recursive"]
+        for name in ("rpool/USERDATA", "rpool/USERDATA/home_x"):
+            assert rules[name]["template"] == "production" and not rules[name]["recursive"]
+        for name in ("rpool/USERDATA/home_x/Docs", "rpool/USERDATA/home_y"):
+            assert rules[name]["template"] == "production" and rules[name]["recursive"]
+        assert f"{downloads}/tmp" not in rules  # the drained section covers it
+        # No recursive rule but the drained one holds the drained subtree.
+        for name, rule in rules.items():
+            if rule["recursive"] and name != downloads:
+                assert not downloads.startswith(f"{name}/"), name
+        assert rules["rpool/var"]["recursive"] and rules["rpool/var"]["template"] == "minimal"
+
+    def test_a_drained_section_writes_no_snapshot_and_every_count_at_zero(self):
+        lines = _format_rule("rpool/x", {"template": "drained", "recursive": True, "explain": ""})
+        text = "\n".join(lines)
+        for key in ("frequently", "hourly", "daily", "weekly", "monthly", "yearly"):
+            assert f"{key} = 0" in text
+        assert "autosnap = no" in text and "autoprune = yes" in text
+        assert "recursive = yes" in text and "use_template" not in text
+        planned = [("rpool/x", {"template": "drained", "recursive": True, "explain": ""})]
+        parsed = _parse_sanoid_conf(_generate_sanoid_conf(planned))  # type: ignore[arg-type]
+        diff = _diff_rules(parsed, planned)  # type: ignore[arg-type]
+        assert not (diff["added"] or diff["removed"] or diff["changed"])
+
+    def test_a_drained_top_level_dataset_replaces_its_rule(self):
+        rules = dict(self._run_discovery(list(self.LAYOUT), frozenset({"rpool/var"})))
+        assert rules["rpool/var"]["template"] == "drained"
 
     def test_var_subtree_collapses_to_single_rule(self):
         """rpool/var, rpool/var/lib, rpool/var/lib/docker → only rpool/var
