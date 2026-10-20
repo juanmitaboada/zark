@@ -88,6 +88,17 @@ def zark_path() -> str:
     return str(Path(__file__).resolve().parent.parent / "zark")
 
 
+def _files(zark: str) -> tuple[tuple[str, str, int], ...]:
+    """(path relative to the root, content, mode) of what :func:`install`
+    writes: one table for the writer and for :func:`files_current`. The MOTD
+    script must be executable (run-parts skips it otherwise; M5a-23)."""
+    return (
+        (MOTD_SCRIPT_PATH, MOTD_SCRIPT, 0o755),
+        (SERVICE_PATH, service_unit(zark), 0o644),
+        (TIMER_PATH, TIMER_UNIT, 0o644),
+    )
+
+
 def _write(path: Path, text: str, mode: int) -> bool:
     """Write ``text`` unless it is already there; True when it changed."""
     try:
@@ -112,9 +123,9 @@ def install(log: Log, root: str = "/", zark: str = "") -> None:
         )
         return
     base = Path(root)
-    changed = _write(base / MOTD_SCRIPT_PATH, MOTD_SCRIPT, 0o755)
-    changed = _write(base / SERVICE_PATH, service_unit(zark), 0o644) or changed
-    changed = _write(base / TIMER_PATH, TIMER_UNIT, 0o644) or changed
+    changed = False
+    for rel, text, mode in _files(zark):
+        changed = _write(base / rel, text, mode) or changed
     if changed:
         _ = sh.run("systemctl daemon-reload", log=log)
     elif (
@@ -133,16 +144,14 @@ def install(log: Log, root: str = "/", zark: str = "") -> None:
 
 def files_current(root: str = "/", zark: str = "") -> bool:
     """True when the MOTD script, the service and the timer under ``root``
-    hold what :func:`install` writes for ``zark`` (M4c-10)."""
+    hold what :func:`install` writes for ``zark``, mode included (M4c-10,
+    M5a-23): a file :func:`install` would rewrite is not current."""
     zark = zark or zark_path()
     base = Path(root)
-    for rel, text in (
-        (MOTD_SCRIPT_PATH, MOTD_SCRIPT),
-        (SERVICE_PATH, service_unit(zark)),
-        (TIMER_PATH, TIMER_UNIT),
-    ):
+    for rel, text, mode in _files(zark):
         try:
-            if (base / rel).read_text(encoding="utf-8") != text:
+            path = base / rel
+            if path.read_text(encoding="utf-8") != text or path.stat().st_mode & 0o777 != mode:
                 return False
         except (OSError, UnicodeDecodeError):
             return False

@@ -10576,15 +10576,29 @@ class TestFinishChecks:  # pylint: disable=missing-function-docstring
         with tempfile.TemporaryDirectory() as td:
             assert not alerts_mod.files_current(td, "/opt/zark/zark")
             base = Path(td)
-            for rel, text in (
-                (alerts_mod.MOTD_SCRIPT_PATH, alerts_mod.MOTD_SCRIPT),
-                (alerts_mod.SERVICE_PATH, alerts_mod.service_unit("/opt/zark/zark")),
-                (alerts_mod.TIMER_PATH, alerts_mod.TIMER_UNIT),
+            for rel, text, mode in (
+                (alerts_mod.MOTD_SCRIPT_PATH, alerts_mod.MOTD_SCRIPT, 0o755),
+                (alerts_mod.SERVICE_PATH, alerts_mod.service_unit("/opt/zark/zark"), 0o644),
+                (alerts_mod.TIMER_PATH, alerts_mod.TIMER_UNIT, 0o644),
             ):
                 (base / rel).parent.mkdir(parents=True, exist_ok=True)
                 _ = (base / rel).write_text(text, encoding="utf-8")
+                (base / rel).chmod(mode)
             assert alerts_mod.files_current(td, "/opt/zark/zark")
             assert not alerts_mod.files_current(td, "/usr/share/zark/zark")
+
+    def test_alerts_files_current_checks_the_mode(self):
+        """M5a-23 (M4d plan 15 (12)): the right content with the wrong mode is
+        not current: run-parts skips a MOTD script that is not executable."""
+        with tempfile.TemporaryDirectory() as td:
+            mock = MockShell()
+            mock.on_prefix("systemctl").succeeds("")
+            with patch_sh(mock):
+                alerts_mod.install(make_log(), root=td, zark="/opt/zark/zark")
+            assert alerts_mod.files_current(td, "/opt/zark/zark")
+            motd = Path(td) / alerts_mod.MOTD_SCRIPT_PATH
+            motd.chmod(0o644)
+            assert not alerts_mod.files_current(td, "/opt/zark/zark")
 
     def test_reconfigure_that_restores_them_is_success(self):
         reason, _ = self._efi("/dev/sda1 vfat", {"grubx64.efi"}, {"grubx64.efi", "shimx64.efi"})
