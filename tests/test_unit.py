@@ -5351,6 +5351,54 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring,too-m
         result = self._cold_window([100.0, 0.0, 250.0])
         assert len(result.transport_errors) == 3 and not result.at_unplug
 
+    def test_a_disk_name_that_only_starts_like_the_disks_is_not_the_disk(self):
+        # M5a-17 (M4d plan 15 (6) b): "sda" was a substring of "sdaa".
+        mock = MockShell()
+        mock.on("dmesg").succeeds(
+            "[ 300.0] sd 1:0:0:0: [sdaa] Synchronize Cache(10) failed: hostbyte=DID_ERROR\n"
+            "[ 301.0] sd 0:0:0:0: [sda] Synchronize Cache(10) failed: hostbyte=DID_ERROR\n"
+            "[ 302.0] sd 0:0:0:0: sda1: DID_ERROR\n"
+        )
+        with patch_sh(mock):
+            errs = _transport_errors_since("sda", since_ts=100.0)
+        assert len(errs) == 2 and not any("sdaa" in e for e in errs), errs
+
+    def test_after_the_reconnect_the_lines_are_about_the_new_kernel_name(self):
+        # M5a-17 (M4d plan 15 (6) e): sdb came back as sdc; sdb is now another disk.
+        mock = MockShell()
+        mock.on_prefix("find /dev/disk/by-id/").succeeds("usb-Stick_SER-0:0\t../../sdb\n")
+        for cmd in ("zpool create", "dd", "sync", "zpool export", "eject", "drop_caches"):
+            mock.on(cmd).succeeds()
+        for cmd in ("zpool import", "zpool destroy", "rm -rf", "wipefs", "sgdisk", "rmdir"):
+            mock.on(cmd).succeeds()
+        mock.on("dmesg").succeeds(
+            "[ 120.0] sd 0:0:0:0: [sdb] Synchronize Cache(10) failed: hostbyte=DID_ERROR\n"
+            "[ 300.0] sd 0:0:0:0: [sdb] Synchronize Cache(10) failed: hostbyte=DID_ERROR\n"
+            "[ 310.0] sd 0:0:0:0: [sdc] Synchronize Cache(10) failed: hostbyte=DID_ERROR\n"
+        )  # the one at 300 is about the disk that has the old name now
+        by_id = "/dev/disk/by-id/usb-Stick_SER-0:0"
+        with (
+            patch_sh(mock),
+            patch("lib.health.Path.exists", side_effect=lambda p=None: True),
+            patch(
+                "lib.health.os.path.realpath", side_effect=lambda p: "/dev/sdc" if p == by_id else p
+            ),
+            patch("lib.health.time.sleep"),
+            patch.object(health_mod, "_dmesg_now_ts", side_effect=[100.0, 150.0, 250.0]),
+            redirect_stdout(StringIO()),
+        ):
+            result = run_destructive_test(
+                "/dev/sdb",
+                PROFILE_FAST,
+                True,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+                wait_for_reconnect=lambda: True,
+            )
+        assert len(result.transport_errors) == 2, result.transport_errors
+        assert "[sdb]" in result.transport_errors[0] and "[ 120.0]" in result.transport_errors[0]
+        assert "[sdc]" in result.transport_errors[1], result.transport_errors
+
     def test_transport_errors_ignores_clean_disconnect(self):
         """DID_NO_CONNECT (a clean unplug) must NOT be flagged as an error."""
         mock = MockShell()
