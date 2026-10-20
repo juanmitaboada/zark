@@ -112,14 +112,14 @@ check: ## Syntax-check all Python files (fast, no dependencies)
 	$(PYTHON) -m py_compile zark
 	@echo "  All files OK"
 
-mypy: ## Type-check with mypy (strict - fails on any error)
+mypy: ## Type-check with the mypy in PATH (strict); fulltest uses the pinned one (tox -e lint)
 	@command -v mypy >/dev/null || { \
 		echo "  mypy not installed. Install with: pip install mypy --break-system-packages"; \
 		exit 1; \
 	}
 	mypy .
 
-pylint: ## Run pylint on the whole project
+pylint: ## Run the pylint in PATH; fulltest uses the pinned one (tox -e lint)
 	@command -v pylint >/dev/null || { \
 		echo "  pylint not installed. Install with: pip install pylint --break-system-packages"; \
 		exit 1; \
@@ -152,7 +152,7 @@ format: ## Reformat and auto-fix the whole project with ruff (rewrites files)
 	ruff check --fix lib commands tests zark
 	ruff format lib commands tests zark
 
-basedpyright: ## Run basedpyright (strict type checking, beyond mypy)
+basedpyright: ## Run the basedpyright in PATH (strict); fulltest uses the pinned one (tox -e types)
 	@# Configured in pyproject.toml under [tool.pyright]: basedpyright's
 	@# own strict preset is mostly noise on this codebase, so the noisy
 	@# rule families are switched off there and what remains is signal.
@@ -442,7 +442,7 @@ dist-check: ## Validate the dist tarball: no debian/ inside, dpkg-source -b succ
 		fi
 	@echo "  OK: dpkg-source -b . succeeds"
 
-fulltest: check tox-ruff mypy pylint basedpyright test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
+fulltest: check tox-ruff test manpage-lint dist-check tox deb ## Everything safe to commit (no install, no sign, no QEMU)
 	@# fulltest is the "before-commit" gate. Make's default fail-fast
 	@# behaviour gives us free short-circuit semantics: the moment any
 	@# dependency fails, the rest is skipped.
@@ -452,14 +452,15 @@ fulltest: check tox-ruff mypy pylint basedpyright test manpage-lint dist-check t
 	@#   tox-ruff     - tox -e ruff: the pinned ruff of pyproject.toml,
 	@#                  full ruleset incl. RUF027 and the format check;
 	@#                  never the ruff in PATH (M4c-2)
-	@#   mypy        - ~10-15s (cold) / ~2-3s (warm)
-	@#   basedpyright - ~4s
-	@#   pylint      - ~15-20s
 	@#   test        - 94 unit tests, ~1-2s
 	@#   manpage-lint - pandoc + sed + awk + mandoc + groff, ~1s
 	@#   dist-check  - make dist + dpkg-source -b, ~3-5s
-	@#   tox         - tests on python3.12/3.13/3.14 + lint + types in
-	@#                 venvs, ~40-70s
+	@#   tox         - tests on python3.12/3.13/3.14 + lint (mypy, pylint,
+	@#                 ruff) + types (basedpyright) in venvs with the
+	@#                 PINNED versions, ~40-70s. The standalone mypy,
+	@#                 pylint and basedpyright targets run the ones in PATH
+	@#                 and are not part of fulltest (M5a-25): a different
+	@#                 version in PATH made the same check fail twice.
 	@#                 (tox-uv downloads any missing interpreter; see the
 	@#                  `tox` target and tox.ini)
 	@#   deb         - full debuild -b (binary .deb), ~10-15s

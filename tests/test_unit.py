@@ -6365,6 +6365,26 @@ class TestReleaseGuard:  # pylint: disable=missing-function-docstring
         assert rc != 0 and "top entry is UNRELEASED" in out, out
 
 
+class TestFulltestTargets:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M5a-25: fulltest runs the lint and the types once, with the pinned tools."""
+
+    def test_fulltest_leaves_the_tools_in_path_to_tox(self):
+        root = Path(__file__).resolve().parent.parent
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        r = subprocess.run(
+            ["make", "--no-print-directory", "-pn", "fulltest"],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        line = next(ln for ln in r.stdout.splitlines() if ln.startswith("fulltest:"))
+        needs = line.split(":", 1)[1].split("##")[0].split()
+        assert "tox" in needs and "tox-ruff" in needs and "test" in needs, needs
+        assert not {"mypy", "pylint", "basedpyright"} & set(needs), needs
+
+
 class TestChrootEsp:  # pylint: disable=missing-function-docstring
     """M5a-19 (M4d plan 15 (8)): the chroot mounts the ESP of rpool's disk."""
 
