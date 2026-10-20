@@ -48,7 +48,7 @@ from lib.replication import (
     is_archived,
     is_bpool,
 )
-from lib.restore_points import COMPLETE_PROP, Snap
+from lib.restore_points import COMPLETE_PROP, Snap, complete_points
 from lib.survey import ReadError, checked, read_origin
 
 REPLICATE = "org.zark:replicate"
@@ -292,6 +292,28 @@ def read_point_mark(pool: str, point: str, snaps: list[Snap]) -> PointMark | Non
             f"the snapshots of {point} disagree on what it left out, or it is unreadable"
         )
     return parsed
+
+
+def held_lines(pool: str) -> list[str]:
+    """For ``zark mount`` (M5b-13b): one line per subtree the drive's newest
+    complete point left out while the drive still holds a copy of it. Best
+    effort: a drive that cannot be read, or written before rc10, gives none."""
+    try:
+        snaps = drive_snapshots(pool, strict=True)
+        newest = max(complete_points(snaps, ""), default="")
+        mark = read_point_mark(pool, newest, snaps) if newest else None
+    except (ReadError, ValueError):
+        return []
+    lines: list[str] = []
+    for top in sorted(mark.tops if mark else {}):
+        copies = [s for s in snaps if s.stored == top]
+        if copies:
+            last = max(copies, key=lambda s: s.createtxg)
+            lines.append(
+                f"{top}: excluded from backups at {newest}; "
+                + f"this drive's last copy of it is {last.name}"
+            )
+    return lines
 
 
 def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:

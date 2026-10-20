@@ -15,7 +15,8 @@
 zark status - how full the source pools are and how old each drive's
 backup is (M3 decisions 12 and 13). Read-only.
 
-  zark status                     the report
+  zark status                     the report, with what is excluded from
+                                  backups (zark exclude)
   zark status --refresh           write the MOTD file (/run/zark/status.motd)
   zark status --refresh --notify  also a desktop notification for a pool at
                                   a warning or critical level, at most once
@@ -26,9 +27,11 @@ backup is (M3 decisions 12 and 13). Read-only.
 import os
 from datetime import UTC, datetime
 
-from lib import notify, status
-from lib.config import Config
+from commands.setup import sanoid_conf_gap
+from lib import exclusions, notify, status, survey
+from lib.config import Config, zark_command
 from lib.log import Log
+from lib.zfs import ZFS
 
 
 def _report(st: status.Status, log: Log) -> None:
@@ -52,6 +55,30 @@ def _report(st: status.Status, log: Log) -> None:
         log.warn(st.read_error)
     if st.residues:
         log.info(status.residue_line(st.residues))
+
+
+def _exclusions(log: Log) -> None:
+    """One line when anything is excluded from backups, and the sanoid.conf
+    line when setup's split of the drained subtrees is missing (M5b-13b).
+    No line per drive: the registry does not know what each one holds."""
+    pools = survey.source_pools()
+    if "rpool" not in pools:
+        return
+    try:
+        origin = survey.read_origin(pools, strict=True)
+        declared = exclusions.read(pools, origin, strict=True)
+    except survey.ReadError as e:
+        log.warn(f"Cannot read what is excluded from backups: {e}")
+        return
+    left_out = [rel for top in declared.no_backup for rel in exclusions.subtree(top, origin)]
+    if left_out:
+        log.info(
+            f"Excluded from backups: {len(left_out)} dataset(s) ({zark_command()} exclude list)"
+        )
+    if declared.no_snapshot and (gap := sanoid_conf_gap(ZFS(log))):
+        log.warn(f"sanoid.conf does not keep the exclusions ({gap}): run {zark_command()} setup")
+    for rel, why in declared.ignored:
+        log.warn(f"Exclusion ignored on {rel}: {why}")
 
 
 def _notify(st: status.Status) -> None:
@@ -88,3 +115,4 @@ def run(args: list[str]) -> None:
     log.banner("STATUS", "Source pools and backup drives")
     st = status.refresh(cfg, log)
     _report(st, log)
+    _exclusions(log)

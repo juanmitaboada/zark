@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import drive_marks, sh, zfs_features
+from lib import drive_marks, exclusions, sh, zfs_features
 from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
 from lib.cleanup import Cleanup
 from lib.config import Config, zark_command
@@ -380,6 +380,8 @@ def run(
             solutions=[f"Check: zfs get mountpoint,canmount -r {pool_name}/rpool"],
         )
 
+    for line in exclusions.held_lines(pool_name):
+        log.info(line)
     _show_result(log, pool_name, mnt_point, readonly, mounted, archived)
 
     # Leave mounted for the user

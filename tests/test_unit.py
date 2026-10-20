@@ -15419,6 +15419,25 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         last = [c for c in sends if f"rpool/var/lib/docker@{point}" in c]
         assert last and all(" -i " in c or " -I " in c for c in last), last
 
+    def test_mount_and_status_name_what_is_excluded(self) -> None:
+        """M5b-13b: mount names the drive's last copy of a held excluded
+        subtree; status counts what is excluded, with no line per drive."""
+        fake = self._held_excluded()
+        _, rc = self._run(fake)
+        assert rc == 0
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            lines = excl.held_lines("backup")
+            status_mod._exclusions(Log())  # pylint: disable=protected-access
+        last = fake.names("backup/rpool/var/lib/docker")[-1]
+        assert lines == [
+            f"rpool/var/lib/docker: excluded from backups at {point}; "
+            + f"this drive's last copy of it is {last}"
+        ], lines
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert "Excluded from backups: 1 dataset(s)" in text, text
+
     def test_prune_offers_the_drive_copy_of_an_excluded_subtree(self) -> None:
         """M5b-10 10a: zark prune lists it, kept or not, and destroys it on PRUNE."""
         fake = self._held_excluded()
