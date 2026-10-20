@@ -55,6 +55,7 @@ from lib.anchors import POINT_FOR, anchor_point, point_owners, release_point
 from lib.cleanup import Cleanup
 from lib.log import Log
 from lib.replication import (
+    EXCLUDED_KEPT_PROP,
     POINT_RE,
     STRUCTURAL,
     TRANSFERABLE,
@@ -403,6 +404,23 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 self.log.info(f"  {rel}: back in origin, no longer kept as an orphan")
             else:
                 self.log.warn(f"  {rel}: could not clear {ORPHAN}: {r.stderr.strip()}")
+        return cleared
+
+    def clear_excluded_kept(self) -> list[str]:
+        """Drop the "kept" mark of a drive's copy once its dataset is
+        included again (M5b-11 11a); return them. Left marked, a later
+        exclusion would keep it without asking."""
+        cleared: list[str] = []
+        for rel, d in sorted(self.dest.items()):
+            if not d.excluded_kept or is_excluded(rel, self.exclusions):
+                continue
+            r = sh.run(f"zfs inherit {EXCLUDED_KEPT_PROP} {_q(self._dst(rel))}", log=self.log)
+            if r.ok:
+                d.excluded_kept = ""
+                cleared.append(rel)
+                self.log.info(f"  {rel}: included in backups again, no longer kept as excluded")
+            else:
+                self.log.warn(f"  {rel}: could not clear {EXCLUDED_KEPT_PROP}: {r.stderr.strip()}")
         return cleared
 
     def follow_rename(self, p: DatasetPlan) -> bool:
@@ -856,6 +874,7 @@ def _transfer(run: Run, res: Result) -> None:
     """Every transfer round; ``res.plans`` holds the latest survey."""
     res.plans = run.survey()
     _ = run.clear_orphan_marks()
+    _ = run.clear_excluded_kept()
     for rel in run.ensure_containers():
         run.log.error(f"  {rel}: could not create the container on the backup")
     for _ in range(MAX_ROUNDS):

@@ -153,8 +153,22 @@ def _add(dataset: str, what: str, log: Log) -> None:
         _sanoid(log)
 
 
+def _next_backups(dataset: str, origin: dict[str, Origin], log: Log) -> None:
+    """What each registered drive's next backup does with ``dataset``, from
+    the anchors origin holds, without importing a drive (M5b-11 11a)."""
+    anchored = {anchor_disk(b.name) for b in origin[dataset].bookmarks} - {""}
+    for name, info in sorted(Config.load().known_drives.items()):
+        if info.guid in anchored:
+            log.info(f"  {name}: an incremental if it still holds {dataset}, else in full")
+        else:
+            log.info(
+                f"  {name}: in full (no anchor of it for this drive; if it holds an older "
+                + "copy, its next backup asks what to do with it)"
+            )
+
+
 def _remove(dataset: str, what: str, log: Log) -> None:
-    _origin, declared = _read(log)
+    origin, declared = _read(log)
     ex = declared.tops.get(dataset)
     wanted = [p for p in _PROPS[what] if ex and (ex.replicate if p == REPLICATE else ex.snapshot)]
     if not wanted:
@@ -174,10 +188,8 @@ def _remove(dataset: str, what: str, log: Log) -> None:
             log.fatal(f"Could not clear {prop} on {dataset}: {r.stderr.strip()}")
     log.ok(f"{dataset} included again ({what})")
     if REPLICATE in wanted:
-        log.info(
-            "The next backup to a drive that kept its copy continues from it; "
-            + "a drive without one gets it in full."
-        )
+        log.info("The next backup to each drive:")
+        _next_backups(dataset, origin, log)
     if SNAPSHOT in wanted:
         _sanoid(log)
 

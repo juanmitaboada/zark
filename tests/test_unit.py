@@ -6684,6 +6684,16 @@ class TestExcludeCommand:  # pylint: disable=missing-function-docstring
         out, rc, _ = self._run(fake, ["remove", "rpool/var", "backups"])
         assert rc == 0 and "org.zark:replicate" not in fake.ds["rpool/var"].props, out
 
+    def test_remove_says_what_each_drives_next_backup_does(self):
+        fake = _fresh_fake()
+        fake.ds["rpool/var"].props["org.zark:replicate"] = "no"
+        out, rc, _ = self._run(fake, ["remove", "rpool/var", "backups"])
+        assert rc == 0 and "  blue: in full (no anchor of it for this drive" in out, out
+        fake.ds["rpool/var"].props["org.zark:replicate"] = "no"
+        fake.ds["rpool/var"].bookmarks.append(FSnap(repl.anchor_name("999", P1), "7", 1, 1))
+        out, rc, _ = self._run(fake, ["remove", "rpool/var", "backups"])
+        assert rc == 0 and "  blue: an incremental if it still holds rpool/var, else" in out, out
+
     def test_a_usage_error_exits_2(self):
         for args in (["add", "rpool/var"], ["add", "rpool/var", "all"], ["drop", "x", "both"]):
             _, rc, _ = self._run(_fresh_fake(), args)
@@ -15288,6 +15298,25 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         with patch_sh(fake):
             # recover's list (M4c-16): the point is still complete, not PARTLY REMOVED.
             assert first in complete_points(drive_marks.drive_snapshots("backup"), "")
+
+    def test_included_again_the_kept_copy_continues_and_loses_its_mark(self) -> None:
+        """M5b-11 11a: an incremental from the drive's copy, and the mark
+        that kept it is cleared on that run."""
+        fake = self._held_excluded()
+        _, rc = self._run(fake)  # kept, the default
+        assert rc == 0 and excl.KEPT in fake.ds["backup/rpool/var/lib/docker"].props
+        del fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"]
+        out = StringIO()
+        _, rc = self._run(fake, redirect_stdout(out))
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert excl.KEPT not in fake.ds["backup/rpool/var/lib/docker"].props
+        assert "rpool/var/lib/docker: included in backups again" in text
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        assert fake.names("backup/rpool/var/lib/docker")[-1] == point
+        sends = [c for c in fake.calls if c.startswith("zfs send ") and " | " in c]
+        last = [c for c in sends if f"rpool/var/lib/docker@{point}" in c]
+        assert last and all(" -i " in c or " -I " in c for c in last), last
 
     def test_prune_offers_the_drive_copy_of_an_excluded_subtree(self) -> None:
         """M5b-10 10a: zark prune lists it, kept or not, and destroys it on PRUNE."""
