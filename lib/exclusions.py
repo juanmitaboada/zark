@@ -36,6 +36,7 @@ import shlex
 from dataclasses import dataclass, field
 
 from lib import sh
+from lib.log import Log
 from lib.replication import (
     EXCLUDED_KEPT_PROP,
     KEYSTORE,
@@ -44,7 +45,7 @@ from lib.replication import (
     is_archived,
     is_bpool,
 )
-from lib.survey import checked
+from lib.survey import ReadError, checked, read_origin
 
 REPLICATE = "org.zark:replicate"
 SNAPSHOT = "org.zark:snapshot"
@@ -261,3 +262,43 @@ def parse_point_mark(value: str) -> PointMark | None:
         if isinstance(rel, str) and isinstance(props, list) and len(props) == 2:
             out.datasets[rel] = (str(props[0]), str(props[1]))
     return out
+
+
+def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:
+    """What a backup or prepare leaves out, and the mark its point will carry
+    on the drive, read before the point is taken (D10: checked at every run).
+
+    A value zark ignores is reported. A mark that would not fit in a user
+    property stops the run before anything is written: recover could not
+    recreate what the point leaves out (M5b-7 7a)."""
+    try:
+        origin = read_origin(pools, strict=True)
+        declared = read(pools, origin, strict=True)
+    except ReadError as e:
+        log.fatal(f"Cannot read what is excluded from backups: {e}")
+    for rel, why in declared.ignored:
+        log.warn(f"Exclusion ignored on {rel}: {why}")
+    mark = point_mark(declared, origin)
+    if len(mark) > MARK_LIMIT:
+        log.fatal(
+            f"Too many datasets excluded to record them on the drive ({len(mark)} bytes, "
+            + f"at most {MARK_LIMIT})",
+            causes=["recover reads what a point left out from the drive, to recreate it"],
+            solutions=["Exclude fewer, larger subtrees: zark exclude list"],
+        )
+    return declared, mark
+
+
+def record(pool: str, point: str, rels: list[str], mark: str, log: Log) -> bool:
+    """Set the point's mark on its snapshots on the drive, complete run or not
+    (M5b-7 7a): a user property, nothing mounts."""
+    if not rels:
+        return True
+    names = " ".join(_q(f"{pool}/{rel}@{point}") for rel in rels)
+    r = sh.run(f"zfs set {_q(f'{POINT_MARK}={mark}')} {names}", log=log)
+    if not r.ok:
+        log.warn(
+            f"Could not record what {point} leaves out on {pool}: {r.stderr.strip()} "
+            + "(recover restores that point as if nothing were excluded)"
+        )
+    return r.ok

@@ -33,11 +33,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
+from commands.setup import sanoid_conf_gap
 from lib import (
     anchors,
     certificates,
     drive_marks,
     engine,
+    exclusions,
     forensics,
     notify,
     reclaim,
@@ -215,7 +217,9 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
     policy = policy or Policy()
     log.info("Plan: " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items())))
     for p in plans:
-        if p.state is State.EXCLUDED:
+        if p.state is State.EXCLUDED and p.declared:
+            log.info(f"  {p.rel}: excluded from backups ({_gib(p.used)})")
+        elif p.state is State.EXCLUDED:
             log.warn(f"  {p.rel}: NOT BACKED UP ({p.note})")
         elif p.state is State.VIA_BOOKMARK:
             log.info(f"  {p.rel}: from this drive's bookmark")
@@ -1004,7 +1008,17 @@ def run(
     log.step(6, TOTAL_STEPS, "Taking the backup point and planning every dataset...")
     if not opts.take_snapshots:
         log.info("--no-snapshot has no effect: the backup point is taken by zark itself")
-    eng = engine.Run(pool_name, pool_guid, log, point_name(datetime.now(UTC)))
+    declared, excluded_mark = exclusions.for_run(survey.source_pools(), log)
+    if declared.no_snapshot and (gap := sanoid_conf_gap(zfs)):
+        # sanoid.conf must keep the excluded subtrees out of its recursive rules (M5b-6).
+        log.warn(f"sanoid.conf is not setup's policy here ({gap}): run {zark_command()} setup")
+    eng = engine.Run(
+        pool_name,
+        pool_guid,
+        log,
+        point_name(datetime.now(UTC)),
+        exclusions=declared.no_backup,
+    )
     _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
     log.info(f"Tip: run '{zark_command()} monitor' in another terminal for progress")
 
@@ -1019,6 +1033,14 @@ def run(
         log.fatal(f"Backup not started: {res.error or 'aborted'}")
 
     _show_table(res, eng.point, log)
+    # What the point leaves out, on whatever of it reached the drive (M5b-7).
+    _ = exclusions.record(
+        pool_name,
+        eng.point,
+        [p.rel for p in res.plans if p.state is State.AT_POINT],
+        excluded_mark,
+        log,
+    )
     used_after = zfs.pool_info(pool_name)  # P0-4: after the transfer
     pruned = (0, 0)
     shared: dict[str, list[Ref]] | None = None
@@ -1089,7 +1111,8 @@ def run(
         except OSError as e:
             log.warn(f"Could not persist last_backup_at for {pool_name}: {e}")
 
-    not_backed_up = [p for p in res.plans if p.state is State.EXCLUDED]
+    not_backed_up = [p for p in res.plans if p.state is State.EXCLUDED and not p.declared]
+    left_out = [p for p in res.plans if p.state is State.EXCLUDED and p.declared]
     log.banner_ok(
         "BACKUP COMPLETED",
         [
@@ -1110,6 +1133,13 @@ def run(
                 else []
             ),
             *[f"{log.Y}  {p.rel} ({p.note}){log.N}" for p in not_backed_up],
+            # D12: what the user excluded, with what a first full send would carry.
+            *(
+                [f"Excluded:       {len(left_out)} dataset subtree(s), by zark exclude:"]
+                if left_out
+                else []
+            ),
+            *[f"  {p.rel} ({_gib(p.used)}, {declared.flags_of(p.rel)})" for p in left_out],
         ],
     )
     origin: dict[str, Origin] = {}

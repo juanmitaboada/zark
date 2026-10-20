@@ -15183,6 +15183,54 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         banner = text[text.index("BACKUP COMPLETED") :]
         assert f"Available:      {backup_mod._gib(80 << 30)}" in banner, banner  # pylint: disable=protected-access
 
+    def test_an_excluded_subtree_is_left_out_listed_and_recorded_on_the_drive(self) -> None:
+        """D8, D9, D12 (M5b-7, M5b-12): not sent, COMPLETED without it, listed
+        with its size in the banner, and the point's snapshots say so."""
+        fake = _fresh_fake()
+        fake.ds["rpool/var/lib/docker"].props |= {"org.zark:replicate": "no", "referenced": "5000"}
+        fake.ds["rpool/ROOT/be"].props["org.zark:replicate"] = "no"  # never excluded (D10)
+        out = StringIO()
+        _, rc = self._run(fake, redirect_stdout(out))
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert "backup/rpool/var/lib/docker" not in fake.ds
+        assert "Exclusion ignored on rpool/ROOT/be: a boot environment is never excluded" in text
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        assert any(s.name == point for s in fake.ds["backup/rpool/ROOT/be"].snaps)
+        banner = text[text.index("BACKUP COMPLETED") :]
+        assert "Excluded:       1 dataset subtree(s), by zark exclude:" in banner, banner
+        assert f"rpool/var/lib/docker ({backup_mod._gib(5000)}, backups)" in banner  # pylint: disable=protected-access
+        mark = next(
+            s.props["org.zark:excluded"]
+            for s in fake.ds["backup/rpool/var"].snaps
+            if s.name == point
+        )
+        parsed = excl.parse_point_mark(mark)
+        assert parsed is not None and parsed.tops == {"rpool/var/lib/docker": "backups"}
+        assert parsed.datasets["rpool/var/lib/docker"] == ("on", "/var/lib/docker")
+
+    def test_without_exclusions_the_point_still_records_none(self) -> None:
+        """A drive written by rc10 reads differently from an older one (M5b-7)."""
+        fake = _fresh_fake()
+        _, rc = self._run(fake)
+        assert rc == 0
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        snap = next(s for s in fake.ds["backup/rpool/ROOT/be"].snaps if s.name == point)
+        parsed = excl.parse_point_mark(snap.props["org.zark:excluded"])
+        assert parsed is not None and not parsed.tops and not parsed.datasets
+
+    def test_a_mark_too_long_for_the_drive_stops_before_the_point(self) -> None:
+        """M5b-7: recover could not recreate what the point leaves out."""
+        fake = _fresh_fake()
+        for i in range(120):
+            fake.dataset(f"rpool/many/d{i:03}_{'x' * 40}", canmount="on", mountpoint=f"/m/{i}")
+        fake.dataset("rpool/many", canmount="on", mountpoint="/many")
+        fake.ds["rpool/many"].props["org.zark:replicate"] = "no"
+        out = StringIO()
+        _, rc = self._run(fake, redirect_stdout(out))
+        assert rc == 1 and "Too many datasets excluded to record them" in out.getvalue()
+        assert fake.was_not_called("zfs snapshot")
+
     def test_the_completed_notification_comes_before_the_eject_question(self) -> None:
         """M4dF-3: the eject question waits for the user; the notification
         that the backup is done goes out before it, not after the answer."""

@@ -26,7 +26,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import anchors, drive_marks, engine, registry, sh, survey
+from lib import anchors, drive_marks, engine, exclusions, registry, sh, survey
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso, zark_command
 from lib.drives import record_backup, validate_external_block_device
@@ -186,7 +186,14 @@ def run(
     rpool_used = sh.run("zfs list -H -o used rpool").output
     log.info(f"~{rpool_used} to transfer")
     new_guid = zfs.pool_guid(new_pool)
-    eng = engine.Run(new_pool, new_guid, log, point_name(datetime.now(UTC)))
+    declared, excluded_mark = exclusions.for_run(survey.source_pools(), log)
+    eng = engine.Run(
+        new_pool,
+        new_guid,
+        log,
+        point_name(datetime.now(UTC)),
+        exclusions=declared.no_backup,
+    )
 
     def decide(plans: list[DatasetPlan], _eng: engine.Run) -> bool:
         return all(p.state in (State.NEW, State.EXCLUDED) for p in plans)
@@ -195,13 +202,16 @@ def run(
     if res.aborted:
         log.fatal(f"Initial send not started: {res.error or 'the new pool is not empty'}")
     for p in res.plans:
-        if p.state is not State.AT_POINT:
+        if p.state is State.EXCLUDED and p.declared:
+            log.info(f"  {p.rel}: excluded from backups ({sh.humanize_bytes(p.used)})")
+        elif p.state is not State.AT_POINT:
             out = res.outcomes.get(p.rel)
             log.warn(f"  {p.rel}: {p.note or (out.error if out else p.state)}")
 
     shared: dict[str, list[Ref]] | None = None
+    at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
+    _ = exclusions.record(new_pool, eng.point, at_point, excluded_mark, log)
     if res.ok:
-        at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
         _ = drive_marks.record_complete(new_pool, eng.point, at_point, log)
         shared = eng.shared_with_origin()  # a full send carries only the point: empty lists
     prepared_at = now_utc_iso()
