@@ -2244,8 +2244,29 @@ class TestSimulatePrompts:  # pylint: disable=missing-function-docstring
         with patch("builtins.input", return_value="/dev/sdb"), redirect_stdout(StringIO()):
             sim._confirm_rw_or_abort("/dev/sdb", make_log())  # pylint: disable=protected-access
 
-    def test_eof_at_the_qemu_prompt_takes_its_default(self):
-        # Today's behaviour: the [Y/n] default, as log.ask(default=True) would.
+    def test_eof_at_the_qemu_prompt_does_not_install(self):
+        # M5a-13: EOF used to answer yes and install packages with nobody there.
+        import commands.simulate as sim  # pylint: disable=import-outside-toplevel
+
+        mock = MockShell()
+        mock.on("which qemu-system-x86_64").fails()
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch("builtins.input", side_effect=EOFError),
+            patch.object(sim, "_install_deps") as deps,
+            redirect_stdout(out),
+        ):
+            try:
+                sim.run([])
+            except SystemExit as e:
+                assert e.code == 1
+            else:
+                raise AssertionError("simulate went on without QEMU")
+        assert not deps.called
+        assert "QEMU is required for simulate" in out.getvalue()
+
+    def test_enter_at_the_qemu_prompt_installs(self):
         import commands.simulate as sim  # pylint: disable=import-outside-toplevel
 
         class Stop(Exception):
@@ -2255,7 +2276,7 @@ class TestSimulatePrompts:  # pylint: disable=missing-function-docstring
         mock.on("which qemu-system-x86_64").fails()
         with (
             patch_sh(mock),
-            patch("builtins.input", side_effect=EOFError),
+            patch("builtins.input", return_value=""),
             patch.object(sim, "_install_deps", side_effect=Stop) as deps,
             redirect_stdout(StringIO()),
         ):
@@ -3161,7 +3182,7 @@ class TestMockShell:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             _sh.run("zpool export backup")
         assert mock.was_called("zpool export backup")
-        assert mock.was_not_called("zpool import")
+        assert mock.was_not_called("zpool import -o readonly=on")  # the verification import
 
     def test_call_count(self):
         mock = MockShell()
@@ -5037,19 +5058,20 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
         assert "Kernel errors at the unplug, not counted (1): the pool was exported" in out
         assert f"  {line}" in out
 
-    def test_eof_at_the_reconnect_pause_raises_nothing(self):
-        # R2-14: the cold test's pause reads stdin; EOF there goes on (today's
-        # behaviour) and raises nothing out of the command.
+    def test_eof_at_the_reconnect_pause_is_not_a_reconnect(self):
+        # R2-14, M5a-13: the cold test's pause reads stdin; EOF there is
+        # nobody having reconnected (the test used to go on as if they had).
+        # The command raises nothing.
         mock = MockShell()
         mock.on_prefix("lsblk -no NAME /dev/sdb").succeeds("")
         mock.on("blkid /dev/sdb").succeeds("")
-        reached: list[bool] = []
+        answers: list[bool] = []
 
-        def destructive(*_a: object, wait_for_reconnect: Callable[[], None], **_k: object):
-            wait_for_reconnect()
-            reached.append(True)
-            return HealthResult("fast", True, 1, 0.0, True, "ONLINE")
+        def destructive(*_a: object, wait_for_reconnect: Callable[[], bool], **_k: object):
+            answers.append(wait_for_reconnect())
+            return HealthResult("fast", True, 1, 0.0, False, "the reconnect was not confirmed")
 
+        out = StringIO()
         with (
             patch_sh(mock),
             patch.object(health_cmd, "_select_device", return_value="/dev/sdb"),
@@ -5063,10 +5085,52 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
             patch.object(Log, "ask_choice", side_effect=[1, 0]),  # destructive, fast
             patch.object(Log, "ask", side_effect=[False, True, True]),  # obfuscate, go, cold
             patch("builtins.input", side_effect=EOFError),
-            redirect_stdout(StringIO()),
+            redirect_stdout(out),
         ):
-            health_cmd.run([])
-        assert reached == [True]
+            try:
+                health_cmd.run([])
+            except SystemExit:
+                pass
+        assert answers == [False]
+
+    def test_a_yes_no_question_can_decline_at_eof(self):
+        # M5a-13: Enter takes the default, a closed terminal the on_eof answer.
+        with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
+            assert make_log().ask("Install?", default=True, on_eof=False)
+        with patch("builtins.input", side_effect=EOFError), redirect_stdout(StringIO()):
+            assert not make_log().ask("Install?", default=True, on_eof=False)
+            assert make_log().ask("Install?", default=True)  # unchanged without on_eof
+
+    def test_enter_at_the_reconnect_pause_goes_on(self):
+        with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
+            assert make_log().ask_enter("    Press Enter once reconnected... ")
+        with patch("builtins.input", side_effect=EOFError), redirect_stdout(StringIO()):
+            assert not make_log().ask_enter("    Press Enter once reconnected... ")
+
+    def test_a_cold_test_whose_reconnect_is_not_confirmed_fails_before_the_import(self):
+        mock = MockShell()
+        mock.on_prefix("find /dev/disk/by-id/").succeeds("usb-Stick_SER-0:0\t../../sda\n")
+        for cmd in (
+            "zpool create",
+            "dd",
+            "sync",
+            "zpool export",
+            "eject",
+            "zpool destroy",
+            "rm -rf",
+        ):
+            mock.on(cmd).succeeds()
+        with patch_sh(mock), exists_only("/dev/disk/by-id/"):
+            result = run_destructive_test(
+                "/dev/sda",
+                PROFILE_FAST,
+                True,
+                make_log(),
+                zfs=_FakeHealthZFS(),
+                wait_for_reconnect=lambda: False,
+            )
+        assert not result.passed and "not confirmed" in result.detail, result
+        assert mock.was_not_called("zpool import -o readonly=on")  # the verification import
 
     def test_imported_clean_pool_is_ok(self):
         mock = MockShell()
@@ -5151,8 +5215,9 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
     def test_destructive_cold_waits_for_reconnect(self):
         called = {"reconnect": False, "eject": False}
 
-        def _wait():
+        def _wait() -> bool:
             called["reconnect"] = True
+            return True
 
         mock = MockShell()
         mock.on_prefix("find /dev/disk/by-id/").succeeds("usb-Stick_SER-0:0\t../../sda\n")
@@ -5268,7 +5333,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
                 True,
                 make_log(),
                 zfs=_FakeHealthZFS(),
-                wait_for_reconnect=lambda: None,
+                wait_for_reconnect=lambda: True,
             )
 
     def test_errors_at_the_unplug_are_listed_apart(self):
@@ -5349,7 +5414,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
                 True,
                 make_log(),
                 zfs=_FakeHealthZFS(),
-                wait_for_reconnect=lambda: None,
+                wait_for_reconnect=lambda: True,
             )
 
     def test_cold_wipe_follows_the_disk_not_its_old_name(self):
@@ -5456,7 +5521,7 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
                 True,
                 make_log(),
                 zfs=_FakeHealthZFS(),
-                wait_for_reconnect=lambda: None,
+                wait_for_reconnect=lambda: True,
             )
         assert "did not reappear" not in result.detail, result
         assert any("readonly=on" in c for c in mock.calls), mock.calls
@@ -6959,7 +7024,7 @@ class TestImportBackupPool:  # pylint: disable=missing-function-docstring
         mock.on("zpool list backup").fails()
         with patch_sh(mock), redirect_stdout(StringIO()):
             assert not ZFS(make_log()).import_backup_pool("backup", None)
-        assert mock.was_not_called("zpool import")
+        assert mock.was_not_called("zpool import -o readonly=on")  # the verification import
 
     def test_refuses_pool_already_imported_without_altroot(self):
         mock = MockShell()
@@ -7291,7 +7356,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         ident = _purge_ident(PoolLabel("rpool", "99"))
         with patch("lib.log.Log.ask", return_value=True):
             self._run(cfg_dir, ident, mock)
-        assert mock.was_not_called("zpool import")
+        assert mock.was_not_called("zpool import -o readonly=on")  # the verification import
         assert mock.was_not_called("zpool destroy")
         assert mock.was_called("wipefs -a /dev/sdb")
 

@@ -544,7 +544,7 @@ def run_destructive_test(
     log: Log,
     *,
     zfs,  # lib.zfs.ZFS - typed loosely to avoid an import cycle
-    wait_for_reconnect=None,  # callable() invoked at the cold-reconnect pause
+    wait_for_reconnect=None,  # callable() -> bool at the cold-reconnect pause; False: not confirmed
     write_mb_s: float = 0.0,
 ) -> TestResult:
     """Create a throwaway pool, write with churn, and verify re-import.
@@ -620,8 +620,18 @@ def run_destructive_test(
             before_eject = _dmesg_now_ts()
             log.info("Powering the device down (eject)...")
             run(f"eject /dev/{base}", log=log)
-            if wait_for_reconnect is not None:
-                wait_for_reconnect()  # blocks until operator reconnects
+            if wait_for_reconnect is not None and not wait_for_reconnect():
+                # Blocks until the operator reconnects; False is a closed
+                # stdin, where nobody did (M5a-13).
+                return TestResult(
+                    profile,
+                    cold,
+                    bytes_written,
+                    write_mb_s,
+                    False,
+                    "the reconnect was not confirmed (stdin closed at the pause)",
+                    _transport_errors_since(base, dmesg_mark, unplug),
+                )
             # The kernel announces the disk, then each partition, and udev
             # makes each by-id link from that device's own event (block/
             # genhd.c disk_uevent; 60-persistent-storage.rules). settle waits

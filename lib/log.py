@@ -354,18 +354,38 @@ class Log:
 
     # ── Interactive ──────────────────────────────────────────────────────
 
-    def ask(self, question: str, default: bool = False) -> bool:
-        """Yes/no question. Returns bool."""
+    def ask(self, question: str, default: bool = False, *, on_eof: bool | None = None) -> bool:
+        """Yes/no question. Returns bool.
+
+        At EOF (a closed terminal) the answer is ``on_eof`` when given, else
+        ``default``: a question whose default is an action that changes the
+        system passes ``on_eof=False``, since nobody pressed Enter.
+        """
         prompt = "[Y/n]" if default else "[y/N]"
         self._show(self._box(f"{self.Y}?{self.N} {question}"), after=False)
+        eof = False
         try:
             answer = input(f"    {prompt}: ").strip().lower()
         except EOFError:
-            answer = ""
-        result = default if not answer else answer.startswith("y")
-        shown = self._loggable(answer, _YES_NO) if answer else "<default>"
+            answer, eof = "", True
+        if eof and on_eof is not None:
+            result, shown = on_eof, "<eof>"
+        else:
+            result = default if not answer else answer.startswith("y")
+            shown = self._loggable(answer, _YES_NO) if answer else "<default>"
         self._answer_to_file(question, f"{shown} ({'yes' if result else 'no'})")
         return result
+
+    def ask_enter(self, prompt: str) -> bool:
+        """Wait for Enter (after a physical step). True on a line, False at
+        EOF, where nobody did the step; the log says which."""
+        try:
+            _ = input(prompt)
+        except EOFError:
+            self._answer_to_file(prompt.strip(), "<eof>")
+            return False
+        self._answer_to_file(prompt.strip(), "<enter>")
+        return True
 
     def ask_timeout(self, question: str, default: bool, timeout: int) -> bool:
         """Yes/no question that auto-applies ``default`` after ``timeout`` seconds.

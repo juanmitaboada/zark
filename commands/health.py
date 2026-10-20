@@ -221,15 +221,13 @@ def run(args: list[str]) -> None:
     test = None
     if destructive:
 
-        def _wait_for_reconnect() -> None:
+        def _wait_for_reconnect() -> bool:
             log.warn(
                 "Device powered down. Physically UNPLUG it, wait ~3s, "
                 "plug it back in, then press Enter.",
             )
-            try:
-                input("    Press Enter once reconnected... ")
-            except EOFError:
-                pass
+            # EOF is not a reconnect: nobody was there to do it (M5a-13).
+            return log.ask_enter("    Press Enter once reconnected... ")
 
         test = run_destructive_test(
             dev,

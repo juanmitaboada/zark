@@ -406,10 +406,7 @@ def _confirm_rw_or_abort(disk: str, log: Log) -> None:
     log.warn("=" * 60)
     log.blank()
     log.info(f"  To confirm, retype the disk path verbatim: {disk}")
-    try:
-        typed = input("  > ").strip()
-    except EOFError:
-        typed = ""
+    typed = log.ask_text("  > ", accept=[disk], label=f"Retype {disk} to confirm --rw")
     if typed != disk:
         log.fatal(
             "Aborted - typed path did not match the target disk",
@@ -478,11 +475,8 @@ def run(
     # consistently across that decision.
     if not sh.run("which qemu-system-x86_64").ok:
         log.warn("qemu-system-x86_64 not found")
-        try:
-            install = input("  Install qemu-system-x86 + ovmf? [Y/n]: ").strip().lower()
-        except EOFError:
-            install = "y"
-        if install in ("", "y", "yes"):
+        # Enter installs; a closed terminal does not: nobody agreed (M5a-13).
+        if log.ask("Install qemu-system-x86 + ovmf?", default=True, on_eof=False):
             _install_deps(log)
         else:
             log.fatal(
@@ -571,10 +565,10 @@ def run(
         log.info("Eligible disks (in-use disks are not listed):")
         for i, (_dev, desc) in enumerate(candidates):
             log.raw(f"  {log.W}{i + 1}{log.N}) {desc}")
-        try:
-            sel = input(f"  Select disk [1-{len(candidates)}]: ").strip()
-        except EOFError:
-            sel = ""
+        sel = log.ask_input(
+            f"Select disk [1-{len(candidates)}]",
+            accept=[str(n) for n in range(1, len(candidates) + 1)],
+        )
         if not sel.isdigit() or not 1 <= int(sel) <= len(candidates):
             log.fatal("Aborted - invalid selection")
         target_disk = candidates[int(sel) - 1][0]
