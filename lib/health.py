@@ -456,6 +456,8 @@ _TRANSPORT_ERROR_PATTERNS = (
     "Synchronize Cache(10) failed",
     "command aborted",
     "reset SuperSpeed",
+    "reset high-speed",  # bridges that negotiate lower (M5a-18)
+    "reset full-speed",
 )
 
 
@@ -478,6 +480,19 @@ def _names_disk(line: str, base: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9]){re.escape(base)}(?![A-Za-z])", line) is not None
 
 
+def _usb_id(name: str) -> str:
+    """USB device id (``2-1``, ``2-1.4``) of the disk ``name``, or "" if it is not USB.
+
+    The kernel's reset line is ``usb 2-1: reset SuperSpeed USB device number
+    3 ...``: it has neither the disk's name nor "scsi host" nor "uas", so it
+    is found by this id (M5a-18). The deepest path component that looks like
+    a device id is the disk's own bridge, behind any hub.
+    """
+    parts = os.path.realpath(f"/sys/block/{name}/device").split("/")
+    ids = [c for c in parts if re.fullmatch(r"[0-9]+-[0-9]+(\.[0-9]+)*", c)]
+    return ids[-1] if ids else ""
+
+
 def _transport_lines(
     base: str, since_ts: float, renamed: tuple[float, str] | None = None
 ) -> list[tuple[float, str]]:
@@ -495,12 +510,20 @@ def _transport_lines(
     if not r.ok:
         return []
     hits: list[tuple[float, str]] = []
+    usb = {n: _usb_id(n) for n in (base, renamed[1] if renamed else base)}
     for line in r.output.splitlines():
         m = re.match(r"\[\s*([0-9]+\.[0-9]+)\]", line)
         if not m or float(m.group(1)) <= since_ts:
             continue
         name = renamed[1] if renamed and float(m.group(1)) > renamed[0] else base
-        if not _names_disk(line, name) and "scsi host" not in line and "uas" not in line:
+        # The bridge's own reset line names its USB device, not the disk.
+        on_bridge = bool(usb[name]) and f"usb {usb[name]}: " in line
+        if (
+            not on_bridge
+            and not _names_disk(line, name)
+            and "scsi host" not in line
+            and "uas" not in line
+        ):
             continue
         # A failed cache flush with DID_NO_CONNECT is the harmless "device
         # already unplugged" case, not a transport fault - never flag it.

@@ -5363,6 +5363,40 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring,too-m
             errs = _transport_errors_since("sda", since_ts=100.0)
         assert len(errs) == 2 and not any("sdaa" in e for e in errs), errs
 
+    def test_the_usb_reset_line_of_the_disks_own_bridge_counts(self):
+        # M5a-18 (M4d plan 15 (6) a): the kernel's reset line has neither the
+        # disk's name nor "scsi host" nor "uas"; it is found by the USB id.
+        mock = MockShell()
+        mock.on("dmesg").succeeds(
+            "[ 300.0] usb 2-1.4: reset SuperSpeed USB device number 7 using xhci_hcd\n"
+            "[ 301.0] usb 2-1: reset SuperSpeed USB device number 3 using xhci_hcd\n"  # the hub
+            "[ 302.0] usb 2-2: reset SuperSpeed USB device number 5 using xhci_hcd\n"  # another
+            "[ 303.0] usb 2-1.4: reset high-speed USB device number 7 using xhci_hcd\n"
+            "[ 304.0] usb 2-1.4: new SuperSpeed USB device number 7 using xhci_hcd\n"
+        )
+        real = (
+            "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1.4/2-1.4:1.0"
+            + "/host6/target6:0:0/6:0:0:0"
+        )
+        with (
+            patch_sh(mock),
+            patch(
+                "lib.health.os.path.realpath",
+                side_effect=lambda p: real if p == "/sys/block/sdb/device" else p,
+            ),
+        ):
+            errs = _transport_errors_since("sdb", since_ts=100.0)
+        assert [e[:7] for e in errs] == ["[ 300.0", "[ 303.0"], errs
+
+    def test_without_a_usb_id_the_reset_lines_are_not_the_disks(self):
+        # M5a-18: a disk that is not USB has no bridge to reset.
+        mock = MockShell()
+        mock.on("dmesg").succeeds(
+            "[ 300.0] usb 2-1: reset SuperSpeed USB device number 3 using xhci_hcd\n"
+        )
+        with patch_sh(mock):
+            assert _transport_errors_since("sdb", since_ts=100.0) == []
+
     def test_after_the_reconnect_the_lines_are_about_the_new_kernel_name(self):
         # M5a-17 (M4d plan 15 (6) e): sdb came back as sdc; sdb is now another disk.
         mock = MockShell()
