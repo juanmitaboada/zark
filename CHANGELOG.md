@@ -65,6 +65,8 @@ preceded them.
   boxes, a disabled Cleanup, recover's monthly cases) are each killed by a
   test; the fake parses `-r` and writes a bookmark token as `#name`
   (M5a-2, M5a-8, M5a-20).
+- The tests that run the Makefile skip, with the reason, on a host without
+  `make` (eli has none) instead of failing (M5aF-1).
 
 #### Known limitations
 

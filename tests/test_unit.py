@@ -6379,11 +6379,18 @@ class TestChrootSafety:  # pylint: disable=missing-function-docstring,too-few-pu
         raise AssertionError("Expected SystemExit when rpool is already imported")
 
 
+def _skip_without_make() -> None:
+    """The Makefile is a development tool: a host without make has nothing to run here."""
+    if shutil.which("make") is None:
+        raise SkipTest("make not found (the Makefile is a development tool)")
+
+
 class TestReleaseGuard:  # pylint: disable=missing-function-docstring
     """M5a-21: `make release-guard` refuses an UNRELEASED top changelog entry."""
 
     @staticmethod
     def _guard(top: str) -> tuple[int, str]:
+        _skip_without_make()
         root = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td)
@@ -6431,6 +6438,7 @@ class TestFulltestTargets:  # pylint: disable=missing-function-docstring,too-few
     """M5a-25: fulltest runs the lint and the types once, with the pinned tools."""
 
     def test_fulltest_leaves_the_tools_in_path_to_tox(self):
+        _skip_without_make()
         root = Path(__file__).resolve().parent.parent
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         r = subprocess.run(
@@ -6445,6 +6453,19 @@ class TestFulltestTargets:  # pylint: disable=missing-function-docstring,too-few
         needs = line.split(":", 1)[1].split("##")[0].split()
         assert "tox" in needs and "tox-ruff" in needs and "test" in needs, needs
         assert not {"mypy", "pylint", "basedpyright"} & set(needs), needs
+
+
+class TestMakeIsOptional:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M5aF-1: the tests that run the Makefile skip on a host without make."""
+
+    def test_a_host_without_make_skips_instead_of_failing(self):
+        with patch.object(shutil, "which", return_value=None):
+            try:
+                _skip_without_make()
+            except SkipTest as skip:
+                assert "make not found" in str(skip)
+                return
+        raise AssertionError("expected SkipTest")
 
 
 class TestChrootEsp:  # pylint: disable=missing-function-docstring
