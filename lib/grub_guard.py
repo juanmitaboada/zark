@@ -83,7 +83,7 @@ fi
 """
 
 
-def install(target_root: str, log: Log, *, overwrite: bool = True) -> None:
+def install(target_root: str, log: Log, *, overwrite: bool = True) -> bool:
     """
     Write the GRUB guard script to {target_root}/etc/grub.d/09_zfs_backup_guard
     and make it executable.
@@ -95,24 +95,28 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> None:
         log: logger for the success message.
         overwrite: if False, leave an existing file untouched. Defaults to
             True because every caller in zark wants the canonical version.
+
+    Returns True when it wrote the script, False when it was already there
+    (current, or kept because ``overwrite`` is False; M5a-24).
     """
     root = target_root.rstrip("/")
     guard_path = Path(f"{root}/{GUARD_RELATIVE_PATH}") if root else Path(f"/{GUARD_RELATIVE_PATH}")
 
     if guard_path.exists() and not overwrite:
-        return
+        return False
     try:
         current = guard_path.read_text(encoding="utf-8") if guard_path.exists() else None
     except (OSError, UnicodeDecodeError):
         current = None
     if current == GUARD_SCRIPT and guard_path.stat().st_mode & 0o111:
         log.ok("Grub guard already current ✓")
-        return
+        return False
 
     guard_path.parent.mkdir(parents=True, exist_ok=True)
     _ = guard_path.write_text(GUARD_SCRIPT, encoding="utf-8")
     guard_path.chmod(0o755)
     log.ok("Grub guard installed (09_zfs_backup_guard) ✓")
+    return True
 
 
 def remove(target_root: str, log: Log) -> list[str]:

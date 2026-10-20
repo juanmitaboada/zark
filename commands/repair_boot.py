@@ -143,7 +143,7 @@ def run(
     cache_path = f"{REPAIR_MNT}/etc/zfs/zpool.cache"
     zfs.write_zpool_cache(cache_path, ["rpool", "bpool"])
 
-    grub_guard.install(target_root=REPAIR_MNT, log=log)
+    guard_wrote = grub_guard.install(target_root=REPAIR_MNT, log=log)
 
     initrd_failures = regenerate_initrd(REPAIR_MNT, log)
 
@@ -176,7 +176,7 @@ def run(
         "grub.cfg regenerated ✓"
         if not grub_failure
         else f"✗ grub.cfg not regenerated: {grub_failure}",
-        "Grub guard installed ✓",
+        "Grub guard installed ✓" if guard_wrote else "Grub guard already current ✓",
         *(["initrd regenerated ✓"] if not initrd_failures else []),
         *(f"✗ {f}" for f in initrd_failures),
         *(["Pools exported cleanly ✓"] if not still else []),

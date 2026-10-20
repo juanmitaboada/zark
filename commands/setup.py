@@ -713,7 +713,7 @@ def _install_guards(log: Log) -> None:
     written by an older zark up to date (finish keeps an existing one).
     """
     apt_guard.install(target_root="", log=log)
-    grub_guard.install(target_root="", log=log)
+    _ = grub_guard.install(target_root="", log=log)
 
 
 def remove_installed(log: Log, root: str = "") -> int:

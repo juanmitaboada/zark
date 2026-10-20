@@ -6759,10 +6759,10 @@ class TestSetupInstallsBothGuards:  # pylint: disable=missing-function-docstring
             path = Path(td, grub_guard.GUARD_RELATIVE_PATH)
             path.parent.mkdir(parents=True)
             path.write_text("#!/bin/sh\nold guard\n", encoding="utf-8")
-            grub_guard.install(target_root=td, log=make_log())
+            assert grub_guard.install(target_root=td, log=make_log())  # wrote (M5a-24)
             assert path.read_text(encoding="utf-8") == grub_guard.GUARD_SCRIPT
             os.utime(path, (1, 1))
-            grub_guard.install(target_root=td, log=make_log())
+            assert not grub_guard.install(target_root=td, log=make_log())  # already current
             assert path.stat().st_mtime == 1
 
 
@@ -10014,10 +10014,11 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
     """P0-6: every mount is tracked, /boot goes before rpool, banner is truthful."""
 
     @staticmethod
-    def _run(
+    def _run(  # pylint: disable=too-many-locals
         export_rpool_ok: bool,
         grub_failure: str = "",
         vdev: str = "/dev/disk/by-id/ata-DISK-part4",
+        guard_wrote: bool = True,
     ) -> tuple[MockShell, str, bool, list[str]]:
         mock = MockShell()
         order: list[str] = []
@@ -10044,8 +10045,9 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
             order.append("initrd")
             return []
 
-        def fake_guard(**_k: object) -> None:
+        def fake_guard(**_k: object) -> bool:
             order.append("guard")
+            return guard_wrote
 
         def fake_grub(*_a: object) -> str:
             order.append("grub")
@@ -10113,6 +10115,13 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         assert "BOOT REPAIR INCOMPLETE" in out
         assert "Pools exported cleanly" not in out
         assert "rpool is still imported" in out
+
+    def test_the_banner_says_what_the_guard_did(self):
+        # M5a-24 (iii): "installed" was a constant, printed after "already current".
+        _, out, _, _ = self._run(export_rpool_ok=True, guard_wrote=True)
+        assert "Grub guard installed ✓" in out and "already current" not in out, out
+        _, out, _, _ = self._run(export_rpool_ok=True, guard_wrote=False)
+        assert "Grub guard already current ✓" in out and "Grub guard installed" not in out, out
 
     def test_initrd_and_guard_come_before_update_grub(self):
         # 10_linux_zfs skips kernels without an initrd (E8 on eli).

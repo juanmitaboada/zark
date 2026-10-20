@@ -251,7 +251,7 @@ def run(
     log.step(2, TOTAL_STEPS, "Rebuilding the initrds and grub.cfg...")
 
     # Install grub guard (prevents update-grub with backup drive connected)
-    grub_guard.install(target_root="", log=log, overwrite=False)
+    _ = grub_guard.install(target_root="", log=log, overwrite=False)
 
     # Install the apt guard (non-clobbering on first boot of the recovered
     # system, in case recover already wrote it or the operator edited it).

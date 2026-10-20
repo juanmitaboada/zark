@@ -503,7 +503,7 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
 
     # Install grub guard - prevents update-grub from running with external
     # ZFS pools connected (which corrupts grub.cfg with no kernel entries)
-    grub_guard.install(target_root=RECOVER_MNT, log=log)
+    _ = grub_guard.install(target_root=RECOVER_MNT, log=log)
 
     # Install the apt guard - stops a later kernel/GRUB/ZFS upgrade on the
     # recovered system from half-applying while a backup drive is connected.
