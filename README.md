@@ -206,6 +206,7 @@ zark/
 │   ├── drive_marks.py         # What zark records on a backup drive and reads back
 │   ├── drives.py              # Drive detection and identification
 │   ├── engine.py              # Backup executor: point, send/receive, anchors
+│   ├── exclusions.py          # Datasets left out of backups or snapshots
 │   ├── forensics.py           # Pool state captured before it is changed
 │   ├── grub_cfg.py            # grub.cfg regeneration with an honest verdict
 │   ├── grub_guard.py          # The update-grub guard

@@ -93,6 +93,7 @@ import commands.umount as umount_mod  # pylint: disable=wrong-import-position # 
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.certificates as certs  # pylint: disable=wrong-import-position # noqa: E402
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
+import lib.exclusions as excl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.health as health_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.initrd as initrd_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -6448,6 +6449,120 @@ def _skip_without_make() -> None:
     """The Makefile is a development tool: a host without make has nothing to run here."""
     if shutil.which("make") is None:
         raise SkipTest("make not found (the Makefile is a development tool)")
+
+
+def _excl_origin(*rels: str, volume: tuple[str, ...] = ()) -> dict[str, repl.Origin]:
+    """An origin with the stock layout plus ``rels`` (``volume`` as zvols)."""
+    base: tuple[str, ...] = ("rpool", "rpool/ROOT", f"rpool/ROOT/{_BE}", "rpool/USERDATA")
+    base += ("rpool/keystore", "bpool", "bpool/BOOT", f"bpool/BOOT/{_BE}")
+    out = {r: repl.Origin(r, "filesystem", "on", f"/{r}", 1000) for r in (*base, *rels)}
+    out["rpool/keystore"].kind = "volume"
+    for r in volume:
+        out[r] = repl.Origin(r, "volume", "-", "-", 1000)
+    return out
+
+
+def _excl_lines(*entries: tuple[str, str, str]) -> list[str]:
+    return ["\t".join(e) for e in entries]
+
+
+class TestExclusions:  # pylint: disable=missing-function-docstring
+    """D7 to D10 (M5b-3 to M5b-5): what is excluded, read from origin."""
+
+    R, S = excl.REPLICATE, excl.SNAPSHOT
+
+    def test_an_exclusion_covers_its_subtree(self):
+        origin = _excl_origin("rpool/data", "rpool/data/c", "rpool/database")
+        d = excl.parse(_excl_lines(("rpool/data", self.R, "no")), origin)
+        assert d.no_backup == {"rpool/data"} and not d.no_snapshot and not d.ignored
+        assert excl.covering("rpool/data/c", d.no_backup) == "rpool/data"
+        assert excl.covering("rpool/database", d.no_backup) == ""  # not a prefix match
+
+    def test_the_two_flags_are_independent(self):
+        origin = _excl_origin("rpool/a", "rpool/b")
+        d = excl.parse(_excl_lines(("rpool/a", self.R, "no"), ("rpool/b", self.S, "no")), origin)
+        assert d.no_backup == {"rpool/a"} and d.no_snapshot == {"rpool/b"}
+        assert d.tops["rpool/a"].flags == excl.BACKUPS
+        assert d.tops["rpool/b"].flags == excl.SNAPSHOTS
+        both = excl.parse(_excl_lines(("rpool/a", self.R, "no"), ("rpool/a", self.S, "no")), origin)
+        assert both.tops["rpool/a"].flags == excl.BOTH and both.flags_of("rpool/a") == excl.BOTH
+
+    def test_the_blacklist_is_ignored_with_its_reason(self):
+        origin = _excl_origin("rpool/data", volume=("rpool/vm",))
+        lines = _excl_lines(
+            (f"rpool/ROOT/{_BE}", self.R, "no"),
+            ("rpool/ROOT", self.S, "no"),
+            (f"bpool/BOOT/{_BE}", self.R, "no"),
+            ("rpool/keystore", self.R, "no"),
+            ("rpool/USERDATA", self.R, "no"),
+            ("rpool", self.R, "no"),
+            ("rpool/vm", self.R, "no"),
+        )
+        d = excl.parse(lines, origin)
+        assert not d.tops, d.tops
+        why = dict(d.ignored)
+        assert (
+            "boot environment" in why[f"rpool/ROOT/{_BE}"]
+            and "boot environment" in why["rpool/ROOT"]
+        )
+        assert "boot pool" in why[f"bpool/BOOT/{_BE}"]
+        assert "keystore" in why["rpool/keystore"]
+        assert "structural" in why["rpool/USERDATA"] and "structural" in why["rpool"]
+        assert "zvol" in why["rpool/vm"]
+
+    def test_a_subtree_that_holds_a_blacklisted_dataset_is_refused(self):
+        origin = _excl_origin("rpool/x", "rpool/x/ROOT")
+        assert excl.never_excluded("rpool/x", origin) == ""
+        origin["rpool/x/.archived-1"] = repl.Origin("rpool/x/.archived-1")
+        assert "rpool/x/.archived-1" in excl.never_excluded("rpool/x", origin)
+
+    def test_a_yes_inside_an_excluded_subtree_is_reported_and_changes_nothing(self):
+        origin = _excl_origin("rpool/data", "rpool/data/c")
+        d = excl.parse(
+            _excl_lines(("rpool/data", self.R, "no"), ("rpool/data/c", self.R, "yes")), origin
+        )
+        assert d.no_backup == {"rpool/data"}
+        assert any(r == "rpool/data/c" and "inside rpool/data" in w for r, w in d.ignored)
+
+    def test_another_value_is_reported(self):
+        d = excl.parse(_excl_lines(("rpool/data", self.R, "off")), _excl_origin("rpool/data"))
+        assert not d.tops and d.ignored == [("rpool/data", f"{self.R}=off: only 'no' excludes")]
+
+    def test_it_reads_local_values_only(self):
+        mock = MockShell()
+        cmd = f"zfs get -H -s local -o name,property,value {self.R},{self.S} -r rpool"
+        mock.on(cmd).succeeds("rpool/data\torg.zark:replicate\tno\n")
+        with patch_sh(mock):
+            d = excl.read(["rpool"], _excl_origin("rpool/data"), strict=True)
+        assert d.no_backup == {"rpool/data"} and mock.was_called(cmd)
+
+    def test_the_point_mark_names_every_dataset_of_the_subtree(self):
+        origin = _excl_origin("rpool/data", "rpool/data/c", "rpool/s")
+        origin["rpool/data/c"].mountpoint = "/srv/c"
+        d = excl.parse(
+            _excl_lines(
+                ("rpool/data", self.R, "no"),
+                ("rpool/data", self.S, "no"),
+                ("rpool/s", self.S, "no"),
+            ),
+            origin,
+        )
+        value = excl.point_mark(d, origin)
+        assert len(value) <= excl.MARK_LIMIT
+        mark = excl.parse_point_mark(value)
+        assert mark is not None and mark.tops == {"rpool/data": excl.BOTH}  # snapshot-only: not
+        assert mark.datasets == {
+            "rpool/data": ("on", "/rpool/data"),
+            "rpool/data/c": ("on", "/srv/c"),
+        }
+        assert mark.covers("rpool/data/c/new") and not mark.covers("rpool/s")
+        empty = excl.parse_point_mark(excl.point_mark(excl.Declared(), origin))
+        assert empty is not None and not empty.tops and not empty.datasets
+        assert excl.parse_point_mark("") is None and excl.parse_point_mark("[1]") is None
+
+    def test_the_banner_size_is_the_subtrees_referenced(self):
+        origin = _excl_origin("rpool/data", "rpool/data/c")
+        assert excl.subtree_referenced("rpool/data", origin) == 2000
 
 
 class TestMountBanner:  # pylint: disable=missing-function-docstring,too-few-public-methods
