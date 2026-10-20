@@ -531,9 +531,12 @@ version: ## Show current version
 # https://wiki.ubuntu.com/Releases first):
 #   - oracular (24.10) - EOL 2025-07
 #   - plucky   (25.04) - EOL 2026-01
-#   - questing (25.10) - EOL 2026-07 (add it back to the case table below
-#     together with the series, if it is ever supported again)
-PPA_SERIES   := noble resolute
+#   - questing (25.10) - EOL 2026-07
+# One table, series:release, from which the series list and each upload's
+# version suffix (~ubuntu<release>.1) are derived; README.md and
+# debian/README.packaging.md name the same series (a test checks it).
+PPA_TABLE    := noble:24.04 resolute:26.04
+PPA_SERIES   := $(foreach s,$(PPA_TABLE),$(firstword $(subst :, ,$(s))))
 # Upload target. We use a named profile (`zark-ppa`) rather than the
 # canonical `ppa:juanmitaboada/zark` shorthand so the configuration
 # travels with the repo (./dput.cf) and any maintainer can clone+upload
@@ -733,13 +736,12 @@ deb-ppa: release-guard $(ORIG_TARBALL) ## Upload a signed source package per Ubu
 	cp debian/changelog "$$changelog_backup"; \
 	trap 'cp -f "$$changelog_backup" debian/changelog 2>/dev/null || true; rm -f "$$changelog_backup"' EXIT INT TERM; \
 	for series in $(PPA_SERIES); do \
-		case $$series in \
-			noble)     suffix="~ubuntu24.04.1" ;; \
-			oracular)  suffix="~ubuntu24.10.1" ;; \
-			plucky)    suffix="~ubuntu25.04.1" ;; \
-			resolute)  suffix="~ubuntu26.04.1" ;; \
-			*)         echo "  Unknown series: $$series"; exit 1 ;; \
-		esac; \
+		release=""; \
+		for entry in $(PPA_TABLE); do \
+			if [ "$${entry%%:*}" = "$$series" ]; then release="$${entry#*:}"; fi; \
+		done; \
+		if [ -z "$$release" ]; then echo "  Unknown series: $$series"; exit 1; fi; \
+		suffix="~ubuntu$$release.1"; \
 		echo ""; \
 		echo "  ── Building for $$series ($(DEB_VERSION)-1$$suffix) ──"; \
 		cp "$$changelog_backup" debian/changelog; \

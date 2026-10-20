@@ -6450,6 +6450,26 @@ def _skip_without_make() -> None:
         raise SkipTest("make not found (the Makefile is a development tool)")
 
 
+class TestPpaSeries:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M5aP.4: the PPA's series are named in one Makefile table, and the
+    READMEs name the same ones."""
+
+    def test_the_readmes_name_the_makefiles_series(self):
+        root = Path(__file__).resolve().parent.parent
+        make = (root / "Makefile").read_text(encoding="utf-8")
+        m = re.search(r"^PPA_TABLE\s*:=\s*(.+)$", make, re.M)
+        assert m is not None
+        table = dict(e.split(":") for e in m.group(1).split())
+        assert table and all(re.fullmatch(r"\d\d\.\d\d", v) for v in table.values()), table
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        line = next(ln for ln in readme.splitlines() if ln.startswith("Supported series:"))
+        named = dict(re.findall(r"([a-z]+) \((\d\d\.\d\d) LTS\)", line))
+        assert named == table, (named, table)
+        packaging = (root / "debian" / "README.packaging.md").read_text(encoding="utf-8")
+        for series, release in table.items():
+            assert f"{series} ({release}" in packaging, series
+
+
 class TestReleaseGuard:  # pylint: disable=missing-function-docstring
     """M5a-21: `make release-guard` refuses an UNRELEASED top changelog entry."""
 
