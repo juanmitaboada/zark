@@ -49,6 +49,7 @@ COMMANDS = {
     "health": "Non-destructive risk checks on a backup drive",
     "registry": "List, forget or fix entries in known_drives.json",
     "prune": "Reclaim space in origin or on a backup drive (interactive)",
+    "exclude": "Leave datasets out of backups or of local snapshots (list/add/remove)",
     "status": "Source pools' fill level and each drive's backup age",
     "alerts": "Install or remove the MOTD and timer for status alerts",
     "fix-rpool-mountpoint": "Give a restored rpool back mountpoint=/ (live USB)",

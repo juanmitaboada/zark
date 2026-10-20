@@ -848,54 +848,11 @@ def _initial_snapshots(zfs: ZFS, log: Log) -> None:
         log.warn("sanoid --take-snapshots had errors")
 
 
-def run(
-    args: list[str],
-):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
-    """Run the setup process to install dependencies and configure sanoid;
-    ``--remove`` removes the guards and alerts instead."""
-    log = Log()
-    if args == ["--remove"]:
-        raise SystemExit(remove_installed(log))
-    if "--remove" in args:
-        # Not the full setup after being asked to remove things (M4dR-4).
-        log.error("--remove takes no other argument")
-        log.info("Usage: zark setup [--remove]")
-        raise SystemExit(2)
-    # cfg = Config.load()
-    zfs = ZFS(log)
-
-    log.banner("BACKUP SYSTEM SETUP", "Install dependencies and configure sanoid")
-    certificates.show_warnings(log)
-
-    # ── 1. Dependencies ──────────────────────────────────────────────────
-    log.step(1, 6, "Checking dependencies...")
-    missing: list[str] = []
-    for cmd, pkg in DEPS.items():
-        # Use `which` (real binary at /usr/bin/which), not `command -v`
-        # (a shell builtin that subprocess can't invoke without shell=True).
-        if sh.run(f"which {cmd}").ok:
-            log.ok(f"  {cmd} - installed")
-        else:
-            missing.append(pkg)
-            log.warn(f"  {cmd} - MISSING (package: {pkg})")
-
-    if missing:
-        pkgs = " ".join(sorted(set(missing)))
-        log.info(f"Installing: {pkgs}")
-        r = sh.run(f"apt-get install -y {pkgs}", log=log)
-        if r.ok:
-            log.ok("All packages installed")
-        else:
-            log.fatal(
-                "Package installation failed",
-                solutions=[f"Try: apt-get update && apt-get install -y {pkgs}"],
-            )
-    else:
-        log.ok("All dependencies present")
-
-    # ── 2. Sanoid configuration ──────────────────────────────────────────
-    log.step(2, 6, "Configuring sanoid...")
-
+def configure_sanoid(zfs: ZFSQuery, log: Log) -> bool:  # pylint: disable=too-many-branches
+    """Show setup's sanoid policy for this system and write it to
+    /etc/sanoid/sanoid.conf after a question (setup's step 2; ``zark
+    exclude`` after a change of its snapshot flag). False when there was no
+    file and the user chose not to write one."""
     ubuntu_name = _detect_ubuntu_ds()
     if not ubuntu_name:
         # Nothing typed could be right: rpool/ROOT has no child (M1P.21).
@@ -965,7 +922,60 @@ def run(
             log.ok(f"Created {conf_path} ({len(rules)} dataset rules)")
         else:
             log.warn("sanoid.conf NOT written - you can re-run setup later")
-            return
+            return False
+    return True
+
+
+def run(
+    args: list[str],
+):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
+    """Run the setup process to install dependencies and configure sanoid;
+    ``--remove`` removes the guards and alerts instead."""
+    log = Log()
+    if args == ["--remove"]:
+        raise SystemExit(remove_installed(log))
+    if "--remove" in args:
+        # Not the full setup after being asked to remove things (M4dR-4).
+        log.error("--remove takes no other argument")
+        log.info("Usage: zark setup [--remove]")
+        raise SystemExit(2)
+    # cfg = Config.load()
+    zfs = ZFS(log)
+
+    log.banner("BACKUP SYSTEM SETUP", "Install dependencies and configure sanoid")
+    certificates.show_warnings(log)
+
+    # ── 1. Dependencies ──────────────────────────────────────────────────
+    log.step(1, 6, "Checking dependencies...")
+    missing: list[str] = []
+    for cmd, pkg in DEPS.items():
+        # Use `which` (real binary at /usr/bin/which), not `command -v`
+        # (a shell builtin that subprocess can't invoke without shell=True).
+        if sh.run(f"which {cmd}").ok:
+            log.ok(f"  {cmd} - installed")
+        else:
+            missing.append(pkg)
+            log.warn(f"  {cmd} - MISSING (package: {pkg})")
+
+    if missing:
+        pkgs = " ".join(sorted(set(missing)))
+        log.info(f"Installing: {pkgs}")
+        r = sh.run(f"apt-get install -y {pkgs}", log=log)
+        if r.ok:
+            log.ok("All packages installed")
+        else:
+            log.fatal(
+                "Package installation failed",
+                solutions=[f"Try: apt-get update && apt-get install -y {pkgs}"],
+            )
+    else:
+        log.ok("All dependencies present")
+
+    # ── 2. Sanoid configuration ──────────────────────────────────────────
+    log.step(2, 6, "Configuring sanoid...")
+
+    if not configure_sanoid(zfs, log):
+        return
 
     # ── 3. Enable sanoid timer ───────────────────────────────────────────
     log.step(3, 6, "Enabling sanoid timer...")

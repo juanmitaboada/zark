@@ -24,7 +24,7 @@ copy run from a stick, so both see the same lock.
 
 Read-only commands run without it: ``status`` (the alerts timer runs it
 hourly), ``explore``, ``monitor`` (watches a running backup),
-``registry`` with no subcommand or ``list``, and ``selftest status``,
+``registry`` and ``exclude`` with no subcommand or ``list``, and ``selftest status``,
 ``report`` and ``certificate`` (M4s-16).
 """
 
@@ -55,7 +55,7 @@ def needs_lock(command: str, args: list[str]) -> bool:
     """Whether ``command`` (as typed, kebab-case) changes state."""
     if command in _READ_ONLY:
         return False
-    if command == "registry":
+    if command in ("registry", "exclude"):
         return bool(args) and args[0] != "list"
     if command == "setup" and args == ["--remove"]:
         # It touches no pool, and the package's prerm runs it (M3P.2): a

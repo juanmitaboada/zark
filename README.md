@@ -244,6 +244,7 @@ zark/
 │   ├── backup.py              # Back up this system to a registered drive
 │   ├── chroot.py              # Interactive chroot into the installed system (live USB)
 │   ├── clean.py               # Release what an interrupted run left
+│   ├── exclude.py             # Leave datasets out of backups or snapshots
 │   ├── explore.py             # Scan for ZFS pools and show their status
 │   ├── finish.py              # Post-recovery finalization
 │   ├── fix_rpool_mountpoint.py  # Give a restored rpool back mountpoint=/

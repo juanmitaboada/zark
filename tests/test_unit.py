@@ -75,6 +75,7 @@ from unittest.mock import (  # pylint: disable=wrong-import-position # noqa: E40
 import commands.backup as backup_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.exclude as exclude_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.finish as finish_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.health as health_cmd  # pylint: disable=wrong-import-position # noqa: E402
@@ -6611,6 +6612,88 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
     def test_the_banner_size_is_the_subtrees_referenced(self):
         origin = _excl_origin("rpool/data", "rpool/data/c")
         assert excl.subtree_referenced("rpool/data", origin) == 2000
+
+
+class TestExcludeCommand:  # pylint: disable=missing-function-docstring
+    """zark exclude (M5b-2 2a): list, add and remove, as origin's properties."""
+
+    def _run(
+        self, fake: FakeZfs, args: list[str], answer: bool = True
+    ) -> tuple[str, int, MagicMock]:
+        cfg = make_config()
+        cfg.known_drives["blue"] = DriveInfo("blue", "999", "usb-B-0:0")
+        out, rc = StringIO(), 0
+        with (
+            patch_sh(fake),
+            patch.object(Config, "load", return_value=cfg),
+            patch.object(Log, "ask", return_value=answer),
+            patch.object(exclude_mod, "configure_sanoid", return_value=True) as sanoid,
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            try:
+                exclude_mod.run(args)
+            except SystemExit as e:
+                rc = int(e.code) if isinstance(e.code, int) else 1
+        return Log._STRIP_RE.sub("", out.getvalue()), rc, sanoid  # pylint: disable=protected-access
+
+    def test_add_backups_sets_the_property_on_the_dataset_only(self):
+        fake = _fresh_fake()
+        out, rc, sanoid = self._run(fake, ["add", "rpool/var", "backups"])
+        assert rc == 0, out
+        assert fake.ds["rpool/var"].props["org.zark:replicate"] == "no"
+        assert "org.zark:replicate" not in fake.ds["rpool/var/lib"].props
+        assert "rpool/var/lib/docker" in out and not sanoid.called
+        out, rc, _ = self._run(fake, ["list"])
+        assert rc == 0 and "rpool/var" in out and "backups" in out, out
+
+    def test_add_snapshots_warns_of_the_drain_and_rewrites_sanoid_conf(self):
+        fake = _fresh_fake()
+        out, rc, sanoid = self._run(fake, ["add", "rpool/var/lib/docker", "snapshots"])
+        assert rc == 0 and sanoid.called, out
+        assert "removes the 1 it took at its next prune" in out, out
+        assert "blue has no zark 2 anchor there" in out, out
+        assert fake.ds["rpool/var/lib/docker"].props["org.zark:snapshot"] == "no"
+
+    def test_nothing_changes_without_a_yes(self):
+        fake = _fresh_fake()
+        out, rc, _ = self._run(fake, ["add", "rpool/var", "both"], answer=False)
+        assert rc == 0 and "Nothing changed" in out
+        assert "org.zark:replicate" not in fake.ds["rpool/var"].props
+
+    def test_the_blacklist_and_unknown_datasets_are_refused(self):
+        fake = _fresh_fake()
+        for ds, why in (
+            ("rpool/ROOT/be", "boot environment"),
+            ("bpool/BOOT/be", "boot pool"),
+            ("rpool/keystore", "keystore"),
+            ("rpool/USERDATA", "structural"),
+            ("rpool/vm", "zvol"),
+        ):
+            out, rc, _ = self._run(fake, ["add", ds, "backups"])
+            assert rc == 1 and why in out, (ds, out)
+            assert "org.zark:replicate" not in fake.ds[ds].props
+        out, rc, _ = self._run(fake, ["add", "rpool/nope", "backups"])
+        assert rc == 1 and "not a dataset" in out
+
+    def test_a_child_cannot_be_included_alone(self):
+        fake = _fresh_fake()
+        fake.ds["rpool/var"].props["org.zark:replicate"] = "no"
+        out, rc, _ = self._run(fake, ["remove", "rpool/var/lib", "backups"])
+        assert rc == 1 and "only the whole subtree" in out, out
+        out, rc, _ = self._run(fake, ["remove", "rpool/var", "backups"])
+        assert rc == 0 and "org.zark:replicate" not in fake.ds["rpool/var"].props, out
+
+    def test_a_usage_error_exits_2(self):
+        for args in (["add", "rpool/var"], ["add", "rpool/var", "all"], ["drop", "x", "both"]):
+            _, rc, _ = self._run(_fresh_fake(), args)
+            assert rc == 2, args
+
+    def test_list_takes_no_lock(self):
+        assert not lock_mod.needs_lock("exclude", []) and not lock_mod.needs_lock(
+            "exclude", ["list"]
+        )
+        assert lock_mod.needs_lock("exclude", ["add", "rpool/var", "both"])
 
 
 class TestMountBanner:  # pylint: disable=missing-function-docstring,too-few-public-methods
