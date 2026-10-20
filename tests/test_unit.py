@@ -5143,7 +5143,7 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
         assert finding.level == OK
 
 
-class TestHealthDestructive:  # pylint: disable=missing-function-docstring
+class TestHealthDestructive:  # pylint: disable=missing-function-docstring,too-many-public-methods
     """Destructive write-and-verify logic in lib/health.py (mocked shell)."""
 
     def test_profile_target_bytes_fast_medium(self):
@@ -5494,6 +5494,33 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring
         self._stateful_pool(mock, destroy="fails")
         result = self._cold(mock, back=True, now="/dev/sdc")
         assert "zpool destroy failed: pool is busy" in result.cleanup_error, result
+
+    def test_a_failed_export_stops_the_test_before_the_eject(self):
+        # M5a-17 (M4d plan 15 (6) c): the export was not checked: the drive was
+        # ejected, or read back, with the pool still imported.
+        mock = self._cold_mock()
+        self._stateful_pool(mock)
+        real = mock.mock_run
+
+        def busy(cmd: str, **kw: Any) -> RunResult:
+            if cmd.startswith("zpool export zarktest_"):
+                return RunResult(1, "", "pool is busy", cmd)
+            return real(cmd, **kw)
+
+        mock.mock_run = busy  # type: ignore[method-assign,assignment]
+        result = self._cold(mock, back=True, now="/dev/sdc")
+        assert not result.passed and "could not export the test pool: pool is busy" in result.detail
+        assert mock.was_not_called("eject "), mock.calls
+        assert mock.was_not_called("readonly=on"), mock.calls  # nor read back
+
+    def test_the_altroot_stays_when_the_destroy_failed(self):
+        # M5a-17 (M4d plan 15 (6) d): the directory is how `zark clean` finds
+        # a test pool left imported.
+        for destroy, removed in (("fails", False), ("ok", True)):
+            mock = self._cold_mock()
+            self._stateful_pool(mock, destroy=destroy)
+            _ = self._cold(mock, back=True, now="/dev/sdc")
+            assert any(c.startswith("rmdir ") for c in mock.calls) is removed, (destroy, mock.calls)
 
     def test_the_disk_link_after_the_reconnect_is_waited_for(self):
         # M4aV-3 V25: the disk's by-id link appears late (after the settle):

@@ -613,8 +613,20 @@ def run_destructive_test(
 
         log.info("Exporting test pool...")
         run("sync")
-        run(f"zpool export {test_pool}", log=log)
+        exported = run(f"zpool export {test_pool}", log=log)
         run("sync")
+        if not exported.ok:
+            # Ejecting or re-importing a pool that is still imported tests
+            # nothing: the pool was never read back from the disk (M5a-17).
+            return TestResult(
+                profile,
+                cold,
+                bytes_written,
+                write_mb_s,
+                False,
+                f"could not export the test pool: {exported.stderr.strip()}",
+                _transport_errors_since(base, dmesg_mark, unplug),
+            )
 
         if cold:
             before_eject = _dmesg_now_ts()
@@ -763,7 +775,8 @@ def _remove_test_pool(  # pylint: disable=too-many-arguments,too-many-positional
             + f"zpool import -d {import_from} lists it"
         )
         log.error(f"Test pool {test_pool} was not destroyed: {error}")
-    run(f"rmdir {altroot} 2>/dev/null")
+    if not error:  # an undestroyed pool keeps its directory: it is how `zark clean` finds it
+        run(f"rmdir {altroot} 2>/dev/null")
     label = read_pool_label(part(disk, 1)) or read_pool_label(disk)
     if label is not None and label.name != test_pool:
         log.warn(f"{disk} carries pool '{label.name}', not {test_pool}: not wiped")
