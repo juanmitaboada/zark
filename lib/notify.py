@@ -55,15 +55,17 @@ def desktop_sessions() -> list[tuple[str, str]]:
     return out
 
 
-def notify(title: str, body: str) -> int:
+def notify(title: str, body: str, *, critical: bool = False) -> int:
     """Show ``title``/``body`` in every active desktop session; returns how
-    many sessions it reached."""
+    many sessions it reached. ``critical``: urgency critical, which GNOME
+    keeps on screen until it is dismissed (M5a-22)."""
+    urgency = "--urgency=critical " if critical else ""
     sent = 0
     for name, uid in desktop_sessions():
         r = sh.run(
             f"runuser -u {shlex.quote(name)} -- env "
             + f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus "
-            + "notify-send --app-name=zark --icon=drive-harddisk "
+            + f"notify-send --app-name=zark --icon=drive-harddisk {urgency}"
             + f"{shlex.quote(title)} {shlex.quote(body)}",
             timeout=NOTIFY_TIMEOUT_SEC,
         )

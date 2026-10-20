@@ -63,7 +63,8 @@ def _notify(st: status.Status) -> None:
     day = datetime.now(UTC).strftime("%Y-%m-%d")
     done = {key for key in sent if key.endswith(day)}
     for key, text in status.due_notifications(st, done):
-        if notify.notify("zark: disk space", text):
+        # The key is "<pool> <level> <date>": only the critical level stays on screen.
+        if notify.notify("zark: disk space", text, critical=key.split()[1] == "critical"):
             done.add(key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

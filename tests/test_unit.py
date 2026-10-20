@@ -16869,6 +16869,42 @@ class TestStatus:
         )
         assert "notify-send" in call and "'rpool is 92% full'" in call
 
+    def test_only_the_critical_level_asks_for_urgency_critical(self) -> None:
+        """M5a-22 (M4d plan 15 (11)): a critical CAP stays on screen until
+        dismissed; warnings and backup's messages stay normal."""
+        mock = MockShell()
+        mock.on("loginctl list-sessions --no-legend").succeeds("2 1000 u seat0 tty2\n")
+        mock.on_prefix("loginctl show-session 2").succeeds(
+            "Type=wayland\nClass=user\nActive=yes\nName=u\nUser=1000\n"
+        )
+        mock.on_prefix("runuser").succeeds("")
+        with patch_sh(mock):
+            _ = notify_mod.notify("t", "plain")
+            _ = notify_mod.notify("t", "loud", critical=True)
+        plain, loud = [c for c in mock.calls if c.startswith("runuser")]
+        assert "--urgency" not in plain
+        assert "--icon=drive-harddisk --urgency=critical t loud" in loud, loud
+
+    def test_status_asks_for_critical_only_at_the_critical_level(self) -> None:
+        """M5a-22: `status --notify` passes critical=True for the critical CAP only."""
+        fake = _fresh_fake()
+        fake.capacity["rpool"] = 95
+        fake.capacity["bpool"] = 85
+        seen: dict[str, bool] = {}
+
+        def notify(_title: str, body: str, *, critical: bool = False) -> int:
+            seen[body.split()[0]] = critical
+            return 1
+
+        with (
+            patch_sh(fake),
+            patch.object(Config, "load", return_value=make_config()),
+            patch.object(notify_mod, "notify", side_effect=notify),
+            redirect_stdout(StringIO()),
+        ):
+            status_mod.run(["--refresh", "--notify"])
+        assert seen == {"rpool": True, "bpool": False}, seen
+
     def test_inactive_sessions_are_not_notified(self) -> None:
         """A session that is not its seat's active one (Active=no) gets nothing
         (M3R-13, A5)."""
@@ -16944,7 +16980,7 @@ class TestStatus:
         fake.capacity["rpool"] = 85
         sent: list[str] = []
 
-        def notify(_title: str, body: str) -> int:
+        def notify(_title: str, body: str, **_kw: bool) -> int:
             sent.append(body)
             return 1
 
