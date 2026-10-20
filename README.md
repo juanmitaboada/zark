@@ -64,6 +64,7 @@ zark automates the entire process:
 | `status`           | Source pools' fill level and each drive's backup age         |
 | `alerts`           | Install or remove the status MOTD and hourly timer           |
 | `registry`         | List, forget or fix drives; set each drive's retention       |
+| `exclude`          | Leave datasets out of backups, of sanoid's snapshots, or both |
 | `selftest`         | Check that this platform's ZFS and tools behave as zark relies on |
 
 ---
@@ -420,6 +421,10 @@ When a backup would leave the drive with less free space than its margin (10 % o
 ### Divergence and datasets only on the drive
 
 A dataset with nothing in common with the drive (recreated in the source, or its bookmark destroyed by hand) is asked about before the transfer: skip it this time, archive the drive's copy as `<name>.archived-YYYYMMDD` and send it again, or destroy it and send it again (typed `DESTROY`; a word that does not match asks the question again). Several of them are asked about together first (skip, archive or destroy them all, or decide one by one). A dataset in the source whose name contains `.archived-` is not backed up (the name is reserved) and is listed with the reason. A dataset that exists only on the drive can be kept (not asked again until it reappears in the source), destroyed, or renamed when the source renamed it. `recover` restores old points from archived copies too.
+
+### Excluded datasets
+
+`zark exclude add <dataset> backups|snapshots|both` leaves a dataset and everything below it out of the backups, out of sanoid's snapshots, or both; `zark exclude list` shows what is excluded and `zark exclude remove` undoes it. The exclusion is a ZFS user property on the dataset in the source (`org.zark:replicate=no`, `org.zark:snapshot=no`), so it moves with the dataset. Boot environments, the boot pool, the keystore and the structural containers can never be excluded. A backup lists what it left out with its size and records it on the drive; the first backup to a drive that still holds a copy asks once whether to keep it (the default) or destroy it, and `zark prune` offers the destroy later. Included again, a dataset continues incrementally from the copy a drive kept. `recover` recreates what the restored point left out as empty datasets with their mountpoints and the exclusion, so the system boots with its paths in place. A directory has to become a dataset first, by hand (the manpage's `exclude` entry has the steps).
 
 ---
 

@@ -1,3 +1,18 @@
+zark (2.0.0~rc10-1) UNRELEASED; urgency=medium
+
+  * Milestone M5b of zark 2 (dataset exclusions, and M5a's leftovers). Not
+    for release: nothing is published until the final 2.0.0.
+  * New zark exclude: a dataset and its subtree left out of backups, of
+    sanoid's snapshots, or both, as a user property on the dataset.
+  * backup records what each point left out; a drive's copy of an
+    excluded dataset is kept or destroyed, asked once; prune offers it.
+  * recover recreates what the point left out as empty datasets with
+    their mountpoints and the exclusion.
+  * setup keeps snapshot-excluded subtrees out of sanoid's recursive
+    rules; new self-test checks SNP-07 and KEY-04.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Wed, 21 Oct 2026 00:40:00 +0200
+
 zark (2.0.0~rc9-1) UNRELEASED; urgency=medium
 
   * Milestone M5a of zark 2 (hygiene: the M4d review's findings and the

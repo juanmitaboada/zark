@@ -10,10 +10,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M5a (2.0.0-rc9)** on top of M4d (2.0.0-rc8), M4c (2.0.0-rc7),
+The tree currently carries **M5b (2.0.0-rc10)** on top of M5a (2.0.0-rc9), M4d (2.0.0-rc8), M4c (2.0.0-rc7),
 M4s (2.0.0-rc6), M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2
 (2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling consolidation that
 preceded them.
+
+### M5b: dataset exclusions, and M5a's leftovers (2.0.0-rc10)
+
+#### Added
+
+- **`zark exclude list|add|remove <dataset> backups|snapshots|both`**
+  (D7, D8, M5b-2): an exclusion covers the dataset and its subtree and is
+  a ZFS user property set on it in the source (`org.zark:replicate=no`,
+  `org.zark:snapshot=no`; only `-s local` values count, M5b-3, M5b-4).
+  Boot environments, the boot pool, the keystore, the structural
+  containers and a dataset whose subtree holds one are refused, and a
+  value found on them is ignored with a warning at every run (D10,
+  M5b-5). `list` takes no lock; `remove` says what each registered
+  drive's next backup does (M5b-11).
+- **backup and prepare leave the excluded subtrees out** without making
+  the run incomplete; the plan and the banner list them with their size,
+  the source's `referenced` (D9, D12, M5b-12). Each point records what it
+  left out, with each dataset's canmount and mountpoint, on its snapshots
+  on the drive (`org.zark:excluded`, M5b-7, M5b-8); a record that would
+  not fit in a user property stops the run before the point.
+- **A drive that still holds an excluded subtree** (D11, M5b-9, M5b-10):
+  the copy stays live with its anchors in the source; the first backup to
+  that drive asks once to keep it (the default, `org.zark:excluded-kept`)
+  or destroy it (typed `DESTROY`), and `zark prune` on the drive offers
+  the destroy (typed `PRUNE`). After a destroy the points that held it
+  are recorded without it, so they stay complete, and that drive's
+  anchors on it are removed from the source.
+- **Included again**, a dataset continues from the copy a drive kept
+  (an incremental from origin's bookmark) and the kept mark is cleared
+  (M5b-11).
+- **recover recreates what the point left out** as empty datasets, after
+  `change-key -i` and before the backup pool is imported again, with
+  `zfs create -u`, their canmount and mountpoint and, on the top, the
+  exclusion itself; never from an earlier snapshot. A dataset excluded
+  from snapshots only gets its exclusion set again after the receive: a
+  raw stream carries no user property (M5b-13).
+- **mount and status name the exclusions** (M5b-13b); the MOTD does not.
+- **Self-test checks SNP-07** (a user property: local where set,
+  inherited below, listed with `-s local` only there) and **KEY-04**
+  (`zfs create -u` under an encrypted parent: its key, its properties,
+  not mounted), level 1 (M5b-16).
+
+#### Changed
+
+- **setup writes a snapshot-excluded subtree in sections of its own**
+  that take no snapshots and let sanoid prune the ones it took, outside
+  every recursive rule: sanoid 2.3.0 applies a recursive section over its
+  children's own sections in hash order (M5b-6). backup and status warn
+  when sanoid.conf is not setup's.
+- **health**: "DESTRUCTIVE TEST DID NOT FINISH" says to purge the drive
+  first when its test pool could not be removed; the disk's USB id is
+  read once, before the eject, and both kernel names count at the unplug
+  (M5aR-2, M5aR-3).
+- **mount's banner keeps its border** with long archived-lineage names,
+  listed after it; **purge's eject question** names the drive (M5aP.7,
+  M5aP.8).
+- **The PPA series** come from one Makefile table (M5aP.4).
+
+#### Fixed
+
+- **The level-2 self-test's teardown** reads the vdev lines of `zpool
+  list -v` only, never the pool line (M5aR-5).
+
+#### Tests
+
+- backup's freeing wait and the banner's re-read are driven from
+  `run()`, so the review's mutations R6, R8 and R9 are killed (M5aR-1);
+  the lock test no longer creates `/run/zark` on the host (M5aR-4).
+
+#### Known limitations
+
+- A directory cannot be excluded: it has to become a dataset first, by
+  hand, as the manpage's `exclude` entry describes (M5b-15).
+- `zark status` has no line per drive: the registry does not know what
+  each drive holds (M5b-13b).
+- The point's exclusion record and its completion mark are two `zfs set`
+  calls: a run stopped between them leaves a complete point without the
+  record, which recover restores as a point written before rc10.
+
+#### Rejected approaches
+
+- **An `exclusions.json` next to the registry** (M5b-3 3b): it would not
+  move with the dataset or survive a recover; **excluding one dataset
+  with its children still sent** (M5b-4 4b): a second kind of empty
+  container on drives, and recover would need both.
+- **A child section with `autosnap = no` under sanoid's recursive rule**
+  (M5b-6 6b): sanoid 2.3.0 processes its sections in hash order, so the
+  recursive parent's settings may overwrite it; **keeping the old
+  snapshots until `zark prune`** (6c): the excluded dataset is usually
+  the one that eats space.
+- **Asking about a drive's held copy at every run, or only in `zark
+  prune`** (M5b-10 10b, 10c): keeping is the safe default, and the user
+  would not learn the drive still holds the data.
+- **A full send on re-inclusion** (M5b-11 11b): it throws away the base
+  the design keeps on purpose.
+- **A directory in place of the recreated dataset** (M5b-13 13b): the
+  exclusion would be lost and the next backup would send its contents
+  with the parent; **`zark exclude convert`** (M5b-15 15b): it moves user
+  data on the running system, a new destructive path before the final
+  v2.
+- **A self-test check for the chase.c:648 crash** (M5b-14 14b): a race
+  passes only by chance, and provoking it would crash the host's udev;
+  the rule stays an invariant of the code.
 
 ### M5a: hygiene, the M4d review's findings and the checklist's cosmetics (2.0.0-rc9)
 

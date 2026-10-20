@@ -469,6 +469,21 @@ for the canonical end-to-end sequences.
     **zark** 2 one). When the source cannot be read it says so in one line
     instead. It also says when **prune** can remove legacy residues.
 
+    **Exclusions.** A subtree excluded from backups with **zark exclude**
+    is not sent and does not make the backup incomplete; the plan and the
+    final banner list it with its size (the source's *referenced*, what a
+    first full send would carry). The point records what it left out, and
+    the canmount and mountpoint each dataset had, on its snapshots on the
+    drive (**org.zark:excluded**), so **recover** can recreate them. The
+    first backup to a drive that still holds such a subtree asks once, with
+    the other questions: keep it (the default; not asked again, and its
+    anchors stay in the source so an inclusion continues incrementally) or
+    destroy it with **DESTROY** typed, after listing what it takes. After a
+    destroy, the points that held it are recorded without it, so they stay
+    complete, and that drive's anchors on it are removed from the source.
+    An exclusion set on a boot environment, the boot pool, the keystore or
+    a structural container is ignored, with a warning at every run.
+
     **--no-snapshot** is accepted and has no effect: the backup point is
     taken by **zark** itself.
 
@@ -525,6 +540,42 @@ for the canonical end-to-end sequences.
     the window) and the free-space margin in percent of the drive (0-50).
     Every write is validated and atomic; a malformed file is
     reported with its line and column and never overwritten.
+
+**exclude** \[**list** | **add** *dataset* **backups**|**snapshots**|**both** | **remove** *dataset* **backups**|**snapshots**|**both**\]
+:   Leave datasets out of the backups, out of **sanoid**'s snapshots, or
+    both. An exclusion covers the dataset and everything below it, and is
+    a ZFS user property on the dataset itself in the source
+    (**org.zark:replicate=no**, **org.zark:snapshot=no**): it moves with
+    the dataset, and **zark** reads only values set there (**zfs get -s
+    local**). **list** (the default; takes no lock) shows each exclusion
+    with its flags and its subtree's size, and every value **zark**
+    ignores, with the reason. **add** checks the dataset (never a boot
+    environment, the boot pool, the keystore, a structural container such
+    as **rpool/USERDATA**, or a dataset whose subtree holds one; zvols and
+    archived lineages are left out already), lists the datasets it takes
+    and asks before setting it. **backups**: left out from the next
+    backup on (see **backup** for a drive that already holds a copy).
+    **snapshots**: */etc/sanoid/sanoid.conf* is rewritten as **setup**
+    writes it, with the subtree in sections of its own that take no
+    snapshots and let **sanoid** remove the ones it took at its next prune
+    (a recursive rule would apply to it otherwise); **add** says how many
+    that removes, and names a registered drive with no **zark** 2 anchor
+    there, whose base may be one of them. **remove** clears the property
+    (only on the dataset where it was set: a child cannot be included
+    alone) and says, for each registered drive, whether its next backup
+    is an incremental from the copy it kept or a full send. A user
+    property mounts nothing, so **exclude** runs on the installed system.
+
+    A directory cannot be excluded; it has to become a dataset first, by
+    hand (**zark** does not move data on a running system). Outside the
+    boot environment, with every parent present (created with
+    **canmount=off** when missing) so the new dataset inherits the
+    directory's path from **rpool**'s */*: stop what uses the directory,
+    rename it aside (**mv** */var/lib/docker* */var/lib/docker.old*),
+    **zfs create rpool/var/lib/docker**, copy with **cp -a --preserve=all**
+    */var/lib/docker.old/.* */var/lib/docker/*, check the copy, remove the
+    old directory, then **zark exclude add rpool/var/lib/docker backups**.
+    No mount property is set with **zfs set**.
 
 ## Recovery workflow
 
@@ -586,6 +637,19 @@ for the canonical end-to-end sequences.
     there; for **bpool** the banner also names each kernel the restored
     root has and */boot* lacks, with the command that reinstalls it from
     **zark chroot**.
+
+    A dataset the chosen point left out (**zark exclude**, as recorded in
+    the point's **org.zark:excluded**, read strictly) is never restored
+    from an earlier snapshot: the table says "excluded from backups at
+    this point: recreated empty", and after **zfs change-key -i**, with
+    the backup pool exported, it is created empty with **zfs create -u**,
+    its canmount, its mountpoint when it would not inherit it, and on the
+    exclusion's top the exclusion itself, so the restored system keeps
+    it; its encryption is **rpool**'s. A dataset the point had excluded
+    from snapshots only is restored as any other and gets
+    **org.zark:snapshot=no** again (a raw stream carries no user
+    property). A failed create or set is listed in the banner's errors. A
+    point written before 2.0.0-rc10 restores as before.
 
     The recovered system boots without **zark** present and receives
     normal **apt**(8) upgrades thereafter. **zark** is needed only for
@@ -668,13 +732,19 @@ for the canonical end-to-end sequences.
     before the count, with the advice to back up to it first. On a drive (no passphrase
     needed): what its retention removes now (yes/no), then the oldest
     monthly backup points that still have something to remove and the
-    history from before its first **zark** 2 backup point (typed **PRUNE**).
+    history from before its first **zark** 2 backup point (typed **PRUNE**),
+    then the drive's copy of every subtree excluded from backups, kept or
+    not, with its size, each destroyed on a typed **PRUNE** as **backup**
+    destroys it (its points stay complete; that drive's anchors on it go).
 
 **status**
 :   How full **rpool** and **bpool** are (a warning from 80 %, critical
     from 90 %), the days since every registered drive's last backup, what
     a drive with no anchor in the source still shares with it (see
-    **backup**) and the legacy residues **prune** can remove. **status --refresh** writes
+    **backup**), the legacy residues **prune** can remove and how many
+    datasets are excluded from backups (with a line when
+    */etc/sanoid/sanoid.conf* does not keep the snapshot exclusions, and
+    each exclusion **zark** ignores). **status --refresh** writes
     */run/zark/status.motd*; with **--notify** it also sends a desktop
     notification for a pool at a warning or critical level, at most once a
     day per pool and level. Read-only.
@@ -807,7 +877,10 @@ for the canonical end-to-end sequences.
     mounted dataset, even with nothing written, and the next **backup**
     asks whether to skip those datasets or discard the changes. Archived
     datasets (*\<name\>.archived-YYYYMMDD*) are not part of the tree; the
-    banner lists them with the command to browse one.
+    banner lists them with the command to browse one. A subtree excluded
+    from backups that the drive still holds is mounted like any other,
+    with a line naming the point that left it out and the drive's last
+    copy of it.
 
     With no argument, scans for connected backup drives. With the
     *target* **local** (aliases **system**, **rpool**) it instead mounts
