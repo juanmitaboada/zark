@@ -343,6 +343,9 @@ class TestResult:  # pylint: disable=too-many-instance-attributes
     # The same kind of lines, logged between the cold pass's eject and the
     # reconnect: the unplug's own (M4aP.9), not counted as transport errors.
     at_unplug: list[str] = field(default_factory=list)
+    # The run ended before the drive could be judged (nobody was there to
+    # reconnect it): neither a pass nor evidence against the bridge (M5aF-2).
+    inconclusive: bool = False
 
 
 def device_size_bytes(dev: str) -> int:
@@ -685,6 +688,7 @@ def run_destructive_test(
                     False,
                     "the reconnect was not confirmed (stdin closed at the pause)",
                     _transport_errors_since(base, dmesg_mark, unplug, renamed),
+                    inconclusive=True,
                 )
             # The kernel announces the disk, then each partition, and udev
             # makes each by-id link from that device's own event (block/

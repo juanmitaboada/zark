@@ -5102,6 +5102,22 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
         assert "DESTRUCTIVE TEST FAILED" in out
         assert rc == 1 and written
 
+    def test_an_unfinished_cold_test_does_not_blame_the_bridge(self):
+        # M5aF-2 (M5a-13): EOF at the reconnect pause is no verdict on the enclosure.
+        detail = "the reconnect was not confirmed (stdin closed at the pause)"
+        out, rc, written = self._destructive(
+            HealthResult("fast", True, 1, 0.0, False, detail, inconclusive=True)
+        )
+        assert "DESTRUCTIVE TEST DID NOT FINISH" in out and "The drive was not judged" in out, out
+        assert "lies about cache" not in out and "DESTRUCTIVE TEST FAILED" not in out, out
+        assert "hardware quirk" not in out, out
+        assert rc == 1 and written
+        # A real read-back failure keeps its banner and the invitation.
+        out, rc, _ = self._destructive(
+            HealthResult("fast", True, 1, 0.0, False, "re-import failed")
+        )
+        assert "lies about cache" in out and "hardware quirk" in out, out
+
     def test_a_pass_exits_0_also_with_transport_errors(self):
         out, rc, _ = self._destructive(HealthResult("fast", False, 1, 0.0, True, "ONLINE"))
         assert rc == 0 and "Destructive test PASSED (ONLINE)" in out
@@ -5192,6 +5208,7 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
                 wait_for_reconnect=lambda: False,
             )
         assert not result.passed and "not confirmed" in result.detail, result
+        assert result.inconclusive, result
         assert mock.was_not_called("zpool import -o readonly=on")  # the verification import
 
     def test_imported_clean_pool_is_ok(self):

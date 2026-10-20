@@ -250,6 +250,18 @@ def run(args: list[str]) -> None:
                 "failing at the bus level and may corrupt on another run. "
                 "See docs/HARDWARE.md (consider a usb-storage quirk).",
             )
+        elif test.inconclusive:
+            # Nobody was there to reconnect the drive: it was not judged (M5aF-2).
+            log.banner_error(
+                "DESTRUCTIVE TEST DID NOT FINISH",
+                [
+                    "The drive was not judged.",
+                    f"Detail: {test.detail}",
+                    "",
+                    "Nothing here says anything about the enclosure.",
+                    "Run the test again where the drive can be reconnected.",
+                ],
+            )
         else:
             log.banner_error(
                 "DESTRUCTIVE TEST FAILED",
@@ -283,10 +295,11 @@ def run(args: list[str]) -> None:
         content = generate_report(dev, report, test, obfuscate=obfuscate)
         path = write_report_file(content)
         log.info(f"Diagnostic report written to: {path}")
-        log.info(
-            "If this is a hardware quirk zark should learn about, please file "
-            "it: https://github.com/juanmitaboada/zark/issues/new/choose",
-        )
+        if test is None or not test.inconclusive:
+            log.info(
+                "If this is a hardware quirk zark should learn about, please file "
+                "it: https://github.com/juanmitaboada/zark/issues/new/choose",
+            )
     else:
         log.ok("No risk factors detected.")
     # M4aX.2: what was shown in red ends with exit status 1, as in every other command.

@@ -40,6 +40,9 @@ preceded them.
   reconnect; the kernel's USB reset lines of the disk's bridge count; the
   directory of an undestroyed test pool stays (M5a-13, M5a-17, M5a-18).
   **simulate** installs nothing on a closed stdin (M5a-13).
+  That ending says "DESTRUCTIVE TEST DID NOT FINISH", the drive was not
+  judged, and it no longer blames the bridge or invites a hardware report
+  (M5aF-2).
 - **The empty altroot directory** of an exported pool goes (M5a-15).
 - **The critical CAP notification** is critical (stays until dismissed)
   (M5a-22).
