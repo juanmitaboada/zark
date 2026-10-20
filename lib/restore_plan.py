@@ -26,6 +26,7 @@ from lib.backup_layout import (
     root_is_empty,
     zark_props as _zark_props,
 )
+from lib.exclusions import PointMark, covering
 from lib.log import Log
 from lib.mount_props import (
     BPOOL_CONTAINERS,
@@ -58,6 +59,10 @@ class RestoreRow:  # pylint: disable=too-many-instance-attributes
     # shares it with every drive in rotation (M3P.13, M4b-6), and what it adds.
     base: Snap | None = None
     base_bytes: int = 0
+    # Excluded from backups at this point (M5b-13 13a): created empty, and on
+    # an exclusion's top its flags (``backups`` or ``both``).
+    empty: bool = False
+    flags: str = ""
 
     @property
     def restored(self) -> bool:
@@ -91,8 +96,13 @@ class RestorePlan:  # pylint: disable=too-many-instance-attributes
 
     @property
     def skipped(self) -> list[RestoreRow]:
-        """Rows that will not be restored."""
-        return [r for r in self.rows if not r.restored]
+        """Rows that will not be restored (nor created empty)."""
+        return [r for r in self.rows if not r.restored and not r.empty]
+
+    @property
+    def empty_rows(self) -> list[RestoreRow]:
+        """Rows created empty, parents first (M5b-13)."""
+        return [r for r in self.rows if r.empty]
 
     @property
     def rpool_bytes(self) -> int:
@@ -249,6 +259,16 @@ def _absent_note(ds: str, point: Point, snaps: list[Snap]) -> str:
     return f"destroyed in origin before this point (last snapshot {last.name})"
 
 
+def _log_archived(stored: dict[str, str], log: Log) -> None:
+    archived = sorted(ds for ds in stored if logical(ds) != ds)
+    if archived:
+        log.info(
+            f"Archived lineages on this backup ({len(archived)}), used for points before them:"
+        )
+        for ds in archived:
+            log.info(f"  {ds}")
+
+
 def build_plan(  # pylint: disable=too-many-locals,too-many-branches
     pool: str,
     device: str,
@@ -257,23 +277,21 @@ def build_plan(  # pylint: disable=too-many-locals,too-many-branches
     snaps: list[Snap],
     log: Log,
     complete: set[str] | None = None,
+    excluded: PointMark | None = None,
 ) -> RestorePlan:
-    """Resolve every dataset for ``point`` and decide its mount properties."""
+    """Resolve every dataset for ``point`` and decide its mount properties.
+    What the point left out (``excluded``, its org.zark:excluded mark) is
+    never restored from an earlier snapshot: it is created empty."""
+    excluded = excluded or PointMark()
     stored = _list_datasets(pool)
     # Archived lineages count as earlier snapshots of their dataset (decision 19).
     types: dict[str, str] = {}
     for ds in sorted(stored, key=lambda d: logical(d) != d):
         types.setdefault(logical(ds), stored[ds])
-    archived = sorted(ds for ds in stored if logical(ds) != ds)
-    if archived:
-        log.info(
-            f"Archived lineages on this backup ({len(archived)}), used for points before them:"
-        )
-        for ds in archived:
-            log.info(f"  {ds}")
+    _log_archived(stored, log)
     wanted = [
         ds
-        for ds in sorted(types)
+        for ds in sorted(set(types) | set(excluded.datasets))
         if (ds.startswith("rpool/") and ds not in CREATED_CONTAINERS) or ds == f"bpool/BOOT/{be}"
     ]
     resolved = resolve(point, [s for s in snaps if s.dataset in wanted], wanted, complete)
@@ -291,7 +309,10 @@ def build_plan(  # pylint: disable=too-many-locals,too-many-branches
     claimed: dict[str, str] = {}  # guessed mountpoint → dataset that got it
     rows: list[RestoreRow] = []
     for ds in wanted:
-        snap = resolved[ds]
+        if excluded.covers(ds):
+            rows.append(_empty_row(ds, excluded, zark, effective))
+            continue
+        snap = resolved.get(ds)
         row = RestoreRow(rel=ds, snap=snap)
         parent = ds.rsplit("/", 1)[0]
         leaf = ds.rsplit("/", 1)[-1]
@@ -346,6 +367,24 @@ def build_plan(  # pylint: disable=too-many-locals,too-many-branches
         rpool_mountpoint=root_mp,
         rpool_mountpoint_source=root_src,
     )
+
+
+def _empty_row(
+    ds: str, excluded: PointMark, zark: dict[str, tuple[str, str]], effective: dict[str, str]
+) -> RestoreRow:
+    """A dataset the point left out, created empty with the canmount and
+    mountpoint origin had (M5b-8, M5b-13 13a): the point's mark first, then
+    what the drive recorded of an earlier copy, else "on" and inherited."""
+    parent, leaf = ds.rsplit("/", 1)
+    canmount, mountpoint = excluded.datasets.get(ds) or zark.get(ds) or ("on", "")
+    props = MountProps(canmount, mountpoint, "excluded")
+    row = RestoreRow(rel=ds, snap=None, props=props, empty=True)
+    row.options = receive_options(props, effective.get(parent, ""), leaf)
+    row.effective = effective_mountpoint(props, effective.get(parent, ""), leaf)
+    effective[ds] = row.effective
+    top = covering(ds, set(excluded.tops))
+    row.flags = excluded.tops[top] if top == ds else ""
+    return row
 
 
 def _monthly_base(row: RestoreRow, snaps: list[Snap]) -> Snap | None:
@@ -432,6 +471,13 @@ def show_plan(plan: RestorePlan, log: Log, drives: dict[str, str] | None = None)
         + f"off {plan.rpool_mountpoint} [{plan.rpool_mountpoint_source}]",
     )
     for r in plan.rows:
+        if r.empty:
+            assert r.props is not None
+            log.raw(
+                f"  {r.rel:44} excluded from backups at this point: recreated empty  "
+                + f"{r.props.canmount} {r.effective}"
+            )
+            continue
         if not r.restored:
             log.raw(f"  {log.Y}{r.rel:44} NOT RESTORED - {r.note}{log.N}")
             continue

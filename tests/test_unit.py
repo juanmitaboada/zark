@@ -6613,6 +6613,33 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
         origin = _excl_origin("rpool/data", "rpool/data/c")
         assert excl.subtree_referenced("rpool/data", origin) == 2000
 
+    def test_a_points_mark_is_read_back_strictly(self):
+        """M5b-13 13a: absent on an older drive, the same on every snapshot
+        of the point, a disagreement reported rather than guessed."""
+        fake = FakeZfs()
+        fake.pool("backup")
+        for ds in ("backup/rpool", "backup/rpool/a", "backup/rpool/b"):
+            fake.dataset(ds)
+            _ = fake.snap(ds, P1)
+        with patch_sh(fake):
+            snaps = drive_marks.drive_snapshots("backup")
+            assert excl.read_point_mark("backup", P1, snaps) is None
+            value = '{"datasets":{"rpool/c":["on","/c"]},"tops":{"rpool/c":"backups"}}'
+            for ds in ("backup/rpool", "backup/rpool/a", "backup/rpool/b"):
+                fake.ds[ds].snaps[0].props["org.zark:excluded"] = value
+            mark = excl.read_point_mark("backup", P1, snaps)
+            assert mark is not None and mark.covers("rpool/c/d") and not mark.covers("rpool/a")
+            fake.ds["backup/rpool/b"].snaps[0].props["org.zark:excluded"] = "{}"
+            raised: list[str] = []
+            for fail in (False, True):
+                if fail:
+                    fake.fail_cmds.add("zfs get -H -p -r -s local -t snapshot")
+                try:
+                    _ = excl.read_point_mark("backup", P1, snaps)
+                except (ValueError, survey.ReadError) as e:
+                    raised.append(type(e).__name__)
+            assert raised == ["ValueError", "ReadError"], raised
+
 
 class TestExcludeCommand:  # pylint: disable=missing-function-docstring
     """zark exclude (M5b-2 2a): list, add and remove, as origin's properties."""
@@ -9356,7 +9383,9 @@ def _plan_mock(referenced: int = 1000) -> MockShell:
     return mock
 
 
-def _run_plan(cache: bool, empty: dict[str, bool] | None = None) -> RestorePlan:
+def _run_plan(
+    cache: bool, empty: dict[str, bool] | None = None, excluded: excl.PointMark | None = None
+) -> RestorePlan:
     snaps = _stick_snaps()
     point = restore_points(snaps, f"rpool/ROOT/{_BE}")[-1]
     mock = _plan_mock()
@@ -9375,7 +9404,7 @@ def _run_plan(cache: bool, empty: dict[str, bool] | None = None) -> RestorePlan:
             side_effect=lambda full: (empty or {}).get(full.split("@")[0], False),
         ),
     ):
-        return build_plan("backup", "/dev/sdb1", _BE, point, snaps, make_log())
+        return build_plan("backup", "/dev/sdb1", _BE, point, snaps, make_log(), None, excluded)
 
 
 class TestRecoverPlan:  # pylint: disable=missing-function-docstring
@@ -9412,6 +9441,64 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert rows["rpool/var/lib"].options == ["-o canmount=off"]
         assert rows["rpool/var/lib/docker"].options == ["-o canmount=on"]
         assert rows[f"rpool/ROOT/{_BE}/var"].options == ["-o canmount=off"]
+
+    def test_what_the_point_left_out_is_created_empty_never_restored(self):
+        """M5b-13 13a: an excluded dataset with an earlier snapshot on the
+        drive is not restored from it; one the drive never held is listed
+        too; each gets origin's canmount and mountpoint (set only when not
+        inherited), and the top its exclusion."""
+        mark = excl.PointMark(
+            tops={"rpool/var/lib/docker": excl.BOTH},
+            datasets={
+                "rpool/var/lib/docker": ("on", "/var/lib/docker"),
+                "rpool/var/lib/docker/vol": ("noauto", "/srv/vol"),
+            },
+        )
+        plan = _run_plan(cache=True, excluded=mark)
+        rows = {r.rel: r for r in plan.rows}
+        docker, vol = rows["rpool/var/lib/docker"], rows["rpool/var/lib/docker/vol"]
+        assert docker.empty and docker.snap is None and not docker.restored
+        assert docker.options == ["-o canmount=on"] and docker.flags == excl.BOTH
+        assert vol.empty and vol.options == ["-o canmount=noauto", "-o mountpoint=/srv/vol"]
+        assert not vol.flags
+        assert [r.rel for r in plan.empty_rows] == [docker.rel, vol.rel]
+        assert not plan.skipped and docker not in plan.rpool_rows
+        out = StringIO()
+        with redirect_stdout(out):
+            restore_plan.show_plan(plan, Log())
+        assert "rpool/var/lib/docker" in out.getvalue()
+        assert "excluded from backups at this point: recreated empty" in out.getvalue()
+
+    def test_the_empty_datasets_are_created_unmounted_with_their_exclusion(self):
+        """M5b-13 13a: `zfs create -u`, parents first; the exclusion only on
+        its top; a failure is an error line, not fatal."""
+        mark = excl.PointMark(
+            tops={"rpool/var/lib/docker": excl.BOTH},
+            datasets={
+                "rpool/var/lib/docker": ("on", "/var/lib/docker"),
+                "rpool/var/lib/docker/vol": ("noauto", "/srv/vol"),
+                "rpool/gone/x": ("on", ""),
+            },
+        )
+        plan = _run_plan(cache=True, excluded=mark)
+        fake = FakeZfs()
+        fake.pool("rpool")
+        for ds in ("rpool/var", "rpool/var/lib"):
+            fake.dataset(ds)
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            errors = recover_mod.create_excluded(plan.empty_rows, Log())
+        top = fake.ds["rpool/var/lib/docker"].props
+        assert top == {
+            "canmount": "on",
+            "org.zark:replicate": "no",
+            "org.zark:snapshot": "no",
+        }, top
+        assert fake.ds["rpool/var/lib/docker/vol"].props == {
+            "canmount": "noauto",
+            "mountpoint": "/srv/vol",
+        }
+        assert all(c.startswith("zfs create -u ") for c in fake.calls if "create" in c)
+        assert len(errors) == 1 and errors[0].startswith("rpool/gone/x:"), errors
 
     def test_snapshots_and_keystore_resolution(self):
         plan = _run_plan(cache=True)
@@ -9811,6 +9898,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             if snaps_fail
             else patch.object(recover_mod, "list_snapshots", return_value=snaps),
             patch.object(recover_mod, "choose_point", side_effect=spy("choose_point", point)),
+            patch.object(recover_mod.exclusions, "read_point_mark", return_value=None),
             patch.object(recover_mod, "build_plan", side_effect=spy("build_plan", plan)),
             patch.object(recover_mod, "_select_target", return_value="/dev/sda"),
             patch.object(recover_mod, "_preflight", side_effect=preflight),
@@ -9954,7 +10042,20 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         (menu,) = calls["choose_point"]
         (plan,) = calls["build_plan"]
         assert menu[2] is complete
-        assert plan[-1] is complete
+        assert plan[6] is complete and plan[7] is None  # no exclusion mark on this point
+
+    def test_a_failed_read_of_what_the_point_left_out_stops_before_the_plan(self) -> None:
+        """M5b-13 13a: read strictly, as the completion marks are."""
+        calls: dict[str, list[tuple[object, ...]]] = {}
+        failing = patch.object(
+            recover_mod.exclusions,
+            "read_point_mark",
+            side_effect=survey.ReadError("could not read: zfs get"),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_in(td, "YES", calls=calls, extra=[failing])
+        assert "choose_point" in calls and "build_plan" not in calls
+        assert mock.was_not_called("wipefs")
 
     def test_a_failed_read_of_the_metadata_stops_before_the_menu(self) -> None:
         """M4c-18 (M3X.1): the metadata is read strictly, as the marks are; an

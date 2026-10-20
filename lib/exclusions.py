@@ -273,6 +273,27 @@ def parse_point_mark(value: str) -> PointMark | None:
     return out
 
 
+def read_point_mark(pool: str, point: str, snaps: list[Snap]) -> PointMark | None:
+    """What backup point ``point`` left out, from its snapshots on the
+    drive, read strictly (raises :class:`ReadError`) as the completion
+    marks are (M3R-9, M5b-13 13a). None for a point without the mark (a
+    drive written before rc10, or a sanoid point): restored as before."""
+    marks = snapshot_marks(f"{pool}/rpool", strict=True, prop=POINT_MARK)
+    values = {
+        marks[n]
+        for n in (f"{pool}/{s.stored}@{s.name}" for s in snaps if s.name == point)
+        if n in marks
+    }
+    if not values:
+        return None
+    parsed = parse_point_mark(values.pop()) if len(values) == 1 else None
+    if parsed is None:
+        raise ValueError(
+            f"the snapshots of {point} disagree on what it left out, or it is unreadable"
+        )
+    return parsed
+
+
 def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:
     """What a backup or prepare leaves out, and the mark its point will carry
     on the drive, read before the point is taken (D10: checked at every run).

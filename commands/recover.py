@@ -51,6 +51,7 @@ Recovery order:
 
 import os
 import re
+import shlex
 import tempfile
 import time
 from dataclasses import replace
@@ -58,7 +59,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, NoReturn
 
-from lib import certificates, drive_marks, replication, sh, survey, zfs_features
+from lib import certificates, drive_marks, exclusions, replication, sh, survey, zfs_features
 from lib.backup_layout import find_be as _find_be
 from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
 from lib.cleanup import Cleanup, prompt_eject_or_attach
@@ -630,6 +631,29 @@ def _restore_encryption_root(log: Log) -> list[str]:
     return errors
 
 
+def create_excluded(rows: list[RestoreRow], log: Log) -> list[str]:
+    """Each dataset the point left out, parents first, as an empty dataset
+    with the canmount and mountpoint origin had (the mountpoint only when
+    it would not inherit it) and, on each exclusion's top, the exclusion
+    itself, so the restored system keeps it. ``-u``: nothing is mounted
+    here; encryption is inherited from the parent (rpool's key). A failure
+    is an error line, never fatal: the restored data is intact."""
+    errors: list[str] = []
+    for row in rows:
+        props = list(row.options)
+        if row.flags:
+            props.append(f"-o {exclusions.REPLICATE}=no")
+        if row.flags == exclusions.BOTH:
+            props.append(f"-o {exclusions.SNAPSHOT}=no")
+        r = sh.run(f"zfs create -u {' '.join(props)} {shlex.quote(row.rel)}", log=log)
+        if r.ok:
+            log.ok(f"{row.rel}: created empty (excluded from backups at this point)")
+        else:
+            log.error(f"{row.rel}: could not create it empty: {r.stderr.strip()}")
+            errors.append(f"{row.rel}: excluded at this point, not created: {r.stderr.strip()}")
+    return errors
+
+
 def run(
     args: list[str],
 ):  # pylint: disable= too-many-statements, too-many-branches, too-many-locals
@@ -728,7 +752,18 @@ def run(
 
     # ── 4. Restore plan: datasets, mount properties, hostid ──────────────
     log.step(4, TOTAL_STEPS, "Resolving every dataset for this point...")
-    plan = build_plan(pool_name, device, ubuntu_name, point, snaps, log, complete)
+    try:
+        excluded = exclusions.read_point_mark(pool_name, point_name(point), snaps)
+    except survey.ReadError as e:
+        log.fatal(
+            f"Cannot read what this point left out on {pool_name}: {e}",
+            causes=["The drive did not answer a zfs get; nothing was written"],
+            solutions=[f"Check the drive: zpool status {pool_name}", "Run recover again"],
+        )
+    except ValueError as e:
+        log.warn(f"{e}: every dataset is restored as if nothing were excluded")
+        excluded = None
+    plan = build_plan(pool_name, device, ubuntu_name, point, snaps, log, complete, excluded)
     show_plan(plan, log, {i.guid: n for n, i in cfg.known_drives.items()})
     if plan.hostid:
         _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
@@ -749,6 +784,11 @@ def run(
     log.info(f"Source pool:   {pool_name}")
     if plan.skipped:
         log.warn(f"{len(plan.skipped)} dataset(s) will NOT be restored (see table above)")
+    if plan.empty_rows:
+        log.info(
+            f"{len(plan.empty_rows)} dataset(s) excluded from backups at this point are "
+            + "created empty (see table above)"
+        )
     if is_incomplete(point, complete):
         earlier = [
             r for r in plan.rows if r.restored and r.snap and r.snap.name != point_name(point)
@@ -833,7 +873,7 @@ def run(
     # ── 8. Raw send every rpool dataset (NO keystore = no zvols = safe) ──
     log.step(8, TOTAL_STEPS, "Restoring datasets via raw send (keystore deferred)...")
     _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/ROOT", log=log)
-    if any(r.rel.startswith("rpool/USERDATA/") for r in plan.rpool_rows):
+    if any(r.rel.startswith("rpool/USERDATA/") for r in [*plan.rpool_rows, *plan.empty_rows]):
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/USERDATA", log=log)
 
     errors += restore_rpool_rows(
@@ -857,6 +897,11 @@ def run(
     # installer creates all datasets inheriting from rpool, so we must
     # restore that relationship with `zfs change-key -i`.
     errors += _restore_encryption_root(log)
+
+    # ── 10c. What the point left out, created empty (M5b-13 13a) ────────
+    # The backup pool is exported (no zvol anywhere: the chase.c:648 rule
+    # has nothing to apply to) and rpool's keys are loaded.
+    errors += create_excluded(plan.empty_rows, log)
 
     # ── 11. Boot filesystem (mount properties were set at receive) ───────
     log.step(11, TOTAL_STEPS, "Setting bootfs...")
@@ -1000,6 +1045,9 @@ def run(
     if plan.skipped:
         summary += ["", f"{log.Y}Not restored:{log.N}"]
         summary += [f"  • {r.rel} - {r.note}" for r in plan.skipped]
+    if plan.empty_rows:
+        summary += ["", "Created empty (excluded from backups at this point):"]
+        summary += [f"  • {r.rel}" for r in plan.empty_rows]
     if errors:
         summary += ["", f"{log.R}Errors:{log.N}"]
         summary += [f"  • {e}" for e in errors]
