@@ -222,13 +222,18 @@ def subtree_referenced(top: str, origin: dict[str, Origin]) -> int:
 
 def point_mark(declared: Declared, origin: dict[str, Origin]) -> str:
     """The value recorded on a point's snapshots (M5b-7 7a, M5b-8): every
-    top with its flags, and every dataset of its subtree with origin's
-    canmount and mountpoint at the point. ``{}``-shaped when nothing is
-    excluded, so a drive written before rc10 reads differently."""
+    top with its flags, and every dataset of a subtree left out of the
+    backup with origin's canmount and mountpoint at the point. A subtree
+    excluded from snapshots only is listed too (``snapshots``): a raw send
+    carries no user property, so recover sets it again on what it restores.
+    ``{}``-shaped when nothing is excluded, so a drive written before rc10
+    reads differently."""
     tops = {t: declared.flags_of(t) for t in sorted(declared.no_backup)}
+    for top in sorted(declared.no_snapshot):
+        _ = tops.setdefault(top, SNAPSHOTS)
     datasets = {
         rel: (origin[rel].canmount, origin[rel].mountpoint)
-        for top in sorted(tops)
+        for top in sorted(declared.no_backup)
         for rel in subtree(top, origin)
     }
     return _dump(tops, datasets)
@@ -246,9 +251,19 @@ class PointMark:
     tops: dict[str, str] = field(default_factory=dict)  # top -> flags
     datasets: dict[str, tuple[str, str]] = field(default_factory=dict)  # rel -> (canmount, mp)
 
+    @property
+    def left_out(self) -> set[str]:
+        """The tops of the subtrees the point left out of the backup."""
+        return {t for t, flags in self.tops.items() if flags != SNAPSHOTS}
+
+    @property
+    def no_snapshot(self) -> list[str]:
+        """The tops excluded from snapshots only, as at the point."""
+        return sorted(t for t, flags in self.tops.items() if flags == SNAPSHOTS)
+
     def covers(self, rel: str) -> bool:
         """True when the point left ``rel`` out."""
-        return rel in self.datasets or bool(covering(rel, set(self.tops)))
+        return rel in self.datasets or bool(covering(rel, self.left_out))
 
 
 def parse_point_mark(value: str) -> PointMark | None:
@@ -305,7 +320,7 @@ def held_lines(pool: str) -> list[str]:
     except (ReadError, ValueError):
         return []
     lines: list[str] = []
-    for top in sorted(mark.tops if mark else {}):
+    for top in sorted(mark.left_out if mark else set()):
         copies = [s for s in snaps if s.stored == top]
         if copies:
             last = max(copies, key=lambda s: s.createtxg)

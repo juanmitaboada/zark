@@ -6599,7 +6599,10 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
         value = excl.point_mark(d, origin)
         assert len(value) <= excl.MARK_LIMIT
         mark = excl.parse_point_mark(value)
-        assert mark is not None and mark.tops == {"rpool/data": excl.BOTH}  # snapshot-only: not
+        assert mark is not None
+        # A snapshot-only top is recorded for recover, never as left out.
+        assert mark.tops == {"rpool/data": excl.BOTH, "rpool/s": excl.SNAPSHOTS}
+        assert mark.left_out == {"rpool/data"} and mark.no_snapshot == ["rpool/s"]
         assert mark.datasets == {
             "rpool/data": ("on", "/rpool/data"),
             "rpool/data/c": ("on", "/srv/c"),
@@ -9468,6 +9471,26 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
             restore_plan.show_plan(plan, Log())
         assert "rpool/var/lib/docker" in out.getvalue()
         assert "excluded from backups at this point: recreated empty" in out.getvalue()
+
+    def test_a_snapshot_exclusion_is_set_again_on_what_is_restored(self):
+        """M5b-13: a raw send carries no user property, so the point's
+        snapshot-only exclusion is set again after the receive; a top the
+        point does not restore is left alone."""
+        mark = excl.PointMark(
+            tops={"rpool/var/lib/docker": excl.SNAPSHOTS, "rpool/gone": excl.SNAPSHOTS}
+        )
+        plan = _run_plan(cache=True, excluded=mark)
+        docker = next(r for r in plan.rows if r.rel == "rpool/var/lib/docker")
+        assert docker.restored and not docker.empty and not plan.empty_rows
+        fake = FakeZfs()
+        fake.pool("rpool")
+        fake.dataset("rpool/var/lib/docker")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            errors = recover_mod.restore_snapshot_exclusions(plan, mark, Log())
+            none = recover_mod.restore_snapshot_exclusions(plan, None, Log())
+        assert not errors and not none
+        assert fake.ds["rpool/var/lib/docker"].props["org.zark:snapshot"] == "no"
+        assert fake.calls == ["zfs set org.zark:snapshot=no rpool/var/lib/docker"], fake.calls
 
     def test_the_empty_datasets_are_created_unmounted_with_their_exclusion(self):
         """M5b-13 13a: `zfs create -u`, parents first; the exclusion only on

@@ -382,7 +382,7 @@ def _empty_row(
     row.options = receive_options(props, effective.get(parent, ""), leaf)
     row.effective = effective_mountpoint(props, effective.get(parent, ""), leaf)
     effective[ds] = row.effective
-    top = covering(ds, set(excluded.tops))
+    top = covering(ds, excluded.left_out)
     row.flags = excluded.tops[top] if top == ds else ""
     return row
 

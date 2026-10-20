@@ -654,6 +654,26 @@ def create_excluded(rows: list[RestoreRow], log: Log) -> list[str]:
     return errors
 
 
+def restore_snapshot_exclusions(
+    plan: RestorePlan, excluded: exclusions.PointMark | None, log: Log
+) -> list[str]:
+    """``org.zark:snapshot=no`` again on each restored dataset the point
+    recorded as excluded from snapshots only: a raw send carries no user
+    property, and without it the restored system's next setup would let
+    sanoid snapshot the subtree again. A user property mounts nothing."""
+    errors: list[str] = []
+    for top in excluded.no_snapshot if excluded else []:
+        row = plan.row(top)
+        if row is None or not row.restored:
+            continue
+        r = sh.run(f"zfs set {exclusions.SNAPSHOT}=no {shlex.quote(top)}", log=log)
+        if r.ok:
+            log.ok(f"{top}: excluded from snapshots again, as at this point")
+        else:
+            errors.append(f"{top}: {exclusions.SNAPSHOT}=no not set again: {r.stderr.strip()}")
+    return errors
+
+
 def run(
     args: list[str],
 ):  # pylint: disable= too-many-statements, too-many-branches, too-many-locals
@@ -902,6 +922,7 @@ def run(
     # The backup pool is exported (no zvol anywhere: the chase.c:648 rule
     # has nothing to apply to) and rpool's keys are loaded.
     errors += create_excluded(plan.empty_rows, log)
+    errors += restore_snapshot_exclusions(plan, excluded, log)
 
     # ── 11. Boot filesystem (mount properties were set at receive) ───────
     log.step(11, TOTAL_STEPS, "Setting bootfs...")
