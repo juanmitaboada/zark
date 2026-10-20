@@ -16864,6 +16864,95 @@ class TestAlerts:
             assert not removed.called and not zfs_cls.called, args  # nothing ran
 
 
+class TestWaitFreed:  # pylint: disable=missing-function-docstring
+    """M5a-11: a destroy returns before its blocks are free; the plan of a
+    backup counts them as available, so the transfer waits for them."""
+
+    @staticmethod
+    def _spy(pool: str, figures: list[int]) -> tuple[MockShell, Any]:
+        mock = MockShell()
+        values = iter(figures)
+        last = {"v": figures[-1]}
+        real = mock.mock_run
+
+        def spy(cmd: str, **kw: Any) -> RunResult:
+            if cmd == f"zpool get -Hp -o value freeing {pool}":
+                mock._calls.append(cmd)  # pylint: disable=protected-access
+                last["v"] = next(values, last["v"])
+                return RunResult(0, f"{last['v']}\n", "", cmd)
+            return real(cmd, **kw)
+
+        return mock, patch.object(mock, "mock_run", side_effect=spy)
+
+    def _wait(self, figures: list[int]) -> tuple[list[str], str, MockShell]:
+        mock, spy = self._spy("backup", figures)
+        clock = itertools.count(0, 10)  # ten seconds per read of the clock
+        out = StringIO()
+        with (
+            spy,
+            patch_sh(mock),
+            patch("lib.reclaim.time.sleep"),
+            patch("lib.reclaim.time.monotonic", side_effect=lambda: next(clock)),
+            redirect_stdout(out),
+        ):
+            left = reclaim.wait_freed(["backup"], Log())
+        return left, Log._STRIP_RE.sub("", out.getvalue()), mock  # pylint: disable=protected-access
+
+    def test_it_waits_until_the_pool_has_freed_what_was_removed(self) -> None:
+        left, out, mock = self._wait([5 << 30, 1 << 30, 0])
+        assert left == [] and "Waiting for backup to free what was removed..." in out
+        assert mock.call_count("zpool get -Hp -o value freeing backup") == 3
+
+    def test_it_gives_up_at_the_cap_and_names_the_pool(self) -> None:
+        left, _out, _mock = self._wait([5 << 30])
+        assert left == ["backup"]
+
+    def test_a_pool_that_is_not_freeing_is_not_waited_for(self) -> None:
+        left, out, mock = self._wait([0])
+        assert left == [] and "Waiting" not in out
+        assert mock.call_count("zpool get -Hp -o value freeing backup") == 1
+
+    def test_a_figure_that_cannot_be_read_is_nothing_to_wait_for(self) -> None:
+        mock = MockShell()
+        mock.on("zpool get -Hp -o value freeing backup").fails("no such pool")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert reclaim.wait_freed(["backup"], Log()) == []
+
+    def test_backup_waits_after_its_changes_and_before_the_transfer(self) -> None:
+        order: list[str] = []
+        mock, spy = self._spy("backup", [4 << 30, 0])
+        out = StringIO()
+        with (
+            spy,
+            patch_sh(mock),
+            patch("lib.reclaim.time.sleep"),
+            redirect_stdout(out),
+        ):
+            backup_mod._apply_changes(  # pylint: disable=protected-access
+                [lambda: order.append("a"), lambda: order.append("b")], "backup", Log()
+            )
+            assert order == ["a", "b"]
+            assert mock.call_count("zpool get -Hp -o value freeing backup") == 2
+            assert "Waiting for backup" in out.getvalue()
+            before = mock.call_count("zpool get")
+            backup_mod._apply_changes([], "backup", Log())  # pylint: disable=protected-access
+            assert mock.call_count("zpool get") == before
+
+    def test_backup_says_so_when_the_pool_is_still_freeing(self) -> None:
+        mock, spy = self._spy("backup", [4 << 30])
+        clock = itertools.count(0, 30)
+        out = StringIO()
+        with (
+            spy,
+            patch_sh(mock),
+            patch("lib.reclaim.time.sleep"),
+            patch("lib.reclaim.time.monotonic", side_effect=lambda: next(clock)),
+            redirect_stdout(out),
+        ):
+            backup_mod._apply_changes([lambda: None], "backup", Log())  # pylint: disable=protected-access
+        assert "backup is still freeing what was removed" in out.getvalue()
+
+
 class TestCompletePoints:
     """M2R-1: which backup points are complete is recorded on the drive."""
 

@@ -88,31 +88,12 @@ def _typed(log: Log, what: str) -> bool:
     return answer == WORD
 
 
-# How long prune waits for a pool to free what it removed (M4d-33).
-FREEING_WAIT_SEC = 60
-
-
-def _freeing(pool: str) -> int:
-    """Bytes ``pool`` still frees in the background after destroys, 0 when
-    it cannot be read."""
-    r = sh.run(f"zpool get -Hp -o value freeing {pool}")
-    return int(r.output) if r.ok and r.output.isdigit() else 0
-
-
 def _capacity(log: Log, settle: bool = False) -> None:
     """Each source pool's fill level; ``settle``: after removals, once the
     pool has freed them. A destroy frees in the background, so `zpool list`
     right after it lags (78.9G shown on carmen, 105G a minute later)."""
     pools = survey.source_pools()
-    busy: list[str] = []
-    if settle:
-        end = time.monotonic() + FREEING_WAIT_SEC
-        busy = [p for p in pools if _freeing(p)]
-        if busy:
-            log.info(f"Waiting for {', '.join(busy)} to free what was removed...")
-        while busy and time.monotonic() < end:
-            time.sleep(1)
-            busy = [p for p in busy if _freeing(p)]
+    busy: list[str] = reclaim.wait_freed(pools, log) if settle else []
     for pool in pools:
         r = sh.run(f"zpool list -Hp -o name,capacity,size,free {pool}")
         f = r.output.strip().split("\t") if r.ok else []

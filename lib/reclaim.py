@@ -17,6 +17,7 @@ destroy by exact name, grouped per dataset (retention and ``zark prune``).
 """
 
 import shlex
+import time
 
 from lib import sh
 from lib.log import Log
@@ -25,6 +26,37 @@ from lib.retention import Prune, Removal
 
 def _q(word: str) -> str:
     return shlex.quote(word)
+
+
+# How long to wait for a pool to free what was removed (M4d-33, M5a-11).
+FREEING_WAIT_SEC = 60
+
+
+def freeing(pool: str) -> int:
+    """Bytes ``pool`` still frees in the background after destroys, 0 when
+    it cannot be read (``zpool get freeing`` is ``$FREE``'s used bytes,
+    OpenZFS 2.4.1 module/zfs/spa.c:516-519)."""
+    r = sh.run(f"zpool get -Hp -o value freeing {pool}")
+    return int(r.output) if r.ok and r.output.isdigit() else 0
+
+
+def wait_freed(pools: list[str], log: Log) -> list[str]:
+    """Wait, at most :data:`FREEING_WAIT_SEC`, until each pool has freed what
+    was destroyed on it; the pools still freeing at the cap.
+
+    A destroy returns before its blocks are free: they sit in the pool's
+    ``$FREE`` until its free pass has run, and a write that needs more than
+    ``available`` meanwhile is refused with ENOSPC (OpenZFS 2.4.1
+    module/zfs/dsl_destroy.c:414-420, dsl_dir.c:1338-1363).
+    """
+    end = time.monotonic() + FREEING_WAIT_SEC
+    busy = [p for p in pools if freeing(p)]
+    if busy:
+        log.info(f"Waiting for {', '.join(busy)} to free what was removed...")
+    while busy and time.monotonic() < end:
+        time.sleep(1)
+        busy = [p for p in busy if freeing(p)]
+    return busy
 
 
 # Names per grouped `zfs destroy` (M3P.26): keeps each command line short.

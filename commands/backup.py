@@ -435,9 +435,21 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         actions = [*_make_room(plans, eng, needed, dst_info, policy, log), *actions]
     if confirmed_any:
         log.ok("Applying the confirmed changes on the backup")
+    _apply_changes(actions, pool_name, log)
+    return True
+
+
+def _apply_changes(actions: list[Callable[[], object]], pool: str, log: Log) -> None:
+    """Run the removals and changes the plan chose, then let ``pool`` finish
+    freeing what they destroyed: the plan counts that space as available, and
+    a receive started before ZFS has returned it can meet ENOSPC (M5a-11)."""
     for act in actions:
         _ = act()
-    return True
+    if actions and reclaim.wait_freed([pool], log):
+        log.warn(
+            f"{pool} is still freeing what was removed; if the transfer stops for lack of "
+            + "space, run the backup again"
+        )
 
 
 def _make_room(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
