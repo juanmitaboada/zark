@@ -6450,6 +6450,25 @@ def _skip_without_make() -> None:
         raise SkipTest("make not found (the Makefile is a development tool)")
 
 
+class TestMountBanner:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M5aP.7: POOL MOUNTED keeps its border with long archived-lineage names."""
+
+    def test_long_lineage_names_go_below_the_banner(self):
+        lineage = "rpool/USERDATA/" + "a_very_long_home_dataset_name_" * 3 + ".archived-20261018"
+        out = StringIO()
+        with patch.dict(os.environ, {"COLUMNS": "72"}), redirect_stdout(out):
+            mount_mod._show_result(  # pylint: disable=protected-access
+                Log(), "backup2", "/mnt/zark/backup2", True, 21, [lineage]
+            )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        lines = text.splitlines()
+        top = next(i for i, ln in enumerate(lines) if ln.startswith("\u2554"))
+        bottom = next(i for i, ln in enumerate(lines) if ln.startswith("\u255a"))
+        assert all(ln.endswith("\u2551") for ln in lines[top + 1 : bottom] if "\u2560" not in ln)
+        assert "Archived lineages: 1, not mounted" in text
+        assert any(ln.endswith(f"backup2/{lineage}") for ln in lines[bottom:]), text
+
+
 class TestPpaSeries:  # pylint: disable=missing-function-docstring,too-few-public-methods
     """M5aP.4: the PPA's series are named in one Makefile table, and the
     READMEs name the same ones."""

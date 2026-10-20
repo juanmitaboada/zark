@@ -234,6 +234,56 @@ def _warn_read_write(log: Log) -> None:
     )
 
 
+def _show_result(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    log: Log, pool_name: str, mnt_point: str, readonly: bool, mounted: int, archived: list[str]
+) -> None:
+    """POOL MOUNTED, then the archived lineages' names (M5aP.7)."""
+    root_path = mnt_point  # _mount_origin_layout mounted the boot environment there
+    result_lines = [
+        f"Mount point: {log.W}{mnt_point}{log.N}",
+        f"Mode:        {log.W}{'read-only' if readonly else 'read-write'}{log.N}",
+        f"Datasets:    {log.W}{mounted}{log.N}",
+        "",
+        f"{log.Y}Browse data:{log.N}",
+        f"  ls {mnt_point}/",
+        "",
+        f"{log.Y}Access old snapshots:{log.N}",
+        (f"  ls {root_path}/.zfs/snapshot/" if root_path else f"  ls {mnt_point}/.zfs/snapshot/"),
+        "",
+    ]
+
+    if root_path:
+        result_lines += [
+            f"{log.Y}Chroot into the backup system:{log.N}",
+            f"  sudo mount --bind /proc {root_path}/proc",
+            f"  sudo mount --bind /sys  {root_path}/sys",
+            f"  sudo mount --bind /dev  {root_path}/dev",
+            f"  sudo chroot {root_path}",
+            "",
+        ]
+
+    if archived:
+        # Their names are listed after the banner: a name is one word the
+        # frame never breaks, and a long one would push out its border (M5aP.7).
+        result_lines += [
+            f"{log.Y}Archived lineages: {len(archived)}, not mounted (listed below);"
+            + f" browse one with:{log.N}",
+            f"  sudo mount -t zfs -o ro,zfsutil {pool_name}/<lineage> <directory>",
+            "",
+        ]
+
+    result_lines += [
+        f"{log.Y}To unmount:{log.N}",
+        f"  {zark_command()} umount",
+    ]
+
+    log.banner_ok(f"POOL {pool_name} MOUNTED", result_lines)
+    if archived:
+        log.info(f"Archived lineages on {pool_name} (not mounted):")
+        for rel in archived:
+            log.info(f"  {pool_name}/{rel}")
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
@@ -330,46 +380,7 @@ def run(
             solutions=[f"Check: zfs get mountpoint,canmount -r {pool_name}/rpool"],
         )
 
-    root_path = mnt_point  # _mount_origin_layout mounted the boot environment there
-
-    # ── Show results ─────────────────────────────────────────────────────
-    result_lines = [
-        f"Mount point: {log.W}{mnt_point}{log.N}",
-        f"Mode:        {log.W}{'read-only' if readonly else 'read-write'}{log.N}",
-        f"Datasets:    {log.W}{mounted}{log.N}",
-        "",
-        f"{log.Y}Browse data:{log.N}",
-        f"  ls {mnt_point}/",
-        "",
-        f"{log.Y}Access old snapshots:{log.N}",
-        (f"  ls {root_path}/.zfs/snapshot/" if root_path else f"  ls {mnt_point}/.zfs/snapshot/"),
-        "",
-    ]
-
-    if root_path:
-        result_lines += [
-            f"{log.Y}Chroot into the backup system:{log.N}",
-            f"  sudo mount --bind /proc {root_path}/proc",
-            f"  sudo mount --bind /sys  {root_path}/sys",
-            f"  sudo mount --bind /dev  {root_path}/dev",
-            f"  sudo chroot {root_path}",
-            "",
-        ]
-
-    if archived:
-        result_lines += [f"{log.Y}Archived lineages (not mounted; browse one with):{log.N}"]
-        result_lines += [f"  {pool_name}/{rel}" for rel in archived]
-        result_lines += [
-            f"  sudo mount -t zfs -o ro,zfsutil {pool_name}/<lineage> <directory>",
-            "",
-        ]
-
-    result_lines += [
-        f"{log.Y}To unmount:{log.N}",
-        f"  {zark_command()} umount",
-    ]
-
-    log.banner_ok(f"POOL {pool_name} MOUNTED", result_lines)
+    _show_result(log, pool_name, mnt_point, readonly, mounted, archived)
 
     # Leave mounted for the user
     cleanup.disable()
