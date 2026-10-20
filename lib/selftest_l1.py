@@ -623,6 +623,36 @@ def snp_06(b: Bench) -> None:
     _ = b.ok(f"zfs receive -A {dst}")
 
 
+@check(
+    "SNP-07",
+    1,
+    1,
+    "a user property set on a dataset is local there, inherited below, listed with -s local",
+    depends=("zark exclude and exclusions.read (lib/exclusions.py:195)", "D7, M5b-4 4a"),
+    fake=True,
+)
+def snp_07(b: Bench) -> None:
+    """``org.zark:replicate=no`` set on a dataset is ``local`` there and
+    ``inherited from`` it on a child; ``zfs get -s local -r`` lists the
+    dataset only, and ``zfs inherit`` removes it. OpenZFS
+    cmd/zfs/zfs_main.c:2292-2312; man/man7/zfsprops.7:2279-2280;
+    module/zfs/dsl_prop.c:105, :115-121."""
+    top = b.fs(f"{b.a}/snp07")
+    child = b.fs(f"{top}/c")
+    prop = "org.zark:replicate"
+    _ = b.ok(f"zfs set {prop}=no {top}")
+    got = b.source(prop, top)
+    expect(got == "local", f"{prop} local on {top}", got)
+    got = b.source(prop, child)
+    expect(got == f"inherited from {top}", f"{prop} inherited from {top} on {child}", got)
+    listing = f"zfs get -H -s local -o name,property,value {prop},org.zark:snapshot -r {b.a}"
+    got = ", ".join(b.ok(listing).lines)
+    expect(got == f"{top}\t{prop}\tno", f"{top} alone with -s local", got)
+    _ = b.ok(f"zfs inherit {prop} {top}")
+    got = ", ".join(b.ok(listing).lines)
+    expect(got == "", "nothing listed after zfs inherit", got)
+
+
 # ── send and receive ─────────────────────────────────────────────────────
 
 
@@ -1357,3 +1387,33 @@ def key_03(b: Bench) -> None:
     for ds in three:
         got = b.value("keystatus", ds)
         expect(got == "available", f"{ds} available once {root}'s key is loaded", got)
+
+
+@check(
+    "KEY-04",
+    1,
+    1,
+    "zfs create -u under an encrypted parent: its key, its properties, not mounted",
+    depends=("recover's empty datasets (commands/recover.py create_excluded, M5b-13)",),
+)
+def key_04(b: Bench) -> None:
+    """``zfs create -u -o canmount=on -o mountpoint=... -o org.zark:...``
+    under an encrypted dataset whose key is loaded: encrypted, with the
+    parent's encryption root and key, its properties ``local``, and not
+    mounted. OpenZFS cmd/zfs/zfs_main.c:1154-1155, :1342-1345;
+    lib/libzfs/libzfs_crypto.c:1079-1080; module/zfs/dsl_crypt.c:1946-1948, :1957-1960."""
+    ds = f"{b.a}/key04"
+    _ = b.ok(
+        "zfs create -u -o canmount=on -o mountpoint=/selftest/key04 "
+        + f"-o org.zark:replicate=no {ds}"
+    )
+    got = b.value("encryption", ds)
+    expect(got not in ("off", "-", ""), "encrypted", got)
+    for prop, want in (("encryptionroot", b.a), ("keystatus", "available"), ("mounted", "no")):
+        got = b.value(prop, ds)
+        expect(got == want, f"{prop} {want}", got)
+    for prop, want in (("mountpoint", "/selftest/key04"), ("org.zark:replicate", "no")):
+        got = b.value(prop, ds)
+        expect(got == want, f"{prop} {want}", got)
+        got = b.source(prop, ds)
+        expect(got == "local", f"{prop} local", got)

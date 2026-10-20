@@ -18774,7 +18774,7 @@ class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-f
 
     def test_every_fake_check_passes_on_the_fake(self):
         checks = [c for c in all_selftest_checks() if c.fake]
-        assert len(checks) == 19
+        assert len(checks) == 20
         failed: list[str] = []
         foreign: list[str] = []
         accessors = 0
@@ -18799,7 +18799,7 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
 
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
-        assert len([c for c in checks if c.level == 1]) == 47
+        assert len([c for c in checks if c.level == 1]) == 49
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         for c in checks:
