@@ -5119,6 +5119,15 @@ class TestHealthPoolFindings:  # pylint: disable=missing-function-docstring
         assert "lies about cache" not in out and "DESTRUCTIVE TEST FAILED" not in out, out
         assert "hardware quirk" not in out, out
         assert rc == 1 and written
+        assert "Run the test again where the drive can be reconnected." in out, out
+        # M5aR-2: the test pool left on the drive is purged first.
+        out, rc, _ = self._destructive(
+            HealthResult(
+                "fast", True, 1, 0.0, False, detail, inconclusive=True, cleanup_error="busy"
+            )
+        )
+        assert "Purge the drive, then run the test again where it can be reconnected." in out
+        assert "Test pool was not destroyed: busy" in out and rc == 1, out
         # A real read-back failure keeps its banner and the invitation.
         out, rc, _ = self._destructive(
             HealthResult("fast", True, 1, 0.0, False, "re-import failed")

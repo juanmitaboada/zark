@@ -129,8 +129,9 @@ for the canonical end-to-end sequences.
     not counted: the pool was exported and synced before the eject. The
     export before the eject is checked: a pool that did not leave stops the
     test as failed. A reconnect pause that gets end of input (a closed
-    standard input) is not a confirmation: the cold pass fails, the pool is
-    cleaned. Transport lines are matched by the whole disk name (not a name
+    standard input) is not a confirmation: the cold pass fails, and the
+    test pool is cleaned when the drive can still be reached, else purge
+    removes it before the next test. Transport lines are matched by the whole disk name (not a name
     that merely starts like it), by the USB device of its bridge for the
     kernel's reset lines, and after the reconnect by the name the disk came
     back with. A failed test, or a test pool that could not be destroyed, ends with exit

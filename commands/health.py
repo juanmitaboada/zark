@@ -259,7 +259,11 @@ def run(args: list[str]) -> None:
                     f"Detail: {test.detail}",
                     "",
                     "Nothing here says anything about the enclosure.",
-                    "Run the test again where the drive can be reconnected.",
+                    # The test pool stays when it could not be destroyed, and
+                    # the next run refuses a drive that is not blank (M5aR-2).
+                    "Purge the drive, then run the test again where it can be reconnected."
+                    if test.cleanup_error
+                    else "Run the test again where the drive can be reconnected.",
                 ],
             )
         else:
