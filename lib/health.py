@@ -496,8 +496,31 @@ def _usb_id(name: str) -> str:
     return ids[-1] if ids else ""
 
 
+def _disk_at(
+    ts: float,
+    base: str,
+    renamed: tuple[float, str] | None,
+    unplug: tuple[float, float] | None,
+    usb: tuple[str, str],
+) -> tuple[set[str], set[str]]:
+    """The disk's kernel names and USB ids at ``ts``: its first ones before
+    the unplug, its current ones after, both inside the window (M5aR-3).
+    ``usb`` is (the id read before the eject, the id read now)."""
+    new = renamed[1] if renamed else base
+    if _within(ts, unplug):
+        return {base, new}, set(usb)
+    if (renamed and ts > renamed[0]) or (unplug is not None and ts > unplug[1]):
+        return {new}, {usb[1]}
+    return {base}, {usb[0]}
+
+
 def _transport_lines(
-    base: str, since_ts: float, renamed: tuple[float, str] | None = None
+    base: str,
+    since_ts: float,
+    renamed: tuple[float, str] | None = None,
+    *,
+    unplug: tuple[float, float] | None = None,
+    bridge: str = "",
 ) -> list[tuple[float, str]]:
     """Return kernel transport-error lines for ``base`` newer than ``since_ts``.
 
@@ -507,23 +530,27 @@ def _transport_lines(
     deliberately not in the pattern list, so a normal disconnect does not
     raise a false alarm. ``renamed``: the kernel name the disk got when it
     came back and the timestamp from which it has it; after that, the old
-    name belongs to whatever else was plugged in.
+    name belongs to whatever else was plugged in. ``bridge``: the disk's USB
+    id read before the eject, while its sysfs path existed; the id read now
+    is the port it came back on. Inside ``unplug`` both names and both ids
+    are the disk's (M5aR-3).
     """
     r = run("sh -c 'dmesg'")
     if not r.ok:
         return []
     hits: list[tuple[float, str]] = []
-    usb = {n: _usb_id(n) for n in (base, renamed[1] if renamed else base)}
+    start_id = bridge or _usb_id(base)
+    usb = (start_id, _usb_id(renamed[1] if renamed else base) or start_id)
     for line in r.output.splitlines():
         m = re.match(r"\[\s*([0-9]+\.[0-9]+)\]", line)
         if not m or float(m.group(1)) <= since_ts:
             continue
-        name = renamed[1] if renamed and float(m.group(1)) > renamed[0] else base
+        names, ids = _disk_at(float(m.group(1)), base, renamed, unplug, usb)
         # The bridge's own reset line names its USB device, not the disk.
-        on_bridge = bool(usb[name]) and f"usb {usb[name]}: " in line
+        on_bridge = any(i and f"usb {i}: " in line for i in ids)
         if (
             not on_bridge
-            and not _names_disk(line, name)
+            and not any(_names_disk(line, n) for n in names)
             and "scsi host" not in line
             and "uas" not in line
         ):
@@ -546,6 +573,7 @@ def _transport_errors_since(
     since_ts: float,
     unplug: tuple[float, float] | None = None,
     renamed: tuple[float, str] | None = None,
+    bridge: str = "",
 ) -> list[str]:
     """The transport-error lines since ``since_ts``, except those in ``unplug``.
 
@@ -555,17 +583,26 @@ def _transport_errors_since(
     and the pool was exported and synced before it began (M4aP.9).
     """
     return [
-        line for ts, line in _transport_lines(base, since_ts, renamed) if not _within(ts, unplug)
+        line
+        for ts, line in _transport_lines(base, since_ts, renamed, unplug=unplug, bridge=bridge)
+        if not _within(ts, unplug)
     ]
 
 
 def _at_unplug(
-    base: str, unplug: tuple[float, float] | None, renamed: tuple[float, str] | None = None
+    base: str,
+    unplug: tuple[float, float] | None,
+    renamed: tuple[float, str] | None = None,
+    bridge: str = "",
 ) -> list[str]:
     """The transport-error lines inside the cold pass's ``unplug`` window."""
     if unplug is None:
         return []
-    return [line for ts, line in _transport_lines(base, unplug[0], renamed) if _within(ts, unplug)]
+    return [
+        line
+        for ts, line in _transport_lines(base, unplug[0], renamed, unplug=unplug, bridge=bridge)
+        if _within(ts, unplug)
+    ]
 
 
 # How long the cold pass waits for the disk's by-id links after Enter.
@@ -626,6 +663,9 @@ def run_destructive_test(
     # Mark the kernel-log position so we can later report only the transport
     # errors emitted during this test.
     dmesg_mark = _dmesg_now_ts()
+    # Read while the disk is present: after a reconnect under another name
+    # its old sysfs path is gone (M5aR-3).
+    bridge = _usb_id(base)
     created = False
     unplug: tuple[float, float] | None = None
     renamed: tuple[float, str] | None = None  # the kernel name after the reconnect
@@ -649,7 +689,7 @@ def run_destructive_test(
                 write_mb_s,
                 False,
                 f"could not create test pool: {r.stderr.strip()}",
-                _transport_errors_since(base, dmesg_mark, unplug, renamed),
+                _transport_errors_since(base, dmesg_mark, unplug, renamed, bridge),
             )
         created = True
 
@@ -670,7 +710,7 @@ def run_destructive_test(
                 write_mb_s,
                 False,
                 f"could not export the test pool: {exported.stderr.strip()}",
-                _transport_errors_since(base, dmesg_mark, unplug, renamed),
+                _transport_errors_since(base, dmesg_mark, unplug, renamed, bridge),
             )
 
         if cold:
@@ -687,7 +727,7 @@ def run_destructive_test(
                     write_mb_s,
                     False,
                     "the reconnect was not confirmed (stdin closed at the pause)",
-                    _transport_errors_since(base, dmesg_mark, unplug, renamed),
+                    _transport_errors_since(base, dmesg_mark, unplug, renamed, bridge),
                     inconclusive=True,
                 )
             # The kernel announces the disk, then each partition, and udev
@@ -716,7 +756,7 @@ def run_destructive_test(
                     write_mb_s,
                     False,
                     missing,
-                    _transport_errors_since(base, dmesg_mark, unplug, renamed),
+                    _transport_errors_since(base, dmesg_mark, unplug, renamed, bridge),
                 )
 
             # The kernel may have given the disk another name (sdb, then sdc):
@@ -738,7 +778,7 @@ def run_destructive_test(
         # Transport errors are read AFTER the re-import attempt so the import's
         # own bus traffic (which is where a flaky bridge tends to stumble) is
         # included in the window.
-        terrs = _transport_errors_since(base, dmesg_mark, unplug, renamed)
+        terrs = _transport_errors_since(base, dmesg_mark, unplug, renamed, bridge)
         if not imp.ok:
             return TestResult(
                 profile,
@@ -774,7 +814,7 @@ def run_destructive_test(
     finally:
         cleanup_error = _remove_test_pool(test_pool, vdev, import_from, altroot, created, log)
     result.cleanup_error = cleanup_error
-    result.at_unplug = _at_unplug(base, unplug, renamed)
+    result.at_unplug = _at_unplug(base, unplug, renamed, bridge)
     return result
 
 

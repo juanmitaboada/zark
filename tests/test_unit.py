@@ -199,6 +199,7 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
     Finding,
     HealthReport,
     TestResult as HealthResult,
+    _at_unplug,
     _check_fua,
     _check_transport,
     _transport_errors_since,
@@ -5482,6 +5483,37 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring,too-m
         ):
             errs = _transport_errors_since("sdb", since_ts=100.0)
         assert [e[:7] for e in errs] == ["[ 300.0", "[ 303.0"], errs
+
+    def test_at_the_unplug_both_kernel_names_are_the_disks(self):
+        # M5aR-3: sdb comes back as sdc inside the window, before its links do.
+        mock = MockShell()
+        mock.on("dmesg").succeeds(
+            "[ 200.0] sd 0:0:0:0: [sdb] Synchronize Cache(10) failed: hostbyte=DID_ERROR\n"
+            "[ 230.0] sd 1:0:0:0: [sdc] Synchronize Cache(10) failed: hostbyte=DID_ERROR\n"
+        )
+        with patch_sh(mock):
+            seen = _at_unplug("sdb", (150.0, 250.0), (240.0, "sdc"), bridge="")
+        assert [ln[:7] for ln in seen] == ["[ 200.0", "[ 230.0"], seen
+
+    def test_the_bridge_read_before_the_eject_still_counts_after_a_port_change(self):
+        # M5aR-3: the disk came back on another port under the same name; a
+        # reset of its first port before the eject is still the disk's.
+        mock = MockShell()
+        mock.on("dmesg").succeeds(
+            "[ 120.0] usb 2-1.4: reset SuperSpeed USB device number 7 using xhci_hcd\n"
+            "[ 300.0] usb 2-2: reset SuperSpeed USB device number 9 using xhci_hcd\n"
+            "[ 310.0] usb 2-1.4: reset SuperSpeed USB device number 8 using xhci_hcd\n"
+        )
+        now = "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-2/2-2:1.0/host7/target7:0:0/7:0:0:0"
+        with (
+            patch_sh(mock),
+            patch(
+                "lib.health.os.path.realpath",
+                side_effect=lambda p: now if p == "/sys/block/sdb/device" else p,
+            ),
+        ):
+            errs = _transport_errors_since("sdb", 100.0, (150.0, 250.0), None, "2-1.4")
+        assert [e[:7] for e in errs] == ["[ 120.0", "[ 300.0"], errs
 
     def test_without_a_usb_id_the_reset_lines_are_not_the_disks(self):
         # M5a-18: a disk that is not USB has no bridge to reset.
