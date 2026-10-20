@@ -8190,7 +8190,7 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
     """M4aF-4: an unregistered blank-label disk has nothing to keep; M4aF-5: the warning."""
 
     @staticmethod
-    def _purge_blank_label(mock: MockShell) -> tuple[str, int]:
+    def _purge_blank_label(mock: MockShell, label: PoolLabel | None = None) -> tuple[str, int]:
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(cfg_dir / "known_drives.json", {})
         out = StringIO()
@@ -8199,8 +8199,9 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
             patch_sh(mock),
             patch.object(Config, "default_config_dir", return_value=cfg_dir),
             patch.object(
-                purge_mod, "validate_external_block_device", return_value=_purge_ident(None)
+                purge_mod, "validate_external_block_device", return_value=_purge_ident(label)
             ),
+            patch.object(purge_mod.forensics, "capture", return_value=""),
             patch.object(purge_mod, "_present", return_value=False),
             patch.object(purge_mod, "_held_from_udev", _held_taken),
             patch("builtins.input", side_effect=["y", "yes", "sdb", "n"]),
@@ -8230,6 +8231,17 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
         _wipe_succeeds(mock)
         text, rc = self._purge_blank_label(mock)
         assert rc == 0 and "Eject drive 'DT microDuo 3C (/dev/sdb)' now?" in text, text
+
+    def test_an_unregistered_drive_is_named_by_its_model_not_its_destroyed_pool(self):
+        # M5aP.8: "Eject drive 'zarktest_...'" named a pool that no longer exists.
+        mock = MockShell()
+        mock.on("zpool list zarktest_1").fails()
+        mock.on_prefix("zpool import -N -R /run/zark/altroot/zarktest_1").succeeds()
+        mock.on("zpool destroy zarktest_1").succeeds()
+        _wipe_succeeds(mock)
+        text, rc = self._purge_blank_label(mock, PoolLabel("zarktest_1", "77"))
+        assert rc == 0 and "Eject drive 'DT microDuo 3C (/dev/sdb)' now?" in text, text
+        assert "Eject drive 'zarktest_1'" not in text
 
     def test_a_disk_without_label_and_a_signature_left_says_something_is_left(self):
         mock = MockShell()

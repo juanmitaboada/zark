@@ -405,13 +405,9 @@ def run(
     # confuse a later `prepare`.
     flush_device_cache(log)
 
-    # How the eject prompt and the unplug banner name it (I18).
-    if matched:
-        label = matched[0]
-    elif ident.label:
-        label = ident.label.name
-    else:
-        label = f"{ident.model} ({target_dev})"
+    # How the eject prompt and the unplug banner name it (I18): the drive,
+    # never the pool just destroyed on it (M5aP.8).
+    label = matched[0] if matched else f"{ident.model} ({target_dev})"
     log.banner_ok(
         "DRIVE PURGED",
         [
