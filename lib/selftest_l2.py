@@ -105,7 +105,7 @@ class StickBench(Bench):
         listing = sh.run(f"zpool list -vHP {self.s}", log=self.log)
         if not listing.ok:
             return ""  # the create never ended
-        for line in listing.lines:
+        for line in listing.lines[1:]:  # the first line is the pool's own
             path = line.strip().split("\t")[0]
             if path.startswith("/dev/") and self.disk in identity.disks_under(path):
                 guid = sh.run(f"zpool get -Hp -o value guid {self.s}", log=self.log)

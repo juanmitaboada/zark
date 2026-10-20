@@ -19214,6 +19214,19 @@ class TestSelftestStickCreate:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called(f"zpool destroy -f {bench.s}"), mock.calls
         assert not bench.creating
 
+    def test_the_pool_line_is_never_read_as_a_vdev(self):
+        # M5aR-5: only the lines after the pool's own are its vdevs.
+        mock = MockShell()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            bench = st_l2.StickBench(make_log(), Cleanup(make_log()), self.IDENT)
+            mock.on(f"zpool list -vHP {bench.s}").succeeds("/dev/sdz1\t1G\n\t/dev/sdza1\n")
+            mock.on("lsblk -nrs -o NAME,TYPE /dev/sdz1").succeeds("sdz1 part\nsdz disk\n")
+            mock.on("lsblk -nrs -o NAME,TYPE /dev/sdza1").succeeds("sdza1 part\nsdza disk\n")
+            mock.on(f"zpool get -Hp -o value guid {bench.s}").succeeds("4242\n")
+            bench.creating.add(bench.s)
+            bench.forget()
+        assert mock.was_not_called(f"zpool destroy -f {bench.s}"), mock.calls
+
     def test_without_a_create_in_flight_nothing_is_destroyed(self):
         mock, bench = self._forget("/dev/sdz1", cut_short=False)
         assert mock.was_not_called(f"zpool destroy -f {bench.s}"), mock.calls
