@@ -10,10 +10,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M4d (2.0.0-rc8)** on top of M4c (2.0.0-rc7),
+The tree currently carries **M5a (2.0.0-rc9)** on top of M4d (2.0.0-rc8), M4c (2.0.0-rc7),
 M4s (2.0.0-rc6), M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2
 (2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling consolidation that
 preceded them.
+
+### M5a: hygiene, the M4d review's findings and the checklist's cosmetics (2.0.0-rc9)
+
+#### Changed
+
+- **Banners and boxes keep their right edge when a line has a newline**
+  (M5a-4), and a heavy banner keeps a column free on its right so a
+  full-width line never touches the border (M5a-24).
+- **prune's age-cut warning** names the drive and up to three of the
+  datasets, one warning per drive (M5a-5).
+- **`zark setup --remove` with any other argument** is a usage error,
+  exit 2, and removes nothing (M5a-6).
+- **`zark chroot`, `mount local` and repair-boot** do not mount other
+  boot environments' subtrees, with one info line; bpool's import gets
+  the device hint (M5a-7, M5a-12). chroot mounts the ESP of rpool's disk,
+  not the first NVMe disk's (M5a-19).
+- **Tips and status lines name the command as run** (M5a-9).
+- **A backup waits up to 60 s for the drive to finish freeing** before the
+  transfer when its plan removed something (prune uses the same wait), and
+  its banner's "Available:" is read after retention (M5a-10, M5a-11).
+- **health**: an unconfirmed reconnect pause (EOF) ends the cold pass as
+  FAILED; a failed export before the eject stops it; kernel lines are
+  matched by whole disk name and follow the disk's new name after the
+  reconnect; the kernel's USB reset lines of the disk's bridge count; the
+  directory of an undestroyed test pool stays (M5a-13, M5a-17, M5a-18).
+  **simulate** installs nothing on a closed stdin (M5a-13).
+- **The empty altroot directory** of an exported pool goes (M5a-15).
+- **The critical CAP notification** is critical (stays until dismissed)
+  (M5a-22).
+- **finish** reads the alerts' file mode too: a MOTD script left 0644 is
+  not current (M5a-23).
+- **repair-boot's banner** says whether the grub guard was written; on a
+  live session the installer probe's stop is logged once per boot
+  (M5a-24).
+- **Release flow**: questing (25.10, EOL) is out of the PPA series;
+  `release-guard` refuses an UNRELEASED top changelog entry; `make
+  fulltest` runs the pinned lint only through tox (M5a-21, M5a-25).
+
+#### Fixed
+
+- **A level-2 self-test stopped between its pool's create and its GUID**
+  leaves no pool on the stick (M4dR-1, M5a-3).
+
+#### Tests
+
+- The stop harness's host directories are behind a lock, so the three
+  Pythons can run at once (M4dR-10); the review's surviving mutations
+  (prune's filter and mask order, setup --remove's exit status, narrow
+  boxes, a disabled Cleanup, recover's monthly cases) are each killed by a
+  test; the fake parses `-r` and writes a bookmark token as `#name`
+  (M5a-2, M5a-8, M5a-20).
+
+#### Known limitations
+
+- recover's `zfs mount -a` on the restored tree still does not resolve its
+  symlinks (M5a-14).
+- `zark monitor` still shows `zpool list`'s alloc and free (M5a-16).
+- A destroy returns before its blocks are free; the waits are read from
+  OpenZFS source and were not run on a pool (no self-test check, M5a-27).
 
 ### M4d: status, alerts, purge and health, the self-test, cosmetics, docs, tests and packaging (2.0.0-rc8)
 

@@ -126,8 +126,14 @@ for the canonical end-to-end sequences.
     up to 10 seconds for the disk's by-id links, and a partition link that
     never appears is its own failure. Kernel transport errors logged
     between the eject and the reconnect are listed as at the unplug and
-    not counted: the pool was exported and synced before the eject. A
-    failed test, or a test pool that could not be destroyed, ends with exit
+    not counted: the pool was exported and synced before the eject. The
+    export before the eject is checked: a pool that did not leave stops the
+    test as failed. A reconnect pause that gets end of input (a closed
+    standard input) is not a confirmation: the cold pass fails, the pool is
+    cleaned. Transport lines are matched by the whole disk name (not a name
+    that merely starts like it), by the USB device of its bridge for the
+    kernel's reset lines, and after the reconnect by the name the disk came
+    back with. A failed test, or a test pool that could not be destroyed, ends with exit
     status 1; a pass, also with transport errors, and the read-only
     check's risks end with 0.
 
@@ -202,6 +208,8 @@ for the canonical end-to-end sequences.
     older **zark**'s copy with its "Installed by zark" line), and the APT
     config before the hook it names; anything else is left, named, and the
     command exits 1. It takes no lock. Removing the Debian package runs it.
+    With any other argument it is a usage error (exit 2) and removes
+    nothing.
 
 **prepare** \[*device*\]
 :   Initialise a brand-new external drive as a **zark** backup target. The
@@ -630,7 +638,9 @@ for the canonical end-to-end sequences.
 :   Reclaim space, interactively, in the source or on a connected registered
     drive. Nothing goes without a confirmation; every snapshot is destroyed
     by its exact name and logged, and what each choice frees is measured
-    first. In the source: each pool's fill level (after a removal, once
+    first. Before an age cut that touches a dataset where a registered
+    drive has no **zark** 2 anchor, it names the drive and up to three of
+    the datasets. In the source: each pool's fill level (after a removal, once
     the pool has freed it, up to about a minute, or a line that it is still
     freeing in the background) and, per kind of
     snapshot, how many there are, the oldest and what removing them frees;
@@ -742,7 +752,8 @@ for the canonical end-to-end sequences.
 
     Requires the **qemu-system-x86** and **ovmf** packages, both of
     which are listed in *Recommends* and which **simulate** offers
-    to install on first use.
+    to install on first use. On a closed standard input it installs
+    nothing and goes no further than the question it cannot ask.
 
 **fix-rpool-mountpoint**
 :   Give a restored **rpool** back the Ubuntu installer's

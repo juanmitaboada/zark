@@ -1,3 +1,19 @@
+zark (2.0.0~rc9-1) UNRELEASED; urgency=medium
+
+  * Milestone M5a of zark 2 (hygiene: the M4d review's findings and the
+    checklist's cosmetics). Not for release: nothing is published until
+    the final 2.0.0.
+  * setup --remove with another argument is a usage error; chroot, mount
+    local and repair-boot skip other boot environments and chroot mounts
+    rpool's ESP.
+  * backup waits for the drive to finish freeing; health matches the
+    kernel's transport lines by disk and USB device and fails an
+    unconfirmed reconnect.
+  * The critical space notification stays until dismissed; questing is out
+    of the PPA series; the release guard refuses an UNRELEASED changelog.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Tue, 20 Oct 2026 01:56:00 +0200
+
 zark (2.0.0~rc8-1) UNRELEASED; urgency=medium
 
   * Milestone M4d of zark 2 (status, alerts, purge and health, the
