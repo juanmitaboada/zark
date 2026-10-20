@@ -16938,6 +16938,40 @@ class TestWaitFreed:  # pylint: disable=missing-function-docstring
             backup_mod._apply_changes([], "backup", Log())  # pylint: disable=protected-access
             assert mock.call_count("zpool get") == before
 
+    def test_the_banner_space_is_read_again_after_retention_freed_something(self) -> None:
+        # M4dP.2 (M5a-10): "Available:" was read before retention ran.
+        pool = "backup"
+        info = f"zpool list -H -o name,guid,health,size,alloc,free {pool}"
+        sizes = iter([(100, 40), (60, 80)])  # (used, avail) before and after the free
+        mock, spy = self._spy(pool, [0])
+
+        def reads(cmd: str, **kw: Any) -> RunResult:
+            if cmd == f"zfs list -H -o used,avail -p {pool}":
+                used, avail = next(sizes)
+                return RunResult(0, f"{used << 30}\t{avail << 30}\n", "", cmd)
+            return real(cmd, **kw)
+
+        real = mock.mock_run
+        mock.on(info).succeeds(f"{pool}\t1\tONLINE\t140G\t100G\t40G")
+        with (
+            spy,
+            patch.object(mock, "mock_run", side_effect=reads),
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+        ):
+            zfs = ZFS(make_log())
+            first = zfs.pool_info(pool)
+            assert first is not None and first.avail_bytes == 40 << 30
+            same = backup_mod._space_after_retention(zfs, pool, first, 0, Log())  # pylint: disable=protected-access
+            assert same is first  # nothing removed: not read again
+            after = backup_mod._space_after_retention(zfs, pool, first, 3, Log())  # pylint: disable=protected-access
+        assert after is not None and after.avail_bytes == 80 << 30
+        gone = MockShell()
+        gone.on_prefix("zpool get").succeeds("0")
+        with patch_sh(gone), redirect_stdout(StringIO()):  # the read fails: the first stays
+            kept = backup_mod._space_after_retention(ZFS(make_log()), pool, first, 3, Log())  # pylint: disable=protected-access
+        assert kept is first
+
     def test_backup_says_so_when_the_pool_is_still_freeing(self) -> None:
         mock, spy = self._spy("backup", [4 << 30])
         clock = itertools.count(0, 30)

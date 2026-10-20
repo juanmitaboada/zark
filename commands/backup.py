@@ -439,6 +439,19 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
     return True
 
 
+def _space_after_retention(
+    zfs: ZFS, pool: str, before: PoolInfo | None, removed: int, log: Log
+) -> PoolInfo | None:
+    """The figures of the final banner. Read after the transfer, they would
+    still hold what retention removed (M4dP.2): once it removed something and
+    the pool has freed it, they are read again. ``before`` stays when nothing
+    was removed or the new read fails."""
+    if not removed:
+        return before
+    _ = reclaim.wait_freed([pool], log)
+    return zfs.pool_info(pool) or before
+
+
 def _apply_changes(actions: list[Callable[[], object]], pool: str, log: Log) -> None:
     """Run the removals and changes the plan chose, then let ``pool`` finish
     freeing what they destroyed: the plan counts that space as available, and
@@ -1014,6 +1027,7 @@ def run(
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
         _ = drive_marks.record_complete(pool_name, eng.point, at_point, log)
         pruned = _apply_retention(pool_name, policy, log)
+        used_after = _space_after_retention(zfs, pool_name, used_after, pruned[0], log)
         # After retention, which may remove shared intermediates (decision 5e).
         shared = eng.shared_with_origin()
         meta = drive_marks.read_metadata(pool_name)
