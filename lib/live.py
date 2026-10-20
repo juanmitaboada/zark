@@ -25,11 +25,16 @@ cmd/snap/cmd_services.go:265-282, overlord/servicestate/service_control.go:
 (cmd/snap/error.go:124).
 """
 
+from pathlib import Path
+
 from lib import sh
 from lib.lock import selftest_subcommand
 from lib.log import Log
 
 PROBE_SERVICE = "ubuntu-desktop-bootstrap.subiquity-server"
+# tmpfs: gone at the next boot, when the service runs again. `snap stop` of a
+# stopped service returns 0 too, so the line is logged once per boot (M5a-24).
+PROBE_MARKER = Path("/run/zark/installer-probe-stopped")
 # The commands that import pools, as M4b-14 lists them.
 IMPORTING = frozenset(
     {
@@ -59,8 +64,13 @@ def stop_installer_probe(command: str, args: list[str], log: Log) -> bool:
     if command == "selftest" and selftest_subcommand(args) != "run":
         return False
     r = sh.run(f"snap stop {PROBE_SERVICE}")
-    if r.ok:
+    if r.ok and not PROBE_MARKER.exists():
         log.info(f"Stopped {PROBE_SERVICE} for this session (its disk probe reports crashes)")
+        try:
+            PROBE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            PROBE_MARKER.touch()
+        except OSError:
+            pass  # without the marker the line is logged again: today's behaviour
     else:
         log.file(f"[INFO]    {PROBE_SERVICE} not stopped: {(r.stderr or r.output).strip()}")
     return r.ok

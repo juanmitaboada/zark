@@ -11413,6 +11413,14 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
     stopped, for this session only, before a command that imports pools."""
 
     @staticmethod
+    @contextmanager
+    def _marker() -> Iterator[Path]:
+        with tempfile.TemporaryDirectory() as td:
+            marker = Path(td) / "run" / "installer-probe-stopped"
+            with patch.object(live_mod, "PROBE_MARKER", marker):
+                yield marker
+
+    @staticmethod
     def _mock(live: bool, snap_ok: bool = True) -> MockShell:
         mock = MockShell()
         mock.on("cat /proc/cmdline").succeeds(
@@ -11429,14 +11437,29 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
 
     def test_stopped_before_an_import_on_a_live_session(self) -> None:
         mock = self._mock(live=True)
-        with patch_sh(mock), redirect_stdout(StringIO()):
+        with patch_sh(mock), redirect_stdout(StringIO()), self._marker():
             assert live_mod.stop_installer_probe("recover", [], Log())
         assert mock.was_called("snap stop ubuntu-desktop-bootstrap.subiquity-server")
         assert not mock.was_called("--disable")  # runtime only
         for args in ([], ["run"], ["--stick", "/dev/sdz"], ["run", "--only", "POOL-01"]):
             mock = self._mock(live=True)
-            with patch_sh(mock), redirect_stdout(StringIO()):
+            with patch_sh(mock), redirect_stdout(StringIO()), self._marker():
                 assert live_mod.stop_installer_probe("selftest", args, Log()), args
+
+    def test_the_line_is_logged_once_per_boot(self) -> None:
+        """M5a-24 (ii): `snap stop` of a stopped service returns 0 too, so every
+        command logged "Stopped ..." (eli C3). The stop itself runs every time."""
+        lines: list[str] = []
+        with self._marker() as marker:
+            for _ in range(2):
+                mock = self._mock(live=True)
+                out = StringIO()
+                with patch_sh(mock), redirect_stdout(out):
+                    assert live_mod.stop_installer_probe("recover", [], Log())
+                assert mock.was_called("snap stop ubuntu-desktop-bootstrap.subiquity-server")
+                lines.append(out.getvalue())
+            assert marker.exists()
+        assert "Stopped ubuntu-desktop-bootstrap" in lines[0] and lines[1] == "", lines
 
     def test_left_alone_on_an_installed_system_or_without_an_import(self) -> None:
         cases: list[tuple[bool, str, list[str]]] = [
@@ -11451,14 +11474,14 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
         ]
         for live, cmd, args in cases:
             mock = self._mock(live=live)
-            with patch_sh(mock), redirect_stdout(StringIO()):
+            with patch_sh(mock), redirect_stdout(StringIO()), self._marker():
                 assert not live_mod.stop_installer_probe(cmd, args, Log())
             assert not mock.was_called("snap stop"), (live, cmd, args)
 
     def test_a_missing_snap_is_not_an_error(self) -> None:
         mock = self._mock(live=True, snap_ok=False)
         out = StringIO()
-        with patch_sh(mock), redirect_stdout(out):
+        with patch_sh(mock), redirect_stdout(out), self._marker():
             assert not live_mod.stop_installer_probe("clean", [], Log())
         assert "ERROR" not in out.getvalue() and "FATAL" not in out.getvalue()
 
