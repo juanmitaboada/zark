@@ -6317,6 +6317,40 @@ class TestChrootSafety:  # pylint: disable=missing-function-docstring,too-few-pu
         raise AssertionError("Expected SystemExit when rpool is already imported")
 
 
+class TestChrootEsp:  # pylint: disable=missing-function-docstring
+    """M5a-19 (M4d plan 15 (8)): the chroot mounts the ESP of rpool's disk."""
+
+    @staticmethod
+    def _bind(esp: str) -> tuple[MockShell, Cleanup, StringIO]:
+        mock = MockShell()
+        mock.on_prefix("mkdir -p").succeeds()
+        mock.on_prefix("mount").succeeds()
+        # What the old guess found: the first NVMe disk (a Windows ESP).
+        mock.on_prefix("lsblk -dn -o NAME,TYPE").succeeds("/dev/nvme0n1\n")
+        mock.on_prefix("blkid -t TYPE=vfat").succeeds("/dev/nvme0n1p1\n")
+        cleanup = Cleanup(make_log())
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(chroot_mod, "esp_of_rpool_disk", return_value=esp),
+            redirect_stdout(out),
+        ):
+            chroot_mod._setup_bind_mounts(  # pylint: disable=protected-access
+                "/mnt/zark/chroot", cleanup, make_log()
+            )
+        return mock, cleanup, out
+
+    def test_the_esp_of_rpools_disk_is_mounted(self):
+        mock, _cleanup, _out = self._bind("/dev/nvme1n1p1")
+        assert mock.was_called("mount /dev/nvme1n1p1 /mnt/zark/chroot/boot/efi")
+        assert not mock.was_called("mount /dev/nvme0n1p1")
+
+    def test_without_an_esp_nothing_is_mounted_and_it_is_said(self):
+        mock, _cleanup, out = self._bind("")
+        assert not mock.was_called("/boot/efi ")
+        assert "No EFI System Partition found on rpool's disk" in unframed(out.getvalue())
+
+
 class TestChrootClose:  # pylint: disable=missing-function-docstring
     """M4bR-8 (M4d-26): CHROOT CLOSED only when both pools were exported."""
 

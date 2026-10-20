@@ -31,6 +31,7 @@ for the single internal disk.
 """
 
 from lib import sh, signals
+from lib.boot_chain import esp_of_rpool_disk
 from lib.cleanup import BUSY_HINT, Cleanup
 from lib.config import zark_command
 from lib.keystore import Keystore
@@ -61,17 +62,16 @@ def _setup_bind_mounts(root: str, cleanup: Cleanup, log: Log) -> None:
     if sh.run(f"mount -t efivarfs efivarfs {efivars}", check=False).ok:
         cleanup.track_mount(efivars)
 
-    # ESP at /boot/efi so grub/efibootmgr work inside the chroot
-    internal_disk = sh.run(
-        'lsblk -dn -o NAME,TYPE | awk \'$2=="disk"{print "/dev/"$1}\' | grep nvme | head -1',
-    ).output.strip()
-    efi_part = sh.part(internal_disk, 1) if internal_disk else ""
-    if not efi_part:
-        efi_part = sh.run("blkid -t TYPE=vfat | grep -i efi | head -1 | cut -d: -f1").output.strip()
+    # ESP at /boot/efi so grub/efibootmgr work inside the chroot: the one on
+    # rpool's disk, not the first NVMe disk's (a Windows ESP can come first;
+    # M5a-19). rpool is imported by now.
+    efi_part = esp_of_rpool_disk()
     if efi_part:
         sh.run(f"mkdir -p {root}/boot/efi")
         if sh.run(f"mount {efi_part} {root}/boot/efi").ok:
             cleanup.track_mount(f"{root}/boot/efi")
+    else:
+        log.info("No EFI System Partition found on rpool's disk - /boot/efi is not mounted")
 
 
 def run(args: list[str]):  # pylint: disable=too-many-branches,too-many-statements
