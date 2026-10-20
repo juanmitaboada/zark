@@ -68,6 +68,7 @@ from lib.replication import (
     archive_name,
     expected,
     is_bpool,
+    is_excluded,
     old_anchors,
     parent,
     plan,
@@ -125,6 +126,8 @@ class Run:  # pylint: disable=too-many-instance-attributes
     origin: dict[str, Origin] = field(default_factory=dict)
     dest: dict[str, Dest] = field(default_factory=dict)
     started: set[str] = field(default_factory=set)  # datasets a receive began on
+    # Subtree tops excluded from backups (D8, lib/exclusions.py): not expected.
+    exclusions: frozenset[str] = field(default_factory=frozenset)
     _timer_was_active: bool = False
 
     # ── sanoid ───────────────────────────────────────────────────────────
@@ -191,7 +194,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         except ReadError as e:
             self.log.error(f"Cannot take {self.point}: {e}")
             return False
-        wanted = expected(self.origin)
+        wanted = expected(self.origin, self.exclusions)
         for pool in self.pools:
             names = [rel for rel in wanted if rel == pool or rel.startswith(f"{pool}/")]
             if not names:
@@ -224,7 +227,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
                     f"{pool} is not imported, and {self.pool} holds its backup "
                     + f"(import it first: sudo zpool import {pool})"
                 )
-        return plan(self.origin, self.dest, self.point)
+        return plan(self.origin, self.dest, self.point, self.exclusions)
 
     # ── sizes ────────────────────────────────────────────────────────────
 
@@ -562,7 +565,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
             self.log.warn(f"Anchors not checked: {e}")
             return []
         done: list[str] = []
-        for rel in expected(origin):
+        for rel in expected(origin, self.exclusions):
             d, o = dest.get(rel), origin[rel]
             newest = d.newest if d is not None else None
             if is_bpool(rel) or newest is None or o.snap_by_guid(newest.guid) is None:
@@ -596,7 +599,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         except ReadError as e:
             self.log.warn(f"Could not read what {self.pool} shares with origin: {e}")
             return None
-        return shared_snapshots(origin, dest)
+        return shared_snapshots(origin, dest, self.exclusions)
 
     def drop_check(self) -> list[Verdict]:  # pylint: disable=too-many-locals,too-many-branches
         """Decide, against a fresh read of both sides, what may go from origin.
@@ -617,7 +620,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
             # The drive changed under the run: no verdict can rest on it.
             self.log.warn(f"Nothing removed in origin: {self.pool}/{gone} is no longer listed")
             return []
-        wanted = set(expected(origin))
+        wanted = set(expected(origin, self.exclusions))
         keep = anchor_name(self.disk_guid, self.point)
         verdicts: list[Verdict] = []
         for rel, o in sorted(origin.items()):
@@ -654,7 +657,10 @@ class Run:  # pylint: disable=too-many-instance-attributes
                     verdicts.append(Verdict(target, False, "may be the base of the next run"))
             for name in old_anchors([a.name for a in new], self.disk_guid, keep):
                 target = f"{rel}{sep}{name}"
-                if verified:
+                if rel not in wanted and is_excluded(rel, self.exclusions):
+                    # The drive's base if the dataset is included again (M5b-9 9a).
+                    verdicts.append(Verdict(target, False, f"the base if {rel} is included again"))
+                elif verified:
                     verdicts.append(Verdict(target, True, f"superseded by {keep}"))
                 else:
                     verdicts.append(Verdict(target, False, "new anchor not verified"))
@@ -704,7 +710,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         at_point: list[str] = []
         kept: dict[str, str] = {}  # rel -> why the point stays there
         if dest is not None:
-            for rel in expected(self.origin):
+            for rel in expected(self.origin, self.exclusions):
                 d = dest.get(rel)
                 own = next((s for s in self.origin[rel].snaps if s.name == self.point), None)
                 if d is not None and d.token:
@@ -734,7 +740,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         except ReadError as e:
             self.log.warn(f"Could not list the points left in origin: {e}")
             present = None
-        for rel in expected(self.origin):
+        for rel in expected(self.origin, self.exclusions):
             target = f"{rel}@{self.point}"
             if rel in gone or (present is not None and rel not in present):
                 continue

@@ -27,7 +27,7 @@ from lib import sh
 from lib.config import zark_command
 from lib.identity import disks_under
 from lib.log import Log
-from lib.replication import Dest, Origin, Ref
+from lib.replication import EXCLUDED_KEPT_PROP, Dest, Origin, Ref
 
 
 def _q(word: str) -> str:
@@ -124,20 +124,15 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
             continue
         r = sh.run(
             "zfs list -Hp -t filesystem,volume "
-            + f"-o name,type,receive_resume_token,{ORPHAN},used,written -r {root}",
+            + f"-o name,type,receive_resume_token,{ORPHAN},used,written,{EXCLUDED_KEPT_PROP} "
+            + f"-r {root}",
         )
         r = checked(r, strict)
         for line in r.lines if r.ok else []:
             f = line.split("\t")
             if len(f) >= 6 and f[0].startswith(strip):
                 rel = f[0][len(strip) :]
-                used = int(f[4]) if f[4].isdigit() else 0
-                written = int(f[5]) if f[5].isdigit() else 0
-                token = "" if f[2] in ("-", "") else f[2]
-                orphan = "" if f[3] in ("-", "") else f[3]
-                dest[rel] = Dest(
-                    rel, kind=f[1], token=token, orphan=orphan, used=used, written=written
-                )
+                dest[rel] = _dest_row(rel, f)
         r = checked(
             sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}"),
             strict,
@@ -149,6 +144,26 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
 
 
 ORPHAN = "org.zark:orphan"
+
+
+def _dest_row(rel: str, f: list[str]) -> Dest:
+    """One ``name type token orphan used written excluded-kept`` row."""
+
+    def text(i: int) -> str:
+        return "" if len(f) <= i or f[i] in ("-", "") else f[i]
+
+    def number(i: int) -> int:
+        return int(f[i]) if len(f) > i and f[i].isdigit() else 0
+
+    return Dest(
+        rel,
+        kind=f[1],
+        token=text(2),
+        orphan=text(3),
+        used=number(4),
+        written=number(5),
+        excluded_kept=text(6),
+    )
 
 
 def bookmark_feature(pool: str = "rpool") -> str:

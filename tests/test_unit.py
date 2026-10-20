@@ -12731,10 +12731,11 @@ def _engine_run(
     guid: str,
     point: str,
     decide: "engine.Decide | None" = None,
+    exclusions: frozenset[str] = frozenset(),
 ) -> "engine.Result":
     with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
         log = Log()
-        eng = engine.Run(pool, guid, log, point, sleep=lambda _s: None)
+        eng = engine.Run(pool, guid, log, point, sleep=lambda _s: None, exclusions=exclusions)
         cleanup = Cleanup(log)
         return engine.execute(eng, cleanup, decide or (lambda _p, _r: True))
 
@@ -12771,6 +12772,85 @@ P1, P2, P3 = (
     "zark_2026-10-08_10:00:00Z",
     "zark_2026-10-09_10:00:00Z",
 )
+
+
+class TestEngineExclusions:
+    """D8 replicate=no (M5b-9, M5b-11): an excluded subtree is not expected."""
+
+    DOCKER = frozenset({"rpool/var/lib/docker"})
+
+    def test_an_excluded_subtree_is_not_sent_and_the_run_is_complete(self) -> None:
+        """I-D does not count it, no point is taken of it, nothing reaches the drive."""
+        fake = _fresh_fake()
+        fake.ds["rpool/var/lib/docker"].props["referenced"] = "5000"
+        res = _engine_run(fake, "backup", "111", P1, exclusions=self.DOCKER)
+        assert res.ok
+        assert "backup/rpool/var/lib/docker" not in fake.ds
+        assert not any(s.name == P1 for s in fake.ds["rpool/var/lib/docker"].snaps)
+        row = next(p for p in res.plans if p.rel == "rpool/var/lib/docker")
+        assert row.state is repl.State.EXCLUDED and row.declared and not row.held
+        assert row.used == 5000  # D12: origin's referenced of the subtree
+        assert fake.was_not_called("rpool/var/lib/docker@" + P1)
+
+    def test_a_copy_already_on_the_drive_stays_and_keeps_its_base(self) -> None:
+        """M5b-9 9a: no orphan question, nothing destroyed on the drive, and the
+        drive's anchor on it stays in origin as the base for its return."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        held = [s.name for s in fake.ds["backup/rpool/var/lib/docker"].snaps]
+        kept_anchors = fake.bookmarks("rpool/var/lib/docker")
+        assert kept_anchors
+        _tick(fake, "2026-10-08_00:00:00_daily")
+        res = _engine_run(fake, "backup", "111", P2, exclusions=self.DOCKER)
+        assert res.ok
+        assert not any(p.state is repl.State.ORPHAN for p in res.plans)
+        row = next(p for p in res.plans if p.rel == "rpool/var/lib/docker")
+        assert row.state is repl.State.EXCLUDED and row.held and not row.kept
+        assert [s.name for s in fake.ds["backup/rpool/var/lib/docker"].snaps] == held
+        assert fake.bookmarks("rpool/var/lib/docker") == kept_anchors
+        assert fake.was_not_called("zfs destroy rpool/var/lib/docker#")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P3, exclusions=self.DOCKER)
+            verdicts = [v for v in eng.drop_check() if v.target.startswith("rpool/var/lib/docker#")]
+        assert verdicts and all(not v.drop for v in verdicts)
+        assert all(
+            v.reason == "the base if rpool/var/lib/docker is included again" for v in verdicts
+        )
+
+    def test_included_again_it_continues_from_the_drives_anchor(self) -> None:
+        """M5b-11 11a: an incremental from the bookmark kept while it was excluded."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        assert _engine_run(fake, "backup", "111", P2, exclusions=self.DOCKER).ok
+        _prune_all_autosnaps(fake)
+        _tick(fake, "2026-10-09_00:00:00_daily")
+        seen: list[repl.DatasetPlan] = []
+
+        def decide(plans: list[repl.DatasetPlan], _run: engine.Run) -> bool:
+            seen.extend(plans)
+            return True
+
+        assert _engine_run(fake, "backup", "111", P3, decide).ok
+        docker = next(p for p in seen if p.rel == "rpool/var/lib/docker")
+        assert docker.state is repl.State.VIA_BOOKMARK, docker
+        assert any(s.name == P3 for s in fake.ds["backup/rpool/var/lib/docker"].snaps)
+
+    def test_a_child_created_later_inside_the_subtree_is_left_out_too(self) -> None:
+        """The subtree rule (M5b-4 4a), not ZFS inheritance, decides."""
+        fake = _fresh_fake()
+        fake.dataset("rpool/var/lib/docker/volumes", canmount="on", mountpoint="/v")
+        res = _engine_run(fake, "backup", "111", P1, exclusions=self.DOCKER)
+        assert res.ok and "backup/rpool/var/lib/docker/volumes" not in fake.ds
+        assert not any(p.rel == "rpool/var/lib/docker/volumes" for p in res.plans)
+
+    def test_no_drive_needs_a_base_on_an_excluded_dataset(self) -> None:
+        """origin prune's warning for drives without an anchor leaves it out."""
+        fake = _fresh_fake()
+        with patch_sh(fake):
+            origin = survey.read_origin(["rpool", "bpool"], strict=True)
+        inv = oprune.inventory(origin, {"999": "blue"}, self.DOCKER)
+        assert "rpool/var/lib/docker" not in inv.unanchored
+        assert "rpool/var/lib/docker" in oprune.inventory(origin, {"999": "blue"}).unanchored
 
 
 class TestSharedSnapshots:

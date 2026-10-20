@@ -37,6 +37,7 @@ Kinds:
 """
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 from lib.replication import (
@@ -77,11 +78,14 @@ class Inventory:
     )  # dataset → drives with no anchor
 
 
-def inventory(origin: dict[str, Origin], drives: dict[str, str]) -> Inventory:
+def inventory(
+    origin: dict[str, Origin], drives: dict[str, str], skip: Collection[str] = ()
+) -> Inventory:
     """Classify origin's snapshots. ``drives`` maps each registered drive's
-    pool GUID to its name."""
+    pool GUID to its name; ``skip`` the subtrees excluded from backups,
+    where no drive needs a base."""
     inv = Inventory()
-    backed_up = set(expected(origin))  # where a drive has a base at all
+    backed_up = set(expected(origin, skip))  # where a drive has a base at all
     for rel, o in sorted(origin.items()):
         anchored = {anchor_disk(r.name) for r in [*o.bookmarks, *o.snaps]} - {""}
         missing_here = sorted(name for guid, name in drives.items() if guid not in anchored)

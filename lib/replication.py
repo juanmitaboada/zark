@@ -44,6 +44,7 @@ Dataset names here are relative to the pool root on both sides: origin
 """
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -58,6 +59,9 @@ SANOID_RE = re.compile(rf"^autosnap_.+_({'|'.join(SANOID_TYPES)})$")
 SYNCOID_PREFIX = "syncoid_"
 ARCHIVE_MARK = ".archived-"
 ORPHAN_PROP = "org.zark:orphan"
+# On a drive's copy of a dataset excluded from backups that the user keeps
+# there (M5b-10).
+EXCLUDED_KEPT_PROP = "org.zark:excluded-kept"
 KEYSTORE = "rpool/keystore"
 # Created, never received, by recover (lib/mount_props.py CREATED_CONTAINERS
 # and BPOOL_CONTAINERS, plus the two pool roots).
@@ -130,13 +134,14 @@ class Origin:  # pylint: disable=too-many-instance-attributes
 
 
 @dataclass
-class Dest:
+class Dest:  # pylint: disable=too-many-instance-attributes
     """A destination dataset: snapshots, partial receive state and markers."""
 
     rel: str
     kind: str = "filesystem"
     token: str = ""  # receive_resume_token, "" when none
     orphan: str = ""  # value of org.zark:orphan, "" when unset
+    excluded_kept: str = ""  # value of org.zark:excluded-kept, "" when unset
     used: int = 0
     written: int = 0  # bytes written since the newest snapshot
     snaps: list[Ref] = field(default_factory=list)  # by createtxg
@@ -159,7 +164,7 @@ class State(StrEnum):
     DIVERGED = "diverged"  # nothing in common (decision 8)
     MODIFIED = "modified on backup"  # an incremental whose destination was written (M2F-8)
     ORPHAN = "only on backup"  # destination only (decision 18)
-    EXCLUDED = "excluded"  # zvols (decision 10), structural containers with data
+    EXCLUDED = "excluded"  # zvols (decision 10), structural containers with data, zark exclude
 
 
 # States the engine can transfer without asking anything.
@@ -185,12 +190,22 @@ class DatasetPlan:  # pylint: disable=too-many-instance-attributes
     after: State | None = None  # partial: the plan once that state is discarded (M3R-15)
     used: int = 0  # destination bytes (ORPHAN, DIVERGED, ROLLBACK; MODIFIED: written)
     note: str = ""
+    # EXCLUDED by `zark exclude` (D8): ``used`` is then origin's referenced of
+    # the subtree (D12), ``held`` the drive's copy of it, ``kept`` its mark.
+    declared: bool = False
+    held: bool = False
 
 
-def expected(origin: dict[str, Origin]) -> list[str]:
+def is_excluded(rel: str, skip: Collection[str]) -> bool:
+    """True when an excluded subtree top in ``skip`` is ``rel`` or above it."""
+    return any(rel == top or rel.startswith(f"{top}/") for top in skip)
+
+
+def expected(origin: dict[str, Origin], skip: Collection[str] = ()) -> list[str]:
     """Datasets a backup must bring to the point: rpool tree minus the keystore,
     other zvols and the structural containers, plus the bpool tree minus its
-    structural containers, parents first."""
+    structural containers, parents first. ``skip`` names the subtrees
+    excluded from backups (D8): they are not expected (I-D)."""
     return sorted(
         rel
         for rel, o in origin.items()
@@ -199,6 +214,7 @@ def expected(origin: dict[str, Origin]) -> list[str]:
         and o.kind != "volume"
         and rel not in STRUCTURAL
         and not is_archived(rel)
+        and not is_excluded(rel, skip)
     )
 
 
@@ -303,17 +319,21 @@ def _guids(o: Origin) -> set[str]:
     return {s.guid for s in o.snaps} | {b.guid for b in o.bookmarks}
 
 
-def plan(origin: dict[str, Origin], dest: dict[str, Dest], point: str) -> list[DatasetPlan]:
+def plan(
+    origin: dict[str, Origin], dest: dict[str, Dest], point: str, skip: Collection[str] = ()
+) -> list[DatasetPlan]:
     """Plan every expected dataset, plus one ORPHAN entry per destination tree
     origin no longer has (its descendants follow it). Archived lineages are
-    not planned. Volumes left out are listed as EXCLUDED."""
+    not planned. Volumes left out are listed as EXCLUDED, and so is each
+    subtree top in ``skip`` (excluded from backups, D8)."""
     live = {rel: d for rel, d in dest.items() if not is_archived(rel)}
-    wanted = expected(origin)
+    wanted = expected(origin, skip)
     plans = [plan_dataset(origin[rel], live.get(rel), point) for rel in wanted]
     for p in plans:
         if p.state is State.NEW:
             _clone_base(p, origin, live)
     plans += [DatasetPlan(rel, State.EXCLUDED, note=why) for rel, why in excluded(origin)]
+    plans += _declared_rows(origin, live, skip)
 
     # A structural container is never offered for destruction: its absence
     # from origin means a pool not imported or a listing that failed.
@@ -333,6 +353,27 @@ def plan(origin: dict[str, Origin], dest: dict[str, Dest], point: str) -> list[D
             ),
         )
     return plans
+
+
+def _declared_rows(
+    origin: dict[str, Origin], live: dict[str, Dest], skip: Collection[str]
+) -> list[DatasetPlan]:
+    """One EXCLUDED row per subtree excluded from backups (D8, D12)."""
+    out: list[DatasetPlan] = []
+    for top in sorted(t for t in skip if t in origin):
+        held = live.get(top)
+        out.append(
+            DatasetPlan(
+                top,
+                State.EXCLUDED,
+                note="excluded from backups (zark exclude)",
+                used=sum(o.referenced for rel, o in origin.items() if is_excluded(rel, (top,))),
+                declared=True,
+                held=held is not None,
+                kept=held is not None and held.excluded_kept.startswith("kept@"),
+            ),
+        )
+    return out
 
 
 def _clone_base(p: DatasetPlan, origin: dict[str, Origin], live: dict[str, Dest]) -> None:
@@ -410,7 +451,9 @@ def shared_kind(name: str) -> str:
     return "syncoid" if name.startswith(SYNCOID_PREFIX) else ""
 
 
-def shared_snapshots(origin: dict[str, Origin], dest: dict[str, Dest]) -> dict[str, list[Ref]]:
+def shared_snapshots(
+    origin: dict[str, Origin], dest: dict[str, Dest], skip: Collection[str] = ()
+) -> dict[str, list[Ref]]:
     """What the drive shares with origin besides its anchors (M3 decision 5e).
 
     For every replicated dataset, origin's snapshots the drive also holds
@@ -420,7 +463,7 @@ def shared_snapshots(origin: dict[str, Origin], dest: dict[str, Dest]) -> dict[s
     list means that dataset would be resent in full.
     """
     out: dict[str, list[Ref]] = {}
-    for rel in expected(origin):
+    for rel in expected(origin, skip):
         d = dest.get(rel)
         held = {s.guid for s in d.snaps} if d else set()
         newest: dict[str, Ref] = {}

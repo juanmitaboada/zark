@@ -36,7 +36,14 @@ import shlex
 from dataclasses import dataclass, field
 
 from lib import sh
-from lib.replication import KEYSTORE, STRUCTURAL, Origin, is_archived, is_bpool
+from lib.replication import (
+    EXCLUDED_KEPT_PROP,
+    KEYSTORE,
+    STRUCTURAL,
+    Origin,
+    is_archived,
+    is_bpool,
+)
 from lib.survey import checked
 
 REPLICATE = "org.zark:replicate"
@@ -45,7 +52,7 @@ SNAPSHOT = "org.zark:snapshot"
 # (M5b-7 7a), so recover recreates it and never restores an older copy.
 POINT_MARK = "org.zark:excluded"
 # On a drive's copy of an excluded dataset the user chose to keep (M5b-10).
-KEPT = "org.zark:excluded-kept"
+KEPT = EXCLUDED_KEPT_PROP
 # A user property value holds at most 8191 bytes (OpenZFS 2.4.1
 # include/sys/fs/zfs.h:86, module/zfs/zfs_ioctl.c:2937-2938).
 MARK_LIMIT = 8191

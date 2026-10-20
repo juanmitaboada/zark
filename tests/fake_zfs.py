@@ -262,24 +262,40 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         (snapshots are not listed; callers skip the names with an ``@``).
         The options are read as options, not as the property (M4d plan 15 (9))."""
         positional: list[str] = []
-        skip = False
+        opts: dict[str, str] = {}
+        skip = ""
         for a in args:
             if skip:
-                skip = False
+                opts[skip], skip = a, ""
             elif a in ("-o", "-t", "-s"):
-                skip = True
+                skip = a
             elif not a.startswith("-"):
                 positional.append(a)
-        prop, roots = positional[0], positional[1:]
+        # -o picks the columns and -s the sources, as zfs get does
+        # (cmd/zfs/zfs_main.c:2269-2330); one line per dataset and property.
+        columns = opts.get("-o", "name,property,value,source").split(",")
+        sources = opts["-s"].split(",") if "-s" in opts else []
         out: list[str] = []
-        for root in roots:
+        for root in positional[1:]:
             if root not in self.ds:
                 return _err("does not exist")
             for n in sorted(self.ds):
                 if n == root or n.startswith(root + "/"):
-                    value, source = self._value(n, None, prop)
-                    out.append(f"{n}\t{prop}\t{value}\t{source}\n")
+                    out += self._get_lines(n, positional[0].split(","), columns, sources)
         return _ok("".join(out))
+
+    def _get_lines(
+        self, name: str, props: list[str], columns: list[str], sources: list[str]
+    ) -> list[str]:
+        """One ``zfs get`` line per property of one dataset."""
+        out: list[str] = []
+        for prop in props:
+            value, source = self._value(name, None, prop)
+            if sources and source.split(" ", maxsplit=1)[0] not in sources:
+                continue
+            cell = {"name": name, "property": prop, "value": value, "source": source}
+            out.append("\t".join(cell[c] for c in columns) + "\n")
+        return out
 
     def _value(self, name: str, s: FSnap | None, prop: str) -> tuple[str, str]:
         """(value, source) of one property of a dataset or snapshot, as zfs get
