@@ -36,15 +36,19 @@ import shlex
 from dataclasses import dataclass, field
 
 from lib import sh
+from lib.backup_layout import zark_props
+from lib.drive_marks import drive_snapshots, snapshot_marks
 from lib.log import Log
 from lib.replication import (
     EXCLUDED_KEPT_PROP,
     KEYSTORE,
     STRUCTURAL,
     Origin,
+    anchor_disk,
     is_archived,
     is_bpool,
 )
+from lib.restore_points import COMPLETE_PROP, Snap
 from lib.survey import ReadError, checked, read_origin
 
 REPLICATE = "org.zark:replicate"
@@ -223,11 +227,16 @@ def point_mark(declared: Declared, origin: dict[str, Origin]) -> str:
     excluded, so a drive written before rc10 reads differently."""
     tops = {t: declared.flags_of(t) for t in sorted(declared.no_backup)}
     datasets = {
-        rel: [origin[rel].canmount, origin[rel].mountpoint]
+        rel: (origin[rel].canmount, origin[rel].mountpoint)
         for top in sorted(tops)
         for rel in subtree(top, origin)
     }
-    return json.dumps({"tops": tops, "datasets": datasets}, sort_keys=True, separators=(",", ":"))
+    return _dump(tops, datasets)
+
+
+def _dump(tops: dict[str, str], datasets: dict[str, tuple[str, str]]) -> str:
+    data = {"tops": tops, "datasets": {rel: list(v) for rel, v in datasets.items()}}
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass
@@ -302,3 +311,111 @@ def record(pool: str, point: str, rels: list[str], mark: str, log: Log) -> bool:
             + "(recover restores that point as if nothing were excluded)"
         )
     return r.ok
+
+
+def keep_held(pool: str, top: str, stamp: str, log: Log) -> bool:
+    """The user keeps the drive's copy of an excluded subtree: not asked
+    again by backup (M5b-10 10a), as a kept orphan is marked."""
+    r = sh.run(f"zfs set {_q(f'{KEPT}=kept@{stamp}')} {_q(f'{pool}/{top}')}", log=log)
+    if r.ok:
+        log.ok(f"Keeping {pool}/{top} (excluded from backups, not asked again)")
+    else:
+        log.warn(f"Could not mark {pool}/{top} as kept: {r.stderr.strip()}")
+    return r.ok
+
+
+@dataclass
+class _Rewrite:
+    """One point's marks once a destroy took part of it (M5b-10b)."""
+
+    targets: list[str]  # the snapshots left of it on the drive
+    complete: str  # COMPLETE_PROP, lowered
+    mark: str  # POINT_MARK, with what the destroy took
+
+
+def _rewrites(
+    pool: str, top: str, flags: str, snaps: list[Snap], marks: dict[str, str]
+) -> dict[str, _Rewrite]:
+    """For every point the destroy of ``top`` takes snapshots from, its marks
+    as they must read afterwards: the count lowered by the datasets it no
+    longer holds, and those datasets recorded as excluded with the values
+    they had on the drive. A point marked before the count (rc2, "yes")
+    is left as it is: :func:`drive_marks.record_complete` counts it again."""
+    values = zark_props(pool)
+    out: dict[str, _Rewrite] = {}
+    for name in sorted({s.name for s in snaps if under(s.stored, top) and s.mark.isdigit()}):
+        members = [s for s in snaps if s.name == name]
+        left = [s for s in members if not under(s.stored, top)]
+        lost = {s.dataset for s in members} - {s.dataset for s in left}
+        count = int(next(s.mark for s in members if s.mark.isdigit())) - len(lost)
+        if not lost or not left or count <= 0:
+            continue
+        stored = [f"{pool}/{s.stored}@{name}" for s in left]
+        pm = parse_point_mark(next((marks[t] for t in stored if t in marks), "")) or PointMark()
+        pm.tops[top] = flags
+        # Recorded on every received dataset since M2; "on" and the inherited
+        # mountpoint when a drive lacks them.
+        pm.datasets |= {rel: values.get(rel, ("on", "")) for rel in lost}
+        out[name] = _Rewrite(stored, str(count), _dump(pm.tops, pm.datasets))
+    return out
+
+
+def destroy_held(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pool: str, top: str, flags: str, disk_guid: str, origin: dict[str, Origin], log: Log
+) -> bool:
+    """Destroy a drive's copy of an excluded subtree (D11, M5b-10).
+
+    ``zfs destroy -r`` of the top, by its exact name and logged. The points
+    that held it then get their marks rewritten (10b): their completion
+    count lowered and the destroyed datasets added to what they left out,
+    so they stay whole and recover recreates those datasets empty. Last,
+    this drive's anchors on the subtree go from origin (10c), each by name:
+    nothing on the drive can use them now; another drive's are never
+    touched."""
+    try:
+        snaps = drive_snapshots(pool, strict=True)
+        marks = snapshot_marks(f"{pool}/rpool", strict=True, prop=POINT_MARK)
+    except ReadError as e:
+        log.warn(f"{pool}/{top} not destroyed: cannot read the points that hold it: {e}")
+        return False
+    rewrites = _rewrites(pool, top, flags, snaps, marks)
+    r = sh.run(f"zfs destroy -r {_q(f'{pool}/{top}')}", log=log)
+    if not r.ok:
+        log.error(f"Could not destroy {pool}/{top}: {r.stderr.strip()}")
+        return False
+    log.ok(f"Destroyed {pool}/{top} and everything below it on the backup")
+    # Every point is rewritten, and the anchors dropped, whatever failed before.
+    rewritten = [_rewrite(name, rw, top, log) for name, rw in rewrites.items()]
+    dropped = _drop_anchors(pool, top, disk_guid, origin, log)
+    return all(rewritten) and dropped
+
+
+def _rewrite(name: str, rw: _Rewrite, top: str, log: Log) -> bool:
+    """One point's marks after a destroy (M5b-10b); a point left with its
+    old marks reads PARTLY REMOVED, which is then the truth."""
+    if len(rw.mark) > MARK_LIMIT:
+        log.warn(f"{name} now reads PARTLY REMOVED: too many datasets to record as excluded")
+        return False
+    props = f"{COMPLETE_PROP}={rw.complete} {_q(f'{POINT_MARK}={rw.mark}')}"
+    r = sh.run(f"zfs set {props} {' '.join(_q(t) for t in rw.targets)}", log=log)
+    if not r.ok:
+        log.warn(f"{name} now reads PARTLY REMOVED: {r.stderr.strip()}")
+        return False
+    log.info(f"  {name}: whole without {top}, recorded as excluded there")
+    return True
+
+
+def _drop_anchors(pool: str, top: str, disk_guid: str, origin: dict[str, Origin], log: Log) -> bool:
+    """This drive's anchors on the destroyed subtree, by name (M5b-10c)."""
+    ok = True
+    for rel in subtree(top, origin):
+        for b in origin[rel].bookmarks:
+            if anchor_disk(b.name) != disk_guid:
+                continue
+            r = sh.run(f"zfs destroy {_q(f'{rel}#{b.name}')}", log=log)
+            if r.ok:
+                log.info(f"  removed {rel}#{b.name}: {pool} no longer holds {rel}")
+            else:
+                ok = False
+                log.warn(f"  could not remove {rel}#{b.name}: {r.stderr.strip()}")
+    return ok

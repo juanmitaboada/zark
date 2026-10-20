@@ -63,6 +63,7 @@ from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
 from lib.origin_prune import inventory
 from lib.replication import (
+    POINT_RE,
     TRANSFERABLE,
     DatasetPlan,
     Origin,
@@ -207,6 +208,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
     dst_info: PoolInfo | None,
     log: Log,
     policy: Policy | None = None,
+    declared: exclusions.Declared | None = None,
 ) -> bool:
     """Show the plan, ask every question before the first byte is sent,
     check space, then apply the user's choices. False aborts the run."""
@@ -266,6 +268,10 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             confirmed_any = True
         elif pick == 3:
             actions.append(partial(eng.follow_rename, p))
+
+    held_actions, destroys = _held_excluded(plans, eng, declared or exclusions.Declared(), log)
+    actions += held_actions
+    confirmed_any = confirmed_any or destroys
 
     # Written on the drive since the newest snapshot (M2F-8): asked once.
     modified = [p for p in plans if p.state is State.MODIFIED]
@@ -628,6 +634,65 @@ def _subtree(plans: list[DatasetPlan], top: str) -> list[DatasetPlan]:
         if (p.rel == top or p.rel.startswith(f"{top}/"))
         and p.state not in (State.ORPHAN, State.EXCLUDED)
     ]
+
+
+def _held_excluded(
+    plans: list[DatasetPlan], eng: engine.Run, declared: exclusions.Declared, log: Log
+) -> tuple[list[Callable[[], object]], bool]:
+    """D11 (M5b-10 10a): the subtrees excluded from backups that this drive
+    still holds, asked about once for all of them: keep (the default, not
+    asked again) or destroy with DESTROY typed. The points that held them
+    stay whole (10b) and this drive's anchors on them go (10c). Returns the
+    actions, and whether they destroy."""
+    held = [p for p in plans if p.state is State.EXCLUDED and p.declared and p.held]
+    for p in held:
+        if p.kept:
+            log.info(f"  {p.rel}: excluded from backups, the drive's copy kept")
+    asked = [p for p in held if not p.kept]
+    if not asked:
+        return [], False
+    size = sum(eng.dest[p.rel].used for p in asked if p.rel in eng.dest)
+    log.warn(
+        f"{len(asked)} dataset subtree(s) excluded from backups are still on {eng.pool} "
+        + f"({_gib(size)}):"
+    )
+    points = sorted(
+        {
+            s.name
+            for rel, d in eng.dest.items()
+            if _under(rel, {p.rel for p in asked})
+            for s in d.snaps
+            if POINT_RE.match(s.name)
+        }
+    )
+    for p in asked:
+        log.info(f"  {p.rel}")
+    pick = _ask_confirmed(
+        log,
+        "What should happen to the drive's copy?",
+        [
+            "keep it (not asked again; zark prune can destroy it later)",
+            f"destroy it on the backup (the {len(points)} point(s) that hold it stay whole, "
+            + "recorded without it)",
+        ],
+        {1: ("DESTROY", f"destroy the drive's copy of {len(asked)} excluded subtree(s)")},
+        {1: [line for p in asked for line in _on_drive(eng, p.rel)]},
+    )
+    if pick == 0:
+        stamp = datetime.now(UTC).strftime("%Y-%m-%d")
+        return [partial(exclusions.keep_held, eng.pool, p.rel, stamp, log) for p in asked], False
+    return [
+        partial(
+            exclusions.destroy_held,
+            eng.pool,
+            p.rel,
+            declared.flags_of(p.rel),
+            eng.disk_guid,
+            eng.origin,
+            log,
+        )
+        for p in asked
+    ], True
 
 
 def _on_drive(eng: engine.Run, top: str) -> list[str]:
@@ -1025,7 +1090,7 @@ def run(
     policy = cfg.drive_policy(pool_name)
 
     def decide(plans: list[DatasetPlan], run_: engine.Run) -> bool:
-        return _decide(plans, run_, pool_name, dst_info, log, policy)
+        return _decide(plans, run_, pool_name, dst_info, log, policy, declared)
 
     log.step(7, TOTAL_STEPS, "Replicating (this may take a while)...")
     res = engine.execute(eng, cleanup, decide)

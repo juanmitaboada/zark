@@ -34,7 +34,8 @@ A drive (imported under I-G, no passphrase needed): what its retention
 policy removes now (yes/no), then, beyond the policy, the oldest monthly
 backup points and the history from before its first zark 2 backup point
 (typed PRUNE). The drive's newest complete point and every live dataset's
-newest snapshot (I-E) are never offered.
+newest snapshot (I-E) are never offered. Last, the drive's copy of each
+subtree excluded from backups, kept or not (typed PRUNE, D11).
 """
 
 import re
@@ -42,7 +43,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import anchors, drive_marks, reclaim, sh, status, survey
+from lib import anchors, drive_marks, exclusions, reclaim, sh, status, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -335,6 +336,7 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     else:
         log.ok(f"{pool}'s retention removes nothing now")
     _beyond(pool, dest, complete, pins, policy, now, prune, log)
+    _excluded_held(pool, drive.guid, log)
     cleanup.run()
     prompt_eject_or_attach(device, pool, log, default_eject=False)
 
@@ -388,6 +390,36 @@ def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         )
         if _typed(log, f"remove the history from before {pool}'s first backup point"):
             _ = reclaim.apply_prune(pool, legacy, log)
+
+
+def _excluded_held(pool: str, disk_guid: str, log: Log) -> None:
+    """Every subtree excluded from backups that the drive still holds, kept
+    or not, with its size; each one's destroy offered on a typed PRUNE
+    (D11, M5b-10 10a). The points that held it stay whole (10b), and this
+    drive's anchors on it go from origin (10c)."""
+    pools = survey.source_pools()
+    if "rpool" not in pools:
+        return  # what is excluded is declared in origin
+    try:
+        origin = survey.read_origin(pools, strict=True)
+        declared = exclusions.read(pools, origin, strict=True)
+        dest = survey.read_dest(pool, strict=True)
+    except survey.ReadError as e:
+        log.warn(f"The excluded datasets {pool} holds are not offered: {e}")
+        return
+    held = [t for t in sorted(declared.no_backup) if t in dest]
+    if not held:
+        return
+    log.info(f"Excluded from backups, still on {pool}:")
+    for top in held:
+        kept = " (kept)" if dest[top].excluded_kept.startswith("kept@") else ""
+        log.info(f"  {pool}/{top}  {_gib(dest[top].used)}{kept}")
+    for top in held:
+        below = [rel for rel in sorted(dest) if exclusions.under(rel, top)]
+        for rel in below:
+            log.info(f"    {pool}/{rel}  ({len(dest[rel].snaps)} snapshot(s))")
+        if _typed(log, f"destroy {pool}/{top} and the {len(below)} dataset(s) listed"):
+            _ = exclusions.destroy_held(pool, top, declared.flags_of(top), disk_guid, origin, log)
 
 
 def run(args: list[str]) -> None:

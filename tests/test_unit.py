@@ -15231,6 +15231,82 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert rc == 1 and "Too many datasets excluded to record them" in out.getvalue()
         assert fake.was_not_called("zfs snapshot")
 
+    def _held_excluded(self) -> FakeZfs:
+        """A drive holding rpool/var/lib/docker from a first backup, the
+        dataset then excluded from backups (D11)."""
+        fake = _fresh_fake()
+        _, rc = self._run(fake)
+        assert rc == 0
+        fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"] = "no"
+        return fake
+
+    def test_a_held_excluded_copy_is_kept_by_default_and_not_asked_again(self) -> None:
+        """M5b-10 10a: asked once, keep is the default, its anchors stay (9a)."""
+        fake = self._held_excluded()
+        texts: list[str] = []
+        for _ in range(2):
+            out = StringIO()
+            _, rc = self._run(fake, redirect_stdout(out))
+            texts.append(Log._STRIP_RE.sub("", out.getvalue()))  # pylint: disable=protected-access
+            assert rc == 0, texts[-1]
+        assert "1 dataset subtree(s) excluded from backups are still on backup" in texts[0]
+        assert fake.ds["backup/rpool/var/lib/docker"].props[excl.KEPT].startswith("kept@")
+        assert "still on backup" not in texts[1]
+        assert "rpool/var/lib/docker: excluded from backups, the drive's copy kept" in texts[1]
+        assert any(repl.anchor_disk(n) == "111" for n in fake.bookmarks("rpool/var/lib/docker"))
+
+    def test_a_destroyed_excluded_copy_leaves_its_points_whole(self) -> None:
+        """M5b-10 10a-10c: DESTROY typed, the drive's copy goes, the first
+        point's marks count it no more and record it as excluded, and this
+        drive's anchors on it go from origin."""
+        fake = self._held_excluded()
+        other = repl.anchor_name("222", fake.names("rpool/var/lib/docker")[-1])
+        fake.ds["rpool/var/lib/docker"].bookmarks.append(FSnap(other, "9", 1, 1))
+        first = fake.ds["backup"].props["org.zark:last-point"]
+        snap = next(s for s in fake.ds["backup/rpool/ROOT/be"].snaps if s.name == first)
+        count = int(snap.props["org.zark:point-complete"])
+        out = StringIO()
+        _, rc = self._run(
+            fake,
+            patch("lib.log.Log.ask_choice", return_value=1),
+            patch("lib.log.Log.ask_text", return_value="DESTROY"),
+            # The first point stays on the drive to be read back.
+            patch.object(backup_mod, "_apply_retention", return_value=(0, 0)),
+            redirect_stdout(out),
+        )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert "backup/rpool/var/lib/docker" not in fake.ds
+        assert "Destroyed backup/rpool/var/lib/docker and everything below it" in text
+        assert snap.props["org.zark:point-complete"] == str(count - 1)
+        parsed = excl.parse_point_mark(snap.props["org.zark:excluded"])
+        assert parsed is not None and parsed.tops == {"rpool/var/lib/docker": "backups"}
+        assert parsed.datasets == {"rpool/var/lib/docker": ("on", "/var/lib/docker")}
+        assert not any(repl.anchor_disk(n) == "111" for n in fake.bookmarks("rpool/var/lib/docker"))
+        assert fake.bookmarks("rpool/var/lib/docker") == [other]  # another drive's stays
+        assert f"{first}: whole without rpool/var/lib/docker" in text
+        with patch_sh(fake):
+            # recover's list (M4c-16): the point is still complete, not PARTLY REMOVED.
+            assert first in complete_points(drive_marks.drive_snapshots("backup"), "")
+
+    def test_prune_offers_the_drive_copy_of_an_excluded_subtree(self) -> None:
+        """M5b-10 10a: zark prune lists it, kept or not, and destroys it on PRUNE."""
+        fake = self._held_excluded()
+        _, rc = self._run(fake)
+        assert rc == 0
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch("lib.log.Log.ask_text", side_effect=["", "PRUNE"]),
+            redirect_stdout(out),
+        ):
+            prune_mod._excluded_held("backup", "111", Log())  # pylint: disable=protected-access
+            assert "backup/rpool/var/lib/docker" in fake.ds
+            prune_mod._excluded_held("backup", "111", Log())  # pylint: disable=protected-access
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert "backup/rpool/var/lib/docker" not in fake.ds
+        assert "Excluded from backups, still on backup:" in text and "(kept)" in text
+
     def test_the_completed_notification_comes_before_the_eject_question(self) -> None:
         """M4dF-3: the eject question waits for the user; the notification
         that the backup is done goes out before it, not after the answer."""
