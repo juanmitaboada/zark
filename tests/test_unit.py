@@ -14689,6 +14689,75 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
                 rc = int(e.code or 0)
         return cfg, rc
 
+    @staticmethod
+    def _freeing(fake: FakeZfs, figures: list[int]) -> None:
+        """``zpool get freeing backup`` answers ``figures`` in turn, then the
+        last one; recorded in ``fake.calls`` like any other command."""
+        values = iter(figures)
+        last = {"v": figures[-1]}
+        real = fake.mock_run
+
+        def spy(cmd: Any, **kw: Any) -> RunResult:
+            if cmd == "zpool get -Hp -o value freeing backup":
+                fake._calls.append(cmd)  # pylint: disable=protected-access
+                last["v"] = next(values, last["v"])
+                return RunResult(0, f"{last['v']}\n", "", cmd)
+            return real(cmd, **kw)
+
+        # An instance attribute: patch_sh binds fake.mock_run when it starts.
+        vars(fake)["mock_run"] = spy
+
+    def test_the_transfer_waits_for_what_the_space_plan_removed(self) -> None:
+        """M5aR-1 (probe R8): the wait runs from backup's own decisions, so
+        the first send starts only once the drive has freed what went."""
+        fake = _fresh_fake()
+        self._freeing(fake, [4 << 30, 0])
+        out = StringIO()
+        _, rc = self._run(
+            fake,
+            patch.object(backup_mod, "_make_room", return_value=[lambda: None]),
+            patch("lib.reclaim.time.sleep"),
+            redirect_stdout(out),
+        )
+        assert rc == 0, out.getvalue()
+        assert "Waiting for backup to free what was removed..." in out.getvalue()
+        calls = fake.calls
+        first_send = next(
+            i for i, c in enumerate(calls) if c.startswith("zfs send ") and " | " in c
+        )
+        reads = [i for i, c in enumerate(calls) if c == "zpool get -Hp -o value freeing backup"]
+        assert len(reads) == 2 and reads[-1] < first_send, (reads, first_send)
+
+    def test_the_banner_space_comes_after_retention_has_freed(self) -> None:
+        """M5aR-1 (probe R6, R9): run() reads the banner's figures again
+        after retention removed something, once the drive has freed it."""
+        fake = _fresh_fake()
+        self._freeing(fake, [5 << 30, 0])
+        state = {"retained": False}
+        before = PoolInfo("x", used_bytes=60 << 30, avail_bytes=40 << 30, size_bytes=100 << 30)
+        after = PoolInfo("x", used_bytes=20 << 30, avail_bytes=80 << 30, size_bytes=100 << 30)
+
+        def retention(*_a: Any, **_k: Any) -> tuple[int, int]:
+            state["retained"] = True
+            return 3, 40 << 30
+
+        out = StringIO()
+        _, rc = self._run(
+            fake,
+            patch.object(backup_mod, "_apply_retention", side_effect=retention),
+            patch.object(
+                ZFS, "pool_info", side_effect=lambda *_a: after if state["retained"] else before
+            ),
+            patch("lib.reclaim.time.sleep"),
+            redirect_stdout(out),
+        )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert fake.call_count("zpool get -Hp -o value freeing backup") == 2
+        assert "Waiting for backup to free what was removed..." in text
+        banner = text[text.index("BACKUP COMPLETED") :]
+        assert f"Available:      {backup_mod._gib(80 << 30)}" in banner, banner  # pylint: disable=protected-access
+
     def test_the_completed_notification_comes_before_the_eject_question(self) -> None:
         """M4dF-3: the eject question waits for the user; the notification
         that the backup is done goes out before it, not after the answer."""
@@ -17415,20 +17484,28 @@ class TestWaitFreed:  # pylint: disable=missing-function-docstring
         pool = "backup"
         info = f"zpool list -H -o name,guid,health,size,alloc,free {pool}"
         sizes = iter([(100, 40), (60, 80)])  # (used, avail) before and after the free
-        mock, spy = self._spy(pool, [0])
+        # A non-zero first figure (M5aR-1): the figures are read again only
+        # once the pool has freed what retention removed.
+        freeing = iter([3 << 30, 0])
+        seen: list[str] = []
+        mock = MockShell()
+        real = mock.mock_run
 
         def reads(cmd: str, **kw: Any) -> RunResult:
             if cmd == f"zfs list -H -o used,avail -p {pool}":
+                seen.append("space")
                 used, avail = next(sizes)
                 return RunResult(0, f"{used << 30}\t{avail << 30}\n", "", cmd)
+            if cmd == f"zpool get -Hp -o value freeing {pool}":
+                seen.append("freeing")
+                return RunResult(0, f"{next(freeing, 0)}\n", "", cmd)
             return real(cmd, **kw)
 
-        real = mock.mock_run
         mock.on(info).succeeds(f"{pool}\t1\tONLINE\t140G\t100G\t40G")
         with (
-            spy,
             patch.object(mock, "mock_run", side_effect=reads),
             patch_sh(mock),
+            patch("lib.reclaim.time.sleep"),
             redirect_stdout(StringIO()),
         ):
             zfs = ZFS(make_log())
@@ -17437,6 +17514,7 @@ class TestWaitFreed:  # pylint: disable=missing-function-docstring
             same = backup_mod._space_after_retention(zfs, pool, first, 0, Log())  # pylint: disable=protected-access
             assert same is first  # nothing removed: not read again
             after = backup_mod._space_after_retention(zfs, pool, first, 3, Log())  # pylint: disable=protected-access
+        assert seen == ["space", "freeing", "freeing", "space"], seen
         assert after is not None and after.avail_bytes == 80 << 30
         gone = MockShell()
         gone.on_prefix("zpool get").succeeds("0")
