@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from lib import anchors, certificates, sh, survey
-from lib.config import Config
+from lib.config import Config, zark_command
 from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
 from lib.origin_prune import inventory
@@ -104,7 +104,9 @@ def cap_lines(st: Status) -> list[tuple[str, str]]:
         level = cap_level(pct)
         if level:
             limit = CAP_CRITICAL if level == "critical" else CAP_WARNING
-            out.append((level, f"{pool} is {pct}% full ({level} from {limit}%): sudo zark prune"))
+            out.append(
+                (level, f"{pool} is {pct}% full ({level} from {limit}%): {zark_command()} prune")
+            )
     return out
 
 
@@ -113,7 +115,8 @@ def residue_line(n: int) -> str:
     `zark status` and the MOTD (decided 2026-10-13, M3P.8 2a)."""
     return (
         f"In origin: {n} snapshot(s) no registered drive needs "
-        + "(`syncoid_*` left by zark 1.x, keystore `prepare_*`): sudo zark prune removes them"
+        + "(`syncoid_*` left by zark 1.x, keystore `prepare_*`): "
+        + f"{zark_command()} prune removes them"
     )
 
 
@@ -177,7 +180,7 @@ def due_notifications(
         level = cap_level(pct)
         key = f"{pool} {level} {day}"
         if level and key not in sent:
-            out.append((key, f"{pool} is {pct}% full - free space with: sudo zark prune"))
+            out.append((key, f"{pool} is {pct}% full - free space with: {zark_command()} prune"))
     return out
 
 

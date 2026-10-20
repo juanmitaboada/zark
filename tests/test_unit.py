@@ -1514,10 +1514,25 @@ class TestZarkCommand:  # pylint: disable=missing-function-docstring,too-few-pub
         with patch.object(Config, "zark_root", return_value=Path("/media/stick/zark")):
             assert zark_command() == "sudo ./zark"
 
+    def test_the_status_and_certificate_lines_name_the_command_as_run(self):
+        # M4dP.1 (M5a-9): `sudo zark` was written out in the status lines and
+        # the certificate warning, wrong from a checkout.
+        st = status_lib.Status(caps={"rpool": 86}, residues=3)
+        facts = _facts()
+        checks = all_selftest_checks()
+        for root, cmd in (("/usr/share/zark", "sudo zark"), ("/media/stick/zark", "sudo ./zark")):
+            with patch.object(Config, "zark_root", return_value=Path(root)):
+                assert f"{cmd} prune" in status_lib.motd_text(st)
+                assert [t for _lvl, t in status_lib.cap_lines(st)] == [
+                    f"rpool is 86% full (warning from 80%): {cmd} prune"
+                ]
+                assert status_lib.residue_line(3).endswith(f"{cmd} prune removes them")
+                lines = certs.warning_lines(facts, checks, [], [])
+                assert lines[0].endswith(f"run {cmd} selftest"), lines
+
     def test_no_tip_hard_codes_the_command(self):
         # The MOTD's lines (read at login) and the installed scripts say `zark`.
-        allowed = {"lib/status.py", "lib/certificates.py", "lib/alerts.py"}
-        allowed |= {"lib/apt_guard.py", "lib/grub_guard.py", "lib/config.py"}
+        allowed = {"lib/alerts.py", "lib/apt_guard.py", "lib/grub_guard.py", "lib/config.py"}
         # Sentences that name a command without telling to run it (M4dF-5).
         named = (
             "Mounted with 'zark mount",
@@ -16491,7 +16506,7 @@ class TestStatus:
             residues=23,
         )
         text = status_lib.motd_text(st)
-        assert "rpool is 86% full (warning from 80%): sudo zark prune" in text
+        assert f"rpool is 86% full (warning from 80%): {zark_command()} prune" in text
         assert "bpool" not in text
         assert "zark: last backups: black 3 day(s) ago, blue 34 day(s) ago" in text
         assert "blue: no anchor in origin" in text
@@ -16685,7 +16700,7 @@ class TestStatus:
         ):
             status_mod.run(["--refresh", "--notify"])
             status_mod.run(["--refresh", "--notify"])
-        assert sent == ["rpool is 85% full - free space with: sudo zark prune"]
+        assert sent == [f"rpool is 85% full - free space with: {zark_command()} prune"]
 
 
 class TestAlerts:
@@ -17892,7 +17907,7 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
         lines = certs.warning_lines(_facts(), checks, [], [])
         assert lines == [
             f"self-test: no certificate covers this platform ({len(l1)} of {len(l1)} "
-            + "checks): run sudo zark selftest"
+            + f"checks): run {zark_command()} selftest"
         ]
         failed = {
             **all_pass,

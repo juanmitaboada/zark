@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from lib import platform_facts
-from lib.config import VERSION, Config
+from lib.config import VERSION, Config, zark_command
 from lib.log import Log
 from lib.platform_facts import Facts
 from lib.selftest import CHECKLIST, Check, Result, all_checks, dumps
@@ -327,7 +327,7 @@ def warning_lines(
     if missing:
         lines.append(
             f"self-test: no certificate covers this platform ({len(missing)} of {total} "
-            + "checks): run sudo zark selftest"
+            + f"checks): run {zark_command()} selftest"
         )
     fail = newest_failure(facts, record)
     if fail:
