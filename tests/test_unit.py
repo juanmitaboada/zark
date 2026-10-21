@@ -3771,6 +3771,34 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
         rules = dict(self._run_discovery(list(self.LAYOUT), frozenset({"rpool/var"})))
         assert rules["rpool/var"]["template"] == "drained"
 
+    def test_the_gap_check_compares_with_the_drained_subtrees(self):
+        """M5bR-5 (f): sanoid_conf_gap compares sanoid.conf with the rules
+        setup writes with the drained subtrees: none for the file setup
+        wrote with them, a gap for one written without them."""
+        downloads = frozenset({"rpool/USERDATA/home_x/Downloads"})
+
+        def discover(_zfs: object, _ubuntu: str, drained: frozenset[str] = frozenset()):
+            return self._run_discovery(list(self.LAYOUT), drained)
+
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "sanoid.conf"
+            real = Path
+
+            def fake_path(p: object) -> Path:
+                return conf if str(p) == "/etc/sanoid/sanoid.conf" else real(str(p))
+
+            with (
+                patch.object(setup_mod, "Path", fake_path),
+                patch.object(setup_mod, "_detect_ubuntu_ds", return_value=self.UBUNTU),
+                patch.object(setup_mod, "_discover_rules", side_effect=discover),
+                patch.object(setup_mod, "_drained", return_value=downloads),
+            ):
+                zfs = ZFS(make_log())
+                _ = conf.write_text(_generate_sanoid_conf(discover(zfs, "", downloads)))
+                assert setup_mod.sanoid_conf_gap(zfs) == ""
+                _ = conf.write_text(_generate_sanoid_conf(discover(zfs, "")))
+                assert setup_mod.sanoid_conf_gap(zfs).startswith("update /etc/sanoid/sanoid.conf")
+
     def test_var_subtree_collapses_to_single_rule(self):
         """rpool/var, rpool/var/lib, rpool/var/lib/docker → only rpool/var
         appears in the output, because it covers the rest recursively."""
@@ -6527,6 +6555,17 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
         assert excl.covering("rpool/data/c", d.no_backup) == "rpool/data"
         assert excl.covering("rpool/database", d.no_backup) == ""  # not a prefix match
 
+    def test_a_sibling_whose_name_starts_like_an_excluded_top_is_still_expected(self):
+        # M5bR-5 (a): the expected set matches a top by name and "/", not by prefix.
+        origin = _excl_origin("rpool/var", "rpool/var/lib", "rpool/var/lib/docker")
+        origin |= _excl_origin("rpool/var/lib/docker/vol", "rpool/var/lib/docker2")
+        skip = frozenset({"rpool/var/lib/docker"})
+        wanted = repl.expected(origin, skip)
+        assert "rpool/var/lib/docker2" in wanted, wanted
+        assert "rpool/var/lib/docker" not in wanted and "rpool/var/lib/docker/vol" not in wanted
+        assert repl.is_excluded("rpool/var/lib/docker/vol", skip)
+        assert not repl.is_excluded("rpool/var/lib/docker2", skip)
+
     def test_the_two_flags_are_independent(self):
         origin = _excl_origin("rpool/a", "rpool/b")
         d = excl.parse(_excl_lines(("rpool/a", self.R, "no"), ("rpool/b", self.S, "no")), origin)
@@ -6724,6 +6763,21 @@ class TestExcludeCommand:  # pylint: disable=missing-function-docstring
         out, rc, _ = self._run(fake, ["remove", "rpool/var", "backups"])
         assert rc == 0 and "  blue: an incremental if it still holds rpool/var, else" in out, out
 
+    def test_enter_excludes_nothing(self):
+        # M5bR-5 (e): the question's default is no, answered by the terminal.
+        fake = _fresh_fake()
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch.object(Config, "load", return_value=make_config()),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            exclude_mod.run(["add", "rpool/var", "backups"])
+        assert "Nothing changed" in out.getvalue(), out.getvalue()
+        assert "org.zark:replicate" not in fake.ds["rpool/var"].props
+        assert fake.was_not_called("zfs set org.zark:replicate")
+
     def test_a_usage_error_exits_2(self):
         for args in (["add", "rpool/var"], ["add", "rpool/var", "all"], ["drop", "x", "both"]):
             _, rc, _ = self._run(_fresh_fake(), args)
@@ -6734,6 +6788,37 @@ class TestExcludeCommand:  # pylint: disable=missing-function-docstring
             "exclude", ["list"]
         )
         assert lock_mod.needs_lock("exclude", ["add", "rpool/var", "both"])
+
+
+class TestMountHeldLines:  # pylint: disable=too-few-public-methods
+    """M5bR-5 (h), M5b-13b: `zark mount` prints the held excluded subtrees."""
+
+    def test_mount_prints_the_held_lines(self) -> None:
+        """The lines come from exclusions.held_lines, after the mount."""
+        drive = ConnectedDrive(
+            "backup", "111", "usb-X-0:0", "/dev/sdb", True, False, False, "exported"
+        )
+        line = "rpool/x: excluded from backups at P; this drive's last copy of it is S"
+        out = StringIO()
+        with (
+            patch.object(Config, "load", return_value=make_config()),
+            patch.object(Cleanup, "register", lambda _self: None),
+            patch.object(mount_mod, "scan_connected_drives", return_value=[drive]),
+            patch.object(mount_mod, "select_drive", return_value=drive),
+            patch.object(ZFS, "pool_exists", return_value=False),
+            patch("lib.log.Log.ask_choice", return_value=0),
+            patch.object(mount_mod, "backup_device", return_value=""),
+            patch.object(ZFS, "import_backup_pool", return_value=True),
+            patch.object(mount_mod.drive_marks, "log_metadata"),
+            patch.object(mount_mod, "Keystore"),
+            patch.object(mount_mod, "open_keystore", return_value=True),
+            patch.object(mount_mod, "_mount_origin_layout", return_value=(3, [])),
+            patch.object(mount_mod.exclusions, "held_lines", return_value=[line]) as held,
+            redirect_stdout(out),
+        ):
+            mount_mod.run([])
+        held.assert_called_once_with("backup")
+        assert line in Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
 
 
 class TestMountBanner:  # pylint: disable=missing-function-docstring,too-few-public-methods
@@ -8601,6 +8686,26 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
             except SystemExit as e:
                 rc = int(e.code or 0)
         return rc
+
+    def test_prepare_leaves_an_excluded_subtree_out_and_records_it(self):
+        """M5bR-5 (b): D8 and D9 on prepare's side: the subtree is not sent
+        to the new drive, and its first point records it."""
+        fake = _fresh_fake(())
+        fake.dataset("rpool/var/lib/docker/vol")
+        fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"] = "no"
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out) == 0, out.getvalue()
+        assert "blue/rpool/var/lib/docker" not in fake.ds
+        assert "blue/rpool/var/lib/docker/vol" not in fake.ds
+        assert "blue/rpool/ROOT/be" in fake.ds
+        point = fake.ds["blue"].props["org.zark:last-point"]
+        with patch_sh(fake):
+            snaps = drive_marks.drive_snapshots("blue", strict=True)
+            mark = excl.read_point_mark("blue", point, snaps)
+        assert mark is not None and mark.left_out == {"rpool/var/lib/docker"}
+        assert set(mark.datasets) == {"rpool/var/lib/docker", "rpool/var/lib/docker/vol"}
 
     def test_prepare_by_id_replaces_stale_entry_and_uses_by_id_vdev(self):
         cfg_dir = Path(tempfile.mkdtemp())
@@ -15478,6 +15583,76 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
         assert "backup/rpool/var/lib/docker" not in fake.ds
         assert "Excluded from backups, still on backup:" in text and "(kept)" in text
+
+    def test_prune_destroy_removes_this_drives_anchors_on_the_subtree(self) -> None:
+        """M5bR-5 (c), M5b-10c: prune's destroy of a held excluded subtree
+        removes this drive's bookmarks on it from origin by name, and no
+        other drive's."""
+        fake = self._held_excluded()
+        _, rc = self._run(fake)
+        assert rc == 0
+        ds = "rpool/var/lib/docker"
+        other = repl.anchor_name("999", P1)
+        fake.ds[ds].bookmarks.append(FSnap(other, "7", 1, 1))
+        mine = [b.name for b in fake.ds[ds].bookmarks if repl.anchor_disk(b.name) == "111"]
+        assert mine
+        with (
+            patch_sh(fake),
+            patch("lib.log.Log.ask_text", return_value="PRUNE"),
+            redirect_stdout(StringIO()),
+        ):
+            prune_mod._excluded_held("backup", "111", Log())  # pylint: disable=protected-access
+        left = [b.name for b in fake.ds[ds].bookmarks]
+        assert "backup/rpool/var/lib/docker" not in fake.ds
+        assert other in left and not [n for n in left if repl.anchor_disk(n) == "111"], left
+        for name in mine:
+            assert fake.was_called(f"zfs destroy {shlex.quote(f'{ds}#{name}')}"), name
+
+    def test_the_record_names_only_the_snapshots_of_the_point(self) -> None:
+        """M5bR-5 (d), M5b-7: the record is set on every snapshot of the
+        point that reached the drive and on nothing else, without a warning."""
+        fake = _fresh_fake()
+        fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"] = "no"
+        out = StringIO()
+        _, rc = self._run(fake, redirect_stdout(out))
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert "Could not record" not in text, text
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        held = {
+            f"{d}@{point}" for d in fake.ds if d.startswith("backup/") and point in fake.names(d)
+        }
+        sets = [c for c in fake.calls if c.startswith("zfs set") and "org.zark:excluded=" in c]
+        targets = {w for c in sets for w in c.split() if "@" in w and "=" not in w}
+        assert sets and targets == held, sorted(targets ^ held)
+
+    def test_a_snapshot_exclusion_with_sanoid_conf_not_setups_is_warned(self) -> None:
+        """M5bR-5 (f), M5b-6: backup says when sanoid.conf lacks the split."""
+        fake = _fresh_fake()
+        fake.ds["rpool/var/lib/docker"].props["org.zark:snapshot"] = "no"
+        gap = "update /etc/sanoid/sanoid.conf (1 section(s) differ)"
+        out = StringIO()
+        _, rc = self._run(
+            fake,
+            patch.object(backup_mod, "sanoid_conf_gap", return_value=gap),
+            redirect_stdout(out),
+        )
+        text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
+        assert rc == 0 and f"sanoid.conf is not setup's policy here ({gap})" in text, text
+
+    def test_status_counts_every_dataset_and_reports_ignored_values(self) -> None:
+        """M5bR-5 (h), M5b-13b, D10: every dataset of the subtree is counted,
+        and a value zark ignores is reported."""
+        fake = _fresh_fake()
+        fake.dataset("rpool/var/lib/docker/vol")
+        fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"] = "no"
+        fake.ds["rpool/ROOT/be"].props["org.zark:replicate"] = "no"
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            status_mod._exclusions(Log())  # pylint: disable=protected-access
+        text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
+        assert "Excluded from backups: 2 dataset(s)" in text, text
+        assert "Exclusion ignored on rpool/ROOT/be: a boot environment is never excluded" in text
 
     def test_the_completed_notification_comes_before_the_eject_question(self) -> None:
         """M4dF-3: the eject question waits for the user; the notification
