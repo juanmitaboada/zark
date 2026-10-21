@@ -30,6 +30,7 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 import ast
 import atexit
 import fcntl
+import hashlib
 import importlib.machinery
 import importlib.util
 import itertools
@@ -6681,6 +6682,80 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
                 except (ValueError, survey.ReadError) as e:
                     raised.append(type(e).__name__)
             assert raised == ["ValueError", "ReadError"], raised
+
+
+class TestPointRecordInParts:  # pylint: disable=missing-function-docstring
+    """M5bR-1, M5bF-6: a point's record in parts, written and read back."""
+
+    def _drive(self, mark: str) -> FakeZfs:
+        fake = FakeZfs()
+        fake.pool("backup")
+        for ds in ("backup/rpool", "backup/rpool/a", "backup/rpool/b"):
+            fake.dataset(ds)
+            _ = fake.snap(ds, P1)
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert excl.record("backup", P1, ["rpool", "rpool/a", "rpool/b"], mark, Log())
+        return fake
+
+    @staticmethod
+    def _mark(n: int) -> str:
+        datasets = {f"rpool/c/{i:05}": ("on", f"/c/{i:05}") for i in range(n)}
+        return excl._dump({"rpool/c": excl.BACKUPS}, datasets)  # pylint: disable=protected-access
+
+    def _read(self, fake: FakeZfs) -> excl.PointMark | None:
+        with patch_sh(fake):
+            return excl.read_point_mark("backup", P1, drive_marks.drive_snapshots("backup"))
+
+    def test_a_record_that_fits_is_one_property_as_before(self):
+        mark = self._mark(10)
+        assert excl.record_props(mark) == [(excl.POINT_MARK, mark)]
+        fake = self._drive(mark)
+        props = fake.ds["backup/rpool/a"].snaps[0].props
+        assert props[excl.POINT_MARK] == mark and excl.part_prop(1) not in props
+        got = self._read(fake)
+        assert got is not None and len(got.datasets) == 10
+
+    def test_a_long_record_is_written_in_parts_in_one_zfs_set_and_read_back(self):
+        mark = self._mark(1000)
+        props = excl.record_props(mark)
+        n = excl.parts_needed(mark)
+        assert n > 1 and [k for k, _ in props] == [
+            excl.POINT_MARK,
+            *(excl.part_prop(i) for i in range(1, n + 1)),
+        ]
+        fake = self._drive(mark)
+        sets = [c for c in fake.calls if c.startswith("zfs set")]
+        assert len(sets) == 1 and all(f"{excl.part_prop(n)}=" in c for c in sets)
+        got = self._read(fake)
+        assert got is not None and len(got.datasets) == 1000 and got.left_out == {"rpool/c"}
+
+    def test_a_missing_or_changed_part_is_refused(self):
+        mark = self._mark(1000)
+        for spoil in ("missing", "changed", "bad pointer"):
+            fake = self._drive(mark)
+            props = fake.ds["backup/rpool/b"].snaps[0].props
+            if spoil == "missing":
+                del props[excl.part_prop(2)]
+            elif spoil == "changed":
+                props[excl.part_prop(2)] = props[excl.part_prop(2)].replace("on", "no", 1)
+            else:
+                props[excl.POINT_MARK] = '{"parts":99,"sha256":"x"}'
+            try:
+                _ = self._read(fake)
+            except ValueError as e:
+                assert "unreadable or incomplete" in str(e)
+            else:
+                raise AssertionError(f"a {spoil} part was read as a record")
+
+    def test_parts_beyond_the_pointers_count_are_not_read(self):
+        """M5bF-8: a rewrite with fewer parts leaves the old higher ones."""
+        for n in (400, 200):  # two parts, then one property: parts 3 to 5 stay
+            fake = self._drive(self._mark(1000))
+            for ds in ("backup/rpool", "backup/rpool/a", "backup/rpool/b"):
+                fake.ds[ds].snaps[0].props |= dict(excl.record_props(self._mark(n)))
+            assert excl.part_prop(5) in fake.ds["backup/rpool"].snaps[0].props
+            got = self._read(fake)
+            assert got is not None and len(got.datasets) == n
 
 
 class TestExcludeCommand:  # pylint: disable=missing-function-docstring
@@ -15471,16 +15546,46 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         parsed = excl.parse_point_mark(snap.props["org.zark:excluded"])
         assert parsed is not None and not parsed.tops and not parsed.datasets
 
-    def test_a_mark_too_long_for_the_drive_stops_before_the_point(self) -> None:
-        """M5b-7: recover could not recreate what the point leaves out."""
+    def test_a_large_excluded_subtree_is_recorded_in_parts(self) -> None:
+        """M5bR-1: a subtree whose record does not fit in one user property
+        (300 datasets of a docker tree, review E4) is recorded in parts of at
+        most 8191 bytes behind a pointer, and read back whole."""
         fake = _fresh_fake()
-        for i in range(120):
-            fake.dataset(f"rpool/many/d{i:03}_{'x' * 40}", canmount="on", mountpoint=f"/m/{i}")
-        fake.dataset("rpool/many", canmount="on", mountpoint="/many")
-        fake.ds["rpool/many"].props["org.zark:replicate"] = "no"
+        top = "rpool/var/lib/docker"
+        fake.ds[top].props["org.zark:replicate"] = "no"
+        layers = [f"{top}/{hashlib.sha256(str(i).encode()).hexdigest()}" for i in range(299)]
+        for rel in layers:
+            fake.dataset(rel, mountpoint="legacy")
         out = StringIO()
         _, rc = self._run(fake, redirect_stdout(out))
-        assert rc == 1 and "Too many datasets excluded to record them" in out.getvalue()
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0 and "BACKUP COMPLETED" in text and "Could not record" not in text, text
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        snap = next(s for s in fake.ds["backup/rpool/ROOT/be"].snaps if s.name == point)
+        pointer = json.loads(snap.props["org.zark:excluded"])
+        assert set(pointer) == {"parts", "sha256"} and pointer["parts"] > 1, pointer
+        parts = [snap.props[f"org.zark:excluded.{i}"] for i in range(1, pointer["parts"] + 1)]
+        assert all(len(p) <= excl.MARK_LIMIT for p in parts)
+        assert hashlib.sha256("".join(parts).encode()).hexdigest() == pointer["sha256"]
+        with patch_sh(fake):
+            snaps = drive_marks.drive_snapshots("backup", strict=True)
+            mark = excl.read_point_mark("backup", point, snaps)
+        assert mark is not None and mark.left_out == {top}
+        assert len(mark.datasets) == 300 and mark.datasets[layers[0]] == ("on", "legacy")
+
+    def test_a_mark_past_the_bound_stops_before_the_point(self) -> None:
+        """M5bF-7: a record needing more than 64 parts stops the run before
+        the point; recover could not recreate what the point leaves out."""
+        fake = _fresh_fake()
+        fake.dataset("rpool/many", mountpoint="/many")
+        fake.ds["rpool/many"].props["org.zark:replicate"] = "no"
+        for i in range(1100):
+            fake.dataset(f"rpool/many/{i:04}{'x' * 230}", mountpoint=f"/m/{i:04}{'y' * 230}")
+        out = StringIO()
+        _, rc = self._run(fake, redirect_stdout(out))
+        text = " ".join(out.getvalue().split())
+        assert rc == 1 and "Too many datasets excluded to record them" in text, text
+        assert "parts of 8191, at most 64" in text, text
         assert fake.was_not_called("zfs snapshot")
 
     def _held_excluded(self) -> FakeZfs:

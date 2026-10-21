@@ -31,12 +31,14 @@ A user property changes no mount, so it can be set with the keystore zvol
 present (the chase.c:648 rule is about mount properties).
 """
 
+import hashlib
 import json
 import shlex
 from dataclasses import dataclass, field
 
 from lib import sh
 from lib.backup_layout import zark_props
+from lib.config import zark_command
 from lib.drive_marks import drive_snapshots, snapshot_marks
 from lib.log import Log
 from lib.replication import (
@@ -59,8 +61,12 @@ POINT_MARK = "org.zark:excluded"
 # On a drive's copy of an excluded dataset the user chose to keep (M5b-10).
 KEPT = EXCLUDED_KEPT_PROP
 # A user property value holds at most 8191 bytes (OpenZFS 2.4.1
-# include/sys/fs/zfs.h:86, module/zfs/zfs_ioctl.c:2937-2938).
+# include/sys/fs/zfs.h:86, module/zfs/dsl_prop.c:963-970).
 MARK_LIMIT = 8191
+# A record longer than one value is written in parts (M5bR-1, M5bF-6): the
+# mark holds a pointer, the parts are POINT_MARK.1 to .n. 64 parts in one
+# zfs set fit well within execve's argument limit (M5bF-7).
+MAX_PARTS = 64
 
 # What `zark exclude` calls each flag.
 BACKUPS, SNAPSHOTS, BOTH = "backups", "snapshots", "both"
@@ -244,6 +250,93 @@ def _dump(tops: dict[str, str], datasets: dict[str, tuple[str, str]]) -> str:
     return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
+def part_prop(i: int) -> str:
+    """The user property holding part ``i`` (from 1) of a record in parts."""
+    return f"{POINT_MARK}.{i}"
+
+
+def parts_needed(mark: str) -> int:
+    """How many values ``mark`` takes: 1 when it fits in one."""
+    return max(1, -(-len(mark) // MARK_LIMIT))
+
+
+def record_props(mark: str) -> list[tuple[str, str]]:
+    """The user properties that hold ``mark`` on a point's snapshots: the
+    mark itself when it fits in one value, else a pointer naming its parts
+    and the digest of the whole record, then the parts (M5bR-1, M5bF-6).
+    The JSON is ASCII (json.dumps escapes the rest), so a cut never splits
+    a character."""
+    if len(mark) <= MARK_LIMIT:
+        return [(POINT_MARK, mark)]
+    parts = [mark[i : i + MARK_LIMIT] for i in range(0, len(mark), MARK_LIMIT)]
+    digest = hashlib.sha256(mark.encode()).hexdigest()
+    pointer = json.dumps(
+        {"parts": len(parts), "sha256": digest}, sort_keys=True, separators=(",", ":")
+    )
+    return [(POINT_MARK, pointer), *((part_prop(i), p) for i, p in enumerate(parts, 1))]
+
+
+def _pointer(value: str) -> tuple[int, str] | None:
+    """(parts, digest) when ``value`` points to a record in parts, (0, "")
+    for a pointer that cannot be followed, None for a record of its own."""
+    try:
+        data = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or "parts" not in data:
+        return None
+    n, digest = data.get("parts"), data.get("sha256")
+    # bool is an int: a pointer of "true" parts is not one to follow.
+    if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= MAX_PARTS:
+        return 0, ""
+    if not isinstance(digest, str):
+        return 0, ""
+    return n, digest
+
+
+def _read_parts(root: str, most: int, strict: bool) -> dict[str, dict[str, str]]:
+    """Parts 1 to ``most`` as set on each snapshot under ``root``:
+    snapshot -> {property: value}, in one ``zfs get`` of the list."""
+    parts: dict[str, dict[str, str]] = {}
+    if not most:
+        return parts
+    names = ",".join(part_prop(i) for i in range(1, most + 1))
+    r = checked(
+        sh.run(f"zfs get -H -p -r -s local -t snapshot -o name,property,value {names} {_q(root)}"),
+        strict,
+    )
+    for line in r.lines if r.ok else []:
+        f = line.split("\t")
+        if len(f) == 3 and "@" in f[0]:
+            parts.setdefault(f[0], {})[f[1]] = f[2]
+    return parts
+
+
+def point_records(pool: str, strict: bool = False) -> dict[str, str | None]:
+    """Every point record on the drive's rpool snapshots, as set on each
+    snapshot: a record in parts joined, None when one of its parts is
+    missing or the joined record does not match the pointer's digest (a
+    failed set can leave some parts written, OpenZFS
+    module/zfs/zfs_ioctl.c:2875-2908). Parts a rewrite left beyond the
+    pointer's count are never read (M5bF-8). ``strict`` raises
+    :class:`ReadError` when a listing fails."""
+    root = f"{pool}/rpool"
+    marks = snapshot_marks(root, strict, prop=POINT_MARK)
+    pointers = {snap: p for snap, v in marks.items() if (p := _pointer(v)) is not None}
+    out: dict[str, str | None] = dict(marks)
+    if not pointers:
+        return out
+    parts = _read_parts(root, max(n for n, _ in pointers.values()), strict)
+    for snap, (n, digest) in pointers.items():
+        pieces = [parts.get(snap, {}).get(part_prop(i)) for i in range(1, n + 1)]
+        joined = "".join(p for p in pieces if p is not None)
+        whole = n > 0 and None not in pieces
+        out[snap] = (
+            joined if whole and hashlib.sha256(joined.encode()).hexdigest() == digest else None
+        )
+    return out
+
+
 @dataclass
 class PointMark:
     """What a backup point left out, read back from the drive."""
@@ -292,19 +385,23 @@ def read_point_mark(pool: str, point: str, snaps: list[Snap]) -> PointMark | Non
     """What backup point ``point`` left out, from its snapshots on the
     drive, read strictly (raises :class:`ReadError`) as the completion
     marks are (M3R-9, M5b-13 13a). None for a point without the mark (a
-    drive written before rc10, or a sanoid point): restored as before."""
-    marks = snapshot_marks(f"{pool}/rpool", strict=True, prop=POINT_MARK)
+    drive written before rc10, or a sanoid point): restored as before.
+    A record in parts is joined first; one that is incomplete raises
+    :class:`ValueError`, as snapshots that disagree do."""
+    records = point_records(pool, strict=True)
     values = {
-        marks[n]
+        records[n]
         for n in (f"{pool}/{s.stored}@{s.name}" for s in snaps if s.name == point)
-        if n in marks
+        if n in records
     }
     if not values:
         return None
-    parsed = parse_point_mark(values.pop()) if len(values) == 1 else None
+    value = values.pop() if len(values) == 1 else None
+    parsed = parse_point_mark(value) if value is not None else None
     if parsed is None:
         raise ValueError(
-            f"the snapshots of {point} disagree on what it left out, or it is unreadable"
+            f"the snapshots of {point} disagree on what it left out, "
+            + "or its record is unreadable or incomplete"
         )
     return parsed
 
@@ -335,9 +432,9 @@ def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:
     """What a backup or prepare leaves out, and the mark its point will carry
     on the drive, read before the point is taken (D10: checked at every run).
 
-    A value zark ignores is reported. A mark that would not fit in a user
-    property stops the run before anything is written: recover could not
-    recreate what the point leaves out (M5b-7 7a)."""
+    A value zark ignores is reported. A mark longer than :data:`MAX_PARTS`
+    user properties stops the run before anything is written: recover
+    could not recreate what the point leaves out (M5b-7 7a, M5bF-7)."""
     try:
         origin = read_origin(pools, strict=True)
         declared = read(pools, origin, strict=True)
@@ -346,23 +443,28 @@ def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:
     for rel, why in declared.ignored:
         log.warn(f"Exclusion ignored on {rel}: {why}")
     mark = point_mark(declared, origin)
-    if len(mark) > MARK_LIMIT:
+    if (n := parts_needed(mark)) > MAX_PARTS:
         log.fatal(
-            f"Too many datasets excluded to record them on the drive ({len(mark)} bytes, "
-            + f"at most {MARK_LIMIT})",
+            f"Too many datasets excluded to record them on the drive ({len(mark)} bytes: "
+            + f"{n} parts of {MARK_LIMIT}, at most {MAX_PARTS})",
             causes=["recover reads what a point left out from the drive, to recreate it"],
-            solutions=["Exclude fewer, larger subtrees: zark exclude list"],
+            solutions=[
+                f"Include a large subtree again: {zark_command()} exclude list, then "
+                + f"{zark_command()} exclude remove <dataset> backups"
+            ],
         )
     return declared, mark
 
 
 def record(pool: str, point: str, rels: list[str], mark: str, log: Log) -> bool:
     """Set the point's mark on its snapshots on the drive, complete run or not
-    (M5b-7 7a): a user property, nothing mounts."""
+    (M5b-7 7a): user properties, nothing mounts. A record in parts goes in
+    the same zfs set as its pointer, as separate arguments: one shell
+    string longer than 128 KiB is refused by execve (M5bR-1)."""
     if not rels:
         return True
-    names = " ".join(_q(f"{pool}/{rel}@{point}") for rel in rels)
-    r = sh.run(f"zfs set {_q(f'{POINT_MARK}={mark}')} {names}", log=log)
+    props = [f"{k}={v}" for k, v in record_props(mark)]
+    r = sh.run(["zfs", "set", *props, *(f"{pool}/{rel}@{point}" for rel in rels)], log=log)
     if not r.ok:
         log.warn(
             f"Could not record what {point} leaves out on {pool}: {r.stderr.strip()} "

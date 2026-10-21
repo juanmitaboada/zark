@@ -154,7 +154,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         self._calls.append(cmd_str)
         if any(f in cmd_str for f in self.fail_cmds):
             return _err(f"fake: injected failure: {cmd_str}")
-        argv = shlex.split(cmd_str)
+        # A list is the command's own arguments, as sh.run passes it (no shell).
+        argv = list(cmd) if isinstance(cmd, list) else shlex.split(cmd_str)
         if argv and argv[0] == "env":  # `env LC_ALL=C <command>`
             argv = [a for a in argv[1:] if "=" not in a]
         handler = {
@@ -240,7 +241,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ds, prop = args[-1], args[-2]
             if ds not in self.ds:
                 return _err("does not exist")
-            return self._get_snapshots(ds, prop, local="local" in args)
+            columns = args[args.index("-o") + 1] if "-o" in args else "name,value"
+            return self._get_snapshots(ds, prop, local="local" in args, columns=columns)
         if "-r" in args:
             return self._get_recursive(args)
         field_ = args[args.index("-o") + 1] if "-o" in args else "value"
@@ -341,15 +343,22 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             out.append(f"{source if field_ == 'source' else value}\n")
         return _ok("".join(out))
 
-    def _get_snapshots(self, root: str, prop: str, local: bool) -> RunResult:
+    def _get_snapshots(
+        self, root: str, prop: str, local: bool, columns: str = "name,value"
+    ) -> RunResult:
+        """``zfs get -r -t snapshot``: one line per snapshot and property of the
+        comma list where it is set (``-s local``) or seen, in the ``-o``
+        columns (name,value or name,property,value)."""
         rows: list[str] = []
         for n in sorted(self.ds):
             if n != root and not n.startswith(root + "/"):
                 continue
             for s in self.ds[n].snaps:
-                value = s.props.get(prop, "") if local else self._inherited(n, s, prop)
-                if value and value != "-":
-                    rows.append(f"{n}@{s.name}\t{value}\n")
+                for p in prop.split(","):
+                    value = s.props.get(p, "") if local else self._inherited(n, s, p)
+                    if value and value != "-":
+                        cell = {"name": f"{n}@{s.name}", "property": p, "value": value}
+                        rows.append("\t".join(cell[c] for c in columns.split(",")) + "\n")
         return _ok("".join(rows))
 
     def _inherited(self, name: str, s: FSnap | None, prop: str) -> str:
@@ -663,12 +672,19 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
     def _set(self, args: list[str]) -> RunResult:
         """``zfs set k=v [k=v]... <dataset|snapshot>...``: every target that opens
         gets the values, and one that does not makes the exit non-zero
-        (cmd/zfs/zfs_iter.c:524-536)."""
+        (cmd/zfs/zfs_iter.c:524-536). A value of more than 8191 bytes is
+        refused (E2BIG, module/zfs/dsl_prop.c:963-970) and the others are
+        still set, as the kernel retries each alone (zfs_ioctl.c:2875-2908)."""
         kvs = [a.split("=", 1) for a in args if "=" in a]
         targets = [a for a in args if "=" not in a]
         if not targets:
             return _err("missing dataset name(s)")
-        errors: list[str] = []
+        errors: list[str] = [
+            f"cannot set property {k}: value too long ({len(v)} bytes)"
+            for k, v in kvs
+            if len(v) > 8191
+        ]
+        kvs = [kv for kv in kvs if len(kv[1]) <= 8191]
         for t in targets:
             ds, _, snap = t.partition("@")
             if ds not in self.ds or (snap and snap not in self.names(ds)):
