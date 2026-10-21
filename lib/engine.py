@@ -656,7 +656,11 @@ class Run:  # pylint: disable=too-many-instance-attributes
                     continue
                 target = f"{rel}@{s.name}"
                 if rel not in wanted:
-                    verdicts.append(Verdict(target, True, "dataset not replicated"))
+                    # A point another drive's run left before the dataset was
+                    # excluded is anchored for that drive first (M4b-4, M5bR-2).
+                    owner = owners.get(target, "")
+                    other = owner if owner != self.disk_guid and s is not point_snap else ""
+                    verdicts.append(Verdict(target, True, "dataset not replicated", other))
                 elif partial:
                     verdicts.append(Verdict(target, False, "partial receive to resume"))
                 elif s is point_snap and s.guid not in on_backup:

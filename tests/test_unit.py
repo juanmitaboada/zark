@@ -13301,6 +13301,26 @@ class TestEngineExclusions:
         assert res.ok and "backup/rpool/var/lib/docker/volumes" not in fake.ds
         assert not any(p.rel == "rpool/var/lib/docker/volumes" for p in res.plans)
 
+    def test_another_drives_point_on_a_dataset_then_excluded_is_anchored_first(self) -> None:
+        """M5bR-2 (review E3): a point drive A's run left on every dataset (a
+        power loss after the point, no anchor) is anchored for A before drive
+        B's run removes it, on the excluded dataset as on the others."""
+        fake = _fresh_fake(("backup", "blue"))
+        fake.ds["blue"].props["org.zark:origin-machine-id"] = TEST_MACHINE_ID
+        assert _engine_run(fake, "backup", "111", P1).ok
+        assert _engine_run(fake, "blue", "222", P2).ok
+        stale = "zark_2026-10-09_12:00:00Z"
+        for ds in list(fake.ds):
+            if ds.split("/")[0] in ("rpool", "bpool") and fake.ds[ds].kind == "filesystem":
+                fake.snap(ds, stale).props["org.zark:point-for"] = "111"
+        _tick(fake, "2026-10-10_00:00:00_daily")
+        docker = "rpool/var/lib/docker"
+        res = _engine_run(fake, "blue", "222", "zark_2026-10-10_10:00:00Z", exclusions=self.DOCKER)
+        assert res.ok, res.error
+        for ds in (docker, "rpool/USERDATA/home"):
+            assert stale not in fake.names(ds), ds
+            assert repl.anchor_name("111", stale) in fake.bookmarks(ds), (ds, fake.bookmarks(ds))
+
     def test_no_drive_needs_a_base_on_an_excluded_dataset(self) -> None:
         """origin prune's warning for drives without an anchor leaves it out."""
         fake = _fresh_fake()
