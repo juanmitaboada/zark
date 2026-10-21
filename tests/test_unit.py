@@ -15772,6 +15772,59 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert "Excluded from backups: 2 dataset(s)" in text, text
         assert "Exclusion ignored on rpool/ROOT/be: a boot environment is never excluded" in text
 
+    def _parts_and_held(self) -> tuple[FakeZfs, str]:
+        """A drive whose point records a large exclusion in parts and still
+        holds rpool/var/lib/docker, about to be destroyed there (M5bR-1)."""
+        fake = _fresh_fake()
+        fake.dataset("rpool/big", mountpoint="/big")
+        for i in range(300):
+            fake.dataset(f"rpool/big/{hashlib.sha256(str(i).encode()).hexdigest()}")
+        fake.ds["rpool/big"].props["org.zark:replicate"] = "no"
+        _, rc = self._run(fake)
+        assert rc == 0
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        snap = next(s for s in fake.ds["backup/rpool/ROOT/be"].snaps if s.name == point)
+        assert excl.part_prop(2) in snap.props
+        fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"] = "no"
+        return fake, point
+
+    def test_a_record_in_parts_is_rewritten_in_parts_after_a_destroy(self) -> None:
+        """M5bR-1, M5b-10b: the point that held the destroyed copy keeps the
+        large exclusion it recorded and adds the destroyed dataset; it stays
+        complete."""
+        fake, point = self._parts_and_held()
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            origin = survey.read_origin(["rpool", "bpool"], strict=True)
+            done = excl.destroy_held(
+                "backup", "rpool/var/lib/docker", "backups", "111", origin, Log()
+            )
+            snaps = drive_marks.drive_snapshots("backup", strict=True)
+            mark = excl.read_point_mark("backup", point, snaps)
+        assert done and "backup/rpool/var/lib/docker" not in fake.ds, out.getvalue()
+        assert mark is not None and mark.left_out == {"rpool/big", "rpool/var/lib/docker"}
+        assert len(mark.datasets) == 302 and "rpool/var/lib/docker" in mark.datasets
+        assert point in complete_points(snaps, "")
+
+    def test_a_destroy_over_an_unreadable_record_destroys_nothing(self) -> None:
+        """M5bF-9 9a: a rewrite from an unreadable record would lose what the
+        point left out, so the copy is not destroyed and the point is named."""
+        fake, point = self._parts_and_held()
+        snap = next(s for s in fake.ds["backup/rpool/ROOT/be"].snaps if s.name == point)
+        del snap.props[excl.part_prop(2)]
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            origin = survey.read_origin(["rpool", "bpool"], strict=True)
+            done = excl.destroy_held(
+                "backup", "rpool/var/lib/docker", "backups", "111", origin, Log()
+            )
+        text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
+        assert not done and "backup/rpool/var/lib/docker" in fake.ds
+        assert (
+            f"not destroyed: cannot read the points that hold it: the record of {point}" in text
+        ), text
+        assert fake.was_not_called("zfs destroy -r")
+
     def test_the_completed_notification_comes_before_the_eject_question(self) -> None:
         """M4dF-3: the eject question waits for the user; the notification
         that the backup is done goes out before it, not after the answer."""

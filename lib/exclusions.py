@@ -494,13 +494,15 @@ class _Rewrite:
 
 
 def _rewrites(
-    pool: str, top: str, flags: str, snaps: list[Snap], marks: dict[str, str]
+    pool: str, top: str, flags: str, snaps: list[Snap], records: dict[str, str | None]
 ) -> dict[str, _Rewrite]:
     """For every point the destroy of ``top`` takes snapshots from, its marks
     as they must read afterwards: the count lowered by the datasets it no
     longer holds, and those datasets recorded as excluded with the values
     they had on the drive. A point marked before the count (rc2, "yes")
-    is left as it is: :func:`drive_marks.record_complete` counts it again."""
+    is left as it is: :func:`drive_marks.record_complete` counts it again.
+    A point whose record cannot be read raises :class:`ValueError`: its
+    rewrite would lose what it left out (M5bF-9)."""
     values = zark_props(pool)
     out: dict[str, _Rewrite] = {}
     for name in sorted({s.name for s in snaps if under(s.stored, top) and s.mark.isdigit()}):
@@ -511,7 +513,11 @@ def _rewrites(
         if not lost or not left or count <= 0:
             continue
         stored = [f"{pool}/{s.stored}@{name}" for s in left]
-        pm = parse_point_mark(next((marks[t] for t in stored if t in marks), "")) or PointMark()
+        held = [records[t] for t in stored if t in records]
+        pm = parse_point_mark(held[0]) if held and held[0] is not None else None
+        if held and pm is None:
+            raise ValueError(f"the record of {name} cannot be read")
+        pm = pm or PointMark()
         pm.tops[top] = flags
         # Recorded on every received dataset since M2; "on" and the inherited
         # mountpoint when a drive lacks them.
@@ -534,11 +540,10 @@ def destroy_held(  # pylint: disable=too-many-arguments,too-many-positional-argu
     touched."""
     try:
         snaps = drive_snapshots(pool, strict=True)
-        marks = snapshot_marks(f"{pool}/rpool", strict=True, prop=POINT_MARK)
-    except ReadError as e:
+        rewrites = _rewrites(pool, top, flags, snaps, point_records(pool, strict=True))
+    except (ReadError, ValueError) as e:
         log.warn(f"{pool}/{top} not destroyed: cannot read the points that hold it: {e}")
         return False
-    rewrites = _rewrites(pool, top, flags, snaps, marks)
     r = sh.run(f"zfs destroy -r {_q(f'{pool}/{top}')}", log=log)
     if not r.ok:
         log.error(f"Could not destroy {pool}/{top}: {r.stderr.strip()}")
@@ -551,13 +556,14 @@ def destroy_held(  # pylint: disable=too-many-arguments,too-many-positional-argu
 
 
 def _rewrite(name: str, rw: _Rewrite, top: str, log: Log) -> bool:
-    """One point's marks after a destroy (M5b-10b); a point left with its
-    old marks reads PARTLY REMOVED, which is then the truth."""
-    if len(rw.mark) > MARK_LIMIT:
+    """One point's marks after a destroy (M5b-10b), its record in parts when
+    it does not fit in one property, as :func:`record` writes it; a point
+    left with its old marks reads PARTLY REMOVED, which is then the truth."""
+    if parts_needed(rw.mark) > MAX_PARTS:
         log.warn(f"{name} now reads PARTLY REMOVED: too many datasets to record as excluded")
         return False
-    props = f"{COMPLETE_PROP}={rw.complete} {_q(f'{POINT_MARK}={rw.mark}')}"
-    r = sh.run(f"zfs set {props} {' '.join(_q(t) for t in rw.targets)}", log=log)
+    props = [f"{COMPLETE_PROP}={rw.complete}", *(f"{k}={v}" for k, v in record_props(rw.mark))]
+    r = sh.run(["zfs", "set", *props, *rw.targets], log=log)
     if not r.ok:
         log.warn(f"{name} now reads PARTLY REMOVED: {r.stderr.strip()}")
         return False
