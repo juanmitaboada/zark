@@ -230,6 +230,12 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
 # ── Restore plan ─────────────────────────────────────────────────────────
 
 
+def needs_userdata(plan: RestorePlan) -> bool:
+    """Whether step 8 creates the structural ``rpool/USERDATA``: a dataset
+    the point restores below it, or one it recreates empty (M5b-13 13a)."""
+    return any(r.rel.startswith("rpool/USERDATA/") for r in [*plan.rpool_rows, *plan.empty_rows])
+
+
 def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str) -> str:
     """``zpool create`` for the encrypted rpool, root mountpoint as in origin."""
     return (
@@ -893,7 +899,7 @@ def run(
     # ── 8. Raw send every rpool dataset (NO keystore = no zvols = safe) ──
     log.step(8, TOTAL_STEPS, "Restoring datasets via raw send (keystore deferred)...")
     _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/ROOT", log=log)
-    if any(r.rel.startswith("rpool/USERDATA/") for r in [*plan.rpool_rows, *plan.empty_rows]):
+    if needs_userdata(plan):
         _ = sh.run("zfs create -o canmount=off -o mountpoint=none rpool/USERDATA", log=log)
 
     errors += restore_rpool_rows(

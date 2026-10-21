@@ -54,7 +54,7 @@ from contextlib import (
     redirect_stderr,
     redirect_stdout,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -9596,6 +9596,19 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert not errors and not none
         assert fake.ds["rpool/var/lib/docker"].props["org.zark:snapshot"] == "no"
         assert fake.calls == ["zfs set org.zark:snapshot=no rpool/var/lib/docker"], fake.calls
+
+    def test_rpool_userdata_is_created_for_an_empty_row_alone(self):
+        """M5bR-5 (g): an excluded home with nothing else under rpool/USERDATA
+        still needs its container; neither a restored nor an empty row needs
+        it elsewhere."""
+        home = "rpool/USERDATA/home_cgx8je"
+        mark = excl.PointMark(tops={home: excl.BACKUPS}, datasets={home: ("on", "/home/x")})
+        full = _run_plan(cache=True, excluded=mark)
+        others = [r for r in full.rows if not r.rel.startswith("rpool/USERDATA/")]
+        empty = full.row(home)
+        assert empty is not None and empty.empty
+        assert recover_mod.needs_userdata(dc_replace(full, rows=[*others, empty]))
+        assert not recover_mod.needs_userdata(dc_replace(full, rows=others))
 
     def test_the_empty_datasets_are_created_unmounted_with_their_exclusion(self):
         """M5b-13 13a: `zfs create -u`, parents first; the exclusion only on
