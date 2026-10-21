@@ -1400,8 +1400,11 @@ def key_04(b: Bench) -> None:
     """``zfs create -u -o canmount=on -o mountpoint=... -o org.zark:...``
     under an encrypted dataset whose key is loaded: encrypted, with the
     parent's encryption root and key, its properties ``local``, and not
-    mounted. OpenZFS cmd/zfs/zfs_main.c:1154-1155, :1342-1345;
-    lib/libzfs/libzfs_crypto.c:1079-1080; module/zfs/dsl_crypt.c:1946-1948, :1957-1960."""
+    mounted. The pool is imported with an altroot, which ``zfs get``
+    prepends to the mountpoint it shows. OpenZFS cmd/zfs/zfs_main.c:1154-1155,
+    :1342-1345; lib/libzfs/libzfs_crypto.c:1079-1080;
+    module/zfs/dsl_crypt.c:1946-1948, :1957-1960;
+    lib/libzfs/libzfs_dataset.c:2697-2706."""
     ds = f"{b.a}/key04"
     _ = b.ok(
         "zfs create -u -o canmount=on -o mountpoint=/selftest/key04 "
@@ -1412,7 +1415,8 @@ def key_04(b: Bench) -> None:
     for prop, want in (("encryptionroot", b.a), ("keystatus", "available"), ("mounted", "no")):
         got = b.value(prop, ds)
         expect(got == want, f"{prop} {want}", got)
-    for prop, want in (("mountpoint", "/selftest/key04"), ("org.zark:replicate", "no")):
+    shown = f"{_altroot(b.a)}/selftest/key04"
+    for prop, want in (("mountpoint", shown), ("org.zark:replicate", "no")):
         got = b.value(prop, ds)
         expect(got == want, f"{prop} {want}", got)
         got = b.source(prop, ds)
