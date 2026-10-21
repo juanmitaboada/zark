@@ -82,9 +82,11 @@ preceded them.
 
 - **The level-2 self-test's teardown** reads the vdev lines of `zpool
   list -v` only, never the pool line (M5aR-5).
-- **A point another drive's interrupted run left on a dataset that is
-  then excluded** is anchored for that drive before it is removed, as on
-  any other dataset (M5bR-2).
+- **A point an interrupted run left on a dataset that is then excluded**
+  is anchored for the drive it names, this drive or another, before it
+  is removed, as on any other dataset (M5bR-2, M5bV-1). A point the drive
+  never received there is anchored too; the first verified run after the
+  dataset is included again supersedes it.
 - **setup reads the exclusions strictly**: a failed read stops setup's
   sanoid step (and `zark exclude`'s) before it writes anything, and the
   sanoid.conf check of backup, status and finish says it could not read

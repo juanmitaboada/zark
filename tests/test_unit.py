@@ -13368,6 +13368,40 @@ class TestEngineExclusions:
             assert stale not in fake.names(ds), ds
             assert repl.anchor_name("111", stale) in fake.bookmarks(ds), (ds, fake.bookmarks(ds))
 
+    def test_this_drives_own_point_on_a_dataset_then_excluded_is_anchored_first(self) -> None:
+        """M5bV-1 (review E5): the drive received the dataset at its own
+        interrupted point; its next run, with the dataset excluded, anchors
+        that point for it before removing it, so the dataset included again
+        continues incrementally, and the new point's anchor supersedes both."""
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        stale = "zark_2026-10-09_12:00:00Z"
+        for ds in list(fake.ds):
+            if ds.split("/")[0] in ("rpool", "bpool") and fake.ds[ds].kind == "filesystem":
+                fake.snap(ds, stale).props["org.zark:point-for"] = "111"
+        docker = "rpool/var/lib/docker"
+        fake.ds[f"backup/{docker}"].snaps.append(fake.ds[docker].snaps[-1])
+        _tick(fake, "2026-10-10_00:00:00_daily")
+        res = _engine_run(
+            fake, "backup", "111", "zark_2026-10-10_10:00:00Z", exclusions=self.DOCKER
+        )
+        assert res.ok, res.error
+        assert stale not in fake.names(docker)
+        assert repl.anchor_name("111", stale) in fake.bookmarks(docker), fake.bookmarks(docker)
+        _tick(fake, "2026-10-11_00:00:00_daily")
+        seen: list[repl.DatasetPlan] = []
+
+        def decide(plans: list[repl.DatasetPlan], _run: engine.Run) -> bool:
+            seen.extend(plans)
+            return True
+
+        point = "zark_2026-10-11_10:00:00Z"
+        assert _engine_run(fake, "backup", "111", point, decide).ok
+        row = next(p for p in seen if p.rel == docker)
+        assert row.state is repl.State.VIA_BOOKMARK, row
+        assert row.base == f"#{repl.anchor_name('111', stale)}", row
+        assert fake.bookmarks(docker) == [repl.anchor_name("111", point)], fake.bookmarks(docker)
+
     def test_no_drive_needs_a_base_on_an_excluded_dataset(self) -> None:
         """origin prune's warning for drives without an anchor leaves it out."""
         fake = _fresh_fake()
