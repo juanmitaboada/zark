@@ -3800,6 +3800,51 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
                 _ = conf.write_text(_generate_sanoid_conf(discover(zfs, "")))
                 assert setup_mod.sanoid_conf_gap(zfs).startswith("update /etc/sanoid/sanoid.conf")
 
+    def test_the_exclusions_are_read_strictly(self):
+        """M5bR-4: a failed read is never "nothing excluded from snapshots"."""
+        fake = _fresh_fake(())
+        fake.fail_cmds.add("zfs get -H -s local -o name,property,value")
+        with patch_sh(fake), patch.object(setup_mod.survey, "source_pools", return_value=["rpool"]):
+            try:
+                _ = setup_mod._drained()  # pylint: disable=protected-access
+            except survey.ReadError:
+                pass
+            else:
+                raise AssertionError("a failed zfs get read as nothing drained")
+
+    def test_a_failed_read_writes_no_sanoid_conf_and_is_a_gap(self):
+        """M5bR-4: configure_sanoid stops before it shows or writes anything;
+        sanoid_conf_gap names the failure as the gap."""
+        failed = survey.ReadError("could not read: zfs get")
+        with tempfile.TemporaryDirectory() as td:
+            conf = Path(td) / "sanoid.conf"
+            real = Path
+
+            def fake_path(p: object) -> Path:
+                return conf if str(p) == "/etc/sanoid/sanoid.conf" else real(str(p))
+
+            with (
+                patch.object(setup_mod, "Path", fake_path),
+                patch.object(setup_mod, "_detect_ubuntu_ds", return_value=self.UBUNTU),
+                patch.object(setup_mod, "_drained", side_effect=failed),
+                patch.object(setup_mod, "_discover_rules") as discover,
+                patch_sh(MockShell()),
+            ):
+                out = StringIO()
+                with redirect_stdout(out):
+                    try:
+                        _ = setup_mod.configure_sanoid(ZFS(make_log()), Log())
+                    except SystemExit:
+                        pass
+                    else:
+                        raise AssertionError("configure_sanoid went on after a failed read")
+                text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
+                assert "Cannot read what is excluded from snapshots: could not read" in text, text
+                assert not conf.exists() and not discover.called
+                _ = conf.write_text("[rpool/var]\nuse_template = minimal\n")
+                gap = setup_mod.sanoid_conf_gap(ZFS(make_log()))
+                assert gap == "could not read the exclusions", gap
+
     def test_var_subtree_collapses_to_single_rule(self):
         """rpool/var, rpool/var/lib, rpool/var/lib/docker → only rpool/var
         appears in the output, because it covers the rest recursively."""

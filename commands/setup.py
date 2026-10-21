@@ -332,9 +332,13 @@ def _split_around(
 
 
 def _drained() -> frozenset[str]:
-    """The subtrees excluded from snapshots, as origin declares them."""
+    """The subtrees excluded from snapshots, as origin declares them, read
+    strictly (raises :class:`survey.ReadError`): a failed read is not
+    "nothing excluded", which would put them back in the recursive rules
+    (M5bR-4)."""
     pools = survey.source_pools()
-    return exclusions.read(pools, survey.read_origin(pools)).no_snapshot
+    origin = survey.read_origin(pools, strict=True)
+    return exclusions.read(pools, origin, strict=True).no_snapshot
 
 
 def _generate_sanoid_conf(
@@ -783,7 +787,11 @@ def sanoid_conf_gap(zfs: ZFSQuery) -> str:
         current = _parse_sanoid_conf(conf.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return "rewrite /etc/sanoid/sanoid.conf (unreadable)"
-    diff = _diff_rules(current, _discover_rules(zfs, ubuntu_name, _drained()))
+    try:
+        drained = _drained()
+    except survey.ReadError:
+        return "could not read the exclusions"
+    diff = _diff_rules(current, _discover_rules(zfs, ubuntu_name, drained))
     n = len(diff["added"]) + len(diff["removed"]) + len(diff["changed"]) + len(diff["templates"])
     return f"update /etc/sanoid/sanoid.conf ({n} section(s) differ)" if n else ""
 
@@ -862,8 +870,13 @@ def configure_sanoid(zfs: ZFSQuery, log: Log) -> bool:  # pylint: disable=too-ma
             solutions=["Check: zfs list -r -d 1 rpool/ROOT"],
         )
 
+    try:
+        drained = _drained()
+    except survey.ReadError as e:
+        log.fatal(f"Cannot read what is excluded from snapshots: {e}")
+
     # Discover and classify
-    rules = _discover_rules(zfs, ubuntu_name, _drained())
+    rules = _discover_rules(zfs, ubuntu_name, drained)
     if not rules:
         log.fatal(
             "No datasets discovered in rpool/bpool - nothing to configure",
