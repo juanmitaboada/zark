@@ -474,7 +474,11 @@ for the canonical end-to-end sequences.
     final banner list it with its size (the source's *referenced*, what a
     first full send would carry). The point records what it left out, and
     the canmount and mountpoint each dataset had, on its snapshots on the
-    drive (**org.zark:excluded**), so **recover** can recreate them. The
+    drive (**org.zark:excluded**), so **recover** can recreate them. A
+    record longer than one user property (8191 bytes) is written in parts
+    (**org.zark:excluded.1** to **.n**) behind a pointer with their count
+    and digest, up to 64 parts; past that the backup stops before its
+    point. The
     first backup to a drive that still holds such a subtree asks once, with
     the other questions: keep it (the default; not asked again, and its
     anchors stay in the source so an inclusion continues incrementally) or

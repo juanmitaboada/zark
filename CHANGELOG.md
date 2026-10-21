@@ -32,8 +32,12 @@ preceded them.
   the run incomplete; the plan and the banner list them with their size,
   the source's `referenced` (D9, D12, M5b-12). Each point records what it
   left out, with each dataset's canmount and mountpoint, on its snapshots
-  on the drive (`org.zark:excluded`, M5b-7, M5b-8); a record that would
-  not fit in a user property stops the run before the point.
+  on the drive (`org.zark:excluded`, M5b-7, M5b-8). A record longer than
+  one user property (8191 bytes) is written in parts,
+  `org.zark:excluded.1` to `.n`, in the same `zfs set` as a pointer that
+  names their count and the sha256 of the whole record; a missing part or
+  a digest that does not match reads as an unreadable record (M5bR-1,
+  M5bF-6). Past 64 parts the run stops before the point (M5bF-7).
 - **A drive that still holds an excluded subtree** (D11, M5b-9, M5b-10):
   the copy stays live with its anchors in the source; the first backup to
   that drive asks once to keep it (the default, `org.zark:excluded-kept`)
@@ -54,7 +58,9 @@ preceded them.
 - **Self-test checks SNP-07** (a user property: local where set,
   inherited below, listed with `-s local` only there) and **KEY-04**
   (`zfs create -u` under an encrypted parent: its key, its properties,
-  not mounted), level 1 (M5b-16).
+  not mounted), level 1 (M5b-16); **SNP-08** (user properties of 8191
+  bytes, several in one `zfs set` on snapshots, read back as a list; 8192
+  refused), level 1, for the record in parts (M5bF-10).
 
 #### Changed
 
@@ -76,12 +82,25 @@ preceded them.
 
 - **The level-2 self-test's teardown** reads the vdev lines of `zpool
   list -v` only, never the pool line (M5aR-5).
+- **A point another drive's interrupted run left on a dataset that is
+  then excluded** is anchored for that drive before it is removed, as on
+  any other dataset (M5bR-2).
+- **setup reads the exclusions strictly**: a failed read stops setup's
+  sanoid step (and `zark exclude`'s) before it writes anything, and the
+  sanoid.conf check of backup, status and finish says it could not read
+  them (M5bR-4).
+- **A destroy of a drive's held copy** rewrites a record in parts as it
+  was written, and destroys nothing when the record of a point it would
+  rewrite cannot be read (M5bR-1, M5bF-9).
 
 #### Tests
 
 - backup's freeing wait and the banner's re-read are driven from
   `run()`, so the review's mutations R6, R8 and R9 are killed (M5aR-1);
   the lock test no longer creates `/run/zark` on the host (M5aR-4).
+- one test for each mutation of the M5b review's probe that no test
+  noticed (M5bR-5); recover's need for `rpool/USERDATA` is a function of
+  its own so its test can reach it.
 
 #### Known limitations
 
@@ -90,8 +109,13 @@ preceded them.
 - `zark status` has no line per drive: the registry does not know what
   each drive holds (M5b-13b).
 - The point's exclusion record and its completion mark are two `zfs set`
-  calls: a run stopped between them leaves a complete point without the
-  record, which recover restores as a point written before rc10.
+  calls, the record first: a run stopped between them leaves an
+  incomplete point that carries its record. A complete point lacks the
+  record only when its own `zfs set` failed, which the run warns about;
+  recover then restores that point as if nothing were excluded (M5bF-4,
+  M5bR-3).
+- Parts a rewrite after a destroy no longer needs stay on the point's
+  snapshots; the pointer's count means they are never read (M5bF-8).
 
 #### Rejected approaches
 
@@ -117,6 +141,39 @@ preceded them.
 - **A self-test check for the chase.c:648 crash** (M5b-14 14b): a race
   passes only by chance, and provoking it would crash the host's udev;
   the rule stays an invariant of the code.
+- **Questions in setup, or both a command and questions** (M5b-2 2b,
+  2c): setup is a one-off step and an exclusion a later decision per
+  dataset; two ways would say the same thing.
+- **D10's three items only as the blacklist** (M5b-5 5b):
+  `org.zark:replicate=no` on `rpool` would exclude everything but the
+  keystore.
+- **The current set of exclusions on `<pool>/rpool`, or a manifest in an
+  unencrypted `<pool>/zark`** (M5b-7 7b, 7c): no history, so recover of
+  an older point would recreate the wrong datasets; a dataset on the
+  drive that orphans, retention and mount would each have to skip.
+- **A held copy drained by retention** (M5b-9 9b): the points before the
+  exclusion would turn PARTLY REMOVED and the base for a return would go.
+- **`used`, or the stream's estimate, as the banner's size** (M5b-12
+  12b, 12c): it counts history the drive would never hold; one more
+  command per exclusion and run for an informational figure.
+- **No new self-test check** (M5b-16 16b): gate 1 asks for one where a
+  bench pool reaches the behaviour, and it does.
+- **A pointer without a digest** (M5bF-6 6b): a part left from another
+  record would go unnoticed; **names relative to the top, inherited
+  values left out** (6c): it moves the bound without removing it, and a
+  second format to read.
+- **A bound of 14 parts**, so one `zfs set` fits execve's floor of 128
+  KiB (M5bF-7 7b): a large docker host can reach it, and no default stack
+  limit is that low.
+- **Removing stale parts with `zfs inherit`** (M5bF-8 8b): one more
+  command per part and point, each a way for a rewrite to end half done.
+- **Rewriting a point whose record cannot be read as if it had none**
+  (M5bF-9 9b): the point would lose what it left out, and recover could
+  restore older copies of it.
+- **`zark exclude add` refusing a subtree past the bound** (M5bF-11
+  11b): the bound moves with the subtree's growth after the exclusion.
+- **Shortening the parts in zark.log** (M5bF-12 12b): every command is
+  logged by one path; the log keeps what recover will read.
 
 ### M5a: hygiene, the M4d review's findings and the checklist's cosmetics (2.0.0-rc9)
 
