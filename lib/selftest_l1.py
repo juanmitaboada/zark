@@ -653,6 +653,48 @@ def snp_07(b: Bench) -> None:
     expect(got == "", "nothing listed after zfs inherit", got)
 
 
+@check(
+    "SNP-08",
+    1,
+    1,
+    "user properties of 8191 bytes, several in one zfs set, on snapshots",
+    depends=("the point's record in parts: exclusions.record, point_records (M5bR-1)",),
+    fake=True,
+)
+def snp_08(b: Bench) -> None:
+    """One ``zfs set`` of four user properties of 8191 bytes each on two
+    snapshots sets them all on both; ``zfs get -s local -t snapshot -r -o
+    name,property,value`` with the four names returns each value whole; a
+    value of 8192 bytes is refused and the snapshot stays without it.
+    OpenZFS include/sys/fs/zfs.h:86; module/zfs/dsl_prop.c:963-970,
+    :1033-1054; cmd/zfs/zfs_main.c:4574-4603, :2292-2316;
+    lib/libzfs/libzfs_util.c:1943-1959."""
+    top = b.fs(f"{b.a}/snp08")
+    x = b.fs(f"{top}/x")
+    for s in ("1", "2"):
+        _ = b.ok(f"zfs snapshot {x}@{s}")
+    # A different digit per property, so a value read under another name shows.
+    values = {
+        name: str(i) * 8191
+        for i, name in enumerate(("org.zark:t", "org.zark:t.1", "org.zark:t.2", "org.zark:t.3"))
+    }
+    _ = b.ok(f"zfs set {' '.join(f'{k}={v}' for k, v in values.items())} {x}@1 {x}@2")
+    r = b.ok(
+        f"zfs get -H -p -r -s local -t snapshot -o name,property,value {','.join(values)} {top}"
+    )
+    want = sorted(f"{x}@{s}\t{k}\t{v}" for s in ("1", "2") for k, v in values.items())
+    got = sorted(r.lines)
+    expect(
+        got == want,
+        "the four values of 8191 bytes on each snapshot, whole",
+        f"{len(got)} line(s), lengths {[len(line) for line in got]}",
+    )
+    r = b.run(f"zfs set org.zark:t.4={'9' * 8192} {x}@1")
+    expect(not r.ok, "a value of 8192 bytes to be refused", "exit 0")
+    got1 = b.value("org.zark:t.4", f"{x}@1")
+    expect(got1 == "-", f"{x}@1 without org.zark:t.4", got1[:16])
+
+
 # ── send and receive ─────────────────────────────────────────────────────
 
 
