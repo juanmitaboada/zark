@@ -6734,14 +6734,14 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
 class TestPointRecordInParts:  # pylint: disable=missing-function-docstring
     """M5bR-1, M5bF-6: a point's record in parts, written and read back."""
 
-    def _drive(self, mark: str) -> FakeZfs:
+    def _drive(self, mark: str, rels: tuple[str, ...] = ("rpool", "rpool/a", "rpool/b")) -> FakeZfs:
         fake = FakeZfs()
         fake.pool("backup")
-        for ds in ("backup/rpool", "backup/rpool/a", "backup/rpool/b"):
-            fake.dataset(ds)
-            _ = fake.snap(ds, P1)
+        for rel in rels:
+            fake.dataset(f"backup/{rel}")
+            _ = fake.snap(f"backup/{rel}", P1)
         with patch_sh(fake), redirect_stdout(StringIO()):
-            assert excl.record("backup", P1, ["rpool", "rpool/a", "rpool/b"], mark, Log())
+            assert excl.record("backup", P1, list(rels), mark, Log())
         return fake
 
     @staticmethod
@@ -6793,6 +6793,28 @@ class TestPointRecordInParts:  # pylint: disable=missing-function-docstring
                 assert "unreadable or incomplete" in str(e)
             else:
                 raise AssertionError(f"a {spoil} part was read as a record")
+
+    def test_a_part_changed_alike_on_every_snapshot_is_refused_by_the_digest(self):
+        """M5bV-2 (a): the snapshots agree, the join is valid JSON, and only
+        the pointer's sha256 tells it is not the record that was written."""
+        mark = self._mark(1000)
+        for rels in (("rpool", "rpool/a", "rpool/b"), ("rpool",)):
+            fake = self._drive(mark, rels)
+            second = fake.ds["backup/rpool"].snaps[0].props[excl.part_prop(2)]
+            changed = second.replace('"rpool/c/0', '"rpool/c/9', 1)
+            assert changed != second
+            for rel in rels:
+                fake.ds[f"backup/{rel}"].snaps[0].props[excl.part_prop(2)] = changed
+            props = fake.ds["backup/rpool"].snaps[0].props
+            n = excl.parts_needed(mark)
+            joined = "".join(props[excl.part_prop(i)] for i in range(1, n + 1))
+            assert excl.parse_point_mark(joined) is not None, rels
+            try:
+                _ = self._read(fake)
+            except ValueError as e:
+                assert "unreadable or incomplete" in str(e)
+            else:
+                raise AssertionError(f"a changed part was read as the record on {rels}")
 
     def test_parts_beyond_the_pointers_count_are_not_read(self):
         """M5bF-8: a rewrite with fewer parts leaves the old higher ones."""
@@ -15906,6 +15928,54 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert mark is not None and mark.left_out == {"rpool/big", "rpool/var/lib/docker"}
         assert len(mark.datasets) == 302 and "rpool/var/lib/docker" in mark.datasets
         assert point in complete_points(snaps, "")
+
+    @staticmethod
+    def _full_record() -> str:
+        """A point's record as full as 64 parts get: one more dataset's line
+        does not fit (M5bV-2 (b))."""
+        limit = excl.MAX_PARTS * excl.MARK_LIMIT
+
+        def mark_of(n: int) -> str:
+            datasets = {f"rpool/z/{i:05}": ("on", f"/z/{i:05}") for i in range(n)}
+            return excl._dump({"rpool/z": excl.BACKUPS}, datasets)  # pylint: disable=protected-access
+
+        step = len(mark_of(2)) - len(mark_of(1))
+        n = (limit - len(mark_of(0))) // step
+        while len(mark_of(n + 1)) <= limit:
+            n += 1
+        mark = mark_of(n)
+        assert limit - len(mark) < step and excl.parts_needed(mark) == excl.MAX_PARTS
+        return mark
+
+    def test_a_rewrite_past_the_bound_writes_nothing_and_the_point_is_partly_removed(
+        self,
+    ) -> None:
+        """M5bV-2 (b), M5bF-7: a point whose record already needs 64 parts
+        loses a destroyed copy; its record would need 65, so no zfs set runs
+        and the point reads PARTLY REMOVED, which is then the truth."""
+        fake = _fresh_fake()
+        _, rc = self._run(fake)
+        assert rc == 0
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        mark = self._full_record()
+        for ds, d in fake.ds.items():
+            for s in d.snaps:
+                if ds.startswith("backup/") and s.name == point:
+                    s.props |= dict(excl.record_props(mark))
+        fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"] = "no"
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            origin = survey.read_origin(["rpool", "bpool"], strict=True)
+            n0 = len(fake.calls)
+            done = excl.destroy_held(
+                "backup", "rpool/var/lib/docker", "backups", "111", origin, Log()
+            )
+            snaps = drive_marks.drive_snapshots("backup", strict=True)
+        text = " ".join(Log._STRIP_RE.sub("", out.getvalue()).split())  # pylint: disable=protected-access
+        assert not done and "backup/rpool/var/lib/docker" not in fake.ds, text
+        assert f"{point} now reads PARTLY REMOVED: too many datasets to record as excluded" in text
+        assert not [c for c in fake.calls[n0:] if c.startswith("zfs set")]
+        assert point not in complete_points(snaps, "")
 
     def test_a_destroy_over_an_unreadable_record_destroys_nothing(self) -> None:
         """M5bF-9 9a: a rewrite from an unreadable record would lose what the

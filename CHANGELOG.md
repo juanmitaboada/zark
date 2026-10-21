@@ -103,6 +103,9 @@ preceded them.
 - one test for each mutation of the M5b review's probe that no test
   noticed (M5bR-5); recover's need for `rpool/USERDATA` is a function of
   its own so its test can reach it.
+- the record's digest alone refuses a part changed alike on every
+  snapshot of a point, and a rewrite past the bound on the parts writes
+  nothing and leaves the point PARTLY REMOVED (M5bV-2).
 
 #### Known limitations
 
