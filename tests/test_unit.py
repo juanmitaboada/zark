@@ -3829,6 +3829,8 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
                 patch.object(setup_mod, "_drained", side_effect=failed),
                 patch.object(setup_mod, "_discover_rules") as discover,
                 patch_sh(MockShell()),
+                # log.fatal waits for Enter on a terminal; the suite reads no stdin.
+                patch("builtins.input", return_value=""),
             ):
                 out = StringIO()
                 with redirect_stdout(out):
