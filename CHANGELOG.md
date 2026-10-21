@@ -121,6 +121,19 @@ preceded them.
   M5bR-3).
 - Parts a rewrite after a destroy no longer needs stay on the point's
   snapshots; the pointer's count means they are never read (M5bF-8).
+- backup's destroy of an orphan is refused by ZFS ("filesystem has
+  dependent clones") when an archived lineage of the orphan, kept next
+  to it after a ROLLBACK (M4b-9 9a), is a clone of one of its snapshots.
+  The confirmation lists what is below the orphan, not that archive; the
+  run ends COMPLETED with an ERROR line ("Failed: destroyed ..."),
+  nothing is destroyed and the question comes back at the next run
+  (M5bV-3; the fix is 2.1's). Either answer "keep", or destroy the
+  archive by hand while no zark command runs: `zpool import -N -R
+  /mnt/zark-fix -d <the drive's by-id>-part1 <pool>`, `zfs destroy -r
+  <pool>/<orphan>.archived-<date>`, `zpool export <pool>`; the next
+  backup's DESTROY then succeeds. The archive's snapshots go with it,
+  and a backup point that held one of them reads PARTLY REMOVED
+  afterwards (run on eli).
 
 #### Rejected approaches
 
