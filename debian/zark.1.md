@@ -675,7 +675,10 @@ for the canonical end-to-end sequences.
     **bpool** with the GRUB-readable base features and **rpool** with
     every feature of the live's ZFS, with a warning: a restored system
     whose OpenZFS is older may not import **rpool** once one of them is
-    active.
+    active. Both roots get the installer's properties: *acltype=posixacl*,
+    *xattr=sa*, *normalization=formD*, *relatime=on*, *compression=lz4*
+    and *devices=off*, and *dnodesize=auto* on **rpool**, so every
+    restored dataset that does not set its own inherits them.
 
     The recovered system boots without **zark** present and receives
     normal **apt**(8) upgrades thereafter. **zark** is needed only for

@@ -10564,6 +10564,33 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         assert "not enabled, this ZFS lacks them: unsupported@x:y" in out
         assert "does not record origin's pool features" not in out
 
+    _INSTALLER_ROOT = (
+        "acltype=posixacl",
+        "xattr=sa",
+        "normalization=formD",
+        "relatime=on",
+        "compression=lz4",
+        "devices=off",
+    )
+
+    def test_both_pools_get_the_installers_root_properties(self):
+        """M6R-1: with or without origin's record, bpool's and rpool's roots
+        get what the installer sets (subiquity manipulator.py:242-265), so
+        every restored dataset inherits devices=off."""
+        with tempfile.TemporaryDirectory() as td:
+            plain = self._run_to_create(td, extra=[redirect_stdout(StringIO())])
+        with tempfile.TemporaryDirectory() as td:
+            recorded, _ = self._with_record(
+                td, {"encryption": "active"}, {"lz4_compress": "active"}
+            )
+        for mock in (plain, recorded):
+            creates = [c for c in mock.calls if c.startswith("zpool create")]
+            assert len(creates) == 2, mock.calls[-30:]
+            for cmd in creates:
+                for prop in self._INSTALLER_ROOT:
+                    assert f" -O {prop} " in cmd, (prop, cmd)
+            assert " -O dnodesize=auto " in creates[1] and "dnodesize" not in creates[0]
+
     def test_a_feature_origin_had_active_that_this_zfs_lacks_stops_before_erasing(self):
         """M6-6: recover refuses such a point before it erases the target."""
         with tempfile.TemporaryDirectory() as td:

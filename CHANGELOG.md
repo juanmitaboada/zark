@@ -69,6 +69,18 @@ preceded them.
   installer, or shim-signed's own postinst choosing `.previous` under
   Secure Boot for a kernel the new shim's SBAT revokes.
 - **The package is `Architecture: amd64`** (M6-11): `zark_<v>-1_amd64.deb`.
+- **recover gives both pools' roots the installer's properties** (M6R-1,
+  M6F-2 2a): rpool's root now gets `compression=lz4` and `devices=off`,
+  bpool's `relatime=on`, as subiquity sets them, so every restored
+  dataset inherits `devices=off` (before, `on`: a device node in any
+  dataset could be opened). `compression` was lz4 already through `on`,
+  and `relatime` is on by default; both are now `local`. A system
+  recovered before this (by zark 1.x or an earlier rc) gets the same
+  with `zfs set devices=off compression=lz4 rpool` and `zfs set
+  relatime=on bpool`: `devices` takes effect at each dataset's next
+  mount, the next boot at the latest, and a dataset that needs device
+  nodes (a chroot or container tree) keeps them with a local
+  `devices=on`, which backups carry (M6F-3 3a).
 - Comments that cite sanoid 2.3.0 or systemd v258/v259.5 also give
   noble's lines where zark relies on the behaviour; the sanoid defaults
   path in `lib/sanoid_retention.py` is `/usr/share/sanoid/` (M6-18,
@@ -89,6 +101,8 @@ preceded them.
 - A failed read of the point's record is recover's FATAL before any wipe;
   a record of another format, or with a feature state other than enabled
   or active, is refused on every snapshot alike (M6R-3, M6F-5).
+- Both `zpool create` lines carry the installer's root properties, with
+  and without origin's record (M6R-1).
 
 #### Known limitations
 

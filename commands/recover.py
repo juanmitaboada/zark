@@ -331,8 +331,9 @@ def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str, features: str =
     return (
         "zpool create -f -o ashift=12 -o autotrim=on "
         + (f"{features} " if features else "")
+        # The installer's root properties (subiquity manipulator.py:242-265), M6R-1.
         + "-O acltype=posixacl -O xattr=sa -O dnodesize=auto "
-        + "-O normalization=formD -O relatime=on "
+        + "-O normalization=formD -O relatime=on -O compression=lz4 -O devices=off "
         + f"-O canmount=off -O mountpoint={mountpoint} "
         + "-O encryption=aes-256-gcm -O keyformat=raw "
         + f"-O keylocation=file://{key_file} "
@@ -975,6 +976,8 @@ def run(
         f"zpool create -f -o ashift=12 -o autotrim=on {features} "
         + "-O devices=off -O mountpoint=none -O canmount=off "
         + "-O acltype=posixacl -O xattr=sa -O compression=lz4 -O normalization=formD "
+        # relatime as the installer sets it (M6R-1); on by default since 2.2, now local.
+        + "-O relatime=on "
         + f"-R {RECOVER_MNT} bpool {bpool_vdev}",
         log=log,
     )
