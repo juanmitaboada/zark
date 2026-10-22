@@ -86,6 +86,9 @@ preceded them.
   initramfs-tools root left without a hook.
 - The fake refuses `zfs clone -u` as 2.2.2 does; the reboot warning on a
   stale module and not on noble's design; setup's two causes.
+- A failed read of the point's record is recover's FATAL before any wipe;
+  a record of another format, or with a feature state other than enabled
+  or active, is refused on every snapshot alike (M6R-3, M6F-5).
 
 #### Known limitations
 

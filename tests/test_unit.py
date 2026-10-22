@@ -6941,6 +6941,17 @@ class TestPoolRecord:  # pylint: disable=missing-function-docstring
                 assert "origin's pools" in str(e)
             else:
                 raise AssertionError(f"{other!r} was read as the record")
+        # M6R-3 (R6, R7): the same value on every snapshot, so only parse can refuse it.
+        other_format = json.loads(value) | {"format": 2}
+        disabled = json.loads(value)
+        disabled["pools"]["rpool"]["features"]["encryption"] = "disabled"
+        for bad in (json.dumps(other_format), json.dumps(disabled)):
+            try:
+                _ = self._read(self._drive({"rpool": bad, "rpool/a": bad}))
+            except ValueError as e:
+                assert "origin's pools" in str(e)
+            else:
+                raise AssertionError(f"{bad!r} was read as the record")
 
     def test_the_record_goes_in_the_exclusion_records_zfs_set(self):
         fake = self._drive({"rpool": "", "rpool/a": ""})
@@ -10563,6 +10574,26 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("zpool create")
         assert "lacks features origin's pools had active" in out
         assert "rpool: unsupported@x:y" in out
+
+    def test_a_failed_read_of_origins_pools_stops_before_erasing(self):
+        """M6R-3 (C1): a point whose record cannot be read is a FATAL before
+        the wipe, as a failed read of its exclusion record is."""
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_to_create(
+                td,
+                extra=[
+                    patch.object(
+                        recover_mod.pool_record,
+                        "read",
+                        side_effect=survey.ReadError("could not read: zfs get"),
+                    ),
+                    redirect_stdout(out),
+                ],
+            )
+        assert mock.was_not_called("wipefs")
+        assert mock.was_not_called("zpool create")
+        assert "Cannot read how origin's pools were at this point" in out.getvalue()
 
     def test_a_point_without_a_record_warns_and_creates_the_pools_as_before(self):
         """M6-7, M6-9: a point written before 2.0.0-rc11 is restored as before,
