@@ -1124,7 +1124,7 @@ def run(
         ks_handler = (
             "dracut module"
             if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists()
-            else "initramfs-tools hook"
+            else "the zfs initramfs script"
         )
         log.ok(f"crypttab written (swap only - keystore handled by {ks_handler})")
 

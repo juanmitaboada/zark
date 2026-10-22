@@ -321,7 +321,7 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 
 ## Compatibility
 
-- **Ubuntu 24.04 LTS** - uses initramfs-tools hooks for keystore unlock.
+- **Ubuntu 24.04 LTS** - initramfs-tools: the system's own zfs initramfs script opens the keystore after importing rpool, so recover adds no hook. OpenZFS 2.2.2 tools on the HWE kernel's 2.4.1 module.
 - **Ubuntu 25.04 / 25.10** - uses dracut module (89keystore) with systemd-ask-password integration. zark detects which generator the system has at recovery time.
 - **Ubuntu 26.04 LTS** - same dracut path as 25.04+, plus shim 15.8 (`.signed.latest`) pinning during recovery to avoid the SBAT revocation that affects fresh subiquity installs left pointing at `.signed.previous`.
 - **Cross-host recovery** - backups are portable across machines: a backup taken on machine A can be restored onto machine B with a different drive layout / firmware. zark rewrites every `--fs-uuid` reference in `grub.cfg` (including those carrying `--hint-bios` / `--hint-efi` / `--hint-baremetal` options) so the recovered system boots regardless of where its disks land in the new BIOS enumeration.

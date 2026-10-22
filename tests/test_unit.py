@@ -10745,7 +10745,6 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
                 patch.object(boot_chain, "RECOVER_MNT", td),
                 patch.object(boot_chain.grub_guard, "install"),
                 patch.object(boot_chain.apt_guard, "install"),
-                patch.object(boot_chain, "_install_keystore_initramfs"),
                 patch.object(ZFS, "write_zpool_cache"),
                 redirect_stdout(StringIO()),
             ):
@@ -10776,7 +10775,6 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
                 patch.object(boot_chain, "RECOVER_MNT", td),
                 patch.object(boot_chain.grub_guard, "install"),
                 patch.object(boot_chain.apt_guard, "install"),
-                patch.object(boot_chain, "_install_keystore_initramfs"),
                 patch.object(ZFS, "write_zpool_cache"),
                 redirect_stdout(StringIO()),
             ):
@@ -10786,6 +10784,34 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         assert not errors, errors
         sets = [c for c in mock.calls if "debconf-set-selections" in c]
         assert len(sets) == 1 and f"install_devices multiselect {by_id}'" in sets[0], sets
+
+    def test_an_initramfs_tools_system_gets_no_keystore_hook(self):
+        """M6-4 4a: on 24.04 the zfs initramfs script opens the keystore after
+        the import; recover adds nothing to /etc/initramfs-tools."""
+        with tempfile.TemporaryDirectory() as td:
+            efi = Path(td) / "boot/efi/EFI/ubuntu"
+            efi.mkdir(parents=True)
+            for name in ("grubx64.efi", "shimx64.efi"):
+                _ = (efi / name).write_text("")
+            mock = MockShell()
+            mock.on_prefix(f"chroot {td} debconf-show").succeeds(
+                "* grub-efi/install_devices: /dev/sda1\n"
+            )
+            _ = mock.on_prefix("").succeeds()
+            out = StringIO()
+            with (
+                patch_sh(mock),
+                patch.object(boot_chain, "RECOVER_MNT", td),
+                patch.object(boot_chain.grub_guard, "install"),
+                patch.object(boot_chain.apt_guard, "install"),
+                patch.object(ZFS, "write_zpool_cache"),
+                redirect_stdout(out),
+            ):
+                _ = boot_chain.install_boot_chain(
+                    "/dev/sda", "x", ZFS(make_log()), Cleanup(make_log()), make_log()
+                )
+            assert not Path(td, "etc/initramfs-tools").exists()
+        assert "opened at boot by the system's zfs initramfs script" in out.getvalue()
 
     def test_bpool_gets_the_extended_features_only_without_origins_record(self):
         """M6-6: on a dracut system bpool gets BPOOL_FEATURES_EXTENDED unless

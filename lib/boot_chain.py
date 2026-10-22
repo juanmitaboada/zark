@@ -14,8 +14,8 @@
 """
 The boot chain of a restored system: its datasets mounted under
 RECOVER_MNT, the chroot, zpool.cache and grub.cfg, the signed GRUB and
-shim on the ESP, the keystore hook of dracut or initramfs-tools, and the
-guards.
+shim on the ESP, the keystore hook of dracut (initramfs-tools opens the
+keystore itself), and the guards.
 """
 
 import re
@@ -176,117 +176,6 @@ fi
 """)  # noqa: E501
     (ks_mod_dir / "keystore-open.sh").chmod(0o755)
     log.ok("dracut keystore module installed (89keystore)")
-
-
-def _install_keystore_initramfs(recover_mnt: str, ubuntu_name: str, log: Log):
-    """Install initramfs-tools keystore hook + script (Ubuntu 24.04)."""
-    hooks_dir = Path(f"{recover_mnt}/etc/initramfs-tools/hooks")
-    scripts_dir = Path(f"{recover_mnt}/etc/initramfs-tools/scripts/local-premount")
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-
-    # Hook: include required binaries in the initrd
-    _ = (hooks_dir / "keystore").write_text("""#!/bin/sh
-PREREQ=""
-prereqs() { echo "$PREREQ"; }
-case "$1" in prereqs) prereqs; exit 0;; esac
-
-. /usr/share/initramfs-tools/hook-functions
-
-copy_exec /sbin/cryptsetup /sbin
-copy_exec /sbin/blkid /sbin
-copy_exec /sbin/zfs /sbin
-copy_exec /usr/bin/awk /usr/bin
-
-# askpass for plymouth-integrated password prompt
-if [ -x /lib/cryptsetup/askpass ]; then
-    copy_exec /lib/cryptsetup/askpass /lib/cryptsetup
-fi
-""")
-    (hooks_dir / "keystore").chmod(0o755)
-
-    # Boot-time script: runs in local-premount (after ZFS import, before root mount)
-    # PREREQ="zfs" ensures this runs after the zfs initramfs script imports pools.
-    _ = (scripts_dir / "ORDER-keystore").write_text(f"""#!/bin/sh
-# zark: Open rpool/keystore LUKS zvol and load ZFS encryption keys.
-# Runs in local-premount phase (after zfs local-top imports pools).
-PREREQ="zfs"
-prereqs() {{ echo "$PREREQ"; }}
-case "$1" in prereqs) prereqs; exit 0;; esac
-
-. /scripts/functions
-
-KEYSTORE_MNT="/run/keystore/rpool"
-MAPPER_NAME="keystore-rpool"
-
-# Already mounted? Skip.
-[ -f "$KEYSTORE_MNT/system.key" ] && exit 0
-
-# Find the keystore zvol device
-ZVOL_DEV=""
-if [ -b /dev/zvol/rpool/keystore ]; then
-    ZVOL_DEV="/dev/zvol/rpool/keystore"
-else
-    for dev in /dev/zd*; do
-        [ -b "$dev" ] || continue
-        case "$dev" in /dev/zd[0-9]*p*) continue;; esac
-        if blkid -s TYPE -o value "$dev" 2>/dev/null | grep -q crypto_LUKS; then
-            ZVOL_DEV="$dev"
-            break
-        fi
-    done
-fi
-
-[ -z "$ZVOL_DEV" ] && exit 0
-
-# Open LUKS - password prompt via askpass (integrates with plymouth)
-if [ ! -b "/dev/mapper/$MAPPER_NAME" ]; then
-    log_begin_msg "zark: Opening ZFS keystore ($ZVOL_DEV)"
-    if [ -x /lib/cryptsetup/askpass ]; then
-        PW="$(/lib/cryptsetup/askpass 'Passphrase for ZFS keystore: ')"
-    else
-        # Fallback: direct read from console
-        printf 'Passphrase for ZFS keystore: ' >/dev/console
-        read -r PW </dev/console
-    fi
-    printf '%s' "$PW" | cryptsetup open --key-file=- "$ZVOL_DEV" "$MAPPER_NAME"
-    _rc=$?
-    unset PW
-    if [ "$_rc" -eq 0 ]; then
-        log_end_msg 0
-    else
-        log_end_msg 1
-        log_warning_msg "zark: cryptsetup failed (rc=$_rc)"
-    fi
-fi
-
-# Mount the key filesystem
-if [ -b "/dev/mapper/$MAPPER_NAME" ] && [ ! -f "$KEYSTORE_MNT/system.key" ]; then
-    mkdir -p "$KEYSTORE_MNT"
-    mount "/dev/mapper/$MAPPER_NAME" "$KEYSTORE_MNT" 2>/dev/null
-fi
-
-if [ -f "$KEYSTORE_MNT/system.key" ]; then
-    log_success_msg "zark: system.key available"
-    # Load ZFS encryption keys - try stored keylocation first, then explicit path
-    if ! zfs load-key -a 2>/dev/null; then
-        for ds in $(zfs list -H -o name,encryptionroot -r rpool 2>/dev/null | \
-                     awk '$2 != "-" && $1 == $2 {{print $1}}'); do
-            zfs load-key -L "file://$KEYSTORE_MNT/system.key" "$ds" 2>/dev/null
-        done
-    fi
-    keystatus="$(zfs get -H -o value keystatus rpool/ROOT/{ubuntu_name} 2>/dev/null)"
-    if [ "$keystatus" = "available" ]; then
-        log_success_msg "zark: ZFS keys loaded"
-    else
-        log_warning_msg "zark: key load failed"
-    fi
-else
-    log_warning_msg "zark: system.key NOT found after keystore open"
-fi
-""")
-    (scripts_dir / "ORDER-keystore").chmod(0o755)
-    log.ok("initramfs-tools keystore module installed (hook + local-premount)")
 
 
 def mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> None:
@@ -491,7 +380,7 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     # device doesn't exist yet), creating a chicken-and-egg problem.
     #
     # dracut (Ubuntu 25.04+): 89keystore module with pre-mount hook
-    # initramfs-tools (Ubuntu 24.04): hook + local-premount script
+    # initramfs-tools (Ubuntu 24.04): its zfs script does it (below)
 
     if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists():
         _install_keystore_dracut(RECOVER_MNT, ubuntu_name, log)
@@ -502,7 +391,10 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
                 _ = sh.run(f"zpool set feature@{feat}=enabled bpool")
             log.ok(f"bpool extended features enabled ({len(BPOOL_FEATURES_EXTENDED.split())})")
     else:
-        _install_keystore_initramfs(RECOVER_MNT, ubuntu_name, log)
+        # initramfs-tools (24.04): zfs-initramfs's own script opens the keystore
+        # after the import (contrib/initramfs/scripts/zfs:976-1001 at 2.2.2), so
+        # nothing is added (M6-4 4a); a hook in local-premount ran before it.
+        log.info("Keystore: opened at boot by the system's zfs initramfs script")
 
     # Install grub guard - prevents update-grub from running with external
     # ZFS pools connected (which corrupts grub.cfg with no kernel entries)
