@@ -642,10 +642,13 @@ for the canonical end-to-end sequences.
     **dpkg-reconfigure**(8) sequence described in **NOTES**, regenerates
     the initramfs (**dracut**(8) on Ubuntu 25.04+, with **zark**'s keystore
     module; **initramfs-tools**(8) on 24.04, whose own zfs script opens the
-    keystore) and exports both pools cleanly. The keystore's
+    keystore with **cryptsetup-initramfs**'s *cryptroot*, which the
+    restored root must carry) and exports both pools cleanly. The keystore's
     *@prepare_\** snapshot, which **prepare** leaves on the drive, is
     removed from the recovered system. A failed receive, anchor, ESP
-    record in **debconf** or missing EFI binary makes the banner RECOVERY
+    record in **debconf**, missing EFI binary or, on initramfs-tools, a
+    restored root without **cryptsetup-initramfs** (with the commands that
+    install it from **zark chroot**) makes the banner RECOVERY
     COMPLETED WITH ERRORS, naming it. A dataset whose point failed after
     its monthly arrived is named as left at that monthly and anchored
     there; for **bpool** the banner also names each kernel the restored

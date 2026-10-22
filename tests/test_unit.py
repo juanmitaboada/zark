@@ -10814,8 +10814,17 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
                 mount_restored_system("x", True, make_log())
         assert "(1 kernel(s))" in buf.getvalue()
 
+    @staticmethod
+    def _cryptsetup_initramfs(root: str) -> None:
+        """cryptsetup-initramfs's script and hook in a fake initramfs-tools
+        root, as every installer's 24.04 root has them (M6R-2)."""
+        for rel in boot_chain.CRYPTROOT_FILES:
+            Path(root, rel).parent.mkdir(parents=True, exist_ok=True)
+            _ = Path(root, rel).write_text("", encoding="utf-8")
+
     def test_a_missing_efi_binary_is_an_error(self):
         with tempfile.TemporaryDirectory() as td:
+            self._cryptsetup_initramfs(td)
             efi = Path(td) / "boot/efi/EFI/ubuntu"
             efi.mkdir(parents=True)
             _ = (efi / "grubx64.efi").write_text("")
@@ -10845,6 +10854,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         # R2-14: the ESP's /dev/disk/by-id name when it has one.
         by_id = "/dev/disk/by-id/nvme-X-part1"
         with tempfile.TemporaryDirectory() as td:
+            self._cryptsetup_initramfs(td)
             efi = Path(td) / "boot/efi/EFI/ubuntu"
             efi.mkdir(parents=True)
             for name in ("grubx64.efi", "shimx64.efi"):
@@ -10870,14 +10880,18 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         sets = [c for c in mock.calls if "debconf-set-selections" in c]
         assert len(sets) == 1 and f"install_devices multiselect {by_id}'" in sets[0], sets
 
-    def test_an_initramfs_tools_system_gets_no_keystore_hook(self):
-        """M6-4 4a: on 24.04 the zfs initramfs script opens the keystore after
-        the import; recover adds nothing to /etc/initramfs-tools."""
+    @staticmethod
+    def _initramfs_tools_chain(cryptroot: bool) -> tuple[list[str], str, bool]:
+        """install_boot_chain on an initramfs-tools fake root, with or without
+        cryptsetup-initramfs's script and hook: its errors, its output, and
+        whether it wrote /etc/initramfs-tools."""
         with tempfile.TemporaryDirectory() as td:
             efi = Path(td) / "boot/efi/EFI/ubuntu"
             efi.mkdir(parents=True)
             for name in ("grubx64.efi", "shimx64.efi"):
                 _ = (efi / name).write_text("")
+            if cryptroot:
+                TestRecoverBootChain._cryptsetup_initramfs(td)
             mock = MockShell()
             mock.on_prefix(f"chroot {td} debconf-show").succeeds(
                 "* grub-efi/install_devices: /dev/sda1\n"
@@ -10892,11 +10906,33 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
                 patch.object(ZFS, "write_zpool_cache"),
                 redirect_stdout(out),
             ):
-                _ = boot_chain.install_boot_chain(
+                errors = boot_chain.install_boot_chain(
                     "/dev/sda", "x", ZFS(make_log()), Cleanup(make_log()), make_log()
                 )
-            assert not Path(td, "etc/initramfs-tools").exists()
-        assert "opened at boot by the system's zfs initramfs script" in out.getvalue()
+            hook_dir = Path(td, "etc/initramfs-tools").exists()
+        return errors, out.getvalue(), hook_dir
+
+    def test_an_initramfs_tools_system_gets_no_keystore_hook(self):
+        """M6-4 4a, M6R-2: on 24.04 the zfs initramfs script opens the keystore
+        after the import with cryptsetup-initramfs's cryptroot; recover adds
+        nothing to /etc/initramfs-tools."""
+        errors, out, hook_dir = self._initramfs_tools_chain(cryptroot=True)
+        assert not hook_dir
+        assert not errors, errors
+        assert "opened at boot by the system's zfs initramfs script" in out
+
+    def test_an_initramfs_tools_root_without_cryptsetup_initramfs_is_an_error(self):
+        """M6R-2: without cryptsetup-initramfs the restored initrd cannot open
+        the keystore; the banner's error names the package and the repair."""
+        errors, out, hook_dir = self._initramfs_tools_chain(cryptroot=False)
+        assert not hook_dir
+        assert len(errors) == 1, errors
+        assert "lacks cryptsetup-initramfs" in errors[0]
+        for rel in boot_chain.CRYPTROOT_FILES:
+            assert f"/{rel}" in errors[0], errors[0]
+        repair = "chroot, then apt install cryptsetup-initramfs && update-initramfs -u -k all"
+        assert repair in errors[0], errors[0]
+        assert "opened at boot by the system's zfs initramfs script" not in out
 
     def test_bpool_gets_the_extended_features_only_without_origins_record(self):
         """M6-6: on a dracut system bpool gets BPOOL_FEATURES_EXTENDED unless

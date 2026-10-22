@@ -81,6 +81,15 @@ preceded them.
   mount, the next boot at the latest, and a dataset that needs device
   nodes (a chroot or container tree) keeps them with a local
   `devices=on`, which backups carry (M6F-3 3a).
+- **recover checks that a restored initramfs-tools system can open its
+  keystore** (M6R-2, M6F-4 4a): noble's zfs initramfs script opens it
+  with `cryptsetup-initramfs`'s `cryptroot`, so a restored root without
+  `/usr/share/initramfs-tools/scripts/local-top/cryptroot` or
+  `/usr/share/initramfs-tools/hooks/cryptroot` is an error in the
+  RECOVERY banner naming the package and the repair (`zark chroot`, then
+  `apt install cryptsetup-initramfs && update-initramfs -u -k all`),
+  where the boot would stop in the initramfs shell. An installer's root
+  always has it; dracut systems are unchanged.
 - Comments that cite sanoid 2.3.0 or systemd v258/v259.5 also give
   noble's lines where zark relies on the behaviour; the sanoid defaults
   path in `lib/sanoid_retention.py` is `/usr/share/sanoid/` (M6-18,
@@ -103,6 +112,8 @@ preceded them.
   or active, is refused on every snapshot alike (M6R-3, M6F-5).
 - Both `zpool create` lines carry the installer's root properties, with
   and without origin's record (M6R-1).
+- An initramfs-tools root with and without `cryptsetup-initramfs`'s
+  script and hook (M6R-2).
 
 #### Known limitations
 

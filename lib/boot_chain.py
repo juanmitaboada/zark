@@ -51,6 +51,15 @@ BPOOL_FEATURES_EXTENDED = "userobj_accounting project_quota spacemap_v2 log_spac
 
 RECOVER_MNT = "/mnt/recover"
 
+# What an initramfs-tools initrd needs to open the keystore (M6R-2), both from
+# cryptsetup-initramfs: the script zfs's mountroot runs (scripts/zfs:977-979 at
+# 2.2.2), which mkinitramfs copies into every initrd (mkinitramfs:385-395), and
+# the hook that copies cryptsetup and dmsetup (hooks/cryptroot:372-376).
+CRYPTROOT_FILES = (
+    "usr/share/initramfs-tools/scripts/local-top/cryptroot",
+    "usr/share/initramfs-tools/hooks/cryptroot",
+)
+
 
 def _force_latest_signed_alternative(
     chroot_path: str,
@@ -394,7 +403,18 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
         # initramfs-tools (24.04): zfs-initramfs's own script opens the keystore
         # after the import (contrib/initramfs/scripts/zfs:976-1001 at 2.2.2), so
         # nothing is added (M6-4 4a); a hook in local-premount ran before it.
-        log.info("Keystore: opened at boot by the system's zfs initramfs script")
+        missing = [f"/{f}" for f in CRYPTROOT_FILES if not Path(RECOVER_MNT, f).exists()]
+        if missing:
+            line = (
+                f"Keystore: the restored system lacks cryptsetup-initramfs ({', '.join(missing)}), "
+                + "so its initrd cannot open rpool's keystore and the boot stops in the "
+                + f"initramfs shell: boot this live again, run {zark_command()} chroot, then "
+                + "apt install cryptsetup-initramfs && update-initramfs -u -k all"
+            )
+            log.error(line)
+            errors.append(line)
+        else:
+            log.info("Keystore: opened at boot by the system's zfs initramfs script")
 
     # Install grub guard - prevents update-grub from running with external
     # ZFS pools connected (which corrupts grub.cfg with no kernel entries)
