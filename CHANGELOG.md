@@ -5,15 +5,145 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] - 2026-10-23
 
-zark 2 is being built as internal milestones on `main`, versioned
-`2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
-(`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M6 (2.0.0-rc11)** on top of M5b (2.0.0-rc10), M5a (2.0.0-rc9), M4d (2.0.0-rc8), M4c (2.0.0-rc7),
-M4s (2.0.0-rc6), M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2
-(2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling consolidation that
-preceded them.
+zark 2 replaces the replication of zark 1.x and adds the commands that
+manage space, alerts, exclusions and the platform it runs on. This
+section is for 1.x users; the development history below it (M1 to M6,
+published only as `2.0.0-rc1` to `2.0.0-rc11` on `main`) has every change
+in detail, with the approaches that were rejected.
+
+### For zark 1.x users
+
+#### What changed, and why
+
+- **zark's own replication instead of syncoid.** syncoid based each
+  incremental on the newest snapshot common to both sides and received
+  with `-F`, so every backup destroyed the drive's snapshots newer than
+  that base, the previous backups' restore points, once the source had
+  pruned them. zark 2 takes one atomic backup point (`zark_<UTC>`) of
+  every replicated dataset, sends from the drive's newest snapshot, found
+  in the source as a snapshot or, once pruned there, through this drive's
+  bookmark (`#zark_<pool GUID>_<UTC>`), and never forces a receive.
+  Anything that would destroy data on a drive is a question asked before
+  the transfer starts. `bpool` takes no bookmarks (GRUB must keep reading
+  it); zark keeps one snapshot per drive there instead.
+- **An honest verdict.** BACKUP COMPLETED only when every dataset expected
+  reached the point; otherwise BACKUP INCOMPLETE, exit 1, and the drive's
+  `last_backup_at` is not written. Each run prints and logs a table per
+  dataset.
+- **Retention on the drive.** Per drive: everything of the last 30 days,
+  then the newest complete point of each month (`window`, `max_age`, off
+  by default, and a free-space `margin` of 10%, in the registry). Before a
+  transfer that would not leave the margin free, zark applies the policy
+  and offers the oldest monthly points.
+- **A drive is never mounted over the running system.** Backup pools are
+  imported with nothing mounted under an alternate root, and every
+  receive is unmounted: 1.x could mount a drive's `bpool` over `/boot`
+  during a backup. The APT and update-grub guards also count an imported
+  zark drive.
+- **recover** shows its plan per dataset, never mixes points of different
+  times, orders points by creation, checks the drive's features against
+  the live's ZFS before touching anything, creates both pools with the
+  features the source had at that point, and anchors what it restored for
+  the drive it read.
+- **One zark run at a time** (exit 75 for a second one), and a stopped run
+  (Ctrl-C, SIGTERM, a closed terminal) stops its child first and then
+  cleans up once.
+
+#### The first backup of a 1.x drive
+
+It can ask once, when the drive holds snapshots newer than anything the
+source still has ("first run of this zark on a drive written by an older
+one"): the case 1.x resolved by destroying them silently. Keeping them in
+archived lineages and continuing from the common snapshot destroys and
+resends nothing. After that backup the drive is anchored by its own
+bookmarks and its next backups are incremental whatever sanoid prunes.
+README's "Upgrading from zark 1.x" and the manpage's WORKFLOWS have the
+whole sequence: `zark setup`, one backup per drive, then `zark prune` for
+1.x's residues.
+
+#### Commands
+
+- New: `status` (the source pools' fill and each drive's backup age),
+  `alerts` (the MOTD line, an hourly timer and desktop notifications for
+  them), `prune` (reclaim space in the source or on a drive: sanoid
+  snapshots by age, 1.x's `syncoid_*` and keystore `prepare_*` residues,
+  points left by interrupted runs, a drive's oldest points or its 1.x
+  history), `registry list|forget|fix`, `exclude list|add|remove` (a
+  dataset left out of backups, of sanoid's snapshots, or both),
+  `selftest` (checks on this platform what zark relies on; `status`,
+  `report`, `warnings on|off`), `fix-rpool-mountpoint` (gives a restored
+  rpool back `mountpoint=/`, from a live).
+- Changed: `backup` (above; `--no-snapshot` is accepted and does
+  nothing), `prepare` (every question before the transfer; the drive's
+  pool with `compatibility=openzfs-2.2`; registered only after a verified
+  transfer), `recover` (above; from an Ubuntu 26.04 or newer live),
+  `purge` (by the drive's identity, every step verified, PURGE INCOMPLETE
+  otherwise), `health` (one entry per disk, the pool's state, exit 1 when
+  the destructive test fails), `clean` (lists what an interrupted run left
+  and asks; never forces an export, never deletes a file), `setup` (the
+  guards, the alerts, `feature@bookmark_v2`; `--remove` undoes them, and
+  removing the package runs it), `finish` (does not export the running
+  system's pools; names only what `setup` would still do), `mount`,
+  `umount`, `chroot`, `mount local` and `repair-boot` (read-only mounts
+  are read-only imports; targets resolved inside the tree).
+- Removed: `repair-divergent` (its auto-repair destroyed drive datasets
+  without asking; backup's own questions replace it). syncoid is no longer
+  used; sanoid still takes the source's snapshots.
+
+#### Ubuntu series
+
+2.0.0 is validated on Ubuntu 24.04 LTS (noble) and 26.04 LTS (resolute),
+installed with the installer's encrypted ZFS layout, and published in the
+PPA for both. A system is recovered from an Ubuntu 26.04 or newer live.
+The package is `Architecture: amd64` (1.x's was `all`). Ubuntu 26.10 and
+later are not validated yet.
+
+#### Known limitations a 1.x user meets
+
+- **After a confirmed destroy of a dataset that exists only on the
+  backup**, the backup points that held it read PARTLY REMOVED in
+  recover's menu; such a point still restores everything but the
+  destroyed dataset (M5bV-4). The destroy is refused by ZFS when an
+  archived lineage of that dataset is a clone of one of its snapshots: the
+  run says so and nothing is destroyed (M5bV-3). Both are fixed in 2.1.
+- **A drive written by 1.x keeps the mount properties 1.x sent with its
+  datasets** (`bpool`'s boot environment has `mountpoint=/boot`): zark
+  imports it with nothing mounted, but a `zpool import` by hand without
+  `-N` could mount it over the running `/boot`. Import a drive through
+  zark.
+- **The history 1.x wrote on a drive stays** until `zark prune` on that
+  drive removes it; retention never touches it.
+- **Recovering a point 1.x wrote** (it records no pool features) creates
+  `rpool` with every feature of the live's ZFS, with a warning: a 24.04
+  system restored that way may not import `rpool` with its own OpenZFS
+  once one of them becomes active.
+- **A 24.04 system is recovered from a 26.04 or newer live**; an older live
+  gets a warning. recover selects shim's `.latest` variant; on 24.04 with
+  Secure Boot, a kernel the new shim revokes then cannot boot, where
+  shim-signed's own postinst would have chosen `.previous`.
+- **On 24.04, OpenZFS 2.2.2's `zfs receive`** refuses streams that carry
+  the `longname` or `large_microzap` flags: such a dataset fails and the
+  backup is INCOMPLETE (only a drive or a pool a newer OpenZFS made can
+  have them).
+- Volumes other than the keystore are not backed up (listed every run). A
+  directory cannot be excluded; it has to become a dataset first.
+- A drive's keystore is the copy `prepare` made: after `cryptsetup
+  luksChangeKey` or `zfs change-key` in the source, `zark purge` and
+  `zark prepare` each drive.
+- Desktop notifications need `notify-send` (libnotify-bin). `zark monitor`
+  shows `zpool list`'s figures. recover's `zfs mount -a` on the restored
+  tree does not resolve symlinks inside it.
+- The self-test does not check what needs a boot, a package operation or
+  a cable: GRUB, Secure Boot, dracut, the guards, a USB bridge's cache
+  flushes (`zark health` tests an enclosure).
+
+### Development history: M1 to M6
+
+The milestones as they went into `main`, newest first, each with its
+known limitations at the time (several fixed by a later milestone) and
+the approaches rejected.
 
 ### M6: Ubuntu 24.04 (noble), and origin's pools on the drive (2.0.0-rc11)
 
