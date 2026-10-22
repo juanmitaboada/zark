@@ -332,7 +332,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         in an archive and continue from the common one, destroying nothing
         and resending nothing.
 
-        The lineage is renamed aside, ``zfs clone -u`` of its common snapshot
+        The lineage is renamed aside, ``zfs clone`` of its common snapshot
         takes its place and ``zfs promote`` gives it the snapshots up to that
         one, so the archive keeps only the newer ones, as a clone of
         ``<ds>@<common>``. Promote is allowed with the keys unloaded when the
@@ -356,7 +356,9 @@ class Run:  # pylint: disable=too-many-instance-attributes
             f"-o canmount=noauto -o org.zark:canmount={_q(o.canmount)} "
             + f"-o org.zark:mountpoint={_q(o.mountpoint)}"
         )
-        clone = f"zfs clone -u {marks} {_q(kept + p.common)} {_q(live)}"
+        # No -u: OpenZFS 2.2.2 (noble) lacks it (zfs_main.c:825); canmount=noauto
+        # keeps either release from mounting the clone (2.2.2 zfs_main.c:777-779).
+        clone = f"zfs clone {marks} {_q(kept + p.common)} {_q(live)}"
         for cmd in (clone, f"zfs promote {_q(live)}"):
             r = sh.run(cmd, log=self.log)
             if not r.ok:

@@ -18,6 +18,11 @@ Each docstring says what the check certifies and where that behaviour is
 in the source of the version eli runs (OpenZFS 2.4.1, util-linux 2.41.3,
 systemd 259.5, Linux 7.0, CPython 3.14.4, sanoid 2.3.0); the plan's
 section 4 has the same table. The command shapes are zark's own.
+
+Clones are made without ``-u``, which OpenZFS 2.2.2 (noble) lacks
+(cmd/zfs/zfs_main.c:825 there): the run's pools are created with ``-m
+none``, so a clone inherits ``mountpoint=none`` and nothing mounts
+(lib/libzfs/libzfs_mount.c:254-256 at 2.2.2).
 """
 
 # One check per function, each with its source citations: long by design.
@@ -1059,7 +1064,7 @@ def snd_09(b: Bench) -> None:
     x = _origin(b, "snd09", STREAM_KIB)
     _ = b.ok(f"zfs snapshot {x}@1")
     clone = f"{b.a}/snd09c"
-    _ = b.ok(f"zfs clone -u {x}@1 {clone}")
+    _ = b.ok(f"zfs clone {x}@1 {clone}")
     b.write(clone, 64)
     _ = b.ok(f"zfs snapshot {clone}@c")
     full = _size(b, f"zfs send -nvP -w {clone}@c")
@@ -1097,8 +1102,8 @@ def snd_10(b: Bench) -> None:
     for ds in (x, other, alone):
         _ = b.ok(f"zfs snapshot {ds}@1")
     clone, stray = f"{b.a}/snd10c", f"{b.a}/snd10s"
-    _ = b.ok(f"zfs clone -u {x}@1 {clone}")
-    _ = b.ok(f"zfs clone -u {alone}@1 {stray}")
+    _ = b.ok(f"zfs clone {x}@1 {clone}")
+    _ = b.ok(f"zfs clone {alone}@1 {stray}")
     b.write(clone, 64)
     _ = b.ok(f"zfs snapshot {clone}@p")
     _ = b.ok(f"zfs snapshot {stray}@p")
@@ -1275,7 +1280,7 @@ def dst_02(b: Bench) -> None:
     got = ", ".join(b.snapshot_names(x))
     expect(got == "1, 2, 3", "nothing destroyed while 2 is held", got)
     _ = b.ok(f"zfs release zark-selftest {x}@2")
-    _ = b.ok(f"zfs clone -u {x}@3 {b.a}/dst02c")
+    _ = b.ok(f"zfs clone {x}@3 {b.a}/dst02c")
     _ = b.refused(f"zfs destroy {x}@3", "has dependent clones")
     top = b.fs(f"{b.a}/dst02r")
     kids = [b.fs(f"{top}/k1"), b.fs(f"{top}/k2")]
@@ -1325,7 +1330,7 @@ def dst_03(b: Bench) -> None:
 )
 def cln_01(b: Bench) -> None:
     """On a raw-received lineage with its key unloaded: ``zfs rename``, ``zfs
-    clone -u -o canmount=noauto -o org.zark:...``, ``zfs promote``, then a raw
+    clone -o canmount=noauto -o org.zark:...``, ``zfs promote``, then a raw
     incremental from the common snapshot; the clone's properties are
     ``local`` and nothing is mounted. OpenZFS module/zfs/zfs_ioctl.c:3756-3783,
     :2748-2918; module/zcommon/zfs_prop.c:536-538; module/zfs/dsl_dataset.c:3326-3373,
@@ -1341,7 +1346,7 @@ def cln_01(b: Bench) -> None:
     _ = b.ok(f"zfs snapshot {x}@4")
     _ = b.ok(f"zfs rename {live} {kept}")
     marks = "-o canmount=noauto -o org.zark:canmount=on -o org.zark:mountpoint=/selftest"
-    _ = b.ok(f"zfs clone -u {marks} {kept}@2 {live}")
+    _ = b.ok(f"zfs clone {marks} {kept}@2 {live}")
     _ = b.ok(f"zfs promote {live}")
     _ = b.pipe_ok(f"zfs send -w -i {x}@2 {x}@4", f"zfs receive -s -u {live}")
     got = ", ".join(b.snapshot_names(live))
@@ -1466,7 +1471,7 @@ def key_03(b: Bench) -> None:
     b.write(child, 64)
     _ = b.ok(f"zfs snapshot {child}@s")
     clone = f"{b.a}/key03k"
-    _ = b.ok(f"zfs clone -u {child}@s {clone}")
+    _ = b.ok(f"zfs clone {child}@s {clone}")
     three = (root, child, clone)
     for ds in three:
         got = b.value("encryptionroot", ds)

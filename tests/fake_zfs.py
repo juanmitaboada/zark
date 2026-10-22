@@ -597,10 +597,12 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         return _ok("".join(lines) + f"reclaim\t{sum(x.used for x in hit)}\n")
 
     def _clone(self, args: list[str]) -> RunResult:
-        """``zfs clone [-u] [-o prop=value]... ds@snap new``: an empty head on
+        """``zfs clone [-o prop=value]... ds@snap new``: an empty head on
         that snapshot with a property set of its own: only what ``-o`` gives
         (the origin's properties stay with the origin, as on eli F1.6; the
         kernel sets ``-o`` in the same ioctl, zfs_ioctl.c:3775-3781)."""
+        if "-u" in args:  # OpenZFS 2.2.2 (noble) has no -u (zfs_main.c:825 there)
+            return _err("invalid option 'u'", 2)
         src, dst = args[-2], args[-1]
         props = dict(args[i + 1].split("=", 1) for i, a in enumerate(args[:-1]) if a == "-o")
         ds, _, name = src.partition("@")

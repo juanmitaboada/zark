@@ -15566,14 +15566,16 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         ), live
 
     def test_the_kept_lineage_is_cloned_without_mounting(self) -> None:
-        """I-G on the ROLLBACK keep path (mutation E15): the clone that takes
-        the lineage's place is made with ``-u``; nothing mounts outside a
-        command that asked for it."""
+        """I-G on the ROLLBACK keep path (mutation E15, M6-20): the clone that
+        takes the lineage's place is made with ``canmount=noauto`` and without
+        ``-u``, which OpenZFS 2.2.2 lacks; neither release mounts it."""
         fake = self._var_tree_rolled_ahead()
         before = len(fake.calls)
         assert self._run_with_answers(fake, [1]).ok
         clones = [c for c in fake.calls[before:] if c.startswith("zfs clone")]
-        assert clones and all(c.startswith("zfs clone -u ") for c in clones), clones
+        assert clones and all(
+            " -u " not in c and c.startswith("zfs clone -o canmount=noauto ") for c in clones
+        ), clones
 
     def test_diverged_children_of_an_archived_top_are_not_asked(self) -> None:
         """One question for a diverged subtree; the children go with their parent."""
