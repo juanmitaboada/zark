@@ -32,7 +32,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import sh, zfs_features
+from lib import platform_facts, sh, zfs_features
 from lib.drive_marks import snapshot_marks
 from lib.log import Log
 from lib.restore_points import Snap
@@ -41,7 +41,6 @@ from lib.zfs import COMPAT_DIRS
 POOLS_PROP = "org.zark:pools"
 FORMAT = 1
 ORIGIN_POOLS = ("rpool", "bpool")
-OS_RELEASE = "/etc/os-release"
 
 _ON = ("enabled", "active")
 # A feature the tools do not know: refcount 0 prints "inactive", else "readonly".
@@ -81,18 +80,6 @@ def parse_get(text: str) -> PoolState:
         elif prop.startswith("unsupported@") and value in _UNKNOWN_STATE:
             features[prop] = _UNKNOWN_STATE[value]
     return PoolState(compat, features)
-
-
-def _ubuntu() -> str:
-    try:
-        text = Path(OS_RELEASE).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    for line in text.splitlines():
-        key, _, value = line.partition("=")
-        if key.strip() == "VERSION_ID":
-            return value.strip().strip('"')
-    return ""
 
 
 def dump(rec: PoolRecord) -> str:
@@ -135,7 +122,7 @@ def capture(log: Log, pools: tuple[str, ...] = ORIGIN_POOLS) -> str:
     lines = [ln.strip() for ln in zv.lines] if zv.ok else []
     tools = next((ln for ln in lines if not ln.startswith("zfs-kmod-")), "")
     kmod = next((ln for ln in lines if ln.startswith("zfs-kmod-")), "")
-    return dump(PoolRecord(_ubuntu(), tools, kmod, states))
+    return dump(PoolRecord(platform_facts.ubuntu_release(), tools, kmod, states))
 
 
 def parse(value: str) -> PoolRecord | None:

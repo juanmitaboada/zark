@@ -63,6 +63,7 @@ from lib import (
     certificates,
     drive_marks,
     exclusions,
+    platform_facts,
     pool_record,
     replication,
     sh,
@@ -96,6 +97,9 @@ from lib.restore_points import (
     run_complete_points,
 )
 from lib.zfs import ZFS
+
+# The oldest live recover is made for (M6-8): older ones get a WARN.
+OLDEST_LIVE = (26, 4)
 
 # bpool features safe for GRUB 2.12 (Ubuntu 24.04 / initramfs-tools)
 BPOOL_FEATURES_BASE = (
@@ -297,6 +301,22 @@ def _pools_from_record(
         if s.compat_missing:
             log.info(f"  {p}: compatibility={s.compat_missing} left off (not on this live)")
     return specs
+
+
+def _warn_old_live(log: Log) -> None:
+    """A WARN on a live older than 26.04 (M6-8 8a), and recover goes on: the
+    drive's feature check and the pre-flight stop what cannot work there."""
+    rel = platform_facts.ubuntu_release()
+    found = platform_facts.ubuntu_tuple(rel)
+    if found is None or found >= OLDEST_LIVE:
+        return
+    zv = sh.run("zfs version")
+    zfs = ", ".join(ln.strip() for ln in zv.lines) if zv.ok and zv.lines else "unknown"
+    log.warn(
+        f"This live runs Ubuntu {rel} ({zfs}); zark recovers from Ubuntu "
+        + f"{OLDEST_LIVE[0]}.{OLDEST_LIVE[1]:02d} or newer. Going on: what this live "
+        + "cannot do stops recover before anything is erased."
+    )
 
 
 def needs_userdata(plan: RestorePlan) -> bool:
@@ -781,6 +801,7 @@ def run(
         if confirm != "IUNDERSTAND":
             return
 
+    _warn_old_live(log)
     _install_missing_tools(log)
 
     # ── 1. Find backup drive ─────────────────────────────────────────────

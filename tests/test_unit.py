@@ -10325,6 +10325,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
                 side_effect=lambda real=tempfile.mkdtemp, **_k: real(dir=work),
             ),
             patch.object(recover_mod, "_is_live_usb", return_value=True),
+            patch.object(recover_mod.platform_facts, "ubuntu_release", return_value="26.04"),
             patch.object(recover_mod, "scan_connected_drives", return_value=[drive]),
             patch.object(recover_mod, "select_drive", return_value=drive),
             patch.object(recover_mod, "backup_device", return_value="/dev/sdb1"),
@@ -10547,6 +10548,32 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         assert len(creates) == 2, mock.calls[-30:]
         assert " -d -o feature@async_destroy=enabled " in creates[0]
         assert " -d " not in creates[1]
+
+    def test_a_live_older_than_26_04_is_warned_and_recover_goes_on(self):
+        """M6-8 8a: a WARN naming the live's Ubuntu and OpenZFS, no question."""
+        for rel, warned in (("24.04", True), ("26.04", False), ("26.10", False), ("", False)):
+            out = StringIO()
+
+            def shell(mock: MockShell) -> None:
+                _ = mock.on("zfs version").succeeds("zfs-2.2.2-0ubuntu9.5\nzfs-kmod-2.4.1")
+
+            with tempfile.TemporaryDirectory() as td:
+                mock = self._run_to_create(
+                    td,
+                    shell_setup=shell,
+                    extra=[
+                        patch.object(
+                            recover_mod.platform_facts, "ubuntu_release", return_value=rel
+                        ),
+                        redirect_stdout(out),
+                    ],
+                )
+            text = out.getvalue()
+            assert (
+                "This live runs Ubuntu 24.04 (zfs-2.2.2-0ubuntu9.5, zfs-kmod-2.4.1)" in text
+            ) is (warned), (rel, text[-2000:])
+            assert ("recovers from Ubuntu 26.04 or newer" in text) is warned
+            assert len([c for c in mock.calls if c.startswith("zpool create")]) == 2, rel
 
     def test_no_wipe_when_not_confirmed(self):
         mock = self._run("NO")
@@ -21069,6 +21096,24 @@ def _show_output(seen: StringIO) -> None:
     """A failed test's own output, indented under its line."""
     for line in seen.getvalue().splitlines()[-40:]:
         print(f"        | {line}")
+
+
+class TestUbuntuRelease:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M6-8: this system's Ubuntu release, read once for the live warning
+    and origin's record."""
+
+    def test_version_id_is_read_and_as_numbers(self):
+        with tempfile.TemporaryDirectory() as td:
+            osr = Path(td, "os-release")
+            _ = osr.write_text('NAME="Ubuntu"\nVERSION_ID="24.04"\n', encoding="utf-8")
+            with patch("lib.platform_facts.OS_RELEASE", str(osr)):
+                assert pfacts.ubuntu_release() == "24.04"
+            with patch("lib.platform_facts.OS_RELEASE", str(Path(td, "missing"))):
+                assert pfacts.ubuntu_release() == ""
+        assert pfacts.ubuntu_tuple("24.04") == (24, 4)
+        assert pfacts.ubuntu_tuple("26.10") == (26, 10)
+        for bad in ("", "noble", "24", "24.04.5"):
+            assert pfacts.ubuntu_tuple(bad) is None
 
 
 def main() -> int:

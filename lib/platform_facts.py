@@ -63,6 +63,17 @@ def _os_release() -> dict[str, str]:
     return out
 
 
+def ubuntu_release() -> str:
+    """This system's Ubuntu ``VERSION_ID`` (``24.04``), "" when unreadable."""
+    return _os_release().get("VERSION_ID", "")
+
+
+def ubuntu_tuple(version_id: str) -> tuple[int, int] | None:
+    """``24.04`` as ``(24, 4)``; None for anything that is not one."""
+    m = re.fullmatch(r"(\d+)\.(\d+)", version_id)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
 def _first(cmd: str) -> str:
     r = sh.run(cmd)
     return r.lines[0].strip() if r.ok and r.lines else ""
