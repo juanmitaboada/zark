@@ -140,7 +140,15 @@ preceded them.
   check on noble (its 2.4.1 module imports it), but noble's 2.2.2 tools
   cannot receive streams with the longname or large_microzap flags
   (M6-20, N8). Only a drive a 2.3+ system prepared without compatibility
-  has them.
+  has them. **On the origin side** (V3, M6F-7 7a): a noble rpool that a
+  recover from a newer live made (zark 1.x's, or an rc's before rc11)
+  has those two features enabled, and a dataset where one becomes active
+  (longname: a name of 256 bytes or more under `longname=on`, a property
+  only a newer `zfs` than noble's sets; large_microzap: a microzap past
+  128 KiB, with the `zap_micro_max_size` module parameter raised) sends
+  streams that noble's 2.2.2 `zfs receive` refuses ("stream has
+  unsupported feature"): that dataset fails and the run is INCOMPLETE.
+  The other six features of 2.3 and 2.4 change no stream.
 - A point written before 2.0.0-rc11 has no record: recover gives rpool
   every feature of its live's ZFS, as before, with a warning (M6-7).
 
