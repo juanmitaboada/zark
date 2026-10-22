@@ -83,12 +83,12 @@ gets), so nothing untracked (a `__pycache__`, a local config) can reach
 the `.deb`. The `.deb`, `.changes` and `.buildinfo` land in the parent
 directory.
 
-Result: `../zark_X.Y.Z-1_all.deb` and the artefacts of the build process
+Result: `../zark_X.Y.Z-1_amd64.deb` and the artefacts of the build process
 (`.changes`, `.buildinfo`, `.dsc`, `.tar.xz`) sitting next to the source
 tree. Install it locally to smoke-test:
 
 ```sh
-sudo dpkg -i ../zark_X.Y.Z-1_all.deb
+sudo dpkg -i ../zark_X.Y.Z-1_amd64.deb
 zark --version          # should print the version from lib/config.py
 sudo zark explore       # should run; failures here probably mean a
                         # Recommends should be a Depends

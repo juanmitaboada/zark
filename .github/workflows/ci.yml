@@ -146,7 +146,7 @@ jobs:
         # We then purge so subsequent steps run on a clean system.
         run: |
           set -euo pipefail
-          DEB=$(ls ../zark_*_all.deb | head -1)
+          DEB=$(ls ../zark_*_amd64.deb | head -1)
           echo "Testing: $DEB"
 
           # Inspect package metadata before installing
@@ -204,7 +204,7 @@ jobs:
         # form referenced by the README - so we stage it alongside.
         run: |
           mkdir -p dist
-          cp ../zark_*_all.deb       dist/
+          cp ../zark_*_amd64.deb       dist/
           cp ../zark_*.changes       dist/ 2>/dev/null || true
           cp ../zark_*.buildinfo     dist/ 2>/dev/null || true
           cp zark_*.tar.gz           dist/ 2>/dev/null || true
@@ -215,12 +215,12 @@ jobs:
         with:
           name: zark-release-assets
           path: |
-            dist/zark_*_all.deb
+            dist/zark_*_amd64.deb
             dist/zark_*.tar.gz
 
       - name: Attach release assets to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/zark_*_all.deb
+            dist/zark_*_amd64.deb
             dist/zark_*.tar.gz

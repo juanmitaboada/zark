@@ -91,7 +91,7 @@ and creates `/etc/zark/` for `known_drives.json`. Logs go to `/var/log/zark.log`
 If you cannot or prefer not to add a PPA - restricted networks, offline systems, or simply a one-shot install - every release ships a prebuilt `.deb` as a release asset on GitHub:
 
 ```bash
-wget https://github.com/juanmitaboada/zark/releases/latest/download/zark_<VERSION>-1_all.deb
+wget https://github.com/juanmitaboada/zark/releases/latest/download/zark_<VERSION>-1_amd64.deb
 sudo apt install ./zark_*.deb
 ```
 

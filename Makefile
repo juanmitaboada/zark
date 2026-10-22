@@ -580,7 +580,7 @@ deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally from the source packa
 	(cd "$$tmp/src" && dpkg-source -b .); \
 	dpkg-source -x "$$tmp"/zark_$(DEB_VERSION)-*.dsc "$$tmp/build"; \
 	(cd "$$tmp/build" && debuild -us -uc -b --lintian-opts --suppress-tags $(LINTIAN_SUPPRESS_TAGS)); \
-	cp "$$tmp"/zark_$(DEB_VERSION)-*_all.deb "$$tmp"/zark_$(DEB_VERSION)-*.changes \
+	cp "$$tmp"/zark_$(DEB_VERSION)-*_amd64.deb "$$tmp"/zark_$(DEB_VERSION)-*.changes \
 	   "$$tmp"/zark_$(DEB_VERSION)-*.buildinfo ..
 	@# Make the upstream tarball available in cwd for downstream steps
 	@# (CI's "stage release artefacts" step in .github/workflows/ci.yml
@@ -589,7 +589,7 @@ deb: $(ORIG_TARBALL) ## Build unsigned binary .deb locally from the source packa
 	@# just expose a renamed link/copy for convenience.
 	@cp $(ORIG_TARBALL) zark_$(VERSION).tar.gz
 	@echo ""
-	@echo "  Built: $$(ls -1t ../zark_$(DEB_VERSION)-*_all.deb | head -1)"
+	@echo "  Built: $$(ls -1t ../zark_$(DEB_VERSION)-*_amd64.deb | head -1)"
 	@echo "  Inspect: lintian -i ../zark_$(DEB_VERSION)-*.changes"
 
 deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
