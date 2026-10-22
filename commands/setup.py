@@ -198,7 +198,7 @@ def _classify(  # pylint: disable=too-many-return-statements
 
 # A subtree excluded from snapshots (D8, M5b-6 6a): sanoid takes none, and
 # with autoprune and every count at 0 removes the old ones at its next prune
-# (sanoid v2.3.0 sanoid:325-366).
+# (sanoid v2.3.0 sanoid:325-366; v2.2.0, noble, :270-311).
 DRAINED = "drained"
 _DRAINED_SETTINGS = {
     "autosnap": "no",
@@ -294,11 +294,12 @@ def _split_around(
     sanoid reads its sections in Perl hash order, and a recursive section
     writes its values into every child's config, autosnap included, before
     or after the child's own section was read (sanoid v2.3.0 sanoid:970,
-    :1075-1115): a child section inside a recursive rule is honoured on some
-    runs only. So a recursive rule above a drained subtree becomes a
-    non-recursive section for each dataset on the way down to it, and a
-    recursive one for each other subtree that branches off that way. The
-    rules inside a drained subtree go: the drained section covers it.
+    :1075-1115; v2.2.0, noble, :894, :987-1027): a child section inside a
+    recursive rule is honoured on some runs only. So a recursive rule above
+    a drained subtree becomes a non-recursive section for each dataset on
+    the way down to it, and a recursive one for each other subtree that
+    branches off that way. The rules inside a drained subtree go: the
+    drained section covers it.
     """
     by_name = dict(rules)
 

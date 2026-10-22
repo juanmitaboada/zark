@@ -32,10 +32,11 @@ Why parse sanoid.conf at runtime instead of a hardcoded constant: the
 operator can edit ``/etc/sanoid/sanoid.conf`` freely and the retention
 that actually applies depends on those values.
 
-Computation, from sanoid's own rule (sanoid v2.3.0, ``sanoid:338-370``): a
-snapshot of type t is pruned only when it is older than ``n_t * period_t``
-and more than ``n_t`` of that type exist, with periods of 1 hour, 1 day,
-7 days, 31 days and 365.25 days (``:342-347``). The newest snapshot of a
+Computation, from sanoid's own rule (sanoid v2.3.0, ``sanoid:338-370``;
+v2.2.0 on noble, ``:283-315``): a snapshot of type t is pruned only when it
+is older than ``n_t * period_t`` and more than ``n_t`` of that type exist,
+with periods of 1 hour, 1 day, 7 days, 31 days and 365.25 days
+(``:342-347``; v2.2.0 ``:287-292``). The newest snapshot of a
 type is up to one period old when the drive receives it, so it is
 guaranteed to stay ``(n_t - 1) * period_t`` more (``n_t * period_t`` is
 only the most it may stay); a template guarantees the longest of those
@@ -53,15 +54,15 @@ from pathlib import Path
 from lib.config import zark_command
 from lib.log import Log
 
-# Standard location of sanoid's config. The package ships
-# ``/etc/sanoid/sanoid.defaults.conf`` separately; we don't consult that
-# one because zark's setup writes ``sanoid.conf`` with explicit values
-# for every template, so the defaults file never contributes to the
-# effective retention here.
+# Standard location of sanoid's config. The package ships its defaults as
+# ``/usr/share/sanoid/sanoid.defaults.conf`` (hard-coded, sanoid:47 in both
+# 2.2.0 and 2.3.0); we don't consult that one because zark's setup writes
+# ``sanoid.conf`` with explicit values for every template, so the defaults
+# file never contributes to the effective retention here.
 SANOID_CONF_PATH = Path("/etc/sanoid/sanoid.conf")
 
 
-# sanoid's periods, in days (sanoid:342-347).
+# sanoid's periods, in days (sanoid:342-347; v2.2.0 :287-292).
 _PERIOD_DAYS = {"hourly": 1 / 24, "daily": 1.0, "weekly": 7.0, "monthly": 31.0, "yearly": 365.25}
 
 

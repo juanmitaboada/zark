@@ -59,7 +59,8 @@ def unsafe_char(path: str) -> str:
     """The first character of ``path`` systemd refuses in an executable path
     (a quote, a backslash or a control character: ``string_is_safe``,
     src/basic/string-util.c:1078-1093, and config_parse_exec,
-    src/core/load-fragment.c:989-994, v258), or ""."""
+    src/core/load-fragment.c:989-994, v258; on noble's v255,
+    string-util.c:1126-1141 and load-fragment.c:951-956), or ""."""
     return next((c for c in path if c in "\"'\\" or ord(c) < 0x20 or ord(c) == 0x7F), "")
 
 

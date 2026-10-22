@@ -158,7 +158,9 @@ def _held_from_udev(disk: str, log: Log) -> Iterator[bool]:
     When a writer closes the disk, udev re-reads its partition table only if
     it can take LOCK_EX|LOCK_NB on it, and gives up the re-read while that
     fails (src/shared/reread-partition-table.c:255-271); its workers'
-    LOCK_SH|LOCK_NB requeues the event (src/udev/udev-worker.c:124-136). The
+    LOCK_SH|LOCK_NB requeues the event (src/udev/udev-worker.c:124-136). On
+    noble's v255 the same: src/shared/blockdev-util.c:745-763 and
+    src/udev/udev-worker.c:117, :183-190. The
     lock is waited for up to 10 s (udevd may be probing). The descriptor is
     read-only, so closing it triggers no new event.
     """
