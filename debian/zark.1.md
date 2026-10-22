@@ -975,7 +975,8 @@ for the canonical end-to-end sequences.
 
 # WORKFLOWS
 
-The following sequences cover the two normal end-to-end uses of **zark**.
+The following sequences cover the normal end-to-end uses of **zark**, and
+the move from **zark** 1.x.
 
 ## First-time setup of a new backup drive
 
@@ -1005,6 +1006,45 @@ into the recovered system and run:
 To verify a recovery without rebooting:
 
     sudo zark simulate
+
+## Upgrading from zark 1.x
+
+The package upgrade replaces the code under */usr/share/zark* and adds the
+self-test's certificates; */etc/zark/known_drives.json*, */etc/sanoid/sanoid.conf*
+and the guards 1.x's **setup** installed are left as they are (1.0.12 has no
+maintainer script that runs on upgrade; 2.0.0's only creates */etc/zark*).
+The package is now *amd64* (it was *all*). Then, once per system:
+
+    sudo zark setup          # the policy's diff, then "Apply these changes?";
+                             # replaces the guards, installs the alerts
+    sudo zark backup         # once to each drive
+
+**setup** asks to enable rpool's *feature@bookmark_v2* only when it is
+disabled; once enabled it cannot be disabled. The first backup to a drive
+written by 1.x can ask once how to continue when the drive holds snapshots
+newer than anything the source still has ("first run of this zark on a drive
+written by an older one"): keeping them in archived lineages and continuing
+from the common snapshot destroys and resends nothing (1.x destroyed them
+silently). It can also ask about datasets changed on the drive since their
+newest snapshot (skipping them changes nothing) and datasets only on the
+backup ("ask again next time" changes nothing). After it, the drive is
+anchored by bookmarks.
+
+Once every registered drive has had its first zark 2 backup, **zark prune**,
+origin, "remove the legacy residues" removes the *syncoid_\** snapshots and
+the keystore's *prepare_\** ones 1.x left (one a drive may still need is kept
+and named). Until then, do not remove sanoid snapshots by age in the source:
+one is a 1.x drive's only base (**prune** warns).
+
+No longer needed: stopping *apt-daily-upgrade.timer* around a backup,
+avoiding **clean**, **prepare** and **purge**, keeping 1.x's *syncoid_\**
+snapshots, and checking *known_drives.json* by hand (**registry**). Still
+true: never destroy snapshots by *%* range or by hand on a backup drive, and
+after a crash during a backup unplug the drive before booting.
+
+Until a drive's first zark 2 backup, 1.0.12 can still back up to it; a drive
+**zark** 2 has written must not be used with 1.x again (**syncoid** would
+roll its backup points back).
 
 # FILES
 
