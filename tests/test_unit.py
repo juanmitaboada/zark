@@ -4234,6 +4234,33 @@ class TestForceLatestSignedAlternative:  # pylint: disable=missing-function-docs
 # ═════════════════════════════════════════════════════════════════════════
 
 
+class TestSecureBootAlternatives:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M6-16 16a: setup names both reasons a shim can be on ``.previous``."""
+
+    def test_the_offer_names_the_installer_and_shims_own_choice(self):
+        prev = Path("/usr/lib/shim/shimx64.efi.signed.previous")
+        latest = Path("/usr/lib/shim/shimx64.efi.signed.latest")
+        mock = MockShell()
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(
+                setup_mod,
+                "_signed_alternative_status",
+                side_effect=lambda name: (
+                    (prev, latest) if name.startswith("shim") else (None, None)
+                ),
+            ),
+            patch("builtins.input", return_value="n"),
+            redirect_stdout(out),
+        ):
+            setup_mod._check_secure_boot_alternatives(make_log())  # pylint: disable=protected-access
+        text = " ".join(out.getvalue().split())
+        assert "the installer left it there (the 'subiquity bug'" in text, text
+        assert "the new shim's SBAT revokes an installed kernel" in text, text
+        assert not [c for c in mock.calls if c.startswith("update-alternatives --set")]
+
+
 class TestSignedAlternativeStatus:  # pylint: disable=missing-function-docstring
     """Tests for ``_signed_alternative_status``.
 

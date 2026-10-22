@@ -697,7 +697,10 @@ def _check_secure_boot_alternatives(log: Log) -> None:
     at the older shim (15.4-0ubuntu9, ``.signed.previous``). Recent SBAT
     revocations from fwupd then reject that binary at boot, leaving the
     system unable to start with the dreaded "Verifying shim SBAT data
-    failed: Security Policy Violation".
+    failed: Security Policy Violation". shim-signed's postinst (1.58, noble)
+    also gives ``.previous`` the priority itself, with Secure Boot on, when
+    the new shim's SBAT revokes an installed kernel (postinst:63-75): the
+    text names both causes (M6-16 16a).
 
     This function inspects the alternatives for ``shimx64.efi.signed`` and
     ``grubx64.efi.signed``. If any points to ``.previous`` and a ``.latest``
@@ -732,9 +735,14 @@ def _check_secure_boot_alternatives(log: Log) -> None:
     log.warn(
         "One or more Secure Boot binaries are NOT pinned to the latest variant.",
     )
+    # Two causes (M6-16 16a): shim-signed's postinst picks .previous itself
+    # under Secure Boot when the new shim revokes an installed kernel (1.58).
     log.info(
-        "This is the 'subiquity bug' that leaves systems unbootable after "
-        "SBAT updates from fwupd. Affected boot chain: ",
+        "Either the installer left it there (the 'subiquity bug', which leaves "
+        "systems unbootable after SBAT updates from fwupd), or shim's own update "
+        "chose .previous because Secure Boot is on and the new shim's SBAT revokes "
+        "an installed kernel: then switching can leave that kernel unbootable. "
+        "Affected boot chain: ",
     )
     for alt_name, _, current, latest in needs_fix:
         log.info(f"  {alt_name}: {current.name} → would become {latest.name}")
