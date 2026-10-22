@@ -271,8 +271,7 @@ def _pools_from_record(
     if rec is None or not known or not all(p in rec.pools for p in ("rpool", "bpool")):
         live = sh.run("zfs version").lines
         log.warn(
-            "This point does not record origin's pool features (written before zark "
-            + f"2.0.0-rc11{'' if rec is None else ', or incomplete'}): rpool gets every feature "
+            f"{_no_record_why(rec, known)}: rpool gets every feature "
             + f"of this live's ZFS ({live[0].strip() if live else 'unknown'}). If the restored "
             + "system runs an older OpenZFS, it may not import rpool once one of them is active."
         )
@@ -301,6 +300,20 @@ def _pools_from_record(
         if s.compat_missing:
             log.info(f"  {p}: compatibility={s.compat_missing} left off (not on this live)")
     return specs
+
+
+def _no_record_why(rec: pool_record.PoolRecord | None, known: set[str]) -> str:
+    """Why the pools are created as before 2.0.0-rc11, for recover's WARN (M6-7)."""
+    # A whole record on a live that lists no feature is not an old point (M6R-4).
+    if rec is not None and not known and all(p in rec.pools for p in ("rpool", "bpool")):
+        return (
+            "This live's zpool upgrade -v lists no feature, so origin's recorded pool "
+            + "features cannot be checked against it"
+        )
+    return (
+        "This point does not record origin's pool features (written before zark "
+        + f"2.0.0-rc11{'' if rec is None else ', or incomplete'})"
+    )
 
 
 def _warn_old_live(log: Log) -> None:

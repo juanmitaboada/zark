@@ -10634,6 +10634,41 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         assert " -d -o feature@async_destroy=enabled " in creates[0]
         assert " -d " not in creates[1]
 
+    def test_a_live_that_lists_no_feature_is_named_not_the_point(self):
+        """M6R-4: a whole record on a live whose zpool upgrade -v lists nothing
+        is not called old or incomplete; the pools are created as before."""
+        rec = pool_record.PoolRecord(
+            "26.04",
+            "zfs-2.4.1",
+            "zfs-kmod-2.4.1",
+            {
+                "rpool": pool_record.PoolState("off", {"encryption": "active"}),
+                "bpool": pool_record.PoolState("off", {"lz4_compress": "active"}),
+            },
+        )
+        out = StringIO()
+
+        def shell(mock: MockShell) -> None:
+            _ = mock.on("zpool upgrade -v").succeeds("")
+
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_to_create(
+                td,
+                shell_setup=shell,
+                extra=[
+                    patch.object(recover_mod.pool_record, "read", return_value=rec),
+                    redirect_stdout(out),
+                ],
+            )
+        text = out.getvalue()
+        assert "This live's zpool upgrade -v lists no feature" in text
+        assert "does not record origin's pool features" not in text
+        assert "or incomplete" not in text
+        creates = [c for c in mock.calls if c.startswith("zpool create")]
+        assert len(creates) == 2, mock.calls[-30:]
+        assert " -d -o feature@async_destroy=enabled " in creates[0]
+        assert " -d " not in creates[1]
+
     def test_a_live_older_than_26_04_is_warned_and_recover_goes_on(self):
         """M6-8 8a: a WARN naming the live's Ubuntu and OpenZFS, no question."""
         for rel, warned in (("24.04", True), ("26.04", False), ("26.10", False), ("", False)):

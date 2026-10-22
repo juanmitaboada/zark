@@ -90,6 +90,12 @@ preceded them.
   `apt install cryptsetup-initramfs && update-initramfs -u -k all`),
   where the boot would stop in the initramfs shell. An installer's root
   always has it; dracut systems are unchanged.
+- **The no-record warning names the live when it is the live's fault**
+  (M6R-4, M6F-6 6a): a whole record on a live whose `zpool upgrade -v`
+  lists no feature now says so ("This live's zpool upgrade -v lists no
+  feature, so origin's recorded pool features cannot be checked against
+  it") instead of calling the point written before rc11 or incomplete;
+  the pools are created as for a point without a record, as before.
 - Comments that cite sanoid 2.3.0 or systemd v258/v259.5 also give
   noble's lines where zark relies on the behaviour; the sanoid defaults
   path in `lib/sanoid_retention.py` is `/usr/share/sanoid/` (M6-18,
@@ -114,6 +120,8 @@ preceded them.
   and without origin's record (M6R-1).
 - An initramfs-tools root with and without `cryptsetup-initramfs`'s
   script and hook (M6R-2).
+- A whole record on a live whose `zpool upgrade -v` lists nothing
+  (M6R-4).
 
 #### Known limitations
 
