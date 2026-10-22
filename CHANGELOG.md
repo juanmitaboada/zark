@@ -10,10 +10,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 zark 2 is being built as internal milestones on `main`, versioned
 `2.0.0-rcN` (`lib/config.py`) and `2.0.0~rcN-1` UNRELEASED
 (`debian/changelog`). Nothing is uploaded to the PPA until the final 2.0.0.
-The tree currently carries **M5b (2.0.0-rc10)** on top of M5a (2.0.0-rc9), M4d (2.0.0-rc8), M4c (2.0.0-rc7),
+The tree currently carries **M6 (2.0.0-rc11)** on top of M5b (2.0.0-rc10), M5a (2.0.0-rc9), M4d (2.0.0-rc8), M4c (2.0.0-rc7),
 M4s (2.0.0-rc6), M4b (2.0.0-rc5), M4a (2.0.0-rc4), M3 (2.0.0-rc3), M2
 (2.0.0-rc2), M1 (2.0.0-rc1) and the development-tooling consolidation that
 preceded them.
+
+### M6: Ubuntu 24.04 (noble), and origin's pools on the drive (2.0.0-rc11)
+
+#### Added
+
+- **Each backup point records how origin's pools were** (M6-5 5a):
+  prepare and every backup write `org.zark:pools` on every snapshot of
+  the point, in the same `zfs set` as its exclusion record: for rpool
+  and bpool each feature that is enabled or active, with its state (one
+  the tools do not know as `unsupported@<guid>`), the pool's
+  `compatibility`, and origin's Ubuntu release and OpenZFS tools and
+  module, as one JSON value well under a user property's 8191 bytes. A
+  pool that cannot be read is a warning and the point is written without
+  the record (M6-9 9a).
+- **recover creates rpool and bpool as origin had them** (M6-6 6a):
+  `zpool create -d` with only the recorded features this live's ZFS
+  knows, and origin's `compatibility` when the live has its file (left
+  off and named otherwise). Decided right after the plan, before the
+  target is chosen: a feature origin had active that the live lacks is a
+  FATAL naming the pool, the feature and the release it needs ("Nothing
+  was erased"); one origin only had enabled is left out with an INFO
+  line. bpool created from the record does not get the dracut extended
+  features. A point without the record keeps the old creation, with a
+  WARN naming the live's ZFS and the import risk (M6-7 7a).
+- **recover warns on a live older than Ubuntu 26.04** (M6-8 8a), naming
+  its release and OpenZFS, and goes on: the drive's feature check and the
+  pre-flight stop what that live cannot do.
+- **Self-test check POOL-13** (M6-10): `zpool create -d` with a feature
+  list enables only those and their dependencies, and `zpool get -H -p
+  all`, read by the record's parser, shows each in its state.
+
+#### Changed
+
+- **ROLLBACK's keep (`Run.branch`) clones without `-u`** (M6-20, N4):
+  OpenZFS 2.2.2 (noble) has no `zfs clone -u`, so the option failed on
+  its first command there. The clone's `canmount=noauto` keeps either
+  release from mounting it; the self-test's CLN-01, SND-09, SND-10,
+  DST-02 and KEY-03 set up their clones the same way.
+- **recover adds no keystore hook to an initramfs-tools system** (M6-4
+  4a, N1): on noble the hook's local-premount script ran before
+  zfs-initramfs imported rpool, so it never acted; noble's own zfs script
+  opens the keystore after the import (part 0's L0 found `cryptroot` in
+  the installer's initrd). dracut systems are unchanged.
+- **The self-test's reboot warning** (M6-3 3a, N3) compares the loaded
+  ZFS module with the one installed for the running kernel (`modinfo -F
+  version zfs`), revision included, instead of the module with the tools:
+  noble's HWE 7.0 kernel ships a 2.4.1 module under 2.2.2 tools by
+  design.
+- **POOL-06 and DST-02 read OpenZFS 2.2.2's texts** too (M6-20, N5, N6):
+  `zpool import`'s listing indented one space more, and "dataset is
+  busy" for the destroy of a held snapshot.
+- **setup's `.previous` shim text** names both causes (M6-16 16a): the
+  installer, or shim-signed's own postinst choosing `.previous` under
+  Secure Boot for a kernel the new shim's SBAT revokes.
+- **The package is `Architecture: amd64`** (M6-11): `zark_<v>-1_amd64.deb`.
+- Comments that cite sanoid 2.3.0 or systemd v258/v259.5 also give
+  noble's lines where zark relies on the behaviour; the sanoid defaults
+  path in `lib/sanoid_retention.py` is `/usr/share/sanoid/` (M6-18,
+  M6-19).
+
+#### Tests
+
+- The record: `zpool get`'s states, its size bound, a pool that cannot be
+  read, the read-back (none, a disagreement, a value that is not a
+  record), the one `zfs set`, prepare's and backup's points carrying it;
+  `create_spec` and its options, compatibility present and missing.
+- recover with a record (both `zpool create` lines and the plan's
+  lines), a FATAL before any wipe, a point without a record, the bpool
+  extended features only without it, the live warning on 24.04 only, the
+  initramfs-tools root left without a hook.
+- The fake refuses `zfs clone -u` as 2.2.2 does; the reboot warning on a
+  stale module and not on noble's design; setup's two causes.
+
+#### Known limitations
+
+- **A 24.04 system is recovered from a 26.04 or newer live** only; an
+  older live gets a warning and may stop at the drive's features or the
+  pre-flight (M6-8).
+- **recover forces shim's `.latest`** (M6-17 17a): on noble, when Secure
+  Boot is on and an installed kernel is revoked by the new shim's SBAT,
+  shim-signed's postinst would have chosen `.previous`; the restored
+  system can then not boot that kernel.
+- **sanoid 2.2.0 (noble) defers a prune** while `ps` shows a `zfs send`
+  or `receive` naming the dataset (M6-18): zark's own sends stop
+  `sanoid.timer` first, so only another tool's send defers it; a drained
+  snapshot exclusion then loses its old snapshots one run later.
+- **A drive with OpenZFS 2.3 or 2.4 features** passes recover's feature
+  check on noble (its 2.4.1 module imports it), but noble's 2.2.2 tools
+  cannot receive streams with the longname or large_microzap flags
+  (M6-20, N8). Only a drive a 2.3+ system prepared without compatibility
+  has them.
+- A point written before 2.0.0-rc11 has no record: recover gives rpool
+  every feature of its live's ZFS, as before, with a warning (M6-7).
+
+#### Rejected approaches
+
+- **One drive-level record rewritten at every backup** (M6-5 5b, 5c): it
+  would give an old point the pools of a later `zpool upgrade`.
+- **bpool's recorded features intersected with GRUB's `grub2` set**
+  (M6-6 6b): origin's bpool was readable by the GRUB being restored.
+- **Refusing a point without a record, or deriving a compatibility from
+  the boot environment's OpenZFS** (M6-7 7b, 7c): no v2 drive outside the
+  maintainer's has such points, and the derivation is guesswork.
+- **A question for an old live** (M6-8 8b), and **a FATAL when origin's
+  pools cannot be read** (M6-9 9b): the exclusion record's failure is a
+  warning too.
+- **Dropping the module warning, or leaving it** (M6-3 3b, 3c); **keeping
+  the initramfs-tools hook** (M6-4 4b); **following shim's postinst
+  choice in recover** (M6-17 17b).
 
 ### M5b: dataset exclusions, and M5a's leftovers (2.0.0-rc10)
 

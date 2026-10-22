@@ -475,7 +475,13 @@ for the canonical end-to-end sequences.
     final banner list it with its size (the source's *referenced*, what a
     first full send would carry). The point records what it left out, and
     the canmount and mountpoint each dataset had, on its snapshots on the
-    drive (**org.zark:excluded**), so **recover** can recreate them. A
+    drive (**org.zark:excluded**), so **recover** can recreate them. In
+    the same **zfs set** the point records how origin's **rpool** and
+    **bpool** were: each feature enabled or active, its state, the pools'
+    *compatibility*, and the Ubuntu release and OpenZFS tools and module
+    that ran them (**org.zark:pools**), so **recover** can create the new
+    pools as origin had them; a pool that cannot be read is a warning and
+    the point is written without it. A
     record longer than one user property (8191 bytes) is written in parts
     (**org.zark:excluded.1** to **.n**) behind a pointer with their count
     and digest, up to 64 parts; past that the backup stops before its
@@ -587,7 +593,9 @@ for the canonical end-to-end sequences.
 **recover**
 :   Full bare-metal restoration of an encrypted Ubuntu-on-ZFS system from
     a backup drive. Must be run from an Ubuntu Live USB with the backup
-    drive connected.
+    drive connected: Ubuntu 26.04 or newer, for a 24.04 or a 26.04
+    system. On an older live **recover** warns and goes on; what that
+    live cannot do stops it before anything is erased.
 
     The procedure scans for backup drives and, before importing anything,
     lists the chosen drive with **zpool import -d**: when it uses features
@@ -632,8 +640,9 @@ for the canonical end-to-end sequences.
     **zfs change-key -i**, repopulates **bpool**, chroots into the
     recovered system, reinstalls a Secure-Boot-capable GRUB chain via the
     **dpkg-reconfigure**(8) sequence described in **NOTES**, regenerates
-    the initramfs (**dracut**(8) on Ubuntu 25.04+, **initramfs-tools**(8)
-    on 24.04) and exports both pools cleanly. The keystore's
+    the initramfs (**dracut**(8) on Ubuntu 25.04+, with **zark**'s keystore
+    module; **initramfs-tools**(8) on 24.04, whose own zfs script opens the
+    keystore) and exports both pools cleanly. The keystore's
     *@prepare_\** snapshot, which **prepare** leaves on the drive, is
     removed from the recovered system. A failed receive, anchor, ESP
     record in **debconf** or missing EFI binary makes the banner RECOVERY
@@ -655,6 +664,18 @@ for the canonical end-to-end sequences.
     **org.zark:snapshot=no** again (a raw stream carries no user
     property). A failed create or set is listed in the banner's errors. A
     point written before 2.0.0-rc10 restores as before.
+
+    **rpool** and **bpool** are created as the point's **org.zark:pools**
+    says origin had them: **zpool create -d** with only origin's features,
+    and origin's *compatibility* when the live has its file (left off and
+    named otherwise). A feature origin had active that the live's ZFS
+    lacks stops **recover** before anything is erased, naming the release
+    it needs; one origin only had enabled is left out with a line in the
+    plan. A point without the record (written before 2.0.0-rc11) gets
+    **bpool** with the GRUB-readable base features and **rpool** with
+    every feature of the live's ZFS, with a warning: a restored system
+    whose OpenZFS is older may not import **rpool** once one of them is
+    active.
 
     The recovered system boots without **zark** present and receives
     normal **apt**(8) upgrades thereafter. **zark** is needed only for

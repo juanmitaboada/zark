@@ -1,3 +1,18 @@
+zark (2.0.0~rc11-1) UNRELEASED; urgency=medium
+
+  * Milestone M6 of zark 2 (Ubuntu 24.04, noble). Not for release:
+    nothing is published until the final 2.0.0.
+  * prepare and every backup record how origin's rpool and bpool were
+    (features, compatibility, Ubuntu and OpenZFS) on each point;
+    recover creates the pools with exactly those features, and warns on
+    a live older than 26.04.
+  * noble: zfs clone without -u (OpenZFS 2.2.2); no initramfs-tools
+    keystore hook (the zfs script opens the keystore); the self-test's
+    module warning only when a reboot is due; new check POOL-13.
+  * Architecture: amd64.
+
+ -- Juanmi Taboada <br0th3r@juanmitaboada.com>  Thu, 22 Oct 2026 17:30:00 +0200
+
 zark (2.0.0~rc10-1) UNRELEASED; urgency=medium
 
   * Milestone M5b of zark 2 (dataset exclusions, and M5a's leftovers). Not
