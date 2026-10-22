@@ -340,8 +340,8 @@ def warning_lines(
         )
     if facts.zfs_mismatch:
         lines.append(
-            f"self-test: the ZFS module ({facts.series['zfs_kmod']}) and its tools "
-            + f"({facts.series['zfs']}) differ: reboot after updating ZFS"
+            f"self-test: the loaded ZFS module ({facts.exact['zfs_kmod']}) is not the one "
+            + f"installed for this kernel ({facts.zfs_kmod_installed}): reboot after updating ZFS"
         )
     return lines
 

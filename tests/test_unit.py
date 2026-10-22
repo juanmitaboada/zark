@@ -19870,10 +19870,11 @@ def _facts(**over: Any) -> pfacts.Facts:
     }
     series.update(over.pop("series", {}))
     return pfacts.Facts(
-        exact={"zfs": "zfs-2.4.1-1ubuntu5.1"},
+        exact={"zfs": "zfs-2.4.1-1ubuntu5.1", **over.pop("exact", {})},
         series=series,
         where=over.pop("where", "installed"),
         iso=over.pop("iso", None),
+        zfs_kmod_installed=over.pop("installed", ""),
     )
 
 
@@ -20175,12 +20176,19 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
             "self-test: SND-04.1 and 1 more failed on this machine on 2026-10-18: "
             + "the MODIFIED state"
         ]
-        mixed = _facts(series={"zfs_kmod": "2.3.4"})
-        lines = certs.warning_lines(mixed, checks, [], [])
+        stale = _facts(exact={"zfs_kmod": "zfs-kmod-2.4.1-1ubuntu4"}, installed="2.4.1-1ubuntu5.1")
+        lines = certs.warning_lines(stale, checks, [], [])
         assert lines[-1] == (
-            "self-test: the ZFS module (2.3.4) and its tools (2.4.1) differ: "
-            + "reboot after updating ZFS"
+            "self-test: the loaded ZFS module (zfs-kmod-2.4.1-1ubuntu4) is not the one "
+            + "installed for this kernel (2.4.1-1ubuntu5.1): reboot after updating ZFS"
         )
+        # M6-3: noble's HWE kernel, 2.2.2 tools on the 2.4.1 module it installed.
+        noble = _facts(
+            series={"zfs": "2.2.2", "zfs_kmod": "2.4.1"},
+            exact={"zfs_kmod": "zfs-kmod-2.4.1-1ubuntu5.1"},
+            installed="2.4.1-1ubuntu5.1",
+        )
+        assert not [ln for ln in certs.warning_lines(noble, checks, [], []) if "reboot" in ln]
 
     def test_the_subscription(self):
         with tempfile.TemporaryDirectory() as td:
@@ -20250,6 +20258,7 @@ class TestPlatformFacts:  # pylint: disable=missing-function-docstring
         mock.on("findmnt --version").succeeds("findmnt from util-linux 2.41.3\n")
         mock.on("systemctl --version").succeeds("systemd 259 (259.5-0ubuntu3.4)\n+PAM\n")
         mock.on("sgdisk --version").succeeds("GPT fdisk (sgdisk) version 1.0.10\n")
+        mock.on("modinfo -F version zfs").succeeds("2.4.1-1ubuntu4\n")
         return mock
 
     def test_series_drop_the_ubuntu_revision(self):
@@ -20269,6 +20278,7 @@ class TestPlatformFacts:  # pylint: disable=missing-function-docstring
         assert f.series["util_linux"] == "2.41" and f.series["systemd"] == "259"
         assert f.series["ubuntu"] == "26.04" and f.where == "installed" and f.iso is None
         assert f.exact["zfs_kmod"] == "zfs-kmod-2.4.1-1ubuntu4"
+        assert f.zfs_kmod_installed == "2.4.1-1ubuntu4"
 
     def test_a_live_session_reads_its_iso(self):
         mock = self._mock()
@@ -20280,8 +20290,17 @@ class TestPlatformFacts:  # pylint: disable=missing-function-docstring
                 f = pfacts.read()
         assert f.where == "live" and f.iso and f.iso.startswith("Ubuntu 26.04")
 
-    def test_a_different_release_is_a_mismatch(self):
-        assert _facts(series={"zfs_kmod": "2.3.4"}).zfs_mismatch
+    def test_only_a_module_other_than_the_installed_one_is_a_mismatch(self):
+        """M6-3 3a: a reboot is due when the loaded module is not the one
+        installed for the running kernel; tools of another release are not."""
+        loaded = {"zfs_kmod": "zfs-kmod-2.4.1-1ubuntu4"}
+        assert _facts(exact=loaded, installed="2.4.1-1ubuntu5.1").zfs_mismatch
+        assert not _facts(exact=loaded, installed="2.4.1-1ubuntu4").zfs_mismatch
+        assert not _facts(
+            series={"zfs": "2.2.2"}, exact=loaded, installed="2.4.1-1ubuntu4"
+        ).zfs_mismatch
+        assert not _facts(exact=loaded).zfs_mismatch  # modinfo unread
+        assert not _facts(installed="2.4.1-1ubuntu4").zfs_mismatch  # no module loaded
 
 
 class TestZfsFeatures:  # pylint: disable=missing-function-docstring

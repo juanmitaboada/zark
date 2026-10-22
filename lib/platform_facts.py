@@ -41,13 +41,17 @@ class Facts:
     series: dict[str, str]
     where: str  # "installed" or "live"
     iso: str | None
+    # The zfs module installed for the running kernel (modinfo), "" if unread.
+    zfs_kmod_installed: str = ""
 
     @property
     def zfs_mismatch(self) -> bool:
-        """Whether the loaded ZFS module and its tools are different releases
-        (Ubuntu's revision ignored, M4s-8)."""
-        tools, kmod = self.series.get("zfs", ""), self.series.get("zfs_kmod", "")
-        return bool(tools and kmod and tools != kmod)
+        """Whether the loaded ZFS module is not the one installed for the
+        running kernel, so a reboot is due (M6-3 3a). Tools and module of
+        different releases are not one: noble's HWE kernel ships a 2.4.1
+        module under 2.2.2 tools by design."""
+        loaded = self.exact.get("zfs_kmod", "").removeprefix("zfs-kmod-")
+        return bool(loaded and self.zfs_kmod_installed and loaded != self.zfs_kmod_installed)
 
 
 def _os_release() -> dict[str, str]:
@@ -123,4 +127,5 @@ def read() -> Facts:
             iso = lines[0].strip() if lines else "unknown"
         except OSError:
             iso = "unknown"
-    return Facts(exact, series, "live" if live else "installed", iso)
+    installed = _first("modinfo -F version zfs")
+    return Facts(exact, series, "live" if live else "installed", iso, installed)

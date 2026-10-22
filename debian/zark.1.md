@@ -178,7 +178,8 @@ for the canonical end-to-end sequences.
     **zark** and by this machine's own runs. **warnings on** adds one line at
     the start of **setup**, **backup** and **recover**, and to the MOTD,
     when no certificate covers this platform, when a check failed here, or
-    when the loaded ZFS module and its tools are different releases;
+    when the loaded ZFS module is not the one installed for the running
+    kernel (a reboot is due);
     **warnings off** (the default) removes them. **certificate** turns
     reports into entries of the certificates file (for the maintainer).
 
