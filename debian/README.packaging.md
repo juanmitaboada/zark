@@ -97,8 +97,8 @@ sudo dpkg -P zark       # purge to clean up
 
 `debuild` also runs `lintian` against the resulting `.deb`; address any
 errors before declaring the build clean. Warnings should be reviewed
-case by case - some are legitimately suppressed in
-`debian/zark.lintian-overrides`.
+case by case; one that is legitimate is acknowledged in
+`debian/zark.lintian-overrides`, with its reason (it holds none today).
 
 ---
 
