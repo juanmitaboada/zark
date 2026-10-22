@@ -10915,18 +10915,22 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         sets = [c for c in mock.calls if "debconf-set-selections" in c]
         assert len(sets) == 1 and f"install_devices multiselect {by_id}'" in sets[0], sets
 
+    _CRYPTROOT_SCRIPT = "usr/share/initramfs-tools/scripts/local-top/cryptroot"
+    _CRYPTROOT_HOOK = "usr/share/initramfs-tools/hooks/cryptroot"
+
     @staticmethod
-    def _initramfs_tools_chain(cryptroot: bool) -> tuple[list[str], str, bool]:
-        """install_boot_chain on an initramfs-tools fake root, with or without
-        cryptsetup-initramfs's script and hook: its errors, its output, and
+    def _initramfs_tools_chain(files: tuple[str, ...]) -> tuple[list[str], str, bool]:
+        """install_boot_chain on an initramfs-tools fake root that holds the
+        given files (paths relative to the root): its errors, its output, and
         whether it wrote /etc/initramfs-tools."""
         with tempfile.TemporaryDirectory() as td:
             efi = Path(td) / "boot/efi/EFI/ubuntu"
             efi.mkdir(parents=True)
             for name in ("grubx64.efi", "shimx64.efi"):
                 _ = (efi / name).write_text("")
-            if cryptroot:
-                TestRecoverBootChain._cryptsetup_initramfs(td)
+            for rel in files:
+                Path(td, rel).parent.mkdir(parents=True, exist_ok=True)
+                _ = Path(td, rel).write_text("", encoding="utf-8")
             mock = MockShell()
             mock.on_prefix(f"chroot {td} debconf-show").succeeds(
                 "* grub-efi/install_devices: /dev/sda1\n"
@@ -10951,7 +10955,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         """M6-4 4a, M6R-2: on 24.04 the zfs initramfs script opens the keystore
         after the import with cryptsetup-initramfs's cryptroot; recover adds
         nothing to /etc/initramfs-tools."""
-        errors, out, hook_dir = self._initramfs_tools_chain(cryptroot=True)
+        errors, out, hook_dir = self._initramfs_tools_chain(boot_chain.CRYPTROOT_FILES)
         assert not hook_dir
         assert not errors, errors
         assert "opened at boot by the system's zfs initramfs script" in out
@@ -10959,7 +10963,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
     def test_an_initramfs_tools_root_without_cryptsetup_initramfs_is_an_error(self):
         """M6R-2: without cryptsetup-initramfs the restored initrd cannot open
         the keystore; the banner's error names the package and the repair."""
-        errors, out, hook_dir = self._initramfs_tools_chain(cryptroot=False)
+        errors, out, hook_dir = self._initramfs_tools_chain(())
         assert not hook_dir
         assert len(errors) == 1, errors
         assert "lacks cryptsetup-initramfs" in errors[0]
@@ -10968,6 +10972,20 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         repair = "chroot, then apt install cryptsetup-initramfs && update-initramfs -u -k all"
         assert repair in errors[0], errors[0]
         assert "opened at boot by the system's zfs initramfs script" not in out
+
+    def test_either_cryptroot_file_missing_alone_is_an_error_naming_it(self):
+        """M6V-1: each of cryptsetup-initramfs's two files is checked on its
+        own: a root with only one of them gets one error naming the other
+        alone. The paths are written literally, not from CRYPTROOT_FILES."""
+        script, hook = self._CRYPTROOT_SCRIPT, self._CRYPTROOT_HOOK
+        for present, absent in ((hook, script), (script, hook)):
+            errors, out, hook_dir = self._initramfs_tools_chain((present,))
+            assert not hook_dir
+            assert len(errors) == 1, (present, errors)
+            assert "lacks cryptsetup-initramfs" in errors[0], errors[0]
+            assert f"(/{absent})" in errors[0], (absent, errors[0])
+            assert f"/{present}" not in errors[0], (present, errors[0])
+            assert "opened at boot by the system's zfs initramfs script" not in out
 
     def test_bpool_gets_the_extended_features_only_without_origins_record(self):
         """M6-6: on a dracut system bpool gets BPOOL_FEATURES_EXTENDED unless

@@ -122,6 +122,8 @@ preceded them.
   script and hook (M6R-2).
 - A whole record on a live whose `zpool upgrade -v` lists nothing
   (M6R-4).
+- An initramfs-tools root with only one of `cryptsetup-initramfs`'s two
+  files, each way: one error naming the missing file alone (M6V-1).
 
 #### Known limitations
 
