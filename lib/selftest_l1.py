@@ -20,12 +20,15 @@ systemd 259.5, Linux 7.0, CPython 3.14.4, sanoid 2.3.0); the plan's
 section 4 has the same table. The command shapes are zark's own.
 """
 
+# One check per function, each with its source citations: long by design.
+# pylint: disable=too-many-lines
+
 import os
 import shlex
 import shutil
 from pathlib import Path
 
-from lib import identity, sh, zfs_features
+from lib import identity, pool_record, sh, zfs_features
 from lib.keystore import ZVOL_ID, Keystore
 from lib.selftest import (
     Bench,
@@ -452,6 +455,55 @@ def pool_12(b: Bench) -> None:
         got = label.hostid if label is not None else "no label"
         expect(got == want, f"read_pool_label: hostid {want}", observed(got))
         reimport(b, c)
+    finally:
+        b.drop_pool(c)
+
+
+@check(
+    "POOL-13",
+    1,
+    1,
+    "zpool create -d with a feature list enables only those, as the record reads them",
+    depends=(
+        "recover's pools as origin had them (M6-6): pool_record.create_spec and options",
+        "prepare's and backup's record of origin's pools (M6-5): pool_record.parse_get",
+    ),
+)
+def pool_13(b: Bench) -> None:
+    """``zpool create -d -o feature@X=enabled ...`` enables only the listed
+    features and the ones they depend on; every other is disabled. One that
+    activates on enable is ``active``. ``zpool get -H -p all`` prints each
+    with its state and zark's reader gives back the same set. OpenZFS
+    cmd/zpool/zpool_main.c:1997-1998, :2246-2288; module/zfs/zfeature.c:340-358;
+    module/zcommon/zfeature_common.c:387-390, :629-651;
+    lib/libzfs/libzfs_pool.c:1174-1185."""
+    known = set(zfs_features.parse_upgrade_v(b.ok("zpool upgrade -v").stdout))
+    asked = {"async_destroy": "enabled", "encryption": "enabled", "lz4_compress": "active"}
+    spec = pool_record.create_spec(pool_record.PoolState("off", asked), known)
+    expect(
+        sorted(spec.features) == sorted(asked),
+        "every asked feature known to this ZFS",
+        ", ".join(sorted(set(asked) - set(spec.features))),
+    )
+    want = {
+        **asked,
+        "bookmark_v2": "enabled",  # encryption's dependencies
+        "bookmarks": "enabled",
+        "extensible_dataset": "enabled",
+    }
+    c = b.make_pool("c", spec.options())
+    try:
+        r = b.ok(f"zpool get -H -p -o property,value all {c}")
+        got = pool_record.parse_get(r.stdout)
+        extra = sorted(set(got.features) - set(want))
+        expect(not extra, "no feature beyond the asked and their dependencies", ", ".join(extra))
+        wrong = sorted(
+            f"{k}={got.features.get(k, 'disabled')}"
+            for k, v in want.items()
+            if got.features.get(k) != v
+        )
+        expect(not wrong, "each feature in its state", ", ".join(wrong), text_of(r))
+        expect(got.compatibility == "off", "compatibility off", observed(got.compatibility))
     finally:
         b.drop_pool(c)
 
