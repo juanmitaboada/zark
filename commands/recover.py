@@ -59,7 +59,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, NoReturn
 
-from lib import certificates, drive_marks, exclusions, replication, sh, survey, zfs_features
+from lib import (
+    certificates,
+    drive_marks,
+    exclusions,
+    pool_record,
+    replication,
+    sh,
+    survey,
+    zfs_features,
+)
 from lib.backup_layout import find_be as _find_be
 from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
 from lib.cleanup import Cleanup, prompt_eject_or_attach
@@ -79,7 +88,13 @@ from lib.restore_plan import (
     partly_removed,
     show_plan,
 )
-from lib.restore_points import complete_points, point_name, restore_points, run_complete_points
+from lib.restore_points import (
+    Snap,
+    complete_points,
+    point_name,
+    restore_points,
+    run_complete_points,
+)
 from lib.zfs import ZFS
 
 # bpool features safe for GRUB 2.12 (Ubuntu 24.04 / initramfs-tools)
@@ -230,16 +245,72 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
 # ── Restore plan ─────────────────────────────────────────────────────────
 
 
+def _pools_from_record(
+    pool: str, point: str, snaps: list[Snap], log: Log
+) -> dict[str, pool_record.Create]:
+    """How rpool and bpool are created from the point's record of origin's
+    pools (M6-6), decided before anything is erased: a feature origin had
+    active that this ZFS lacks is a FATAL here. Empty without a usable
+    record: the pools are created as before 2.0.0-rc11, with a WARN (M6-7)."""
+    try:
+        rec = pool_record.read(pool, point, snaps)
+    except survey.ReadError as e:
+        log.fatal(
+            f"Cannot read how origin's pools were at this point on {pool}: {e}",
+            causes=["The drive did not answer a zfs get; nothing was written"],
+            solutions=[f"Check the drive: zpool status {pool}", "Run recover again"],
+        )
+    except ValueError as e:
+        log.warn(str(e))
+        rec = None
+    known = set(zfs_features.parse_upgrade_v(sh.run("zpool upgrade -v").stdout))
+    if rec is None or not known or not all(p in rec.pools for p in ("rpool", "bpool")):
+        live = sh.run("zfs version").lines
+        log.warn(
+            "This point does not record origin's pool features (written before zark "
+            + f"2.0.0-rc11{'' if rec is None else ', or incomplete'}): rpool gets every feature "
+            + f"of this live's ZFS ({live[0].strip() if live else 'unknown'}). If the restored "
+            + "system runs an older OpenZFS, it may not import rpool once one of them is active."
+        )
+        return {}
+    specs = {p: pool_record.create_spec(rec.pools[p], known) for p in ("rpool", "bpool")}
+    lacking = [f"{p}: {', '.join(s.lacking_active)}" for p, s in specs.items() if s.lacking_active]
+    if lacking:
+        names = sorted({f for s in specs.values() for f in s.lacking_active})
+        guids = tuple(f.guid for f in zfs_features.FEATURES if f.name in names)
+        log.fatal(
+            "This live's ZFS lacks features origin's pools had active at this point",
+            causes=[
+                *lacking,
+                f"This live runs {(sh.run('zfs version').lines or ['?'])[0].strip()}",
+            ],
+            solutions=[
+                f"Boot a live session with {zfs_features.needed_release(guids)} or later and "
+                + "run recover from it",
+                "Nothing was erased",
+            ],
+        )
+    for p, s in specs.items():
+        log.info(pool_record.describe(rec, p))
+        if s.lacking_enabled:
+            log.info(f"  {p}: not enabled, this ZFS lacks them: {', '.join(s.lacking_enabled)}")
+        if s.compat_missing:
+            log.info(f"  {p}: compatibility={s.compat_missing} left off (not on this live)")
+    return specs
+
+
 def needs_userdata(plan: RestorePlan) -> bool:
     """Whether step 8 creates the structural ``rpool/USERDATA``: a dataset
     the point restores below it, or one it recreates empty (M5b-13 13a)."""
     return any(r.rel.startswith("rpool/USERDATA/") for r in [*plan.rpool_rows, *plan.empty_rows])
 
 
-def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str) -> str:
-    """``zpool create`` for the encrypted rpool, root mountpoint as in origin."""
+def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str, features: str = "") -> str:
+    """``zpool create`` for the encrypted rpool, root mountpoint as in origin;
+    ``features`` the record's options (M6-6), "" for every feature of this ZFS."""
     return (
         "zpool create -f -o ashift=12 -o autotrim=on "
+        + (f"{features} " if features else "")
         + "-O acltype=posixacl -O xattr=sa -O dnodesize=auto "
         + "-O normalization=formD -O relatime=on "
         + f"-O canmount=off -O mountpoint={mountpoint} "
@@ -791,6 +862,7 @@ def run(
         excluded = None
     plan = build_plan(pool_name, device, ubuntu_name, point, snaps, log, complete, excluded)
     show_plan(plan, log, {i.guid: n for n, i in cfg.known_drives.items()})
+    pools_spec = _pools_from_record(pool_name, point_name(point), snaps, log)
     if plan.hostid:
         _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
         log.ok(f"Hostid set to: {sh.run('hostid').output}")
@@ -872,10 +944,14 @@ def run(
     rpool_vdev = _stable_vdev(internal_disk, 4, log)
     log.info(f"Pool devices: bpool {bpool_vdev}, rpool {rpool_vdev}")
 
-    # Use only GRUB-safe features for bpool (compatible with GRUB 2.12+)
-    features = " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
+    # bpool as origin had it (M6-6); without a record, only GRUB-safe features.
+    features = (
+        pools_spec["bpool"].options()
+        if pools_spec
+        else "-d " + " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
+    )
     r = sh.run(
-        f"zpool create -f -o ashift=12 -o autotrim=on -d {features} "
+        f"zpool create -f -o ashift=12 -o autotrim=on {features} "
         + "-O devices=off -O mountpoint=none -O canmount=off "
         + "-O acltype=posixacl -O xattr=sa -O compression=lz4 -O normalization=formD "
         + f"-R {RECOVER_MNT} bpool {bpool_vdev}",
@@ -888,7 +964,10 @@ def run(
 
     # Set at create time: the backup pool (with its keystore zvol) is still
     # imported, so a later `zfs set mountpoint` is forbidden (chase.c:648).
-    r = sh.run(_rpool_create_cmd(plan.rpool_mountpoint, tmp_key, rpool_vdev), log=log)
+    rpool_features = pools_spec["rpool"].options() if pools_spec else ""
+    r = sh.run(
+        _rpool_create_cmd(plan.rpool_mountpoint, tmp_key, rpool_vdev, rpool_features), log=log
+    )
     if not r.ok:
         log.fatal("Failed to create rpool container")
     cleanup.track_pool("rpool")
@@ -1049,7 +1128,9 @@ def run(
 
     # ── 15. Chroot: cachefile, grub.cfg UUID fix, grub-install, initrd ───
     log.step(15, TOTAL_STEPS, "Installing bootloader and regenerating initrd...")
-    errors += install_boot_chain(internal_disk, ubuntu_name, zfs, cleanup, log)
+    errors += install_boot_chain(
+        internal_disk, ubuntu_name, zfs, cleanup, log, bpool_as_recorded=bool(pools_spec)
+    )
     errors += regenerate_initrd(RECOVER_MNT, log)
 
     # ── 16. Cleanup and summary ──────────────────────────────────────────

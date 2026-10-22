@@ -6924,6 +6924,49 @@ class TestPoolRecord:  # pylint: disable=missing-function-docstring
         sets = [c for c in fake.calls if c.startswith("zfs set")]
         assert len(sets) == 1 and "org.zark:excluded=" in sets[0] and "org.zark:pools=" in sets[0]
 
+    def test_create_spec_keeps_what_this_zfs_knows_and_sorts_the_rest(self):
+        st = pool_record.PoolState(
+            "off",
+            {
+                "async_destroy": "enabled",
+                "encryption": "active",
+                "unsupported@com.delphix:redaction_bookmarks": "enabled",
+                "unsupported@com.example:used": "active",
+                "unsupported@com.example:newer": "enabled",
+            },
+        )
+        spec = pool_record.create_spec(st, {"async_destroy", "encryption", "redaction_bookmarks"})
+        assert spec.features == ("async_destroy", "encryption", "redaction_bookmarks")
+        assert spec.lacking_active == ("unsupported@com.example:used",)
+        assert spec.lacking_enabled == ("unsupported@com.example:newer",)
+        assert spec.compatibility == "" and spec.compat_missing == ""
+        assert spec.options() == (
+            "-d -o feature@async_destroy=enabled -o feature@encryption=enabled "
+            + "-o feature@redaction_bookmarks=enabled"
+        )
+
+    def test_create_spec_sets_origins_compatibility_only_when_installed(self):
+        st = pool_record.PoolState("grub2", {"async_destroy": "enabled"})
+        with patch.object(pool_record, "compat_installed", return_value=True):
+            spec = pool_record.create_spec(st, {"async_destroy"})
+        assert spec.compatibility == "grub2" and spec.compat_missing == ""
+        assert spec.options().endswith(" -o compatibility=grub2")
+        with patch.object(pool_record, "compat_installed", return_value=False):
+            spec = pool_record.create_spec(st, {"async_destroy"})
+        assert spec.compatibility == "" and spec.compat_missing == "grub2"
+        assert "compatibility" not in spec.options()
+        for off in ("off", "legacy", ""):
+            spec = pool_record.create_spec(pool_record.PoolState(off, {}), set())
+            assert spec.compatibility == spec.compat_missing == "" and spec.options() == "-d"
+
+    def test_compat_installed_needs_every_file_named(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "grub2").write_text("async_destroy\n", encoding="utf-8")
+            with patch.object(pool_record, "COMPAT_DIRS", (td,)):
+                assert pool_record.compat_installed("grub2")
+                assert not pool_record.compat_installed("grub2,openzfs-9.9")
+                assert not pool_record.compat_installed("")
+
 
 class TestExcludeCommand:  # pylint: disable=missing-function-docstring
     """zark exclude (M5b-2 2a): list, add and remove, as origin's properties."""
@@ -10295,6 +10338,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             else patch.object(recover_mod, "list_snapshots", return_value=snaps),
             patch.object(recover_mod, "choose_point", side_effect=spy("choose_point", point)),
             patch.object(recover_mod.exclusions, "read_point_mark", return_value=None),
+            patch.object(recover_mod.pool_record, "read", return_value=None),
             patch.object(recover_mod, "build_plan", side_effect=spy("build_plan", plan)),
             patch.object(recover_mod, "_select_target", return_value="/dev/sda"),
             patch.object(recover_mod, "_preflight", side_effect=preflight),
@@ -10367,15 +10411,23 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             assert copy.stat().st_mode & 0o777 == 0o600
             assert mock.was_called(f"rm -rf {copy.parent}")
 
-    def test_both_pools_are_created_on_the_targets_by_id_partitions(self):
-        """R2-14: recover creates bpool and rpool on the target's
-        /dev/disk/by-id partitions, not on its kernel names."""
-        disk_id = "ata-KINGSTON_SKC600MS512G_50026B7784FC3319"
+    _DISK_ID = "ata-KINGSTON_SKC600MS512G_50026B7784FC3319"
+
+    def _run_to_create(
+        self,
+        td: str,
+        shell_setup: Callable[[MockShell], None] | None = None,
+        extra: Sequence[AbstractContextManager[object]] = (),
+    ) -> MockShell:
+        """A run that reaches step 7 on a target with its by-id links."""
+        disk_id = self._DISK_ID
         links = f"{disk_id}\t../../sda\n" + "".join(
             f"{disk_id}-part{n}\t../../sda{n}\n" for n in range(1, 5)
         )
 
         def shell(mock: MockShell) -> None:
+            if shell_setup is not None:
+                shell_setup(mock)
             _ = mock.on_prefix("find /dev/disk/by-id/").succeeds(links)
             _ = mock.on_prefix("zpool create").succeeds()
 
@@ -10387,17 +10439,114 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
                 return True
             return real_exists(path, *a, **k)
 
+        return self._run_in(
+            td,
+            "YES",
+            shell_setup=shell,
+            extra=[
+                patch.object(recover_mod.Path, "exists", autospec=True, side_effect=exists),
+                *extra,
+            ],
+        )
+
+    def test_both_pools_are_created_on_the_targets_by_id_partitions(self):
+        """R2-14: recover creates bpool and rpool on the target's
+        /dev/disk/by-id partitions, not on its kernel names."""
+        disk_id = self._DISK_ID
         with tempfile.TemporaryDirectory() as td:
-            mock = self._run_in(
-                td,
-                "YES",
-                shell_setup=shell,
-                extra=[patch.object(recover_mod.Path, "exists", autospec=True, side_effect=exists)],
-            )
+            mock = self._run_to_create(td)
         creates = [c for c in mock.calls if c.startswith("zpool create")]
         assert len(creates) == 2, mock.calls[-30:]
         assert creates[0].endswith(f"bpool /dev/disk/by-id/{disk_id}-part2"), creates
         assert creates[1].endswith(f"rpool /dev/disk/by-id/{disk_id}-part4"), creates
+
+    _UPGRADE_V = (
+        "This system supports ZFS pool feature flags.\n\n"
+        + "The following features are supported:\n\n"
+        + "FEAT DESCRIPTION\n"
+        + "-------------------------------------------------------------\n"
+        + "async_destroy                         (read-only compatible)\n"
+        + "     Destroy filesystems asynchronously.\n"
+        + "encryption\n"
+        + "     Support for dataset level encryption\n"
+        + "lz4_compress\n"
+        + "     LZ4 compression algorithm support.\n\n"
+        + "The following legacy versions are also supported:\n"
+    )
+
+    def _with_record(
+        self, td: str, rpool: dict[str, str], bpool: dict[str, str]
+    ) -> tuple[MockShell, str]:
+        rec = pool_record.PoolRecord(
+            "24.04",
+            "zfs-2.2.2-0ubuntu9.5",
+            "zfs-kmod-2.4.1-1ubuntu5.1",
+            {
+                "rpool": pool_record.PoolState("off", rpool),
+                "bpool": pool_record.PoolState("off", bpool),
+            },
+        )
+        out = StringIO()
+
+        def shell(mock: MockShell) -> None:
+            _ = mock.on("zpool upgrade -v").succeeds(self._UPGRADE_V)
+
+        mock = self._run_to_create(
+            td,
+            shell_setup=shell,
+            extra=[
+                patch.object(recover_mod.pool_record, "read", return_value=rec),
+                redirect_stdout(out),
+            ],
+        )
+        return mock, out.getvalue()
+
+    def test_the_pools_are_created_with_the_features_origin_recorded(self):
+        """M6-6: with a record, bpool and rpool get no default feature, only
+        origin's that this ZFS knows; one origin only had enabled is left out."""
+        with tempfile.TemporaryDirectory() as td:
+            mock, out = self._with_record(
+                td,
+                {"async_destroy": "active", "encryption": "active", "unsupported@x:y": "enabled"},
+                {"async_destroy": "enabled", "lz4_compress": "active"},
+            )
+        creates = [c for c in mock.calls if c.startswith("zpool create")]
+        assert len(creates) == 2, mock.calls[-30:]
+        assert (
+            " -d -o feature@async_destroy=enabled -o feature@lz4_compress=enabled -O "
+            in (creates[0])
+        ), creates[0]
+        assert "feature@encryption" not in creates[0]
+        assert (
+            " -d -o feature@async_destroy=enabled -o feature@encryption=enabled " in creates[1]
+        ), creates[1]
+        assert "unsupported" not in creates[1]
+        assert "rpool: 3 feature(s) as origin had them (Ubuntu 24.04" in out
+        assert "not enabled, this ZFS lacks them: unsupported@x:y" in out
+        assert "does not record origin's pool features" not in out
+
+    def test_a_feature_origin_had_active_that_this_zfs_lacks_stops_before_erasing(self):
+        """M6-6: recover refuses such a point before it erases the target."""
+        with tempfile.TemporaryDirectory() as td:
+            mock, out = self._with_record(
+                td, {"encryption": "active", "unsupported@x:y": "active"}, {}
+            )
+        assert mock.was_not_called("wipefs")
+        assert mock.was_not_called("zpool create")
+        assert "lacks features origin's pools had active" in out
+        assert "rpool: unsupported@x:y" in out
+
+    def test_a_point_without_a_record_warns_and_creates_the_pools_as_before(self):
+        """M6-7, M6-9: a point written before 2.0.0-rc11 is restored as before,
+        with a warning naming the live's ZFS."""
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_to_create(td, extra=[redirect_stdout(out)])
+        assert "does not record origin's pool features" in out.getvalue()
+        creates = [c for c in mock.calls if c.startswith("zpool create")]
+        assert len(creates) == 2, mock.calls[-30:]
+        assert " -d -o feature@async_destroy=enabled " in creates[0]
+        assert " -d " not in creates[1]
 
     def test_no_wipe_when_not_confirmed(self):
         mock = self._run("NO")
@@ -10610,6 +10759,50 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         assert not errors, errors
         sets = [c for c in mock.calls if "debconf-set-selections" in c]
         assert len(sets) == 1 and f"install_devices multiselect {by_id}'" in sets[0], sets
+
+    def test_bpool_gets_the_extended_features_only_without_origins_record(self):
+        """M6-6: on a dracut system bpool gets BPOOL_FEATURES_EXTENDED unless
+        it was created from origin's record, which already has what it had."""
+        for as_recorded in (False, True):
+            with tempfile.TemporaryDirectory() as td:
+                efi = Path(td) / "boot/efi/EFI/ubuntu"
+                efi.mkdir(parents=True)
+                for name in ("grubx64.efi", "shimx64.efi"):
+                    _ = (efi / name).write_text("")
+                (Path(td) / "usr/bin").mkdir(parents=True)
+                _ = (Path(td) / "usr/bin/dracut").write_text("")
+                mock = MockShell()
+                mock.on_prefix(f"chroot {td} debconf-show").succeeds(
+                    "* grub-efi/install_devices: /dev/sda1\n"
+                )
+                _ = mock.on_prefix("").succeeds()
+                with (
+                    patch_sh(mock),
+                    patch.object(boot_chain, "RECOVER_MNT", td),
+                    patch.object(boot_chain.grub_guard, "install"),
+                    patch.object(boot_chain.apt_guard, "install"),
+                    patch.object(boot_chain, "_install_keystore_dracut"),
+                    patch.object(ZFS, "write_zpool_cache"),
+                    redirect_stdout(StringIO()),
+                ):
+                    _ = boot_chain.install_boot_chain(
+                        "/dev/sda",
+                        "x",
+                        ZFS(make_log()),
+                        Cleanup(make_log()),
+                        make_log(),
+                        bpool_as_recorded=as_recorded,
+                    )
+            sets = [c for c in mock.calls if c.startswith("zpool set feature@")]
+            want = (
+                []
+                if as_recorded
+                else [
+                    f"zpool set feature@{f}=enabled bpool"
+                    for f in boot_chain.BPOOL_FEATURES_EXTENDED.split()
+                ]
+            )
+            assert sets == want, (as_recorded, sets)
 
 
 class TestRecoverAnchors:  # pylint: disable=missing-function-docstring

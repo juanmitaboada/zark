@@ -32,10 +32,11 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import sh
+from lib import sh, zfs_features
 from lib.drive_marks import snapshot_marks
 from lib.log import Log
 from lib.restore_points import Snap
+from lib.zfs import COMPAT_DIRS
 
 POOLS_PROP = "org.zark:pools"
 FORMAT = 1
@@ -203,3 +204,58 @@ def describe(rec: PoolRecord, pool: str) -> str:
         if x
     )
     return f"{pool}: {n} feature(s) as origin had them" + (f" ({ran})" if ran else "")
+
+
+@dataclass(frozen=True)
+class Create:
+    """How recover creates one pool from origin's record (M6-6)."""
+
+    features: tuple[str, ...]  # enabled at create, by name
+    compatibility: str  # set at create, "" for none
+    lacking_active: tuple[str, ...]  # origin had them active; this ZFS lacks them
+    lacking_enabled: tuple[str, ...]  # only enabled in origin; left out
+    compat_missing: str  # origin's compatibility, not installed on this live
+
+    def options(self) -> str:
+        """The ``zpool create`` options: no default feature, only these."""
+        feats = " ".join(f"-o feature@{f}=enabled" for f in self.features)
+        compat = (
+            f" -o compatibility={shlex.quote(self.compatibility)}" if self.compatibility else ""
+        )
+        return f"-d {feats}{compat}".strip()
+
+
+def feature_name(key: str) -> str:
+    """A recorded feature by its short name; ``unsupported@<guid>`` through
+    zark's table when it knows the GUID, else as it was recorded."""
+    if key.startswith("unsupported@"):
+        f = zfs_features.BY_GUID.get(key.removeprefix("unsupported@"))
+        return f.name if f else key
+    return key
+
+
+def compat_installed(value: str) -> bool:
+    """Whether every file a ``compatibility`` value names is on this system:
+    ``zpool create`` refuses one that is not (lib/libzfs/libzfs_pool.c:826-837
+    at OpenZFS 2.4.1, ``zpool_load_compat``)."""
+    names = [n for n in value.split(",") if n]
+    return bool(names) and all(any(Path(d, n).is_file() for d in COMPAT_DIRS) for n in names)
+
+
+def create_spec(state: PoolState, known: set[str]) -> Create:
+    """What recover passes to ``zpool create`` for a pool origin had as
+    ``state``, on a live whose ZFS lists ``known`` features."""
+    on, active, enabled = [], [], []
+    for key, st in sorted(state.features.items()):
+        name = feature_name(key)
+        if name in known:
+            on.append(name)
+        elif st == "active":
+            active.append(name)
+        else:
+            enabled.append(name)
+    compat = state.compatibility if state.compatibility not in ("", "off", "legacy") else ""
+    present = compat if compat and compat_installed(compat) else ""
+    return Create(
+        tuple(on), present, tuple(active), tuple(enabled), compat if compat and not present else ""
+    )

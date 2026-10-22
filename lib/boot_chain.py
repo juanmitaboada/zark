@@ -323,12 +323,13 @@ def mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> N
     log.ok(f"System mounted at {RECOVER_MNT} ({mounted} datasets)")
 
 
-def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
+def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches,too-many-locals,too-many-arguments,too-many-positional-arguments
     internal_disk: str,
     ubuntu_name: str,
     zfs: ZFS,
     cleanup: Cleanup,
     log: Log,
+    bpool_as_recorded: bool = False,
 ) -> list[str]:
     """Chroot binds, zpool.cache, grub.cfg fix, signed GRUB/shim, keystore hook, guards.
 
@@ -494,10 +495,12 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
 
     if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists():
         _install_keystore_dracut(RECOVER_MNT, ubuntu_name, log)
-        # Enable extended bpool features (safe for GRUB on 25.04+)
-        for feat in BPOOL_FEATURES_EXTENDED.split():
-            _ = sh.run(f"zpool set feature@{feat}=enabled bpool")
-        log.ok(f"bpool extended features enabled ({len(BPOOL_FEATURES_EXTENDED.split())})")
+        # Without origin's record of bpool (M6-6): the extended features (safe
+        # for GRUB on 25.04+); with it, bpool already has what origin's had.
+        if not bpool_as_recorded:
+            for feat in BPOOL_FEATURES_EXTENDED.split():
+                _ = sh.run(f"zpool set feature@{feat}=enabled bpool")
+            log.ok(f"bpool extended features enabled ({len(BPOOL_FEATURES_EXTENDED.split())})")
     else:
         _install_keystore_initramfs(RECOVER_MNT, ubuntu_name, log)
 
