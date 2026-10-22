@@ -145,9 +145,10 @@ make deb-ppa
 ```
 
 It refuses to start (`make release-guard`) unless the tree has no
-uncommitted or untracked file, `HEAD` is the tag `v<version>` and the top
+uncommitted or untracked file, `HEAD` is the tag `v<version>`, and the top
 entry of `debian/changelog` is released (run `dch -r` and commit before
-tagging), so what is uploaded is exactly the tagged commit.
+tagging) and is this version's (`<version>-<revision>`), so what is
+uploaded is exactly the tagged commit.
 
 This iterates over the configured Ubuntu series, regenerates
 `debian/changelog` for each one with the appropriate `~ubuntuXX.YY.1`

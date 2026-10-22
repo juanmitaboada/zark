@@ -676,7 +676,7 @@ deb-ppa-resume: ## Upload remaining series after a deb-ppa-test (skips first ser
 	@# default series list ever changes.
 	@$(MAKE) --no-print-directory deb-ppa PPA_SERIES="$(wordlist 2,$(words $(PPA_SERIES)),$(PPA_SERIES))"
 
-release-guard: ## Refuse to release a tree that is dirty, not at the tag v$(VERSION), or UNRELEASED
+release-guard: ## Refuse to release a tree that is dirty, not at the tag v$(VERSION), or whose changelog is not v$(VERSION)'s released entry
 	@# M1P.7: what goes to the PPA is exactly the tagged commit.
 	@test -z "$$(git status --porcelain)" || { \
 		echo "  The tree has uncommitted or untracked files: commit or remove them first"; \
@@ -691,6 +691,14 @@ release-guard: ## Refuse to release a tree that is dirty, not at the tag v$(VERS
 	@# an UNRELEASED one would be uploaded below them.
 	@head -1 debian/changelog | grep -qv ' UNRELEASED;' || { \
 		echo "  debian/changelog's top entry is UNRELEASED: run 'dch -r' and commit before tagging"; \
+		exit 1; \
+	}
+	@# The top entry must be this version's: the tag v1.0.10 carried
+	@# debian/changelog at 1.0.9-1, so its .deb was built as 1.0.9-1. The
+	@# header's version without its Debian revision is compared.
+	@top=$$(head -1 debian/changelog | sed -nE 's/^[^ ]+ \(([^)]+)\).*/\1/p'); \
+	test "$${top%-*}" = "$(DEB_VERSION)" || { \
+		echo "  debian/changelog's top entry is $${top:-unreadable}, not $(DEB_VERSION)-<revision>: add this version's entry and commit before tagging"; \
 		exit 1; \
 	}
 

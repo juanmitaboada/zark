@@ -7184,10 +7184,11 @@ class TestPpaSeries:  # pylint: disable=missing-function-docstring,too-few-publi
 
 
 class TestReleaseGuard:  # pylint: disable=missing-function-docstring
-    """M5a-21: `make release-guard` refuses an UNRELEASED top changelog entry."""
+    """M5a-21: `make release-guard` refuses an UNRELEASED top changelog entry,
+    and one of another version than lib.config's (scope 5 of the release)."""
 
     @staticmethod
-    def _guard(top: str) -> tuple[int, str]:
+    def _guard(top: str, version: str = "9.9.9-1") -> tuple[int, str]:
         _skip_without_make()
         root = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory() as td:
@@ -7196,7 +7197,7 @@ class TestReleaseGuard:  # pylint: disable=missing-function-docstring
             (repo / "debian").mkdir()
             shutil.copy(root / "Makefile", repo / "Makefile")
             (repo / "lib" / "config.py").write_text('VERSION = "9.9.9"\n')
-            (repo / "debian" / "changelog").write_text(f"zark (9.9.9-1) {top}; urgency=medium\n")
+            (repo / "debian" / "changelog").write_text(f"zark ({version}) {top}; urgency=medium\n")
             env = {
                 **os.environ,
                 "PYTHONDONTWRITEBYTECODE": "1",  # the Makefile imports lib.config in the clone
@@ -7230,6 +7231,15 @@ class TestReleaseGuard:  # pylint: disable=missing-function-docstring
     def test_an_unreleased_entry_is_refused(self):
         rc, out = self._guard("UNRELEASED")
         assert rc != 0 and "top entry is UNRELEASED" in out, out
+
+    def test_a_top_entry_of_another_version_is_refused(self):
+        for version in ("9.9.8-1", "9.9.9.1-1", "9.9-1"):
+            rc, out = self._guard("noble", version)
+            assert rc != 0 and f"top entry is {version}, not 9.9.9-<revision>" in out, out
+
+    def test_a_later_debian_revision_passes(self):
+        rc, out = self._guard("noble", "9.9.9-2")
+        assert rc == 0, out
 
 
 class TestFulltestTargets:  # pylint: disable=missing-function-docstring,too-few-public-methods
