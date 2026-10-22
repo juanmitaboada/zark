@@ -264,17 +264,20 @@ def pool_05(b: Bench) -> None:
     ),
 )
 def pool_06(b: Bench) -> None:
-    """``zpool import -d <dir>`` without a name lists only (``  pool: ``,
-    ``    id: ``, `` state: ``) and imports nothing; with nothing to list it
-    says "no pools available to import" on stderr and exits 0. OpenZFS
-    cmd/zpool/zpool_main.c:3987-4017, :3415-3426, :4077-4079."""
+    """``zpool import -d <dir>`` without a name lists only (``pool: ``,
+    ``id: ``, ``state: ``, indented, as zark's parsers read them: stripped)
+    and imports nothing; with nothing to list it says "no pools available to
+    import" on stderr and exits 0. OpenZFS cmd/zpool/zpool_main.c:3987-4017,
+    :3415-3426, :4077-4079; 2.2.2, noble's tools, indents one space more
+    (its cmd/zpool/zpool_main.c:2778-2783)."""
     c = b.make_pool("c")
     try:
         guid = b.guids[c]
         _ = b.ok(f"zpool export {c}")
         r = b.ok(f"zpool import -d {b.vdev(c)}")
-        for line in (f"  pool: {c}", f"    id: {guid}", " state: ONLINE"):
-            expect(line in r.stdout.splitlines(), f"a line {line!r}", "no such line", text_of(r))
+        lines = [ln.strip() for ln in r.stdout.splitlines()]
+        for line in (f"pool: {c}", f"id: {guid}", "state: ONLINE"):
+            expect(line in lines, f"a line {line!r}", "no such line", text_of(r))
         expect(not b.run(f"zpool list -H {c}").ok, f"{c} still exported", "it was imported")
         empty = f"{b.dir}/empty"
         os.makedirs(empty, exist_ok=True)
@@ -1268,15 +1271,24 @@ def dst_01(b: Bench) -> None:
 )
 def dst_02(b: Bench) -> None:
     """``zfs destroy ds@a,b`` with one held snapshot destroys none ("it's
-    being held"); a clone origin is refused ("has dependent clones"); ``zfs
-    destroy -r ds@s`` takes that name on every descendant. OpenZFS
+    being held"; OpenZFS 2.2.2, noble's tools, has no EBUSY case there and
+    says "dataset is busy", its lib/libzfs/libzfs_dataset.c:4016-4018); a
+    clone origin is refused ("has dependent clones"); ``zfs destroy -r
+    ds@s`` takes that name on every descendant. OpenZFS
     lib/libzfs/libzfs_dataset.c:3968-4030; module/zfs/dsl_destroy.c:603-690, :55-89;
     cmd/zfs/zfs_main.c:1604-1622."""
     x = _origin(b, "dst02", 64)
     for n in ("1", "2", "3"):
         _ = b.ok(f"zfs snapshot {x}@{n}")
     _ = b.ok(f"zfs hold zark-selftest {x}@2")
-    _ = b.refused(f"zfs destroy {x}@1,2", "being held")
+    r = b.run(f"zfs destroy {x}@1,2")
+    said = r.stdout + r.stderr
+    expect(
+        not r.ok and ("being held" in said or "dataset is busy" in said),
+        "refused saying 'being held' (2.4) or 'dataset is busy' (2.2)",
+        exit_status(r),
+        text_of(r),
+    )
     got = ", ".join(b.snapshot_names(x))
     expect(got == "1, 2, 3", "nothing destroyed while 2 is held", got)
     _ = b.ok(f"zfs release zark-selftest {x}@2")
