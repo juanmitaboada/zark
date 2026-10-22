@@ -456,18 +456,27 @@ def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:
     return declared, mark
 
 
-def record(pool: str, point: str, rels: list[str], mark: str, log: Log) -> bool:
+def record(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pool: str,
+    point: str,
+    rels: list[str],
+    mark: str,
+    log: Log,
+    extra: tuple[tuple[str, str], ...] = (),
+) -> bool:
     """Set the point's mark on its snapshots on the drive, complete run or not
     (M5b-7 7a): user properties, nothing mounts. A record in parts goes in
     the same zfs set as its pointer, as separate arguments: one shell
-    string longer than 128 KiB is refused by execve (M5bR-1)."""
+    string longer than 128 KiB is refused by execve (M5bR-1). ``extra``
+    goes in the same zfs set: origin's pools (M6-5)."""
     if not rels:
         return True
-    props = [f"{k}={v}" for k, v in record_props(mark)]
+    props = [f"{k}={v}" for k, v in (*record_props(mark), *extra)]
     r = sh.run(["zfs", "set", *props, *(f"{pool}/{rel}@{point}" for rel in rels)], log=log)
     if not r.ok:
+        also = " and how origin's pools were" if extra else ""
         log.warn(
-            f"Could not record what {point} leaves out on {pool}: {r.stderr.strip()} "
+            f"Could not record what {point} leaves out{also} on {pool}: {r.stderr.strip()} "
             + "(recover restores that point as if nothing were excluded)"
         )
     return r.ok

@@ -223,6 +223,7 @@ zark/
 │   ├── notify.py              # Desktop notifications from root
 │   ├── origin_prune.py        # What `zark prune` can remove in origin
 │   ├── platform_facts.py      # The platform, as the self-test records it
+│   ├── pool_record.py         # How origin's pools were at a backup point (features, versions)
 │   ├── reclaim.py             # What removing snapshots from a drive frees
 │   ├── registry.py            # known_drives.json: parsing, validation, atomic writes
 │   ├── replication.py         # Backup planner: what each dataset needs (pure)

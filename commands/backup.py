@@ -42,6 +42,7 @@ from lib import (
     exclusions,
     forensics,
     notify,
+    pool_record,
     reclaim,
     sh,
     status,
@@ -1074,6 +1075,7 @@ def run(
     if not opts.take_snapshots:
         log.info("--no-snapshot has no effect: the backup point is taken by zark itself")
     declared, excluded_mark = exclusions.for_run(survey.source_pools(), log)
+    pools_mark = pool_record.capture(log)  # how origin's pools are, for recover (M6-5)
     if declared.no_snapshot and (gap := sanoid_conf_gap(zfs)):
         # sanoid.conf must keep the excluded subtrees out of its recursive rules (M5b-6).
         log.warn(f"sanoid.conf is not setup's policy here ({gap}): run {zark_command()} setup")
@@ -1105,6 +1107,7 @@ def run(
         [p.rel for p in res.plans if p.state is State.AT_POINT],
         excluded_mark,
         log,
+        ((pool_record.POOLS_PROP, pools_mark),) if pools_mark else (),
     )
     used_after = zfs.pool_info(pool_name)  # P0-4: after the transfer
     pruned = (0, 0)

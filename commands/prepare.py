@@ -26,7 +26,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import anchors, drive_marks, engine, exclusions, registry, sh, survey
+from lib import anchors, drive_marks, engine, exclusions, pool_record, registry, sh, survey
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso, zark_command
 from lib.drives import record_backup, validate_external_block_device
@@ -187,6 +187,7 @@ def run(
     log.info(f"~{rpool_used} to transfer")
     new_guid = zfs.pool_guid(new_pool)
     declared, excluded_mark = exclusions.for_run(survey.source_pools(), log)
+    pools_mark = pool_record.capture(log)  # how origin's pools are, for recover (M6-5)
     eng = engine.Run(
         new_pool,
         new_guid,
@@ -210,7 +211,14 @@ def run(
 
     shared: dict[str, list[Ref]] | None = None
     at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
-    _ = exclusions.record(new_pool, eng.point, at_point, excluded_mark, log)
+    _ = exclusions.record(
+        new_pool,
+        eng.point,
+        at_point,
+        excluded_mark,
+        log,
+        ((pool_record.POOLS_PROP, pools_mark),) if pools_mark else (),
+    )
     if res.ok:
         _ = drive_marks.record_complete(new_pool, eng.point, at_point, log)
         shared = eng.shared_with_origin()  # a full send carries only the point: empty lists

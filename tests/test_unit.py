@@ -161,6 +161,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     engine,
     forensics,
     grub_guard,
+    pool_record,
     reclaim,
     restore_plan,
     survey,
@@ -6827,6 +6828,103 @@ class TestPointRecordInParts:  # pylint: disable=missing-function-docstring
             assert got is not None and len(got.datasets) == n
 
 
+class TestPoolRecord:  # pylint: disable=missing-function-docstring
+    """M6-5, M6-9: how origin's pools were, recorded on a point's snapshots."""
+
+    GET = (
+        "name\trpool\ncompatibility\toff\nfeature@async_destroy\tenabled\n"
+        + "feature@encryption\tactive\nfeature@dynamic_gang_header\tdisabled\n"
+        + "unsupported@com.example:newer\tinactive\nunsupported@com.example:used\treadonly\n"
+    )
+
+    def test_zpool_get_gives_each_feature_on_with_its_state(self):
+        st = pool_record.parse_get(self.GET)
+        assert st.compatibility == "off"
+        assert st.features == {
+            "async_destroy": "enabled",
+            "encryption": "active",
+            "unsupported@com.example:newer": "enabled",
+            "unsupported@com.example:used": "active",
+        }
+
+    def test_the_record_fits_one_user_property_with_every_feature_active(self):
+        every = {f.name: "active" for f in zfeat.FEATURES}
+        long = "zfs-" + "9" * 60
+        rec = pool_record.PoolRecord(
+            "26.04",
+            long,
+            "zfs-kmod-" + "9" * 60,
+            {
+                p: pool_record.PoolState("openzfs-2.2,grub2", dict(every))
+                for p in ("rpool", "bpool")
+            },
+        )
+        value = pool_record.dump(rec)
+        assert len(value) < excl.MARK_LIMIT // 2, len(value)
+        assert pool_record.parse(value) == rec
+
+    def test_a_pool_that_cannot_be_read_gives_no_record_and_a_warning(self):
+        mock = MockShell()
+        mock.on("zpool get -H -p -o property,value all rpool").fails("no such pool")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            assert pool_record.capture(Log()) == ""
+        assert "Cannot read rpool's features" in out.getvalue()
+
+    def test_capture_names_both_pools_and_the_versions(self):
+        mock = MockShell()
+        mock.on("zpool get -H -p -o property,value all").succeeds(self.GET)
+        mock.on("zfs version").succeeds("zfs-2.2.2-0ubuntu9.5\nzfs-kmod-2.4.1-1ubuntu5.1")
+        with patch_sh(mock):
+            rec = pool_record.parse(pool_record.capture(Log()))
+        assert rec is not None and set(rec.pools) == {"rpool", "bpool"}
+        assert rec.zfs == "zfs-2.2.2-0ubuntu9.5" and rec.kmod == "zfs-kmod-2.4.1-1ubuntu5.1"
+
+    @staticmethod
+    def _drive(values: dict[str, str]) -> FakeZfs:
+        fake = FakeZfs()
+        fake.pool("backup")
+        for rel, value in values.items():
+            fake.dataset(f"backup/{rel}")
+            s = fake.snap(f"backup/{rel}", P1)
+            if value:
+                s.props[pool_record.POOLS_PROP] = value
+        return fake
+
+    def _read(self, fake: FakeZfs) -> pool_record.PoolRecord | None:
+        with patch_sh(fake):
+            return pool_record.read("backup", P1, drive_marks.drive_snapshots("backup"))
+
+    def test_read_back_none_without_a_record_and_refused_when_they_disagree(self):
+        rec = pool_record.PoolRecord(
+            "24.04",
+            "zfs-2.2.2",
+            "",
+            {
+                "rpool": pool_record.parse_get(self.GET),
+            },
+        )
+        value = pool_record.dump(rec)
+        assert self._read(self._drive({"rpool": "", "rpool/a": ""})) is None
+        assert self._read(self._drive({"rpool": value, "rpool/a": value})) == rec
+        for other in (pool_record.dump(dc_replace(rec, ubuntu="26.04")), "not json"):
+            try:
+                _ = self._read(self._drive({"rpool": value, "rpool/a": other}))
+            except ValueError as e:
+                assert "origin's pools" in str(e)
+            else:
+                raise AssertionError(f"{other!r} was read as the record")
+
+    def test_the_record_goes_in_the_exclusion_records_zfs_set(self):
+        fake = self._drive({"rpool": "", "rpool/a": ""})
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            assert excl.record(
+                "backup", P1, ["rpool", "rpool/a"], "{}", Log(), (("org.zark:pools", "{}"),)
+            )
+        sets = [c for c in fake.calls if c.startswith("zfs set")]
+        assert len(sets) == 1 and "org.zark:excluded=" in sets[0] and "org.zark:pools=" in sets[0]
+
+
 class TestExcludeCommand:  # pylint: disable=missing-function-docstring
     """zark exclude (M5b-2 2a): list, add and remove, as origin's properties."""
 
@@ -8850,6 +8948,19 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
             mark = excl.read_point_mark("blue", point, snaps)
         assert mark is not None and mark.left_out == {"rpool/var/lib/docker"}
         assert set(mark.datasets) == {"rpool/var/lib/docker", "rpool/var/lib/docker/vol"}
+
+    def test_prepare_records_origins_pools_on_its_point(self):
+        """M6-5: the first point carries how origin's pools are."""
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out) == 0, out.getvalue()
+        point = fake.ds["blue"].props["org.zark:last-point"]
+        with patch_sh(fake):
+            rec = pool_record.read("blue", point, drive_marks.drive_snapshots("blue", strict=True))
+        assert rec is not None and set(rec.pools) == {"rpool", "bpool"}
+        assert rec.pools["rpool"].features["encryption"] == "active"
 
     def test_prepare_by_id_replaces_stale_entry_and_uses_by_id_vdev(self):
         cfg_dir = Path(tempfile.mkdtemp())
@@ -15866,6 +15977,15 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         sets = [c for c in fake.calls if c.startswith("zfs set") and "org.zark:excluded=" in c]
         targets = {w for c in sets for w in c.split() if "@" in w and "=" not in w}
         assert sets and targets == held, sorted(targets ^ held)
+
+    def test_the_point_records_origins_pools_with_its_exclusion_record(self) -> None:
+        """M6-5: one zfs set carries both records, on the point's snapshots."""
+        fake = _fresh_fake()
+        out = StringIO()
+        _, rc = self._run(fake, redirect_stdout(out))
+        assert rc == 0, out.getvalue()
+        sets = [c for c in fake.calls if c.startswith("zfs set") and "org.zark:excluded=" in c]
+        assert sets and all("org.zark:pools=" in c for c in sets), sets
 
     def test_a_snapshot_exclusion_with_sanoid_conf_not_setups_is_warned(self) -> None:
         """M5bR-5 (f), M5b-6: backup says when sanoid.conf lacks the split."""

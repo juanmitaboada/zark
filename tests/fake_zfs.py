@@ -231,6 +231,11 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err("no such pool")
         if prop == "guid":
             return _ok(f"9{abs(hash(pool)) % 10**8}\n")
+        if prop == "all":  # `zpool get -H -p -o property,value all <pool>` (M6-5)
+            return _ok(
+                "compatibility\toff\nfeature@async_destroy\tenabled\n"
+                + f"feature@bookmark_v2\t{self.features[pool]}\nfeature@encryption\tactive\n"
+            )
         return _ok(self.features[pool] + "\n") if prop == "feature@bookmark_v2" else _err("?")
 
     def _get(self, args: list[str]) -> RunResult:  # pylint: disable=too-many-return-statements
