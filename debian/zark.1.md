@@ -180,7 +180,9 @@ for the canonical end-to-end sequences.
     when no certificate covers this platform, when a check failed here, or
     when the loaded ZFS module is not the one installed for the running
     kernel (a reboot is due);
-    **warnings off** (the default) removes them. **certificate** turns
+    **warnings off** (the default) removes them. The setting is per
+    installation or checkout: it is kept in *settings.json*, next to the
+    *known_drives.json* that copy of **zark** uses. **certificate** turns
     reports into entries of the certificates file (for the maintainer).
 
 ## Backup workflow
@@ -260,7 +262,8 @@ for the canonical end-to-end sequences.
     changed (the import and the export stay in the pool's history), and the
     message names the drive's host and last date. A drive whose metadata
     cannot be read is refused the same way. A drive without that property
-    (written by **zark** 2.0.0-rc2 or earlier, or not by **zark**) is
+    (written by **zark** 1.x or an early 2.0.0 development build, or
+    not by **zark**) is
     accepted only when at least one dataset has something in common with
     this system (a snapshot or bookmark to continue from, a rollback, a
     transfer to resume); this is read before any key, question or change,
@@ -640,7 +643,7 @@ for the canonical end-to-end sequences.
     **zfs change-key -i**, repopulates **bpool**, chroots into the
     recovered system, reinstalls a Secure-Boot-capable GRUB chain via the
     **dpkg-reconfigure**(8) sequence described in **NOTES**, regenerates
-    the initramfs (**dracut**(8) on Ubuntu 25.04+, with **zark**'s keystore
+    the initramfs (**dracut**(8) on Ubuntu 26.04, with **zark**'s keystore
     module; **initramfs-tools**(8) on 24.04, whose own zfs script opens the
     keystore with **cryptsetup-initramfs**'s *cryptroot*, which the
     restored root must carry) and exports both pools cleanly. The keystore's
@@ -666,7 +669,8 @@ for the canonical end-to-end sequences.
     from snapshots only is restored as any other and gets
     **org.zark:snapshot=no** again (a raw stream carries no user
     property). A failed create or set is listed in the banner's errors. A
-    point written before 2.0.0-rc10 restores as before.
+    point written by **zark** 1.x or an early 2.0.0 development build
+    restores as before.
 
     **rpool** and **bpool** are created as the point's **org.zark:pools**
     says origin had them: **zpool create -d** with only origin's features,
@@ -674,7 +678,8 @@ for the canonical end-to-end sequences.
     named otherwise). A feature origin had active that the live's ZFS
     lacks stops **recover** before anything is erased, naming the release
     it needs; one origin only had enabled is left out with a line in the
-    plan. A point without the record (written before 2.0.0-rc11) gets
+    plan. A point without the record (written by **zark** 1.x or an early
+    2.0.0 development build) gets
     **bpool** with the GRUB-readable base features and **rpool** with
     every feature of the live's ZFS, with a warning: a restored system
     whose OpenZFS is older may not import **rpool** once one of them is
@@ -750,8 +755,8 @@ for the canonical end-to-end sequences.
     by interrupted runs or by a run whose anchor failed (typed **PRUNE**;
     a point names its drive, **org.zark:point-for**, and is anchored for
     that drive before it goes, so the drive keeps its base; a point that
-    names no drive (one from before 2.0.0-rc5, or one a **recover**
-    restored) is removed without an anchor, and a drive that received
+    names no drive (one a **recover** restored, or one an early 2.0.0
+    development build left) is removed without an anchor, and a drive that received
     part of it rolls those datasets back at its next backup, after asking;
     either way a drive
     whose transfer was interrupted sends it again) and a drive's **bpool** anchors
@@ -1087,7 +1092,8 @@ roll its backup points back).
 
 *settings.json*
 :   Next to *known_drives.json*: **selftest_warnings** (true or false),
-    set by **selftest warnings**.
+    set by **selftest warnings**. Each installation or checkout has its
+    own, as it has its own registry.
 
 */usr/share/zark/certificates/selftest.json*
 :   The self-test results certified for each platform series, shipped with

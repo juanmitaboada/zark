@@ -22,7 +22,7 @@ For **security** issues do **not** open a public issue - see
 
 ## Setting up a development environment
 
-zark is pure Python and runs on Ubuntu 24.04+. To work on the suite
+zark is pure Python and runs on Ubuntu 24.04 and 26.04. To work on the suite
 itself you need the same dependencies the user-facing `setup` command
 installs, plus the Python tooling:
 

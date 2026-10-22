@@ -30,7 +30,7 @@ body:
     attributes:
       label: Ubuntu version
       description: Output of `lsb_release -d`.
-      placeholder: "Description: Ubuntu 25.10"
+      placeholder: "Description: Ubuntu 26.04.1 LTS"
     validations:
       required: true
 

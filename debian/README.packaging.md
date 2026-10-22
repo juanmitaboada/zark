@@ -160,7 +160,7 @@ The original `debian/changelog` is restored at the end.
 ### Validating the pipeline before a full upload
 
 If you have not run `make deb-ppa` for a while, or you are setting up
-a fresh maintainer machine, you do not have to commit to all five
+a fresh maintainer machine, you do not have to commit to every
 Ubuntu series at once. The pipeline is split into two complementary
 targets:
 
@@ -179,7 +179,7 @@ make deb-ppa-resume   # uploads the remaining series (every series after the fir
 Together, `deb-ppa-test` + `deb-ppa-resume` cover the same ground as
 `deb-ppa`. The advantage is that if the first upload fails (broken
 GPG, wrong PPA path, network issue, Launchpad outage...), only one
-version slot is burned instead of five - the same `1.0.6-1~ubuntu24.04.1`
+version slot is burned instead of one per series - the same `X.Y.Z-1~ubuntu24.04.1`
 identifier can be reused after a `Delete packages` action in the PPA
 web UI.
 
