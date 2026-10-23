@@ -23,13 +23,12 @@ DEB_VERSION := $(subst -,~,$(VERSION))
 # in sync.
 #
 # bad-distribution-in-changes-file:
-#   debian/changelog uses "unstable" as the base distribution - the
-#   Debian convention for "no specific series, will be retargeted at
-#   upload time". `make deb-ppa` rewrites it to a concrete Ubuntu
-#   series (noble/oracular/...) per upload, so the actual files going
-#   to Launchpad never carry "unstable". Local `make deb` / `make
-#   deb-source` runs do produce .changes files with Distribution:
-#   unstable, which lintian (Ubuntu) flags as not-a-valid-Ubuntu-series.
+#   debian/changelog's released entries use "stable" as the base
+#   distribution, which names no Ubuntu series. `make deb-ppa` rewrites
+#   it to a concrete Ubuntu series (PPA_TABLE) per upload, so the actual
+#   files going to Launchpad never carry "stable". Local `make deb` /
+#   `make deb-source` runs do produce .changes files with Distribution:
+#   stable, which lintian (Ubuntu) flags as not-a-valid-Ubuntu-series.
 #   That is by design; the override silences the noise locally without
 #   masking real distribution typos at PPA upload time (deb-ppa runs
 #   debuild without this flag).
@@ -644,7 +643,7 @@ deb-source: $(ORIG_TARBALL) ## Build SIGNED source package for PPA upload
 
 deb-ppa-test: ## Smoke-test the PPA pipeline by uploading only the first series
 	@# A safer way to validate the deb-ppa flow end-to-end without
-	@# burning all five Ubuntu version slots if something is broken.
+	@# burning every series' version slot if something is broken.
 	@#
 	@# This target re-invokes `make deb-ppa` but overrides PPA_SERIES
 	@# from the make command line, so only the first series in the

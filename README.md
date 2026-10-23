@@ -65,6 +65,7 @@ zark automates the entire process:
 | `alerts`           | Install or remove the status MOTD and hourly timer           |
 | `registry`         | List, forget or fix drives; set each drive's retention       |
 | `exclude`          | Leave datasets out of backups, of sanoid's snapshots, or both |
+| `fix-rpool-mountpoint` | Give a restored rpool back `mountpoint=/` (live USB)     |
 | `selftest`         | Check that this platform's ZFS and tools behave as zark relies on |
 
 ---
@@ -95,7 +96,7 @@ wget https://github.com/juanmitaboada/zark/releases/latest/download/zark_<VERSIO
 sudo apt install ./zark_*.deb
 ```
 
-Same package, same layout as the PPA install - only the delivery channel differs. Updates are manual: re-download when a new release is announced.
+Built from the same source and with the same layout as the PPA's packages, but versioned `<VERSION>-1`: the PPA's carry a series suffix (`~ubuntu24.04.1`, `~ubuntu26.04.1`) and sort below it, so on a machine with the PPA, install with apt. Updates are manual: re-download when a new release is announced.
 
 ### Portable tarball (required for live-USB recovery)
 
@@ -118,7 +119,7 @@ to `<zark_root>/zark.log` next to the script (which survives reboot, since the p
 
 zark 2 replaces 1.x's syncoid with its own replication: each drive is anchored by its own bookmarks in the source, receives are never forced, and nothing on a drive is destroyed without a question (see [Why not syncoid?](#why-not-syncoid) and [Anchors](#anchors)). Drives written by 1.x keep working; each one needs one zark 2 backup to move over.
 
-**What the package upgrade does by itself.** `sudo apt upgrade` (or `sudo apt install zark`) replaces the code under `/usr/share/zark/` and adds the self-test's certificates there. Nothing else changes: `/etc/zark/known_drives.json` is kept as it is, 1.0.12 has no maintainer script that runs on upgrade and 2.0.0's only makes sure `/etc/zark/` exists, `/etc/sanoid/sanoid.conf` is not touched, and the guards 1.x's `setup` installed (the APT hook, the update-grub guard, the MOTD reminder) keep working until `setup` replaces them. The package is now `amd64` (it was `all`); apt upgrades it the same way. Removing the package (not upgrading it) also removes what `zark setup` installed, except sanoid's configuration.
+**What the package upgrade does by itself.** `sudo apt upgrade` (or `sudo apt install zark`) replaces the code under `/usr/share/zark/` and adds the self-test's certificates there. Nothing else changes: `/etc/zark/known_drives.json` is kept as it is, 1.0.12 has no maintainer script that runs on upgrade and 2.0.0's only makes sure `/etc/zark/` exists, `/etc/sanoid/sanoid.conf` is not touched, and the guards 1.x installed (the APT hook, the update-grub guard, the MOTD reminder) keep working until `setup` replaces them. The package is now `amd64` (it was `all`); apt upgrades it the same way. Removing the package (not upgrading it) also removes what `zark setup` installed, except sanoid's configuration.
 
 **Then, once per system:**
 

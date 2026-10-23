@@ -70,7 +70,7 @@ whole sequence: `zark setup`, one backup per drive, then `zark prune` for
   them), `prune` (reclaim space in the source or on a drive: sanoid
   snapshots by age, 1.x's `syncoid_*` and keystore `prepare_*` residues,
   points left by interrupted runs, a drive's oldest points or its 1.x
-  history), `registry list|forget|fix`, `exclude list|add|remove` (a
+  history), `registry list|forget|fix|retention`, `exclude list|add|remove` (a
   dataset left out of backups, of sanoid's snapshots, or both),
   `selftest` (checks on this platform what zark relies on; `status`,
   `report`, `warnings on|off`), `fix-rpool-mountpoint` (gives a restored
@@ -107,7 +107,9 @@ later are not validated yet.
   recover's menu; such a point still restores everything but the
   destroyed dataset (M5bV-4). The destroy is refused by ZFS when an
   archived lineage of that dataset is a clone of one of its snapshots: the
-  run says so and nothing is destroyed (M5bV-3). Both are fixed in 2.1.
+  run ends COMPLETED with an ERROR line whose text is wrong ("Failed:
+  destroyed ..."), and nothing is destroyed (M5bV-3). Both are fixed in
+  2.1.
 - **A drive written by 1.x keeps the mount properties 1.x sent with its
   datasets** (`bpool`'s boot environment has `mountpoint=/boot`): zark
   imports it with nothing mounted, but a `zpool import` by hand without

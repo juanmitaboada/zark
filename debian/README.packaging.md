@@ -189,7 +189,7 @@ If for any reason the targets above don't fit, here is the manual
 equivalent:
 
 ```sh
-# Edit debian/changelog: change "unstable" to "noble" (or whichever)
+# Edit debian/changelog: change "stable" to "noble" (or whichever)
 # and append "~ubuntu24.04.1" to the version. Save.
 debuild -S -sa
 dput -c dput.cf zark-ppa ../zark_X.Y.Z-1~ubuntu24.04.1_source.changes
@@ -276,9 +276,10 @@ wants to keep.
   yet picked up your GPG key. Wait a few minutes after uploading the key
   and retry; allow up to 30 min on first registration.
 * **Lintian flags `bad-distribution-in-changes-file`** - the
-  `Distribution:` line in `debian/changelog` says `UNRELEASED` (the
-  default for development). Change it to the target Ubuntu series
-  (e.g. `noble`) before building for upload.
+  `Distribution:` line in `debian/changelog` says `stable` (a released
+  entry) or `UNRELEASED` (in development), neither of them an Ubuntu
+  series. `make deb-ppa` sets the series per upload; by hand, change it
+  to the target Ubuntu series (e.g. `noble`) before building for upload.
 * **`No such file or directory: zark_X.Y.Z.orig.tar.gz`** - non-native
   source format requires an `.orig.tar.gz`. `make deb` regenerates it
   from `make dist` automatically; if running `debuild` by hand, run

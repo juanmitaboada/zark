@@ -1016,7 +1016,7 @@ To verify a recovery without rebooting:
 
 The package upgrade replaces the code under */usr/share/zark* and adds the
 self-test's certificates; */etc/zark/known_drives.json*, */etc/sanoid/sanoid.conf*
-and the guards 1.x's **setup** installed are left as they are (1.0.12 has no
+and the guards 1.x installed are left as they are (1.0.12 has no
 maintainer script that runs on upgrade; 2.0.0's only creates */etc/zark*).
 The package is now *amd64* (it was *all*). Then, once per system:
 
