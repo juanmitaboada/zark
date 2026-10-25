@@ -304,6 +304,7 @@ from tests.test_status_files import (  # pylint: disable=wrong-import-position #
     TestSpaceReads,
     TestStatusDirs,
     TestStatusFixtures,
+    TestStatusJson,
     TestStatusSchemas,
     TestTmpfiles,
 )
@@ -314,6 +315,7 @@ STATUS_FILE_SUITES = (
     TestSpaceReads,
     TestStatusDirs,
     TestStatusFixtures,
+    TestStatusJson,
     TestStatusSchemas,
     TestTmpfiles,
 )

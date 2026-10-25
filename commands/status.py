@@ -13,11 +13,13 @@
 # limitations under the License.
 """
 zark status - how full the source pools are and how old each drive's
-backup is (M3 decisions 12 and 13). Read-only.
+backup is (M3 decisions 12 and 13). Read-only for zark's state: it writes
+only the MOTD file and status.json (docs/STATUS-FILES.md), from one read.
 
   zark status                     the report, with what is excluded from
                                   backups (zark exclude)
   zark status --refresh           write the MOTD file (/run/zark/status.motd)
+                                  and /var/lib/zark/status.json
   zark status --refresh --notify  also a desktop notification for a pool at
                                   a warning or critical level, at most once
                                   a day per pool and level (what the hourly
@@ -28,7 +30,7 @@ import os
 from datetime import UTC, datetime
 
 from commands.setup import sanoid_conf_gap
-from lib import exclusions, notify, status, statusdirs, survey
+from lib import exclusions, notify, status, status_file, statusdirs, survey
 from lib.config import Config, zark_command
 from lib.log import Log
 from lib.zfs import ZFS
@@ -106,13 +108,13 @@ def run(args: list[str]) -> None:
     if "--refresh" in args:
         # Hourly from the timer: nothing goes to zark.log.
         log = Log(os.devnull)
-        st = status.refresh(cfg, log)
+        st = status_file.refresh(cfg, log, "timer")
         if "--notify" in args:
             _notify(st)
         return
     log = Log()
     cfg.check_registry(log, fatal=False)
     log.banner("STATUS", "Source pools and backup drives")
-    st = status.refresh(cfg, log)
+    st = status_file.refresh(cfg, log, "status")
     _report(st, log)
     _exclusions(log)

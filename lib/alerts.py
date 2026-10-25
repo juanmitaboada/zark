@@ -13,8 +13,12 @@
 # limitations under the License.
 """
 The status alerts (M3 decision 13a): a MOTD script that prints the file
-`zark status --refresh` writes, and a systemd timer that refreshes it every
-hour (and two minutes after boot) and sends the CAP notifications.
+`zark status --refresh` writes, and a systemd timer that refreshes it, and
+/var/lib/zark/status.json, every hour (and two minutes after boot) and sends
+the CAP notifications. Besides the monotonic hour, which pauses while the
+machine sleeps, it fires on every wall-clock hour, which a resume catches up
+at once (M7-12 12a), so a laptop's status.json is refreshed right after it
+wakes instead of up to an hour of uptime later.
 
 Installed by `zark setup` (or `zark alerts install`), removed by
 `zark alerts remove` and by the Debian package's prerm on remove. Both are
@@ -49,6 +53,7 @@ Description=zark: refresh the space and backup-age status hourly
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=1h
+OnCalendar=hourly
 
 [Install]
 WantedBy=timers.target

@@ -24,20 +24,37 @@ finds them; run that file, not this one.
 # lock's descriptor, a command's notification step), as test_unit.py does
 # line by line; basedpyright's reportPrivateUsage is off for the same reason.
 
+import atexit
 import json
 import os
+import shutil
 import stat
+import subprocess
+import sys
 import tempfile
+import time
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import commands.status as status_cmd
-from lib import certificates, live, lock, status, statusdirs, zfs
+from lib import alerts, certificates, live, lock, status, status_file, statusdirs, zfs
+from lib.config import Config, DriveInfo
 from lib.log import Log
 from tests import schema_check
 from tests.mock_sh import MockShell, patch_sh
 
 REPO = Path(__file__).resolve().parent.parent
+
+# The writers never touch this host's files (M7-15): for the whole run,
+# status.json and status.lock live under a temporary root. Imported by
+# test_unit.py first, so every test of it runs with this in place.
+TEST_ROOT = Path(tempfile.mkdtemp(prefix="zark-status-tests."))
+atexit.register(shutil.rmtree, TEST_ROOT, True)
+status_file.STATUS_PATH = TEST_ROOT / "var" / "lib" / "zark" / "status.json"
+status_file.LOCK_PATH = TEST_ROOT / "run" / "zark" / "status.lock"
 SCHEMAS = REPO / "docs" / "schema"
 FIXTURES = REPO / "tests" / "fixtures" / "status"
 PROGRESS_REL = Path("run/zark/progress.json")
@@ -416,3 +433,249 @@ class TestSpaceReads:  # pylint: disable=missing-function-docstring
                 for r in rows
             )
             assert own == rows[0]["used_bytes"] == pool["space"]["used_bytes"], pool["name"]
+
+
+def _space(used: int = 100, when: str = "2026-10-24T08:58:12Z") -> zfs.Space:
+    return zfs.Space(used, 900, 1100, 120, 980, 10, when)
+
+
+def _config(*drives: tuple[str, str]) -> Config:
+    cfg = Config()
+    cfg.config_dir = Path(tempfile.mkdtemp(dir=TEST_ROOT))
+    cfg.known_drives = {
+        name: DriveInfo(name, guid, f"usb-{name}-0:0", "2026-10-20T10:00:00Z", name == "black")
+        for name, guid in drives
+    }
+    return cfg
+
+
+def _status() -> status.Status:
+    st = status.Status()
+    st.spaces = {"rpool": _space(), "bpool": None}
+    st.caps = {"rpool": 10}
+    st.datasets = {
+        "rpool": [zfs.DatasetUsage("rpool", "filesystem", 100, 100, 0, 0, 0)],
+        "bpool": None,
+    }
+    st.ages = {"black": 4, "blue": None}
+    return st
+
+
+class TestStatusJson:  # pylint: disable=missing-function-docstring
+    """status.json's writer (M7-13): the document, the merge by GUID, the
+    lock, a newer file left alone, and a failed write that fails nothing."""
+
+    def _write(self, root: Path, cfg: Config, **kw: Any) -> tuple[bool, str]:
+        out = StringIO()
+        log = Log(os.devnull)
+        with redirect_stdout(out), patch.object(status_file.sh, "is_live_usb", return_value=False):
+            ok = status_file.write(
+                kw.pop("st", None) or _status(),
+                cfg,
+                kw.pop("by", "timer"),
+                log,
+                path=root / "status.json",
+                lock_path=root / "status.lock",
+                **kw,
+            )
+        return ok, out.getvalue()
+
+    def _read(self, root: Path) -> dict[str, Any]:
+        doc: dict[str, Any] = json.loads((root / "status.json").read_text("utf-8"))
+        assert not problems(doc, "status"), problems(doc, "status")
+        return doc
+
+    def test_the_document_is_valid_and_says_what_zark_knows(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = _config(("blue", "222"), ("black", "111"))
+            ok, _ = self._write(root, cfg, by="backup")
+            assert ok
+            doc = self._read(root)
+            assert stat.S_IMODE((root / "status.json").stat().st_mode) == 0o644
+            assert not [p.name for p in root.iterdir() if p.name.startswith(".")]
+        assert doc["generated_by"] == "backup" and doc["zark_version"] == status_file.VERSION
+        assert doc["registry"] == str(cfg.drives_file_path)
+        assert doc["thresholds"] == {
+            "capacity_warning_pct": 80,
+            "capacity_critical_pct": 90,
+            "rpo_warning_days": 7,
+            "stale_after_s": 10800,
+        }
+        rpool, bpool = doc["source_pools"]
+        assert rpool["level"] == "ok" and rpool["space"]["used_bytes"] == 100
+        assert len(rpool["datasets"]) == 1
+        assert bpool == {"name": "bpool", "space": None, "level": None}
+        assert [d["name"] for d in doc["drives"]] == ["black", "blue"]
+        black = doc["drives"][0]
+        assert black["autoeject"] is True and black["retention"]["window_days"] == 30
+        assert black["last_backup_at"] == "2026-10-20T10:00:00Z" and isinstance(
+            black["age_days"], int
+        )
+        assert black["last_run"] is None and black["space"] is None
+        assert doc["notices"][0]["code"] == "backup_age"
+
+    def test_what_only_a_backup_measures_is_carried_forward_by_guid(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = status_file.LastRun(
+                "completed",
+                "2026-10-24T09:00:00Z",
+                "2026-10-24T09:30:00Z",
+                "zark_2026-10-24_09:00:05Z",
+            )
+            cfg = _config(("black", "111"), ("blue", "222"), ("old", "333"))
+            up = status_file.DriveUpdate(run, _space(5), "zark_2026-10-24_09:00:05Z")
+            assert self._write(root, cfg, updates={"111": up, "333": up})[0]
+            # The timer: nothing measured. blue was prepared again (a new
+            # GUID), old left the registry.
+            cfg = _config(("black", "111"), ("blue", "999"))
+            assert self._write(root, cfg)[0]
+            doc = self._read(root)
+        black, blue = doc["drives"]
+        assert black["last_run"] == run.to_json() and black["space"] == _space(5).to_json()
+        assert black["last_backup_point"] == "zark_2026-10-24_09:00:05Z"
+        assert blue["guid"] == "999" and blue["last_run"] is None and blue["space"] is None
+        assert [d["name"] for d in doc["drives"]] == ["black", "blue"]
+
+    def test_an_orphan_does_not_overwrite_the_result_its_run_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = _config(("black", "111"))
+            done = status_file.LastRun("completed", "2026-10-24T09:00:00Z", "2026-10-24T09:30:00Z")
+            assert self._write(root, cfg, updates={"111": status_file.DriveUpdate(done)})[0]
+            orphan = status_file.LastRun(
+                "interrupted", "2026-10-24T09:00:00Z", "2026-10-24T09:31:00Z"
+            )
+            keep = status_file.DriveUpdate(orphan, unless_started_at="2026-10-24T09:00:00Z")
+            assert self._write(root, cfg, updates={"111": keep})[0]
+            assert self._read(root)["drives"][0]["last_run"]["result"] == "completed"
+            other = status_file.DriveUpdate(orphan, unless_started_at="2026-10-24T08:00:00Z")
+            assert self._write(root, cfg, updates={"111": other})[0]
+            assert self._read(root)["drives"][0]["last_run"]["result"] == "interrupted"
+
+    def test_a_newer_or_unreadable_previous_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            newer = (FIXTURES / "newer-schema" / STATUS_REL).read_text("utf-8")
+            _ = (root / "status.json").write_text(newer, encoding="utf-8")
+            ok, out = self._write(root, _config(("black", "111")))
+            assert not ok and "newer zark (schema 2)" in out
+            assert (root / "status.json").read_text("utf-8") == newer
+            _ = (root / "status.json").write_text('{"kind": "zark-sta', encoding="utf-8")
+            ok, out = self._write(root, _config(("black", "111")))
+            assert ok and "unreadable; nothing carried forward" in out
+            assert self._read(root)["drives"][0]["last_run"] is None
+
+    def test_the_lock_is_waited_for_then_the_write_is_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            holder = subprocess.Popen(  # pylint: disable=consider-using-with
+                [
+                    sys.executable,
+                    "-c",
+                    "import fcntl,os,sys,time;"
+                    + " fd=os.open(sys.argv[1], os.O_RDWR|os.O_CREAT, 0o600);"
+                    + " fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(30)",
+                    str(root / "status.lock"),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert holder.stdout is not None and holder.stdout.readline() == "held\n"
+                with patch.object(status_file, "LOCK_WAIT_S", 0.3):
+                    t0 = time.monotonic()
+                    ok, out = self._write(root, _config())
+                    waited = time.monotonic() - t0
+                assert not ok and "still held after" in out and waited >= 0.3
+                assert not (root / "status.json").exists()
+            finally:
+                holder.kill()
+                _ = holder.wait()
+            assert self._write(root, _config())[0]  # a killed holder leaves no lock
+            assert stat.S_IMODE((root / "status.lock").stat().st_mode) == 0o600
+
+    def test_a_failed_write_leaves_nothing_and_fails_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.object(status_file.os, "replace", side_effect=OSError(28, "No space left")):
+                ok, out = self._write(root, _config(("black", "111")))
+            assert not ok and "No space left" in out
+            assert sorted(p.name for p in root.iterdir()) == ["status.lock"]
+
+    def test_never_from_a_live_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.object(status_file.sh, "is_live_usb", return_value=True):
+                ok = status_file.write(
+                    _status(),
+                    _config(),
+                    "timer",
+                    Log(os.devnull),
+                    path=root / "s.json",
+                    lock_path=root / "l",
+                )
+            assert not ok and not list(root.iterdir())
+
+    def test_notices_are_the_motd_lines_structured(self):
+        st = status.Status(
+            caps={"bpool": 95, "rpool": 85},
+            ages={"black": 9},
+            shared=["black: no anchor"],
+            shared_drives=["black"],
+            read_error="could not read the source pools: x",
+            residues=3,
+            selftest=["self-test: not certified"],
+        )
+        st.spaces = {"rpool": _space(), "bpool": _space()}
+        st.datasets = {"rpool": None, "bpool": []}
+        got = [(n.level, n.code, n.subject) for n in status.notices(st)]
+        assert got == [
+            ("critical", "capacity", "bpool"),
+            ("warning", "capacity", "rpool"),
+            ("warning", "backup_age", None),
+            ("warning", "no_anchor", "black"),
+            ("warning", "read_error", None),
+            ("warning", "read_error", "rpool"),
+            ("info", "origin_residues", None),
+            ("warning", "selftest", None),
+        ], got
+        motd = status.motd_text(st).splitlines()
+        assert [status.Log._STRIP_RE.sub("", ln) for ln in motd] == [
+            f"zark: {n.text}" for n in status.notices(st)
+        ]
+        assert motd[0].startswith("\033[1;31mzark:") and motd[1].startswith("\033[1;33mzark:")
+        assert motd[6].startswith("zark: In origin")
+
+    def test_zark_status_names_who_wrote_it(self):
+        seen: list[str] = []
+
+        def write(_st: object, _cfg: object, by: str, _log: object, **_kw: object) -> bool:
+            seen.append(by)
+            return True
+
+        with (
+            patch.object(status_file, "write", side_effect=write),
+            patch.object(status_file.status, "gather", return_value=status.Status()),
+            patch.object(status_file.status, "write_motd"),
+            patch.object(status_cmd, "_exclusions"),
+            patch.object(status, "NOTIFIED_FILE", TEST_ROOT / "run" / "zark" / "notified"),
+            patch.object(status_cmd.Config, "load", return_value=_config()),
+            redirect_stdout(StringIO()),
+        ):
+            status_cmd.run(["--refresh", "--notify"])
+            status_cmd.run(["--refresh"])
+            status_cmd.run([])
+        assert seen == ["timer", "timer", "status"], seen
+
+    def test_the_suite_never_writes_this_hosts_file(self):
+        # Not a before/after comparison of the real file: on an installed
+        # system the alerts timer rewrites it hourly, while the suite runs.
+        for path in (status_file.STATUS_PATH, status_file.LOCK_PATH):
+            assert path.is_relative_to(TEST_ROOT), path
+
+    def test_the_timer_also_fires_on_the_wall_clock_hour(self):
+        unit = alerts.TIMER_UNIT
+        assert "OnBootSec=2min\nOnUnitActiveSec=1h\nOnCalendar=hourly\n" in unit
+        assert status_file.STALE_AFTER_S == 3 * 3600

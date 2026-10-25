@@ -26,7 +26,9 @@ What `zark status` reports, the MOTD shows and the timer notifies
   * legacy residues in origin that `zark prune` can remove.
 
 The timer writes the MOTD text to :data:`MOTD_FILE`; the MOTD script only
-prints that file, so nothing runs at login.
+prints that file, so nothing runs at login. The same read gives
+``/var/lib/zark/status.json`` (:mod:`lib.status_file`): its notices are the
+MOTD's lines, structured (M7-13 13a).
 """
 
 import os
@@ -40,6 +42,7 @@ from lib.config import Config, zark_command
 from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
 from lib.origin_prune import inventory
+from lib.zfs import DatasetUsage, Space, read_datasets, read_space
 
 CAP_WARNING = 80
 CAP_CRITICAL = 90
@@ -59,7 +62,7 @@ def cap_level(pct: int) -> str:
 
 
 @dataclass
-class Status:
+class Status:  # pylint: disable=too-many-instance-attributes
     """Everything the report, the MOTD and the notifications say."""
 
     caps: dict[str, int] = field(default_factory=dict)  # pool → capacity %
@@ -68,6 +71,19 @@ class Status:
     residues: int = 0
     read_error: str = ""  # origin could not be read: nothing is said about anchors (M3R-2)
     selftest: list[str] = field(default_factory=list)  # the subscribed self-test lines (M4s-15)
+    shared_drives: list[str] = field(default_factory=list)  # the drive of each `shared` line
+    spaces: dict[str, Space | None] = field(default_factory=dict)  # pool → its Space (R1)
+    datasets: dict[str, list[DatasetUsage] | None] = field(default_factory=dict)  # pool → R2
+
+
+@dataclass(frozen=True)
+class Notice:
+    """One MOTD line, with the level and code status.json gives it."""
+
+    level: str  # "info", "warning" or "critical"
+    code: str
+    subject: str | None
+    text: str  # without colour codes and without the "zark:" prefix
 
 
 def gather(cfg: Config, log: Log) -> Status:
@@ -76,6 +92,11 @@ def gather(cfg: Config, log: Log) -> Status:
     st.selftest = certificates.warnings(log)
     pools = survey.source_pools()
     for pool in pools:
+        space = st.spaces[pool] = read_space(pool)
+        st.datasets[pool] = read_datasets(pool) if space else None
+        if space:
+            st.caps[pool] = space.capacity_pct
+            continue
         r = sh.run(f"zpool list -Hp -o capacity {pool}")
         if r.ok and r.output.strip().isdigit():
             st.caps[pool] = int(r.output.strip())
@@ -92,6 +113,8 @@ def gather(cfg: Config, log: Log) -> Status:
     anchored = anchors.anchored_disks(origin)
     unanchored = [info for info in cfg.known_drives.values() if info.guid not in anchored]
     st.shared = no_anchor_lines(unanchored, origin, log)
+    names = {info.guid: name for name, info in cfg.known_drives.items()}
+    st.shared_drives = [names[info.guid] for info in unanchored]
     drives = {info.guid: name for name, info in cfg.known_drives.items()}
     st.residues = len(inventory(origin, drives).residues)
     return st
@@ -133,21 +156,47 @@ def rpo_line(st: Status) -> tuple[bool, str]:
     return stale, "last backups: " + ", ".join(parts)
 
 
+def notices(st: Status) -> list[Notice]:
+    """The MOTD's lines in its order, each with its level, code and subject
+    (docs/STATUS-FILES.md, "Notice entry")."""
+    out = [
+        Notice(level, "capacity", pool, text)
+        for (level, text), pool in zip(cap_lines(st), _cap_pools(st), strict=True)
+    ]
+    stale, rpo = rpo_line(st)
+    if rpo:
+        out.append(Notice("warning" if stale else "info", "backup_age", None, rpo))
+    drives: list[str | None] = [*st.shared_drives] or [None] * len(st.shared)
+    out += [
+        Notice("warning", "no_anchor", drive, line)
+        for line, drive in zip(st.shared, drives, strict=True)
+    ]
+    if st.read_error:
+        out.append(Notice("warning", "read_error", None, st.read_error))
+    out += [
+        Notice("warning", "read_error", pool, f"could not list the datasets of {pool}")
+        for pool, space in st.spaces.items()
+        if space is not None and st.datasets.get(pool) is None
+    ]
+    if st.residues:
+        out.append(Notice("info", "origin_residues", None, residue_line(st.residues)))
+    out += [Notice("warning", "selftest", None, line) for line in st.selftest]
+    return out
+
+
+def _cap_pools(st: Status) -> list[str]:
+    """The pool of each :func:`cap_lines` line, in its order."""
+    return [pool for pool, pct in sorted(st.caps.items()) if cap_level(pct)]
+
+
 def motd_text(st: Status) -> str:
     """The MOTD lines, with the colours of the apt guard's MOTD."""
     yellow, red, plain = "\033[1;33m", "\033[1;31m", "\033[0m"
-    lines: list[str] = []
-    for level, text in cap_lines(st):
-        lines.append(f"{red if level == 'critical' else yellow}zark:{plain} {text}")
-    stale, rpo = rpo_line(st)
-    if rpo:
-        lines.append(f"{yellow}zark:{plain} {rpo}" if stale else f"zark: {rpo}")
-    lines += [f"{yellow}zark:{plain} {line}" for line in st.shared]
-    if st.read_error:
-        lines.append(f"{yellow}zark:{plain} {st.read_error}")
-    if st.residues:
-        lines.append(f"zark: {residue_line(st.residues)}")
-    lines += [f"{yellow}zark:{plain} {line}" for line in st.selftest]
+    color = {"critical": red, "warning": yellow}
+    lines = [
+        f"{color[n.level]}zark:{plain} {n.text}" if n.level in color else f"zark: {n.text}"
+        for n in notices(st)
+    ]
     return "\n".join(lines) + "\n" if lines else ""
 
 
