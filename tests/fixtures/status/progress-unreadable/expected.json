@@ -1,0 +1,8 @@
+{
+  "now": "2026-10-24T09:01:00Z",
+  "progress_process": null,
+  "progress": "unknown",
+  "status": "ok",
+  "indicator": "edge",
+  "what": "progress.json that does not parse (not produced by an atomic writer)."
+}

@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/juanmitaboada/zark/docs/schema/zark-progress.schema.json",
+  "title": "zark /run/zark/progress.json, schema_version 1",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "zark_version",
+    "command",
+    "pid",
+    "pid_start_ticks",
+    "boot_id",
+    "started_at",
+    "updated_at",
+    "waiting_for_input",
+    "waiting_for",
+    "step",
+    "drive",
+    "point",
+    "transfer"
+  ],
+  "properties": {
+    "kind": {
+      "const": "zark-progress"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "zark_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pid": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "pid_start_ticks": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "boot_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "started_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "updated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "waiting_for_input": {
+      "type": "boolean"
+    },
+    "waiting_for": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "step": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "index",
+            "total",
+            "label"
+          ],
+          "properties": {
+            "index": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "total": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "label": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "drive": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "guid",
+            "drive_id",
+            "space"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "guid": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            },
+            "drive_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "space": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/space"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "point": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^zark_\\d{4}-\\d{2}-\\d{2}_\\d{2}:\\d{2}:\\d{2}Z$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "transfer": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "datasets_total",
+            "datasets_done",
+            "datasets_failed",
+            "dataset",
+            "dataset_state",
+            "bytes_total",
+            "bytes_total_partial",
+            "bytes_done",
+            "rate_bytes_per_s"
+          ],
+          "properties": {
+            "datasets_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "datasets_done": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "datasets_failed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dataset": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dataset_state": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "bytes_total": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bytes_total_partial": {
+              "type": "boolean"
+            },
+            "bytes_done": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rate_bytes_per_s": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "space": {
+      "type": "object",
+      "required": [
+        "used_bytes",
+        "available_bytes",
+        "pool_size_bytes",
+        "pool_alloc_bytes",
+        "pool_free_bytes",
+        "capacity_pct",
+        "measured_at"
+      ],
+      "properties": {
+        "used_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pool_size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pool_alloc_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pool_free_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capacity_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "measured_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,395 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/juanmitaboada/zark/docs/schema/zark-status.schema.json",
+  "title": "zark /var/lib/zark/status.json, schema_version 1",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "zark_version",
+    "generated_at",
+    "generated_by",
+    "registry",
+    "thresholds",
+    "source_pools",
+    "drives",
+    "notices"
+  ],
+  "properties": {
+    "kind": {
+      "const": "zark-status"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "zark_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "generated_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "registry": {
+      "type": "string",
+      "minLength": 1
+    },
+    "thresholds": {
+      "type": "object",
+      "required": [
+        "capacity_warning_pct",
+        "capacity_critical_pct",
+        "rpo_warning_days",
+        "stale_after_s"
+      ],
+      "properties": {
+        "capacity_warning_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "capacity_critical_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "rpo_warning_days": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stale_after_s": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "source_pools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "space",
+          "level"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "space": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/space"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "level": {
+            "enum": [
+              "ok",
+              "warning",
+              "critical",
+              null
+            ]
+          },
+          "datasets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "type",
+                "used_bytes",
+                "usedbydataset_bytes",
+                "usedbysnapshots_bytes",
+                "usedbychildren_bytes",
+                "usedbyrefreservation_bytes"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "type": {
+                  "enum": [
+                    "filesystem",
+                    "volume"
+                  ]
+                },
+                "used_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "usedbydataset_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "usedbysnapshots_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "usedbychildren_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "usedbyrefreservation_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "drives": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "guid",
+          "drive_id",
+          "autoeject",
+          "retention",
+          "last_backup_at",
+          "age_days",
+          "last_backup_point",
+          "last_run",
+          "space"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "guid": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "drive_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "autoeject": {
+            "type": "boolean"
+          },
+          "retention": {
+            "type": "object",
+            "required": [
+              "window_days",
+              "max_age_days",
+              "margin_pct"
+            ],
+            "properties": {
+              "window_days": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3650
+              },
+              "max_age_days": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 36500
+              },
+              "margin_pct": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 50
+              }
+            }
+          },
+          "last_backup_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "age_days": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_backup_point": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^zark_\\d{4}-\\d{2}-\\d{2}_\\d{2}:\\d{2}:\\d{2}Z$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "command",
+                  "result",
+                  "started_at",
+                  "ended_at",
+                  "point",
+                  "datasets_missing",
+                  "message"
+                ],
+                "properties": {
+                  "command": {
+                    "const": "backup"
+                  },
+                  "result": {
+                    "enum": [
+                      "completed",
+                      "incomplete",
+                      "not_verified",
+                      "aborted",
+                      "interrupted"
+                    ]
+                  },
+                  "started_at": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+                  },
+                  "ended_at": {
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+                  },
+                  "point": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^zark_\\d{4}-\\d{2}-\\d{2}_\\d{2}:\\d{2}:\\d{2}Z$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "datasets_missing": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          },
+          "space": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/space"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "notices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "level",
+          "code",
+          "subject",
+          "text"
+        ],
+        "properties": {
+          "level": {
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "space": {
+      "type": "object",
+      "required": [
+        "used_bytes",
+        "available_bytes",
+        "pool_size_bytes",
+        "pool_alloc_bytes",
+        "pool_free_bytes",
+        "capacity_pct",
+        "measured_at"
+      ],
+      "properties": {
+        "used_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pool_size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pool_alloc_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pool_free_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capacity_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "measured_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        }
+      }
+    }
+  }
+}

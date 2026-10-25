@@ -1,0 +1,8 @@
+{
+  "now": "2026-10-24T09:28:00Z",
+  "progress_process": "alive",
+  "progress": "running",
+  "status": "ok",
+  "indicator": "waiting",
+  "what": "Backup completed and recorded; the eject prompt still waits."
+}

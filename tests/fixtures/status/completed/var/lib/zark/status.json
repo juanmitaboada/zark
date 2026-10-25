@@ -1,0 +1,393 @@
+{
+  "kind": "zark-status",
+  "schema_version": 1,
+  "zark_version": "2.1.0",
+  "generated_at": "2026-10-24T09:27:53Z",
+  "generated_by": "backup",
+  "registry": "/etc/zark/known_drives.json",
+  "thresholds": {
+    "capacity_warning_pct": 80,
+    "capacity_critical_pct": 90,
+    "rpo_warning_days": 7,
+    "stale_after_s": 10800
+  },
+  "source_pools": [
+    {
+      "name": "rpool",
+      "space": {
+        "used_bytes": 917611225088,
+        "available_bytes": 71470788608,
+        "pool_size_bytes": 1005022347264,
+        "pool_alloc_bytes": 902414041088,
+        "pool_free_bytes": 102608306176,
+        "capacity_pct": 89,
+        "measured_at": "2026-10-24T09:27:53Z"
+      },
+      "level": "warning",
+      "datasets": [
+        {
+          "name": "rpool",
+          "type": "filesystem",
+          "used_bytes": 917611225088,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 917611028480,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT",
+          "type": "filesystem",
+          "used_bytes": 129927670989,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 129927474381,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p",
+          "type": "filesystem",
+          "used_bytes": 129927474381,
+          "usedbydataset_bytes": 48539621792,
+          "usedbysnapshots_bytes": 4402341478,
+          "usedbychildren_bytes": 76985511111,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/srv",
+          "type": "filesystem",
+          "used_bytes": 196608,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/usr",
+          "type": "filesystem",
+          "used_bytes": 67305472,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 67108864,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/usr/local",
+          "type": "filesystem",
+          "used_bytes": 67108864,
+          "usedbydataset_bytes": 63963136,
+          "usedbysnapshots_bytes": 3145728,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var",
+          "type": "filesystem",
+          "used_bytes": 76918009031,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 76917812423,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/cache",
+          "type": "filesystem",
+          "used_bytes": 4939212389,
+          "usedbydataset_bytes": 3650722201,
+          "usedbysnapshots_bytes": 1288490188,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/games",
+          "type": "filesystem",
+          "used_bytes": 196608,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/lib",
+          "type": "filesystem",
+          "used_bytes": 67777305803,
+          "usedbydataset_bytes": 12670153523,
+          "usedbysnapshots_bytes": 2469606195,
+          "usedbychildren_bytes": 52637546085,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/lib/AccountsService",
+          "type": "filesystem",
+          "used_bytes": 278528,
+          "usedbydataset_bytes": 212992,
+          "usedbysnapshots_bytes": 65536,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/lib/NetworkManager",
+          "type": "filesystem",
+          "used_bytes": 430080,
+          "usedbydataset_bytes": 307200,
+          "usedbysnapshots_bytes": 122880,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/lib/apt",
+          "type": "filesystem",
+          "used_bytes": 290455552,
+          "usedbydataset_bytes": 190840832,
+          "usedbysnapshots_bytes": 99614720,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/lib/dpkg",
+          "type": "filesystem",
+          "used_bytes": 162529280,
+          "usedbydataset_bytes": 98566144,
+          "usedbysnapshots_bytes": 63963136,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/lib/flatpak",
+          "type": "filesystem",
+          "used_bytes": 7623566949,
+          "usedbydataset_bytes": 7194070220,
+          "usedbysnapshots_bytes": 429496729,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/lib/libvirt",
+          "type": "filesystem",
+          "used_bytes": 44560285696,
+          "usedbydataset_bytes": 44560285696,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/log",
+          "type": "filesystem",
+          "used_bytes": 2684354559,
+          "usedbydataset_bytes": 2040109465,
+          "usedbysnapshots_bytes": 644245094,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/mail",
+          "type": "filesystem",
+          "used_bytes": 196608,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/snap",
+          "type": "filesystem",
+          "used_bytes": 1503238552,
+          "usedbydataset_bytes": 1288490188,
+          "usedbysnapshots_bytes": 214748364,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/spool",
+          "type": "filesystem",
+          "used_bytes": 528384,
+          "usedbydataset_bytes": 430080,
+          "usedbysnapshots_bytes": 98304,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/tmp",
+          "type": "filesystem",
+          "used_bytes": 12582912,
+          "usedbydataset_bytes": 12582912,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/ROOT/ubuntu_7k2m4p/var/www",
+          "type": "filesystem",
+          "used_bytes": 196608,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/USERDATA",
+          "type": "filesystem",
+          "used_bytes": 787146486579,
+          "usedbydataset_bytes": 196608,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 787146289971,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/USERDATA/home_bf193q",
+          "type": "filesystem",
+          "used_bytes": 787052756992,
+          "usedbydataset_bytes": 644245094400,
+          "usedbysnapshots_bytes": 142807662592,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/USERDATA/root_7k2m4p",
+          "type": "filesystem",
+          "used_bytes": 93532979,
+          "usedbydataset_bytes": 39845888,
+          "usedbysnapshots_bytes": 53687091,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "rpool/keystore",
+          "type": "volume",
+          "used_bytes": 536870912,
+          "usedbydataset_bytes": 9437184,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 527433728
+        }
+      ]
+    },
+    {
+      "name": "bpool",
+      "space": {
+        "used_bytes": 290189312,
+        "available_bytes": 1588465664,
+        "pool_size_bytes": 2013265920,
+        "pool_alloc_bytes": 290586624,
+        "pool_free_bytes": 1722679296,
+        "capacity_pct": 14,
+        "measured_at": "2026-10-24T09:27:53Z"
+      },
+      "level": "ok",
+      "datasets": [
+        {
+          "name": "bpool",
+          "type": "filesystem",
+          "used_bytes": 290189312,
+          "usedbydataset_bytes": 98304,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 290091008,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "bpool/BOOT",
+          "type": "filesystem",
+          "used_bytes": 290091008,
+          "usedbydataset_bytes": 98304,
+          "usedbysnapshots_bytes": 0,
+          "usedbychildren_bytes": 289992704,
+          "usedbyrefreservation_bytes": 0
+        },
+        {
+          "name": "bpool/BOOT/ubuntu_7k2m4p",
+          "type": "filesystem",
+          "used_bytes": 289992704,
+          "usedbydataset_bytes": 226029568,
+          "usedbysnapshots_bytes": 63963136,
+          "usedbychildren_bytes": 0,
+          "usedbyrefreservation_bytes": 0
+        }
+      ]
+    }
+  ],
+  "drives": [
+    {
+      "name": "black",
+      "guid": "14361060171807873218",
+      "drive_id": "usb-JMicron_Generic_DISK00_0123456789ABCDEF-0:0",
+      "autoeject": true,
+      "retention": {
+        "window_days": 30,
+        "max_age_days": 0,
+        "margin_pct": 10
+      },
+      "last_backup_at": "2026-10-24T09:27:53Z",
+      "age_days": 0,
+      "last_backup_point": "zark_2026-10-24_09:03:02Z",
+      "last_run": {
+        "command": "backup",
+        "result": "completed",
+        "started_at": "2026-10-24T09:02:11Z",
+        "ended_at": "2026-10-24T09:27:53Z",
+        "point": "zark_2026-10-24_09:03:02Z",
+        "datasets_missing": 0,
+        "message": ""
+      },
+      "space": {
+        "used_bytes": 2623442904311,
+        "available_bytes": 1252295318281,
+        "pool_size_bytes": 4000762036224,
+        "pool_alloc_bytes": 2592334885683,
+        "pool_free_bytes": 1408427150541,
+        "capacity_pct": 64,
+        "measured_at": "2026-10-24T09:27:20Z"
+      }
+    },
+    {
+      "name": "blue",
+      "guid": "8963688414852777737",
+      "drive_id": "usb-ASMedia_ASM1153E_000000000000DD3A-0:0",
+      "autoeject": false,
+      "retention": {
+        "window_days": 60,
+        "max_age_days": 365,
+        "margin_pct": 10
+      },
+      "last_backup_at": "2026-10-10T19:58:44Z",
+      "age_days": 13,
+      "last_backup_point": "zark_2026-10-10_19:10:51Z",
+      "last_run": {
+        "command": "backup",
+        "result": "completed",
+        "started_at": "2026-10-10T19:10:02Z",
+        "ended_at": "2026-10-10T19:58:44Z",
+        "point": "zark_2026-10-10_19:10:51Z",
+        "datasets_missing": 0,
+        "message": ""
+      },
+      "space": {
+        "used_bytes": 1381537219293,
+        "available_bytes": 556331892003,
+        "pool_size_bytes": 2000381018112,
+        "pool_alloc_bytes": 1365155355033,
+        "pool_free_bytes": 635225663079,
+        "capacity_pct": 68,
+        "measured_at": "2026-10-10T19:57:20Z"
+      }
+    }
+  ],
+  "notices": [
+    {
+      "level": "warning",
+      "code": "capacity",
+      "subject": "rpool",
+      "text": "rpool is 89% full (warning from 80%): sudo zark prune"
+    },
+    {
+      "level": "info",
+      "code": "backup_age",
+      "subject": null,
+      "text": "last backups: black 0 day(s) ago, blue 13 day(s) ago"
+    },
+    {
+      "level": "info",
+      "code": "origin_residues",
+      "subject": null,
+      "text": "In origin: 3 snapshot(s) no registered drive needs (`syncoid_*` left by zark 1.x, keystore `prepare_*`): sudo zark prune removes them"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "kind": "zark-progress",
+  "schema_version": 1,
+  "zark_version": "2.1.0",
+  "command": "backup",
+  "pid": 4194304,
+  "pid_start_ticks": 2961734,
+  "boot_id": "6f1c0b8e-3d52-4a8e-9c1f-2b7d4e5a9c03",
+  "started_at": "2026-10-24T09:02:11Z",
+  "updated_at": "2026-10-24T09:19:41Z",
+  "waiting_for_input": false,
+  "waiting_for": null,
+  "step": {
+    "index": 7,
+    "total": 8,
+    "label": "Replicating (this may take a while)..."
+  },
+  "drive": {
+    "name": "black",
+    "guid": "14361060171807873218",
+    "drive_id": "usb-JMicron_Generic_DISK00_0123456789ABCDEF-0:0",
+    "space": {
+      "used_bytes": 2606382864714,
+      "available_bytes": 1269355357878,
+      "pool_size_bytes": 4000762036224,
+      "pool_alloc_bytes": 2575477139046,
+      "pool_free_bytes": 1425284897178,
+      "capacity_pct": 64,
+      "measured_at": "2026-10-24T09:02:40Z"
+    }
+  },
+  "point": "zark_2026-10-24_09:03:02Z",
+  "transfer": {
+    "datasets_total": 21,
+    "datasets_done": 9,
+    "datasets_failed": 0,
+    "dataset": "rpool/USERDATA/home_bf193q",
+    "dataset_state": "incremental",
+    "bytes_total": 18253611008,
+    "bytes_total_partial": false,
+    "bytes_done": 7516192768,
+    "rate_bytes_per_s": 112197632
+  }
+}

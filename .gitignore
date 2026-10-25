@@ -17,6 +17,8 @@ eggs/
 parts/
 sdist/
 var/
+# The status files' fixtures mirror the real paths (tests/fixtures/status/README.md).
+!tests/fixtures/status/*/var/
 wheels/
 share/python-wheels/
 *.egg-info/

@@ -1,0 +1,8 @@
+{
+  "now": "2026-10-24T09:01:00Z",
+  "progress_process": null,
+  "progress": "idle",
+  "status": "stale",
+  "indicator": "edge",
+  "what": "status.json 6 h old: the timer is not running."
+}

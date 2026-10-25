@@ -1,0 +1,8 @@
+{
+  "now": "2026-10-24T09:19:44Z",
+  "progress_process": "alive",
+  "progress": "running",
+  "status": "ok",
+  "indicator": "running",
+  "what": "One send had no estimate: bytes_total is a floor, no ETA."
+}
