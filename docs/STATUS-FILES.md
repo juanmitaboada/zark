@@ -334,9 +334,15 @@ in the same pass as `space`:
 | `usedbyrefreservation_bytes` | integer |
 
 A dataset's own share is `usedbydataset + usedbysnapshots +
-usedbyrefreservation`. The shares of all datasets do not overlap and add up
-to the pool root's `used_bytes`, so a chart built on them counts nothing
-twice. Grouping (homes, system, other) is the reader's.
+usedbyrefreservation`. The shares of all datasets do not overlap, so a chart
+built on them counts nothing twice. Their sum is a little less than the pool
+root's `used_bytes`: the root's `usedbychildren` also holds what ZFS keeps
+under the root in directories `zfs list` never shows (`$MOS`, the pool's own
+metadata, among them), and a dataset's `usedbychildren` holds the part of its
+children's `reservation` they do not use. A reader that shows the whole of
+`used_bytes` takes the rest, `used_bytes` minus the sum of the shares, as
+pool metadata (and reservations, where any is set). Grouping (homes, system,
+other) is the reader's.
 
 Drives carry no `datasets`: their datasets can only be listed while zark has
 the drive imported.

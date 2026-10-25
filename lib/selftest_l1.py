@@ -529,23 +529,26 @@ def pool_13(b: Bench) -> None:
     "POOL-14",
     1,
     1,
-    "a pool's zfs and zpool figures read as integers; its datasets' own shares sum to used",
+    "a pool's zfs and zpool figures are integers; dataset shares plus the hidden part are used",
     depends=(
         "status.json's Space object (lib/zfs.py read_space, R1)",
-        "status.json's datasets and the identity readers rely on (read_datasets, R2)",
+        "status.json's datasets and what readers compute from them (read_datasets, R2)",
     ),
 )
 def pool_14(b: Bench) -> None:
     """``zfs list -Hp -o used,avail`` and ``zpool list -Hp -o
     size,alloc,free,capacity`` give integers zark's reader takes, capacity
-    0-100; on a pool with a child, a snapshot that holds overwritten data and
-    a zvol with a refreservation, each dataset's ``usedbydataset +
-    usedbysnapshots + usedbyrefreservation`` sums to the root's ``used``
-    (every ``used`` is its four parts). ``used`` is the dir's dd_used_bytes,
-    which its breakdown sums to, and the four usedby* are that breakdown,
-    usedbychildren with the children's reservations (none here). OpenZFS
-    module/zfs/dsl_dataset.c:2561-2572, :2816-2817; module/zfs/dsl_dir.c:1041-1064,
-    :1102-1122, :1568-1577; cmd/zpool/zpool_main.c:6977-6985 (capacity, -p)."""
+    0-100. On a pool with a child, a snapshot that holds overwritten data and
+    a zvol with a refreservation: every ``used`` is its four usedby* parts; a
+    dataset's ``usedbychildren`` is its listed children's ``used`` (no
+    reservation is set); the root's ``usedbychildren`` holds more than its
+    listed children, what ZFS keeps under the root in directories ``zfs
+    list`` never shows (``$MOS``, the pool's metadata); and the datasets' own
+    shares (usedbydataset + usedbysnapshots + usedbyrefreservation) plus that
+    hidden part are the root's ``used``. OpenZFS module/zfs/dsl_dataset.c:2561-2572,
+    :2816-2817; module/zfs/dsl_dir.c:1041-1064, :1102-1122, :1568-1577;
+    module/zfs/dsl_pool.c:512, :798-812 ($MOS under the root, its space);
+    cmd/zpool/zpool_main.c:6977-6985 (capacity, -p)."""
     c = b.make_pool("c")
     try:
         x = b.fs(f"{c}/pool14")
@@ -565,9 +568,6 @@ def pool_14(b: Bench) -> None:
         expect(
             refres > 0 and snaps > 0, "a refreservation and snapshot space", f"{refres}, {snaps}"
         )
-        own = sum(r.usedbydataset + r.usedbysnapshots + r.usedbyrefreservation for r in rows)
-        root = next(r for r in rows if r.name == c)
-        expect(own == root.used, "the shares to add up to the root's used", f"{own} != {root.used}")
         parts = [
             r.name
             for r in rows
@@ -575,6 +575,16 @@ def pool_14(b: Bench) -> None:
             != r.usedbydataset + r.usedbysnapshots + r.usedbychildren + r.usedbyrefreservation
         ]
         expect(not parts, "every used to be its four parts", f"{len(parts)} not")
+        root = next(r for r in rows if r.name == c)
+        listed = sum(r.used for r in rows if r.name.rpartition("/")[0] == c)
+        hidden = root.usedbychildren - listed
+        expect(hidden > 0, "the root's hidden part above zero", str(hidden))
+        own = sum(r.usedbydataset + r.usedbysnapshots + r.usedbyrefreservation for r in rows)
+        expect(
+            own + hidden == root.used,
+            "the shares plus the hidden part to be the root's used",
+            f"{own} + {hidden} != {root.used}",
+        )
     finally:
         b.drop_pool(c)
 

@@ -446,17 +446,25 @@ class TestSpaceReads:  # pylint: disable=missing-function-docstring
             with patch_sh(mock):
                 assert zfs.read_datasets("rpool") is None, (rc, out)
 
-    def test_the_fixtures_shares_add_up_to_the_roots_used(self):
+    def test_the_fixtures_shares_and_hidden_part_make_the_roots_used(self):
+        # docs/STATUS-FILES.md: the root's usedbychildren also holds what ZFS
+        # keeps in hidden directories ($MOS); the fixture's figures have none.
         doc = json.loads((FIXTURES / "idle" / STATUS_REL).read_text("utf-8"))
         for pool in doc["source_pools"]:
             rows = pool["datasets"]
+            root = rows[0]
+            listed = sum(
+                r["used_bytes"] for r in rows if r["name"].rpartition("/")[0] == root["name"]
+            )
+            hidden = root["usedbychildren_bytes"] - listed
+            assert hidden >= 0, pool["name"]
             own = sum(
                 r["usedbydataset_bytes"]
                 + r["usedbysnapshots_bytes"]
                 + r["usedbyrefreservation_bytes"]
                 for r in rows
             )
-            assert own == rows[0]["used_bytes"] == pool["space"]["used_bytes"], pool["name"]
+            assert own + hidden == root["used_bytes"] == pool["space"]["used_bytes"], pool["name"]
 
 
 def _space(used: int = 100, when: str = "2026-10-24T08:58:12Z") -> zfs.Space:
