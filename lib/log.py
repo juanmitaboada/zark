@@ -37,20 +37,25 @@ _SGR = re.compile(r"\x1b\[[0-9;]*m")
 _HANG = re.compile(r" *(?:[•→✓✗-] |\d+\. )?")
 _RESET = "\033[0m"
 
-# What lib.progress hears (M7-4, M7-9): a numbered step, and the terminal
+# What lib.progress hears (M7-4, M7-9): a numbered step, the terminal
 # reads, with their prompt while one waits and None once it returned or
-# raised. Set by progress.start; log itself imports nothing of zark's.
+# raised, and a fatal error's message. Set by progress.start; log itself
+# imports nothing of zark's.
 _ON_STEP: list[Callable[[int, int, str], None]] = []
 _ON_WAIT: list[Callable[[str | None], None]] = []
+_ON_FATAL: list[Callable[[str], None]] = []
 
 
 def watch(
     on_step: Callable[[int, int, str], None] | None,
     on_wait: Callable[[str | None], None] | None,
+    on_fatal: Callable[[str], None] | None = None,
 ) -> None:
-    """Hear every :meth:`Log.step` and every terminal read; None stops it."""
+    """Hear every :meth:`Log.step`, every terminal read and every
+    :meth:`Log.fatal`; None stops it."""
     _ON_STEP[:] = [on_step] if on_step else []
     _ON_WAIT[:] = [on_wait] if on_wait else []
+    _ON_FATAL[:] = [on_fatal] if on_fatal else []
 
 
 class _Reading:
@@ -575,6 +580,8 @@ class Log:
         solutions: list[str] | None = None,
     ) -> NoReturn:
         """Print fatal error banner, pause for debugging, then raise SystemExit."""
+        for hear in _ON_FATAL:
+            hear(self._strip(message).split("\n", 1)[0])
         lines = [message, ""]
         if causes:
             lines.append(f"{self.Y}Possible causes:{self.N}")

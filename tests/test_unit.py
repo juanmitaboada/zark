@@ -105,6 +105,7 @@ import lib.mount as lib_mount  # pylint: disable=wrong-import-position # noqa: E
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
 import lib.platform_facts as pfacts  # pylint: disable=wrong-import-position # noqa: E402
+import lib.progress as progress_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.selftest as stest  # pylint: disable=wrong-import-position # noqa: E402
@@ -114,6 +115,7 @@ import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: 
 import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status_file as status_file_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.zfs_features as zfeat  # pylint: disable=wrong-import-position # noqa: E402
+import tests.test_status_files as tsf  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
     _decide,
@@ -17118,6 +17120,152 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
 
 _NVME = "/dev/disk/by-id/nvme-Samsung_X_S1"
 _USB = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0"
+
+
+class TestBackupLastRun:  # pylint: disable=missing-function-docstring
+    """M7-6: every ending of a backup gives its drive a last_run that the
+    schema accepts: completed, incomplete, not verified, aborted (a fatal, a
+    declined question, a signal before the transfer), interrupted (a signal
+    during it, a crash after a receive began)."""
+
+    writes: list[tuple[str, dict[str, status_file_lib.DriveUpdate]]]
+
+    def _ending(
+        self, fake: FakeZfs, *extra: AbstractContextManager[object]
+    ) -> tuple[int, dict[str, Any], list[str]]:
+        """Run backup under a progress run, end it as zark's atexit would, and
+        return the rc, the drive's entry in the status.json it gives and who
+        wrote status.json, in order."""
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "usb-X-0:0", autoeject=False)
+        writes = self.writes = []
+
+        def refresh(_cfg: object, _log: object, by: str, updates: Any = None) -> object:
+            writes.append((by, dict(updates or {})))
+            return status_lib.Status()
+
+        rc = 0
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            for cm in (
+                patch.object(progress_mod, "atexit"),
+                patch.object(status_file_lib, "refresh", side_effect=refresh),
+                patch.object(Config, "load", return_value=cfg),
+                patch.object(progress_mod.sh, "is_live_usb", return_value=False),
+                patch.object(progress_mod.signals, "teardown"),
+            ):
+                stack.enter_context(cm)
+            assert progress_mod.start("backup", Log(os.devnull), Path(td, "progress.json"))
+            try:
+                _, rc = TestBackupCommand()._run(fake, *extra)  # pylint: disable=protected-access
+            except RuntimeError as e:  # a crash: zark's main notes it, then exits
+                progress_mod.note_error(str(e))
+                rc = 1
+            finally:
+                progress_mod.end()
+        by = [w[0] for w in writes]
+        doc = status_file_lib.build(status_lib.Status(), cfg, "backup", None, writes[-1][1])
+        assert not tsf.problems(doc, "status"), tsf.problems(doc, "status")
+        return rc, doc["drives"][0], by
+
+    def test_completed_is_written_before_the_eject_prompt(self):
+        seen: list[int] = []
+        rc, drive, by = self._ending(
+            _fresh_fake(),
+            patch.object(
+                backup_mod,
+                "prompt_eject_or_attach",
+                side_effect=lambda *_a, **_k: seen.append(len(self.writes)),
+            ),
+        )
+        assert rc == 0 and by == ["backup", "backup"] and seen == [1], (rc, by, seen)
+        lr = drive["last_run"]
+        assert lr["result"] == "completed" and lr["message"] == "" and lr["datasets_missing"] == 0
+        assert lr["point"] and repl.POINT_RE.fullmatch(lr["point"]), lr
+        assert drive["last_backup_point"] == lr["point"]
+
+    def test_incomplete(self):
+        real = engine.Run.transfer
+
+        def transfer(self: engine.Run, p: repl.DatasetPlan) -> engine.Outcome:
+            if p.rel == "rpool/USERDATA/home":
+                return engine.Outcome(p.rel, False, "broken pipe")
+            return real(self, p)
+
+        rc, drive, by = self._ending(_fresh_fake(), patch.object(engine.Run, "transfer", transfer))
+        lr = drive["last_run"]
+        assert rc == 1 and by == ["backup"], (rc, by)
+        assert lr["result"] == "incomplete" and lr["datasets_missing"] >= 1, lr
+        assert lr["message"] == f"{lr['datasets_missing']} dataset(s) not backed up"
+        assert lr["point"] and drive["last_backup_point"] is None
+
+    def test_not_verified(self):
+        bad = Readback(imported=True, health="DEGRADED", reexported=True)
+        rc, drive, _ = self._ending(
+            _fresh_fake(), patch.object(ZFS, "verify_exported_pool_readback", return_value=bad)
+        )
+        lr = drive["last_run"]
+        assert rc == 1 and lr["result"] == "not_verified" and lr["point"], lr
+        assert lr["message"] == "backup failed its read-back"
+
+    def test_aborted_by_a_declined_question_or_a_fatal(self):
+        rc, drive, _ = self._ending(_fresh_fake(), patch("lib.log.Log.ask", return_value=False))
+        lr = drive["last_run"]
+        assert rc == 1 and lr["result"] == "aborted" and lr["point"] is None, lr
+        assert lr["message"] == "Aborted by user"
+        fake = _fresh_fake()
+        fake.fail_cmds.add("zfs get -H keystatus -r backup/rpool")
+        rc, drive, _ = self._ending(
+            fake, patch.object(ZFS, "datasets_needing_key", _REAL_DATASETS_NEEDING_KEY)
+        )
+        lr = drive["last_run"]
+        assert rc == 1 and lr["result"] == "aborted", lr
+        assert lr["message"].startswith("Cannot read the key status of backup")
+
+    def _signal_in(self, where: str) -> Callable[..., Any]:
+        """A stand-in for ``where`` that delivers SIGTERM as lib.signals does."""
+        real = getattr(engine.Run, where)
+
+        def stand_in(self: engine.Run, *a: Any) -> Any:
+            if where == "transfer":
+                self.started.add(a[0].rel)  # the receive began
+            elif where == "take_point":
+                _ = real(self, *a)
+            _signals._received.append(signal.SIGTERM)  # pylint: disable=protected-access
+            raise SystemExit(128 + signal.SIGTERM)
+
+        return stand_in
+
+    def test_a_signal_before_the_first_transfer_is_aborted(self):
+        try:
+            rc, drive, _ = self._ending(
+                _fresh_fake(), patch.object(engine.Run, "take_point", self._signal_in("take_point"))
+            )
+        finally:
+            _signals._received.clear()  # pylint: disable=protected-access
+        lr = drive["last_run"]
+        assert rc == 128 + signal.SIGTERM and lr["result"] == "aborted", lr
+        assert lr["point"] is None and lr["message"] == "Interrupted by SIGTERM"
+
+    def test_a_signal_during_the_transfer_is_interrupted(self):
+        try:
+            rc, drive, _ = self._ending(
+                _fresh_fake(), patch.object(engine.Run, "transfer", self._signal_in("transfer"))
+            )
+        finally:
+            _signals._received.clear()  # pylint: disable=protected-access
+        lr = drive["last_run"]
+        assert rc == 128 + signal.SIGTERM and lr["result"] == "interrupted", lr
+        assert lr["point"] and lr["message"] == "Interrupted by SIGTERM"
+        assert drive["last_backup_point"] is None
+
+    def test_a_crash_after_a_receive_began_is_interrupted(self):
+        def boom(self: engine.Run, p: repl.DatasetPlan) -> engine.Outcome:
+            self.started.add(p.rel)
+            raise RuntimeError("boom")
+
+        rc, drive, _ = self._ending(_fresh_fake(), patch.object(engine.Run, "transfer", boom))
+        lr = drive["last_run"]
+        assert rc == 1 and lr["result"] == "interrupted" and lr["message"] == "boom", lr
 
 
 class TestM2R16Smalls:  # pylint: disable=missing-function-docstring,protected-access

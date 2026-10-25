@@ -173,6 +173,7 @@ def main():
             Log().error("Interrupted by user.")
         sys.exit(130)
     except Exception as e:  # pylint: disable=broad-exception-caught
+        progress.note_error(str(e))  # a backup's last_run says why (M7-6 6a)
         print(f"\n\033[0;31m[FATAL]\033[0m {e}")
         if "--debug" in cmd_args:
             import traceback  # pylint: disable=import-outside-toplevel

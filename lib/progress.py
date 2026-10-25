@@ -84,6 +84,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
     point: str | None = None
     transfer: dict[str, Any] | None = None
     updates: dict[str, DriveUpdate] = field(default_factory=dict)
+    error: str = ""  # the last fatal error's message, or a crash's
     on_end: list[Callable[[], None]] = field(default_factory=list)
     errors: set[str] = field(default_factory=set)
     dirty: bool = True
@@ -203,7 +204,7 @@ def _record_orphan(doc: dict[str, Any], command: str, log: Log) -> None:
         began,
         ended,
         point if isinstance(point, str) else None,
-        message="The zark process ended without cleaning up (killed or crashed)",
+        message="the run ended without recording a result",
     )
     log.warn(f"An earlier backup to {drive.get('name', guid)} ended without cleaning up")
     if sh.is_live_usb():
@@ -247,7 +248,7 @@ def start(command: str, log: Log | None = None, path: Path | None = None) -> boo
     _RUN[:] = [run]
     with run.lock:
         _write(run)
-    log_mod.watch(on_step, on_wait)
+    log_mod.watch(on_step, on_wait, note_error)
     thread = threading.Thread(target=_heartbeat, args=(run,), name="zark-progress", daemon=True)
     _THREAD[:] = [thread]
     thread.start()
@@ -264,6 +265,19 @@ def on_step(index: int, total: int, label: str) -> None:
 def on_wait(prompt: str | None) -> None:
     """A terminal read began (its prompt) or ended (None)."""
     _changed(lambda r: setattr(r, "waiting_for", prompt))
+
+
+def note_error(message: str) -> None:
+    """Why the run is ending: a fatal error's message, or a crash's."""
+    _changed(lambda r: setattr(r, "error", message))
+
+
+def error() -> str:
+    """The run's last :func:`note_error`, "" when none."""
+    if not _RUN:
+        return ""
+    with _RUN[0].lock:
+        return _RUN[0].error
 
 
 def set_drive(name: str, guid: str, drive_id: str) -> None:

@@ -26,6 +26,8 @@ per-dataset table goes to the terminal and to zark.log.
 Refuses to run from live USB (would back up the wrong system).
 """
 
+import os
+import signal
 import socket
 import time
 from collections.abc import Callable
@@ -43,9 +45,12 @@ from lib import (
     forensics,
     notify,
     pool_record,
+    progress,
     reclaim,
     sh,
+    signals,
     status,
+    status_file,
     survey,
 )
 from lib.cleanup import Cleanup, prompt_eject_or_attach
@@ -81,7 +86,7 @@ from lib.retention import (
     space_candidates,
     whole_datasets,
 )
-from lib.zfs import ZFS, KeyStatusError, PoolInfo
+from lib.zfs import ZFS, KeyStatusError, PoolInfo, Space, read_space
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
 # so it is never the answer to "out of space" (hallazgo 8).
@@ -909,6 +914,54 @@ def _check_health(zfs: ZFS, pool: str, log: Log) -> None:
         )
 
 
+class _RunRecord:
+    """This run's ``last_run`` for its drive in status.json (M7-6).
+
+    The banners set the result when they print it; a run that ends without
+    one gets it at the end (progress.on_end): ``aborted`` while no receive
+    began, ``interrupted`` once one did, whether a signal, a fatal error or
+    a crash ended it (6a). A result set by a banner is never changed after.
+    """
+
+    def __init__(self, guid: str):
+        self.guid = guid
+        self.eng: engine.Run | None = None
+        self.point_taken = False
+        self.space: Space | None = None
+        self.done = False
+
+    def measure(self, pool: str) -> None:
+        """Read the drive's space now (it is imported) and show it."""
+        self.space = read_space(pool) or self.space
+        progress.set_space(self.space)
+
+    def result(self, result: str, *, missing: int = 0, message: str = "") -> None:
+        """Record the run's result now."""
+        self.done = True
+        point = self.eng.point if self.eng is not None and self.point_taken else None
+        run_ = status_file.LastRun(
+            result, progress.started_at(), now_utc_iso(), point, missing, message
+        )
+        last = point if result == "completed" else None
+        progress.record(self.guid, status_file.DriveUpdate(run_, self.space, last))
+
+    def finish(self) -> None:
+        """The end of a run with no result: what it left the drive with."""
+        if self.done:
+            return
+        began = self.eng is not None and bool(self.eng.started)
+        sig = signals.received()
+        if sig == signal.SIGPIPE:
+            why = "Output closed (its reader went away)"
+        elif sig is not None:
+            why = f"Interrupted by {signal.Signals(sig).name}"
+        else:
+            why = progress.error() or "the run ended without recording a result"
+        if not began:
+            self.point_taken = False  # undone where no receive began
+        self.result("interrupted" if began else "aborted", message=why)
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
@@ -967,6 +1020,10 @@ def run(
 
     pool_name = drive.name
     pool_guid = drive.guid
+    record = _RunRecord(pool_guid)
+    registered = cfg.known_drives.get(pool_name)
+    progress.set_drive(pool_name, pool_guid, registered.drive_id if registered else "")
+    progress.on_end(record.finish)
 
     selected_info = cfg.known_drives.get(pool_name)
     age_at_start = drive_staleness_days(selected_info) if selected_info is not None else None
@@ -1022,6 +1079,7 @@ def run(
 
     src_info = zfs.pool_info(cfg.source_pool)
     dst_info = zfs.pool_info(pool_name)
+    record.measure(pool_name)
 
     _check_target_space(src_info, dst_info, pool_name, cfg.source_pool, log)
 
@@ -1091,7 +1149,12 @@ def run(
 
     policy = cfg.drive_policy(pool_name)
 
+    record.eng = eng
+
     def decide(plans: list[DatasetPlan], run_: engine.Run) -> bool:
+        # The engine asks after it took the point (engine.execute).
+        record.point_taken = True
+        progress.set_point(run_.point)
         return _decide(plans, run_, pool_name, dst_info, log, policy, declared)
 
     log.step(7, TOTAL_STEPS, "Replicating (this may take a while)...")
@@ -1110,6 +1173,7 @@ def run(
         ((pool_record.POOLS_PROP, pools_mark),) if pools_mark else (),
     )
     used_after = zfs.pool_info(pool_name)  # P0-4: after the transfer
+    record.measure(pool_name)
     pruned = (0, 0)
     shared: dict[str, list[Ref]] | None = None
     meta: dict[str, str] = {}
@@ -1118,6 +1182,8 @@ def run(
         _ = drive_marks.record_complete(pool_name, eng.point, at_point, log)
         pruned = _apply_retention(pool_name, policy, log)
         used_after = _space_after_retention(zfs, pool_name, used_after, pruned[0], log)
+        if pruned[0]:
+            record.measure(pool_name)
         # After retention, which may remove shared intermediates (decision 5e).
         shared = eng.shared_with_origin()
         meta = drive_marks.read_metadata(pool_name)
@@ -1152,6 +1218,7 @@ def run(
             ],
         )
         _notify("❌ Backup NOT verified", f"{pool_name} could not be exported")
+        record.result("not_verified", message=f"{pool_name} could not be exported")
         raise SystemExit(1)
     rb = zfs.verify_exported_pool_readback(pool_name, device=device, cleanup=cleanup)
     if not rb.ok:
@@ -1159,6 +1226,7 @@ def run(
             "BACKUP NOT VERIFIED", [*rb.describe(), "", "Do NOT rely on this backup.", *marked]
         )
         _notify("❌ Backup NOT verified", f"{pool_name} failed its read-back")
+        record.result("not_verified", message=f"{pool_name} failed its read-back")
         raise SystemExit(1)
     log.ok(f"{pool_name} verified reimportable (ONLINE)")
 
@@ -1166,6 +1234,7 @@ def run(
         lines, missing = _incomplete_lines(res, eng.point)
         log.banner_error("BACKUP INCOMPLETE", lines)
         _notify("❌ Backup incomplete", f"{missing} dataset(s) not backed up")
+        record.result("incomplete", missing=missing, message=f"{missing} dataset(s) not backed up")
         raise SystemExit(1)
 
     # ── Persist last_backup_at (only for a complete, verified backup) ────
@@ -1210,6 +1279,11 @@ def run(
             *[f"  {p.rel} ({_gib(p.used)}, {declared.flags_of(p.rel)})" for p in left_out],
         ],
     )
+    # In status.json before the eject prompt, which may wait (M7-6): a reader
+    # that sees the prompt already finds the result.
+    record.result("completed")
+    if progress.active() and not sh.is_live_usb():
+        _ = status_file.refresh(cfg, Log(os.devnull), "backup", progress.updates())
     origin: dict[str, Origin] = {}
     try:
         origin = survey.read_origin(survey.source_pools(), strict=True)
