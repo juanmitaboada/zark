@@ -1,3 +1,19 @@
+zark (2.1.0~rc1-1) UNRELEASED; urgency=medium
+
+  * Milestone M7 of zark 2.1 (the status writer). Not for release:
+    nothing is published until the final 2.1.0.
+  * /run/zark/progress.json while a command that changes state runs: its
+    step, whether it waits for an answer, the drive and point of a
+    backup, and its transfer with the bytes sent and their rate.
+  * /var/lib/zark/status.json at the end of every such command, from
+    zark status and hourly from the alerts timer: the source pools'
+    space and datasets, every drive's last backup and last run, the
+    MOTD's lines. Schema version 1, docs/STATUS-FILES.md.
+  * /run/zark from a tmpfiles.d entry; /run/zark and /var/lib/zark 0755.
+  * The alerts timer also fires on the wall-clock hour.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Sun, 25 Oct 2026 09:40:00 +0100
+
 zark (2.0.0-1) stable; urgency=medium
 
   * zark 2. Backups use zark's own send/receive loop instead of syncoid:

@@ -1,6 +1,6 @@
 % ZARK(1) zark @VERSION@ | User Commands
 %
-% October 23, 2026
+% October 25, 2026
 
 # NAME
 
@@ -785,13 +785,16 @@ for the canonical end-to-end sequences.
     each exclusion **zark** ignores). **status --refresh** writes
     */run/zark/status.motd*; with **--notify** it also sends a desktop
     notification for a pool at a warning or critical level, at most once a
-    day per pool and level. Read-only.
+    day per pool and level. Both forms also write
+    */var/lib/zark/status.json* from the same read (see **FILES**).
+    Read-only for zark's state.
 
 **alerts** **install**|**remove**
 :   Install or remove the status alerts: */etc/update-motd.d/97-zark-status*,
     which prints */run/zark/status.motd* at login (nothing is computed
     then), and **zark-status.timer**, which runs **status --refresh
-    --notify** every hour and two minutes after boot, with the **zark**
+    --notify** every hour, on every wall-clock hour (so a refresh follows
+    soon after a resume) and two minutes after boot, with the **zark**
     that installed it. **setup** installs them; **setup --remove** and
     removing the Debian package remove them.
 
@@ -1084,6 +1087,28 @@ roll its backup points back).
 
 */run/zark/status.motd*, */etc/update-motd.d/97-zark-status*, */etc/systemd/system/zark-status.service*, */etc/systemd/system/zark-status.timer*
 :   The status alerts; see **alerts**.
+
+*/run/zark/progress.json*
+:   While a command that changes state runs: its step, whether it waits
+    for an answer and for what, and for **backup** the drive, the backup
+    point and the transfer (datasets, bytes sent, their rate). Written at
+    least every 5 seconds; removed when the command ends. For other
+    programs, which read it without root: the format, schema version 1,
+    is in *docs/STATUS-FILES.md* in **zark**'s source.
+
+*/var/lib/zark/status.json*
+:   The state between runs: the source pools' space and datasets, every
+    registered drive with its last backup, its last run and its space as
+    last measured, and the lines the MOTD shows. Written at the end of
+    every command that changes state, by a backup when its result is
+    known, and by **status** (by hand and from the timer); never from a
+    live session. Its format is in the same document as *progress.json*'s.
+
+*/run/zark/status.lock*
+:   Taken with **flock**(2) around every write of *status.json*.
+
+*/usr/lib/tmpfiles.d/zark.conf*
+:   Creates */run/zark* (0755) at boot, from the Debian package.
 
 */var/lib/zark/selftest/*
 :   **selftest**'s reports (the last ten, *report-\<UTC\>.json*) and

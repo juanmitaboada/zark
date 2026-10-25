@@ -5,6 +5,96 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+zark 2.1 is being built as milestones on `main`, versioned `2.1.0-rcN`
+(`lib/config.py`) and `2.1.0~rcN-1` UNRELEASED (`debian/changelog`).
+Nothing is uploaded to the PPA until the final 2.1.0.
+
+### M7 - the status writer (2.1.0-rc1)
+
+#### Added
+
+- **Status files for other programs** (`docs/STATUS-FILES.md`, schema
+  version 1, with JSON Schemas in `docs/schema/` and fixtures for every
+  state in `tests/fixtures/status/`). zark is not a daemon, so a GNOME
+  Shell extension, `zark monitor` or a script learns what it does from two
+  files it writes, readable without root:
+  - `/run/zark/progress.json` (`lib/progress.py`) while a command that
+    changes state runs: its numbered step, whether it waits for an answer
+    and for what, and for `backup` the drive with its space, the backup
+    point and the transfer (datasets planned, done and failed, the one
+    being sent, the estimated stream size, the bytes sent and their
+    rate). Written at once, on every event and from a heartbeat every 2 s
+    inside the zark process, at most once a second; removed when the
+    command ends, after its result is in `status.json`. A file left by a
+    killed run is an orphan the next command records as `interrupted`.
+  - `/var/lib/zark/status.json` (`lib/status_file.py`): the source pools'
+    space (`zfs` and `zpool` figures, read together) and datasets, every
+    registered drive with its retention, last backup, last run and space
+    as last measured, and the MOTD's lines as structured notices. Written
+    at the end of every command that changes state, by `backup` when its
+    result is known (before the eject prompt), and by `zark status` by
+    hand and from the alerts timer; never from a live session.
+- **Every backup ending is recorded** as the drive's `last_run`:
+  `completed`, `incomplete`, `not_verified`, `aborted` (nothing was sent)
+  or `interrupted` (a receive began), with the reason.
+- **bytes_done measured by the kernel**, outside the data path: the
+  `wchar` count of each `zfs send` (its process group, live; the exited
+  shell's, exactly, at the end). The send, its stderr and the pipe are
+  unchanged.
+- **`/run/zark` from the package's `tmpfiles.d` entry** at boot and on
+  install, so a reader can watch it before zark first runs.
+- **Self-test checks SND-13, PRC-05, SYS-02 and POOL-14** (level 1 has
+  55): the send's count, field 22 of `/proc/<pid>/stat`, a tmpfiles.d
+  directory's mode, and a pool's figures and dataset shares.
+- **CI on named Ubuntu series** (RELP.8): tests and lint on 24.04; the
+  `.deb` is built on 24.04 and installed on 24.04 and 26.04 on a tag and
+  when run by hand (`workflow_dispatch`).
+
+#### Changed
+
+- The MOTD file is refreshed at the end of every command that changes
+  state, a failed backup included; 2.0.0 refreshed it after a successful
+  backup and a prune only. The MOTD and `status.json` come from one read.
+- A source pool whose datasets cannot be listed has a MOTD line of its
+  own.
+- `/run/zark` and `/var/lib/zark` are 0755 whatever the umask, and made
+  so when an earlier zark left them narrower.
+- The alerts timer also fires on every wall-clock hour
+  (`OnCalendar=hourly` next to `OnUnitActiveSec=1h`): the monotonic timer
+  pauses while the machine sleeps, the calendar one catches up on resume. The next
+  `zark setup` or `zark alerts install` rewrites an installed unit.
+- `zark status` writes `status.json` too.
+
+#### Known limitations
+
+- `wchar` also counts what `zfs send` writes to stderr (a few bytes, an
+  error message). On an architecture without large kernel stacks the
+  stream would be written from a taskq thread and not counted; zark is
+  `amd64` only, and SND-13 certifies the count on the running platform.
+- Reading another process's `/proc/<pid>/io` needs root: zark runs as
+  root; a reader never needs it.
+- `transfer` is reported for `backup` only; `recover` moves as much data
+  without it.
+- `status.json` survives `apt purge zark`.
+
+#### Rejected approaches
+
+- `zfs send -vP` parsed from stderr for the byte count: it changes the
+  command and its log line, its counter restarts at each intermediate
+  snapshot of `-I`, and its lines would fill the stderr pipe zark reads
+  only at the end. A counting relay, `pv` or `mbuffer` between send and
+  receive: in the data path. `-V`: rounded figures.
+- A signal timer in the main thread for the heartbeat: a handler can run
+  in the middle of anything, the cleanup included. A thread waits instead.
+- A resident service, or readers running `zark status --json`: zark keeps
+  the files itself, with no resident process.
+- `jsonschema` as a test dependency: the suite stays standard library
+  only, with a validator for exactly the keywords the schemas use.
+- A 15-minute timer: four times the reads of every snapshot in the
+  source, for figures readers can read live themselves.
+
 ## [2.0.0] - 2026-10-23
 
 zark 2 replaces the replication of zark 1.x and adds the commands that

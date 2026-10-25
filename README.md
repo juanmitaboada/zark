@@ -441,6 +441,10 @@ When a backup would leave the drive with less free space than its margin (10 % o
 
 `zark setup` installs a login message and an hourly timer (`zark alerts remove` takes them away): the message says when `rpool` or `bpool` is 80 % full or more (90 % is critical, and a desktop notification is sent once a day), how many days have passed since each drive's last backup, and what `zark prune` could remove. `zark status` shows the same at any time.
 
+### Status files for other programs
+
+zark is not a daemon, so it writes what it is doing and how the backups stand to two JSON files anyone can read: `/run/zark/progress.json` while a command that changes state runs (its step, whether it waits for an answer, and for a backup the drive, the point and the bytes sent with their rate), and `/var/lib/zark/status.json` between runs (the pools' space and datasets, each drive's last backup and last run, the login message's lines). They are written by the running command itself, at the end of every command that changes state, and hourly by the alerts timer. Their format, schema version 1, what a reader may rely on and how to read them safely: [`docs/STATUS-FILES.md`](docs/STATUS-FILES.md).
+
 ### Drive staleness reporting
 
 `zark backup` records `last_backup_at` in `etc/known_drives.json` after every complete, verified run, and the drive's root dataset records the zark version, the source host, its machine-id and the last point (`org.zark:*`). A drive whose machine-id is not this system's is refused before anything is touched. A drive with no machine-id recorded (written by zark 1.x or an early 2.0.0 development build) is accepted only when it shares something with this system, a snapshot or bookmark to continue from, and that run records the owner; one with nothing in common (blank, or every anchor in the source gone) is refused, and `purge` plus `prepare` make it this system's. After a backup it lists how many days have passed since every other drive's last backup, and for a drive with no anchor in the source what it still shares and what its next backup will ask (a rollback to the newest shared snapshot, or a full resend).
