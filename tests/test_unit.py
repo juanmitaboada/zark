@@ -21197,6 +21197,56 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
         assert not [ln for ln in r["log"] if "Traceback" in ln], r["log"]
 
 
+class TestCiWorkflow:  # pylint: disable=missing-function-docstring
+    """RELP.8 (M7-1 1a): every CI job names its Ubuntu series, the .deb is
+    built on 24.04 and installed on 26.04 too, and a manual run checks both
+    without attaching anything to a release."""
+
+    _REPO = Path(__file__).resolve().parent.parent
+    _CI = _REPO / ".github" / "workflows" / "ci.yml"
+
+    def _jobs(self) -> dict[str, str]:
+        """Each job's text, by id (two-space keys under ``jobs:``)."""
+        body = self._CI.read_text("utf-8").split("\njobs:\n", 1)[1]
+        parts = re.split(r"^  ([a-z0-9-]+):\n", body, flags=re.M)
+        return dict(zip(parts[1::2], parts[2::2], strict=True))
+
+    def test_no_job_follows_ubuntu_latest(self):
+        jobs = self._jobs()
+        assert set(jobs) == {"tests", "lint", "package", "smoke-2604"}, sorted(jobs)
+        runs_on = re.compile(r"^    runs-on: (\S+)$", re.M)
+        runners = {job: runs_on.findall(body) for job, body in jobs.items()}
+        assert runners == {
+            "tests": ["ubuntu-24.04"],
+            "lint": ["ubuntu-24.04"],
+            "package": ["ubuntu-24.04"],
+            "smoke-2604": ["ubuntu-26.04"],
+        }, runners
+        assert not re.search(r"runs-on:\s*\S*-latest", self._CI.read_text("utf-8"))
+
+    def test_the_deb_is_checked_on_both_series_by_hand_too(self):
+        text = self._CI.read_text("utf-8")
+        assert re.search(r"^on:\n(?:  .*\n)*  workflow_dispatch:\n", text, re.M), text[:400]
+        jobs = self._jobs()
+        assert (
+            "if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'"
+            in jobs["package"]
+        )
+        assert "needs: [package]" in jobs["smoke-2604"]
+        assert "uses: actions/download-artifact@" in jobs["smoke-2604"]
+        assert "name: zark-release-assets" in jobs["smoke-2604"]
+        for job in ("package", "smoke-2604"):
+            assert ".github/smoke-deb.sh " in jobs[job], job
+        smoke = self._REPO / ".github" / "smoke-deb.sh"
+        assert smoke.stat().st_mode & 0o111, "smoke-deb.sh must be executable"
+
+    def test_release_assets_are_attached_on_tags_only(self):
+        package = self._jobs()["package"]
+        step = package.split("- name: Attach release assets to GitHub Release\n", 1)[1]
+        first = step.split("\n", 1)[0].strip()
+        assert first == "if: startsWith(github.ref, 'refs/tags/v')", first
+
+
 class TestTypography:  # pylint: disable=missing-function-docstring
     """M4c-3: no em dash, en dash or U+2026 in any tracked text file."""
 

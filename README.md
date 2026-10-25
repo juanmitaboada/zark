@@ -525,7 +525,7 @@ make tox        # full path: runs the suite under Python 3.12, 3.13 and 3.14
 
 The suite covers every command and module: the planner and the engine on a model of ZFS (`tests/fake_zfs.py`), the recovery path, the boot chain, the guards, signals and cleanup, and the self-test checks that model can run.
 
-GitHub Actions runs the unit-test suite on every push and pull request, with one job per supported Python version plus a separate lint job (mypy + pylint + ruff). See `.github/workflows/ci.yml`.
+GitHub Actions runs the unit-test suite on every push and pull request, with one job per supported Python version plus a separate lint job (mypy + pylint + ruff + basedpyright), all on Ubuntu 24.04. On a release tag, and when run by hand, it also builds the `.deb` on 24.04 and installs it on 24.04 and 26.04. See `.github/workflows/ci.yml`.
 
 ### Integration tests (QEMU)
 

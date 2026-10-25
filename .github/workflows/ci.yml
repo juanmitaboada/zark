@@ -1,6 +1,6 @@
 # zark - Continuous Integration.
 #
-# Runs on every push and pull request:
+# Runs on every push and pull request, and by hand (workflow_dispatch):
 #
 #   tests  - matrix of Python 3.12 / 3.13 / 3.14, each runs `tox -e py3X`
 #            on the unit-test suite (tests/test_unit.py). Three parallel
@@ -11,6 +11,17 @@
 #            `tox -e types` (basedpyright).
 #            Versions come from pyproject.toml under [dependency-groups]
 #            (PEP 735), so tox and CI share a single source of truth.
+#
+#   package     - builds the .deb on Ubuntu 24.04 and smoke-tests it there;
+#                 on a release tag it also attaches it to the GitHub Release.
+#   smoke-2604  - installs that same .deb on Ubuntu 26.04 and smoke-tests it.
+#                 Both run on tags and on a manual run, so a branch can be
+#                 checked on both supported series before any tag.
+#
+# Every job names its runner image: `ubuntu-latest` moves from 24.04 to
+# 26.04 during 2026-10/11 (RELP.8), and a job must not change series by
+# itself. The .deb is built on the oldest supported series, so its dpkg and
+# debhelper make a package both series install.
 #
 # What this workflow does NOT cover
 # ─────────────────────────────────
@@ -29,11 +40,13 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 # Cancel an older run on the same ref when a new commit lands. Saves
 # minutes and avoids piling up stale results in the PR view.
+# The event is part of the group, so a manual run does not cancel a push's.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 # This workflow only reads source. No write permissions needed.
@@ -45,7 +58,7 @@ jobs:
   # ── Unit tests across the supported Python matrix ────────────────────
   tests:
     name: tests (py${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       # Keep every Python version running even if one fails - we want the
       # full picture of which versions break, not just the first hit.
@@ -71,7 +84,7 @@ jobs:
   # ── Static analysis (mypy + pylint + ruff + basedpyright) ────────────
   lint:
     name: lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -93,18 +106,18 @@ jobs:
         # stays free of the npm-backed package.
         run: tox -e types
 
-  # ── Debian packaging smoke build (tags only) ─────────────────────────
+  # ── Debian packaging smoke build (tags and manual runs) ──────────────
   #
-  # Builds the .deb on release tags (vX.Y.Z), uploads it as a workflow
-  # artefact, and attaches it to the GitHub Release. Does NOT sign and
-  # does NOT upload to the PPA - those steps require the maintainer's
-  # GPG key and run locally via `make deb-ppa`. See
-  # debian/README.packaging.md for the PPA flow.
+  # Builds the .deb on release tags (vX.Y.Z) and on a manual run, uploads
+  # it as a workflow artefact, and on a tag attaches it to the GitHub
+  # Release. Does NOT sign and does NOT upload to the PPA - those steps
+  # require the maintainer's GPG key and run locally via `make deb-ppa`.
+  # See debian/README.packaging.md for the PPA flow.
   package:
     name: package (.deb)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [tests, lint]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write   # needed to attach asset to the release
     steps:
@@ -137,61 +150,9 @@ jobs:
         run: lintian -i --suppress-tags bad-distribution-in-changes-file ../zark_*.changes || true
 
       - name: Smoke test the built .deb
-        # Install the freshly-built .deb on the runner and verify zark
-        # starts. This catches regressions in debian/control's Depends:
-        # - if a dependency is missing, apt fails here. We also check
-        # that the symlink layout works (/usr/bin/zark resolves to
-        # /usr/share/zark/zark via realpath) and that --help / --version
-        # produce output, which exercises the lib/ and commands/ imports.
-        # We then purge so subsequent steps run on a clean system.
-        run: |
-          set -euo pipefail
-          DEB=$(ls ../zark_*_amd64.deb | head -1)
-          echo "Testing: $DEB"
-
-          # Inspect package metadata before installing
-          dpkg-deb -I "$DEB"
-
-          # Verify the Depends list is what we declared. If Depends ever
-          # drifts (a refactor adds a new tool, a new debian/control field
-          # is mis-edited), this catches it before users do.
-          dpkg-deb -f "$DEB" Depends | grep -q 'zfsutils-linux'
-          dpkg-deb -f "$DEB" Depends | grep -q 'sanoid'
-          dpkg-deb -f "$DEB" Depends | grep -q 'cryptsetup-bin'
-          dpkg-deb -f "$DEB" Depends | grep -q 'gdisk'
-
-          # Install with apt (resolves Depends from the Ubuntu archive)
-          sudo apt-get install -y "$DEB"
-
-          # Layout: symlink in /usr/bin pointing at /usr/share/zark/zark
-          which zark
-          test -L /usr/bin/zark
-          readlink -f /usr/bin/zark | grep -q '/usr/share/zark/zark'
-
-          # Entry point: --version and --help must work without root
-          # (we are root in the runner, but the entry point's adaptive
-          # help logic should produce sensible output either way).
-          # We capture --help and assert key content is present, rather
-          # than piping to head -N - head closes its read end after N
-          # lines, killing zark with SIGPIPE, which trips up `set -e`
-          # under pipefail.
-          zark --version
-          zark --help > /tmp/zark_help.out
-          test -s /tmp/zark_help.out
-          grep -q "Commands:" /tmp/zark_help.out
-          grep -q "Examples:" /tmp/zark_help.out
-          grep -q "backup" /tmp/zark_help.out
-          grep -q "recover" /tmp/zark_help.out
-
-          # Clean up so subsequent steps see a pristine system
-          sudo apt-get purge -y zark
-          # bash caches resolved command paths in this shell; the
-          # earlier `which zark` populated the cache. After purge the
-          # file is gone but `command -v zark` still returns the stale
-          # cached path. `hash -r` flushes the cache so the assertion
-          # below reflects reality.
-          hash -r
-          ! command -v zark
+        # Install it, check that zark starts, purge it (.github/smoke-deb.sh,
+        # which the 26.04 job runs too).
+        run: .github/smoke-deb.sh ../zark_*_amd64.deb
 
       - name: Stage build artefacts inside the workspace
         # dpkg-buildpackage drops .deb / .changes / .buildinfo into the
@@ -219,8 +180,32 @@ jobs:
             dist/zark_*.tar.gz
 
       - name: Attach release assets to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/zark_*_amd64.deb
             dist/zark_*.tar.gz
+
+  # ── The same .deb on Ubuntu 26.04 (RELP.8) ───────────────────────────
+  #
+  # Installs the package job's artefact on the newer supported series, so
+  # its Depends resolve from resolute's archive and the entry point runs
+  # with resolute's Python before any release.
+  smoke-2604:
+    name: smoke (.deb on 26.04)
+    runs-on: ubuntu-26.04
+    needs: [package]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fetch the .deb built on 24.04
+        uses: actions/download-artifact@v8
+        with:
+          name: zark-release-assets
+          path: dist
+
+      - name: Smoke test the .deb
+        run: |
+          sudo apt-get update
+          .github/smoke-deb.sh dist/zark_*_amd64.deb
