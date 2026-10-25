@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>zark</title>
+  <g transform="translate(256 262) scale(1.9) translate(-256 -262)">
+    <path fill="#E8592A" d="M256 138 L360 168 L360 262 C360 322 312 362 256 386 C200 362 152 322 152 262 L152 168 Z"/>
+    <path fill="#1B2236" d="M186 186 L326 186 L326 218 L232 326 L186 326 L280 218 L198 218 Z M272 294 L314 294 L326 326 L244 326 Z"/>
+  </g>
+</svg>

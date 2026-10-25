@@ -18,3 +18,11 @@ question-mark dialog with the `Cancel` and `Report problem...` buttons.
 
 If you regenerate this image, keep the filename the same so the
 README link doesn't need touching.
+
+## Brand assets
+
+### `brand/`
+
+The zark mark, wordmark headers, social preview, GNOME symbolic icon and
+favicon, as SVG with PNG renders. `brand/BRAND.md` documents the palette,
+typography and which variant to use at each size.
