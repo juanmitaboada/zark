@@ -21,6 +21,7 @@ behaviour at the version eli runs.
 
 import fcntl
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -29,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from lib import alerts
+from lib import alerts, progress, statusdirs
 from lib.selftest import Bench, Fail, Skip, check, exit_status, expect, text_of
 from lib.selftest_l1 import reimport
 from lib.zfs import BACKUP_ALTROOT_BASE
@@ -379,7 +380,11 @@ time.sleep(60)
     1,
     1,
     "flock: exclusive, gone with a killed holder, not kept by children",
-    depends=("zark's lock (lib/lock.py:66)", "purge's disk lock (_held_from_udev)"),
+    depends=(
+        "zark's lock (lib/lock.py:66)",
+        "purge's disk lock (_held_from_udev)",
+        "status.json's status.lock (lib/status_file.py)",
+    ),
 )
 def prc_04(b: Bench) -> None:
     """``flock(LOCK_EX|LOCK_NB)`` from a second open of the same file fails
@@ -426,6 +431,56 @@ def prc_04(b: Bench) -> None:
                 os.close(fd)
 
 
+@check(
+    "PRC-05",
+    1,
+    1,
+    "/proc/<pid>/stat field 22 after the last ) tells a process apart; boot_id's form",
+    depends=(
+        "progress.json's pid_start_ticks and boot_id (lib/progress.py start_ticks)",
+        "the orphan rules readers apply (docs/STATUS-FILES.md, rules 3 to 5)",
+    ),
+)
+def prc_05(b: Bench) -> None:
+    """A child whose name holds ``) (``: zark's reader of field 22
+    (``starttime``, counted after the last ``)``) gives the same value twice,
+    and that value, in clock ticks, is the child's start, ``/proc/uptime``
+    minus its ``etimes`` from ``ps``, within a second and a half;
+    ``/proc/sys/kernel/random/boot_id`` has the schema's form. Linux
+    fs/proc/array.c:466, :580, :585 (the name, unescaped), :606."""
+    sleep = shutil.which("sleep")
+    if not sleep:
+        raise Skip("sleep is not installed")
+    named = Path(b.dir, "z) (x")
+    named.symlink_to(sleep)  # the name a process gets is the one it was executed by
+    child = subprocess.Popen([str(named), "30"])  # pylint: disable=consider-using-with
+    try:
+        time.sleep(0.3)
+        line = Path(f"/proc/{child.pid}/stat").read_text(encoding="ascii", errors="replace")
+        expect(") (" in line[: line.rindex(")") + 1], "a name holding ') ('", "it does not")
+        first, second = progress.start_ticks(child.pid), progress.start_ticks(child.pid)
+        expect(first == second, "the same starttime twice", f"{first} then {second}")
+        r = b.ok(f"ps -o etimes= -p {child.pid}")
+        uptime = float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
+        started = uptime - int(r.output.strip())
+        hz = os.sysconf("SC_CLK_TCK")
+        expect(
+            abs(first / hz - started) <= 1.5,
+            f"starttime/{hz} within 1.5 s of uptime - etimes",
+            f"{first / hz:.1f} against {started:.1f}",
+        )
+    finally:
+        child.kill()
+        _ = child.wait()
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    expect(
+        re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", boot)
+        is not None,
+        "boot_id in the schema's form",
+        f"{len(boot)} characters",
+    )
+
+
 # ── systemd, sanoid ──────────────────────────────────────────────────────
 
 
@@ -462,6 +517,35 @@ def sys_01(b: Bench) -> None:
         exit_status(r),
         text_of(r),
     )
+
+
+@check(
+    "SYS-02",
+    1,
+    1,
+    "a tmpfiles.d d line makes the directory 0755 under any umask, and fixes it",
+    depends=("/run/zark at boot from the package's tmpfiles.d entry (M7-11)",),
+)
+def sys_02(b: Bench) -> None:
+    """``systemd-tmpfiles --create`` of a ``d <path> 0755 root root -``
+    line, the form of the package's ``/run/zark`` entry, run under umask
+    077: the directory is created 0755, and a 0700 one is set back to 0755.
+    systemd v259.5 man/tmpfiles.d.xml:197-201; src/tmpfiles/tmpfiles.c:2089-2114
+    (create_directory, then fd_set_perms whether it was made or found),
+    :964-1060 (fd_set_perms, fchmod to the line's mode)."""
+    exe = shutil.which("systemd-tmpfiles")
+    if not exe:
+        raise Skip("systemd-tmpfiles is not installed")
+    d = Path(b.dir, "tmpd")
+    conf = Path(b.dir, "zark-st.conf")
+    conf.write_text(f"d {d} {statusdirs.MODE:04o} root root -\n", encoding="ascii")
+    cmd = f"sh -c {_q(f'umask 077; {exe} --create {conf}')}"
+    for state in ("absent", "0700"):
+        if state == "0700":
+            d.chmod(0o700)
+        _ = b.ok(cmd)
+        mode = os.lstat(d).st_mode & 0o7777 if d.is_dir() else -1
+        expect(mode == 0o755, f"0755 when {state}", f"{mode:o}" if mode >= 0 else "no directory")
 
 
 @check(

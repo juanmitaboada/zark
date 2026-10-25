@@ -28,12 +28,15 @@ none``, so a clone inherits ``mountpoint=none`` and nothing mounts
 # One check per function, each with its source citations: long by design.
 # pylint: disable=too-many-lines
 
+import fcntl
 import os
 import shlex
 import shutil
+import subprocess
+import time
 from pathlib import Path
 
-from lib import identity, pool_record, sh, zfs_features
+from lib import identity, pool_record, progress, sh, zfs_features
 from lib.keystore import ZVOL_ID, Keystore
 from lib.selftest import (
     Bench,
@@ -46,7 +49,13 @@ from lib.selftest import (
     remove_empty_dirs,
     text_of,
 )
-from lib.zfs import BACKUP_ALTROOT_BASE, COMPAT_DIRS, DRIVE_COMPATIBILITY
+from lib.zfs import (
+    BACKUP_ALTROOT_BASE,
+    COMPAT_DIRS,
+    DRIVE_COMPATIBILITY,
+    read_datasets,
+    read_space,
+)
 
 ZPOOL_CACHE = "/etc/zfs/zpool.cache"
 # A raw incremental of this many KiB is cut at half its size to leave partial state.
@@ -512,6 +521,60 @@ def pool_13(b: Bench) -> None:
         )
         expect(not wrong, "each feature in its state", ", ".join(wrong), text_of(r))
         expect(got.compatibility == "off", "compatibility off", observed(got.compatibility))
+    finally:
+        b.drop_pool(c)
+
+
+@check(
+    "POOL-14",
+    1,
+    1,
+    "a pool's zfs and zpool figures read as integers; its datasets' own shares sum to used",
+    depends=(
+        "status.json's Space object (lib/zfs.py read_space, R1)",
+        "status.json's datasets and the identity readers rely on (read_datasets, R2)",
+    ),
+)
+def pool_14(b: Bench) -> None:
+    """``zfs list -Hp -o used,avail`` and ``zpool list -Hp -o
+    size,alloc,free,capacity`` give integers zark's reader takes, capacity
+    0-100; on a pool with a child, a snapshot that holds overwritten data and
+    a zvol with a refreservation, each dataset's ``usedbydataset +
+    usedbysnapshots + usedbyrefreservation`` sums to the root's ``used``
+    (every ``used`` is its four parts). ``used`` is the dir's dd_used_bytes,
+    which its breakdown sums to, and the four usedby* are that breakdown,
+    usedbychildren with the children's reservations (none here). OpenZFS
+    module/zfs/dsl_dataset.c:2561-2572, :2816-2817; module/zfs/dsl_dir.c:1041-1064,
+    :1102-1122, :1568-1577; cmd/zpool/zpool_main.c:6977-6985 (capacity, -p)."""
+    c = b.make_pool("c")
+    try:
+        x = b.fs(f"{c}/pool14")
+        b.write(x, 512)
+        _ = b.ok(f"zfs snapshot {x}@s")
+        b.write(x, 512)
+        _ = b.ok(f"zfs create -V 32M {c}/pool14vol")
+        _ = b.ok(f"zpool sync {c}")
+        space = read_space(c)
+        if space is None:
+            raise Fail("the Space object read", "a figure did not parse")
+        expect(space.used_bytes > 0 and space.pool_size_bytes > 0, "non-zero sizes", "zero")
+        rows = read_datasets(c) or []
+        expect(len(rows) == 3, "3 datasets listed", str(len(rows)))
+        refres = next(r.usedbyrefreservation for r in rows if r.name.endswith("pool14vol"))
+        snaps = next(r.usedbysnapshots for r in rows if r.name.endswith("/pool14"))
+        expect(
+            refres > 0 and snaps > 0, "a refreservation and snapshot space", f"{refres}, {snaps}"
+        )
+        own = sum(r.usedbydataset + r.usedbysnapshots + r.usedbyrefreservation for r in rows)
+        root = next(r for r in rows if r.name == c)
+        expect(own == root.used, "the shares to add up to the root's used", f"{own} != {root.used}")
+        parts = [
+            r.name
+            for r in rows
+            if r.used
+            != r.usedbydataset + r.usedbysnapshots + r.usedbychildren + r.usedbyrefreservation
+        ]
+        expect(not parts, "every used to be its four parts", f"{len(parts)} not")
     finally:
         b.drop_pool(c)
 
@@ -1218,6 +1281,75 @@ def snd_12(b: Bench) -> None:
     _ = b.pipe_ok(f"zfs send -i {restored}@zark_anchor {restored}@q", f"zfs receive -s -u {dboot}")
     got = ", ".join(b.snapshot_names(dboot))
     expect(got == "p, q", "p, q on the drive's bpool", got)
+
+
+@check(
+    "SND-13",
+    1,
+    1,
+    "zfs send's stream is counted in its wchar, live and exactly at its end",
+    depends=(
+        "progress.json's bytes_done (M7-2 2a): progress.group_wchar, the live count",
+        "run_pipe's count at a send's end: sh._written_at_exit (waitid WNOWAIT)",
+    ),
+)
+def snd_13(b: Bench) -> None:
+    """``sh -c 'zfs send ...'`` in a process group of its own, as run_pipe
+    runs it: while it streams, the group's ``wchar`` is above zero, never
+    above what was read plus the pipe's capacity (F_GETPIPE_SZ), and grows as
+    more is read; once it exited, the shell's zombie, read before it is
+    reaped, counts exactly the stream plus what zfs wrote to stderr. The
+    stream is written from the ioctl's own thread with ``kernel_write``
+    (OpenZFS module/zfs/zfs_ioctl.c:5829-5878, zfs_file_os.c:85-90, with
+    HAVE_LARGE_STACKS: zfs_context_os.h:32-34), which counts it in the task's
+    ``wchar`` (Linux fs/read_write.c:603-628, :652-664); /proc/<pid>/io sums the
+    threads and the reaped children (fs/proc/base.c:3032-3075,
+    kernel/exit.c:1256-1257)."""
+    x = _origin(b, "snd13", 4096)
+    _ = b.ok(f"zfs snapshot {x}@p")
+    send = f"zfs send -w {_q(x + '@p')}"
+    b.log.cmd(f"{send} | <the check reads it>")
+    p = subprocess.Popen(  # pylint: disable=consider-using-with
+        send, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, process_group=0
+    )  # nosec B602 - the bench's own names
+    assert p.stdout is not None and p.stderr is not None
+    try:
+        cap = fcntl.fcntl(p.stdout.fileno(), fcntl.F_GETPIPE_SZ)
+        read = len(p.stdout.read(1 << 20))
+        first = _settled(p.pid)
+        expect(
+            0 < first <= read + cap,
+            f"0 < wchar <= {read} read + {cap} in the pipe",
+            str(first),
+        )
+        read += len(p.stdout.read(1 << 20))
+        second = _settled(p.pid)
+        expect(second > first, "wchar to grow as the stream is read", f"{first} then {second}")
+        while chunk := p.stdout.read(1 << 20):
+            read += len(chunk)
+        err = p.stderr.read()
+        total = sh._written_at_exit(p.pid)  # pylint: disable=protected-access
+    finally:
+        rc = p.wait()
+    expect(rc == 0, "zfs send to succeed", f"exit {rc}", err.decode(errors="replace"))
+    expect(read > 2 << 20, "a stream of more than 2 MiB", str(read))
+    expect(
+        total == read + len(err),
+        f"the zombie's wchar {read} + {len(err)} (stream + stderr)",
+        str(total),
+    )
+
+
+def _settled(pgid: int) -> int:
+    """The group's wchar once the writer blocked on a full pipe (two equal reads)."""
+    last = -1
+    for _ in range(100):
+        now = progress.group_wchar(pgid)
+        if now == last:
+            return now
+        last = now
+        time.sleep(0.05)
+    return last
 
 
 # ── destroy, clone, keys ─────────────────────────────────────────────────
