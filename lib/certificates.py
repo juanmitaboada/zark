@@ -39,7 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lib import platform_facts
+from lib import platform_facts, statusdirs
 from lib.config import VERSION, Config, zark_command
 from lib.log import Log
 from lib.platform_facts import Facts
@@ -134,6 +134,8 @@ def write_report(report: dict[str, Any], record_dir: str = RECORD_DIR) -> Path:
     """Write ``report`` as ``report-<UTC>.json`` (root only), keep the newest
     :data:`REPORTS_KEPT`, and add it to the local record."""
     d = Path(record_dir)
+    # Its parent (/var/lib/zark) holds status.json, which anyone reads (M7-10).
+    _ = statusdirs.ensure(d.parent)
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = d / f"report-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json"
     _write_atomic(path, dumps(report))

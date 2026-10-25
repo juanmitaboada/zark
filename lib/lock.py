@@ -33,6 +33,7 @@ import os
 import time
 from typing import NoReturn
 
+from lib import statusdirs
 from lib.log import Log
 
 LOCK_PATH = "/run/zark/zark.lock"
@@ -70,7 +71,7 @@ def acquire(command: str) -> None:
     """Take the lock for this process, or raise :class:`LockHeld`."""
     if "fd" in _STATE:
         return
-    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    _ = statusdirs.ensure(os.path.dirname(LOCK_PATH))
     fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

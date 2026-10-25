@@ -262,6 +262,7 @@ zark/
 │   ├── sh.py                  # Shell command runner with logging
 │   ├── signals.py             # How every command stops on a signal
 │   ├── status.py              # What status reports, the MOTD shows, the timer notifies
+│   ├── statusdirs.py          # /run/zark and /var/lib/zark, readable by anyone
 │   ├── survey.py              # Reads of origin and of a drive, and the checks before a run
 │   ├── zfs.py                 # ZFS pool and dataset operations
 │   └── zfs_features.py        # OpenZFS pool features and their first release

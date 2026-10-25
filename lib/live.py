@@ -27,7 +27,7 @@ cmd/snap/cmd_services.go:265-282, overlord/servicestate/service_control.go:
 
 from pathlib import Path
 
-from lib import sh
+from lib import sh, statusdirs
 from lib.lock import selftest_subcommand
 from lib.log import Log
 
@@ -67,7 +67,7 @@ def stop_installer_probe(command: str, args: list[str], log: Log) -> bool:
     if r.ok and not PROBE_MARKER.exists():
         log.info(f"Stopped {PROBE_SERVICE} for this session (its disk probe reports crashes)")
         try:
-            PROBE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            _ = statusdirs.ensure(PROBE_MARKER.parent)
             PROBE_MARKER.touch()
         except OSError:
             pass  # without the marker the line is logged again: today's behaviour

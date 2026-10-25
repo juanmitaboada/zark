@@ -28,7 +28,7 @@ import os
 from datetime import UTC, datetime
 
 from commands.setup import sanoid_conf_gap
-from lib import exclusions, notify, status, survey
+from lib import exclusions, notify, status, statusdirs, survey
 from lib.config import Config, zark_command
 from lib.log import Log
 from lib.zfs import ZFS
@@ -94,7 +94,7 @@ def _notify(st: status.Status) -> None:
         if notify.notify("zark: disk space", text, critical=key.split()[1] == "critical"):
             done.add(key)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = statusdirs.ensure(path.parent)
         path.write_text("".join(f"{k}\n" for k in sorted(done)), encoding="utf-8")
     except OSError:
         pass

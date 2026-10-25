@@ -19,9 +19,21 @@ the fixtures and zark's writer of both files (M7-15).
 finds them; run that file, not this one.
 """
 
-import json
-from pathlib import Path
+# pylint: disable=protected-access
+# Rationale: these tests drive the writer's private state and helpers (the
+# lock's descriptor, a command's notification step), as test_unit.py does
+# line by line; basedpyright's reportPrivateUsage is off for the same reason.
 
+import json
+import os
+import stat
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import commands.status as status_cmd
+from lib import certificates, live, lock, status, statusdirs
+from lib.log import Log
 from tests import schema_check
 
 REPO = Path(__file__).resolve().parent.parent
@@ -196,3 +208,109 @@ class TestStatusFixtures:  # pylint: disable=missing-function-docstring
         for path in files:
             data = path.read_bytes()
             assert all(b < 0x80 for b in data), path
+
+
+class TestStatusDirs:  # pylint: disable=missing-function-docstring
+    """M7-10 10a: /run/zark and /var/lib/zark are 0755 whatever the umask,
+    and an earlier zark's narrower one is widened; nothing else is touched."""
+
+    def _mode(self, p: Path) -> int:
+        return stat.S_IMODE(os.lstat(p).st_mode)
+
+    def test_created_0755_under_any_umask(self):
+        for mask in (0o077, 0o027, 0o022, 0o000):
+            with tempfile.TemporaryDirectory() as td:
+                old = os.umask(mask)
+                try:
+                    got = statusdirs.ensure(Path(td, "var", "lib", "zark"))
+                finally:
+                    _ = os.umask(old)
+                assert got == Path(td, "var", "lib", "zark")
+                assert self._mode(got) == 0o755, (oct(mask), oct(self._mode(got)))
+
+    def test_a_narrower_one_is_widened_a_wider_or_special_one_left(self):
+        with tempfile.TemporaryDirectory() as td:
+            for mode, want in (
+                (0o700, 0o755),
+                (0o750, 0o755),
+                (0o755, 0o755),
+                (0o775, 0o775),
+                (0o1777, 0o1777),
+                (0o2755, 0o2755),
+            ):
+                d = Path(td, f"d{mode:o}")
+                d.mkdir()
+                os.chmod(d, mode)
+                _ = statusdirs.ensure(d)
+                assert self._mode(d) == want, (oct(mode), oct(self._mode(d)))
+
+    def test_another_owner_a_link_or_a_file_is_not_changed(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td, "d")
+            d.mkdir()
+            os.chmod(d, 0o700)
+            with patch("lib.statusdirs.os.geteuid", return_value=os.geteuid() + 1):
+                _ = statusdirs.ensure(d)
+            assert self._mode(d) == 0o700
+            link = Path(td, "link")
+            link.symlink_to(d)
+            assert statusdirs.ensure(link) == link
+            assert self._mode(d) == 0o700
+            f = Path(td, "f")
+            _ = f.write_text("x", encoding="utf-8")
+            for bad in (f, Path(td, "dangling")):
+                if bad.name == "dangling":
+                    bad.symlink_to(Path(td, "nowhere"))
+                try:
+                    _ = statusdirs.ensure(bad)
+                except NotADirectoryError:
+                    continue
+                raise AssertionError(bad)
+
+    def test_every_creator_goes_through_it(self):
+        # The lock, the MOTD, the self-test's record, the notification log
+        # and the live session's marker (docs/STATUS-FILES.md, Directories).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old = os.umask(0o077)
+            try:
+                lock_path = str(root / "lock" / "zark.lock")
+                with (
+                    patch.object(lock, "LOCK_PATH", lock_path),
+                    patch.dict(lock._STATE, clear=True),
+                ):
+                    lock.acquire("test")
+                    os.close(lock._STATE["fd"])
+                status.write_motd("x\n", root / "motd" / "status.motd")
+                with (
+                    patch.object(certificates, "_write_atomic"),
+                    patch.object(certificates, "_add_to_record"),
+                ):
+                    _ = certificates.write_report({}, str(root / "state" / "selftest"))
+                with (
+                    patch.object(status, "NOTIFIED_FILE", root / "notified" / "notified"),
+                    patch.object(status_cmd.notify, "notify", return_value=True),
+                ):
+                    status_cmd._notify(status.Status())
+                marker = root / "live" / "installer-probe-stopped"
+                with (
+                    patch.object(live, "PROBE_MARKER", marker),
+                    patch.object(live.sh, "is_live_usb", return_value=True),
+                    patch.object(live.sh, "run", return_value=MagicMock(ok=True)),
+                ):
+                    assert live.stop_installer_probe("mount", [], Log(os.devnull))
+            finally:
+                _ = os.umask(old)
+            for d in ("lock", "motd", "state", "notified"):
+                assert self._mode(root / d) == 0o755, d
+            assert self._mode(root / "state" / "selftest") == 0o700
+            assert self._mode(root / "live") == 0o755 and marker.exists()
+
+
+class TestTmpfiles:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M7-11: the package creates /run/zark at boot, 0755 root root."""
+
+    def test_the_tmpfiles_line(self):
+        text = (REPO / "debian" / "zark.tmpfiles").read_text("ascii")
+        assert text == "d /run/zark 0755 root root -\n", text
+        assert str(statusdirs.RUN_DIR) == "/run/zark" and statusdirs.MODE == 0o755

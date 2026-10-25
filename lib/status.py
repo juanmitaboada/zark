@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import anchors, certificates, sh, survey
+from lib import anchors, certificates, sh, statusdirs, survey
 from lib.config import Config, zark_command
 from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
@@ -154,7 +154,7 @@ def motd_text(st: Status) -> str:
 def write_motd(text: str, path: Path | None = None) -> None:
     """Replace the MOTD file atomically (0644: the MOTD is shown to anyone)."""
     path = path or MOTD_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ = statusdirs.ensure(path.parent)
     fd, tmp = tempfile.mkstemp(prefix=".status.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

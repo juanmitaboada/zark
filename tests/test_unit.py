@@ -301,13 +301,15 @@ from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E4
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 from tests.test_status_files import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestStatusDirs,
     TestStatusFixtures,
     TestStatusSchemas,
+    TestTmpfiles,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the
 # Test* classes of this module's globals, so they are named here.
-STATUS_FILE_SUITES = (TestStatusFixtures, TestStatusSchemas)
+STATUS_FILE_SUITES = (TestStatusDirs, TestStatusFixtures, TestStatusSchemas, TestTmpfiles)
 
 # ═════════════════════════════════════════════════════════════════════════
 #  Helpers
