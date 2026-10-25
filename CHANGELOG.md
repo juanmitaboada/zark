@@ -73,6 +73,10 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   error message). On an architecture without large kernel stacks the
   stream would be written from a taskq thread and not counted; zark is
   `amd64` only, and SND-13 certifies the count on the running platform.
+- With BSD process accounting on (atop's `atopacct`, `acct`), the kernel
+  writes a 64-byte record from every process that exits, so `bytes_done`
+  counts 64 bytes more per exited process of a send (a few hundred bytes
+  a run); SND-13 measures those records and certifies the rest exactly.
 - Reading another process's `/proc/<pid>/io` needs root: zark runs as
   root; a reader never needs it.
 - `transfer` is reported for `backup` only; `recover` moves as much data

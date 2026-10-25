@@ -51,6 +51,7 @@ from lib import (
     lock,
     log as log_mod,
     progress,
+    selftest_l1,
     sh,
     status,
     status_file,
@@ -59,6 +60,7 @@ from lib import (
 )
 from lib.config import Config, DriveInfo
 from lib.log import Log
+from lib.selftest import Fail
 from tests import schema_check
 from tests.mock_sh import MockShell, patch_sh
 
@@ -1118,6 +1120,28 @@ class TestByteMeter:  # pylint: disable=missing-function-docstring
                 pass
             else:
                 raise AssertionError("a member with no wchar was read as 0")
+
+    def test_a_launchs_exit_records_are_whole_accounting_records(self):
+        # M7F-11: 0 here unless the host has process accounting on (atop).
+        self._need_io()
+        assert selftest_l1._exit_records() in (0, 64, 128)
+
+    def test_exit_records_other_than_whole_records_fail_the_check(self):
+        for extra, ok in ((0, True), (128, True), (100, False), (192, False), (-1, False)):
+            with patch("lib.sh._written_at_exit", side_effect=lambda pid, e=extra: e):
+                try:
+                    got = selftest_l1._exit_records()
+                except Fail:
+                    assert not ok, extra
+                else:
+                    assert ok and got == extra, (extra, got)
+        with patch("lib.sh._written_at_exit", return_value=None):
+            try:
+                _ = selftest_l1._exit_records()
+            except Fail:
+                pass
+            else:
+                raise AssertionError("unreadable counters passed")
 
 
 class TestTransferProgress:  # pylint: disable=missing-function-docstring,too-few-public-methods

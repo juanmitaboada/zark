@@ -1314,7 +1314,12 @@ def snd_13(b: Bench) -> None:
     HAVE_LARGE_STACKS: zfs_context_os.h:32-34), which counts it in the task's
     ``wchar`` (Linux fs/read_write.c:603-628, :652-664); /proc/<pid>/io sums the
     threads and the reaped children (fs/proc/base.c:3032-3075,
-    kernel/exit.c:1256-1257)."""
+    kernel/exit.c:1256-1257). With BSD process accounting on (atop's
+    atopacct, acct), each process of the group writes its 64-byte record
+    from its own exit (kernel/exit.c:966-967, kernel/acct.c:518-534,
+    include/linux/acct.h:39-50): the end count is the stream, stderr and
+    those records, measured on ``sh -c /usr/bin/true`` launched the same way."""
+    records = _exit_records()
     x = _origin(b, "snd13", 4096)
     _ = b.ok(f"zfs snapshot {x}@p")
     send = f"zfs send -w {_q(x + '@p')}"
@@ -1344,10 +1349,42 @@ def snd_13(b: Bench) -> None:
     expect(rc == 0, "zfs send to succeed", f"exit {rc}", err.decode(errors="replace"))
     expect(read > 2 << 20, "a stream of more than 2 MiB", str(read))
     expect(
-        total == read + len(err),
-        f"the zombie's wchar {read} + {len(err)} (stream + stderr)",
+        total == read + len(err) + records,
+        f"the zombie's wchar {read} + {len(err)} + {records} (stream + stderr + exit records)",
         str(total),
     )
+
+
+# sizeof(acct_t) for ACCT_VERSION 1, 2 and 3: the record an exiting process writes.
+ACCT_RECORD = 64
+
+
+def _exit_records() -> int:
+    """What process accounting adds to the zombie's wchar of ``sh -c '<one
+    external command>'`` in its own group, the shape SND-13 launches: 0
+    without accounting, one record per process that exited with it."""
+    true = shutil.which("true")
+    if true is None:
+        raise Skip("true is not installed")
+    p = subprocess.Popen(  # pylint: disable=consider-using-with
+        _q(true), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, process_group=0
+    )  # nosec B602 - a fixed path
+    assert p.stdout is not None and p.stderr is not None
+    try:
+        out, err = p.stdout.read(), p.stderr.read()
+        total = sh._written_at_exit(p.pid)  # pylint: disable=protected-access
+    finally:
+        _ = p.wait()
+    expect(total is not None, "the shell's zombie counters to be readable", "unreadable")
+    assert total is not None
+    extra = total - len(out) - len(err)
+    # sh and the command it forks: at most two records.
+    expect(
+        extra % ACCT_RECORD == 0 and 0 <= extra <= 2 * ACCT_RECORD,
+        f"sh -c {true}'s wchar to be 0, 64 or 128 (process accounting records)",
+        str(extra),
+    )
+    return extra
 
 
 def _settled(pgid: int) -> int:
