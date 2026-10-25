@@ -23,7 +23,7 @@ Usage:    sudo ./zark <command> [options]
 import os
 import sys
 
-from lib import live, lock, signals
+from lib import live, lock, progress, signals
 from lib.config import VERSION, Config
 from lib.log import Log
 
@@ -142,6 +142,10 @@ def main():
     # One way to stop for every command: the running child first, then the
     # command's cleanup, once (H12).
     signals.install()
+    # What the command does, for other programs (docs/STATUS-FILES.md): its
+    # end runs after the command's own cleanup, which registers later (M7-5).
+    if lock.needs_lock(cmd_name, cmd_args):
+        _ = progress.start(cmd_name)
     # On a live session the installer's disk probe reports a crash after each import (M4aF-6).
     live.stop_installer_probe(cmd_name, cmd_args, Log())
 

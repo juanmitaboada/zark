@@ -43,7 +43,7 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import anchors, drive_marks, exclusions, reclaim, sh, status, survey
+from lib import anchors, drive_marks, exclusions, reclaim, sh, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -444,4 +444,3 @@ def run(args: list[str]) -> None:
         _prune_origin(cfg, log)
     else:
         _prune_drive(cfg, drives[pick - (len(targets) - len(drives))], log)
-    status.refresh_quietly(cfg)

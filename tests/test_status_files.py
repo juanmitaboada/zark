@@ -32,15 +32,29 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from contextlib import redirect_stdout
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import commands.status as status_cmd
-from lib import alerts, certificates, live, lock, status, status_file, statusdirs, zfs
+from lib import (
+    alerts,
+    certificates,
+    live,
+    lock,
+    log as log_mod,
+    progress,
+    status,
+    status_file,
+    statusdirs,
+    zfs,
+)
 from lib.config import Config, DriveInfo
 from lib.log import Log
 from tests import schema_check
@@ -55,6 +69,7 @@ TEST_ROOT = Path(tempfile.mkdtemp(prefix="zark-status-tests."))
 atexit.register(shutil.rmtree, TEST_ROOT, True)
 status_file.STATUS_PATH = TEST_ROOT / "var" / "lib" / "zark" / "status.json"
 status_file.LOCK_PATH = TEST_ROOT / "run" / "zark" / "status.lock"
+progress.PROGRESS_PATH = TEST_ROOT / "run" / "zark" / "progress.json"
 SCHEMAS = REPO / "docs" / "schema"
 FIXTURES = REPO / "tests" / "fixtures" / "status"
 PROGRESS_REL = Path("run/zark/progress.json")
@@ -75,6 +90,13 @@ def problems(doc: object, kind: str) -> list[str]:
     if kind == "space":
         root = schema("status")
         return schema_check.errors(doc, {"$ref": "#/$defs/space", "$defs": root["$defs"]})
+    if kind == "last_run":
+        node: object = schema("status")
+        for key in ("properties", "drives", "items", "properties", "last_run"):
+            assert isinstance(node, dict)
+            node = node[key]
+        assert isinstance(node, dict)
+        return schema_check.errors(doc, node)
     return schema_check.errors(doc, schema(kind))
 
 
@@ -679,3 +701,284 @@ class TestStatusJson:  # pylint: disable=missing-function-docstring
         unit = alerts.TIMER_UNIT
         assert "OnBootSec=2min\nOnUnitActiveSec=1h\nOnCalendar=hourly\n" in unit
         assert status_file.STALE_AFTER_S == 3 * 3600
+
+
+class _Clock:  # pylint: disable=too-few-public-methods
+    """A clock for ``now_utc_iso`` that moves one second per reading."""
+
+    def __init__(self) -> None:
+        self.t = datetime(2026, 10, 24, 9, 0, 0, tzinfo=UTC)
+        self.lock = threading.Lock()
+
+    def __call__(self) -> str:
+        with self.lock:
+            self.t += timedelta(seconds=1)
+            return self.t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _doc(path: Path) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(path.read_text("utf-8"))
+    return loaded
+
+
+def _until(
+    path: Path, pred: Callable[[dict[str, Any]], bool], timeout: float = 5.0
+) -> dict[str, Any]:
+    """The file's content once ``pred`` holds (polling); fails after ``timeout``."""
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        try:
+            last = _doc(path)
+            if pred(last):
+                return last
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.02)
+    raise AssertionError(f"never reached: {last}")
+
+
+BLACK_GUID = "14361060171807873218"
+
+
+@contextmanager
+def _running(
+    root: Path, command: str = "backup", cfg: Config | None = None
+) -> Iterator[tuple[Path, MagicMock]]:
+    """A progress run of ``command`` writing under ``root``, ended on exit;
+    status_file.refresh is the mock yielded."""
+    path = root / "run" / "zark" / "progress.json"
+    with (
+        patch.object(progress, "atexit"),
+        patch.object(progress, "HEARTBEAT_S", 0.3),
+        patch.object(progress, "MIN_GAP_S", 0.05),
+        patch.object(progress, "now_utc_iso", _Clock()),
+        patch.object(progress.status_file, "refresh") as refresh,
+        patch.object(progress.Config, "load", return_value=cfg or _config(("black", BLACK_GUID))),
+        patch.object(progress.sh, "is_live_usb", return_value=False),
+        patch.object(progress.signals, "teardown"),
+    ):
+        assert progress.start(command, Log(os.devnull), path)
+        try:
+            yield path, refresh
+        finally:
+            progress.end()
+
+
+class TestProgressFile:  # pylint: disable=missing-function-docstring
+    """progress.json's writer (M7-3, M7-5, M7-7, M7-9): written at once, on
+    every event and from a heartbeat, valid at every write, told apart from
+    another process, removed after status.json at the end."""
+
+    def test_the_suite_never_writes_this_hosts_file(self):
+        assert progress.PROGRESS_PATH.is_relative_to(TEST_ROOT), progress.PROGRESS_PATH
+
+    def test_written_at_start_and_valid(self):
+        with tempfile.TemporaryDirectory() as td, _running(Path(td)) as (path, _):
+            doc = _doc(path)
+            assert not problems(doc, "progress"), problems(doc, "progress")
+            assert doc["command"] == "backup" and doc["pid"] == os.getpid()
+            assert stat.S_IMODE(path.stat().st_mode) == 0o644
+            assert stat.S_IMODE(path.parent.stat().st_mode) == 0o755
+            # The contract's rules 3 to 5 find this process alive.
+            assert (
+                doc["boot_id"] == Path("/proc/sys/kernel/random/boot_id").read_text("ascii").strip()
+            )
+            assert Path(f"/proc/{doc['pid']}").exists()
+            assert doc["pid_start_ticks"] == progress.start_ticks(os.getpid())
+            assert doc["step"] is None and doc["drive"] is None and doc["transfer"] is None
+            assert doc["waiting_for_input"] is False and doc["waiting_for"] is None
+
+    def test_the_heartbeat_moves_while_the_main_thread_waits(self):
+        with tempfile.TemporaryDirectory() as td, _running(Path(td)) as (path, _):
+            first = _doc(path)["updated_at"]
+            time.sleep(1.0)  # a blocked main thread: only the heartbeat writes
+            later = _doc(path)
+            assert later["started_at"] < first < later["updated_at"]
+
+    def test_steps_and_the_run_state(self):
+        with tempfile.TemporaryDirectory() as td, _running(Path(td)) as (path, _):
+            Log(os.devnull).step(7, 8, f"{Log.C}Replicating{Log.N} (this may take a while)...")
+            doc = _until(path, lambda d: d["step"] is not None)
+            assert doc["step"] == {
+                "index": 7,
+                "total": 8,
+                "label": "Replicating (this may take a while)...",
+            }
+            progress.set_drive("black", BLACK_GUID, "")
+            progress.set_space(_space(7))
+            progress.set_point("zark_2026-10-24_09:03:02Z")
+            doc = _until(path, lambda d: bool(d["point"] and (d["drive"] or {}).get("space")))
+            assert doc["drive"] == {
+                "name": "black",
+                "guid": BLACK_GUID,
+                "drive_id": "<unknown>",
+                "space": _space(7).to_json(),
+            }
+            assert not problems(doc, "progress"), problems(doc, "progress")
+
+    def test_waiting_for_input_during_a_read(self):
+        seen: list[dict[str, Any]] = []
+        with tempfile.TemporaryDirectory() as td, _running(Path(td)) as (path, _):
+
+            def answer(_prompt: str = "") -> str:
+                seen.append(_until(path, lambda d: d["waiting_for_input"]))
+                return "y"
+
+            with patch("builtins.input", side_effect=answer), redirect_stdout(StringIO()):
+                assert Log(os.devnull).ask(f"Eject {Log.W}black{Log.N} now?", default=True)
+            after = _until(path, lambda d: not d["waiting_for_input"])
+        assert seen[0]["waiting_for"] == "Eject black now?"
+        assert not problems(seen[0], "progress")
+        assert after["waiting_for"] is None
+
+    def test_every_terminal_read_is_heard(self):
+        heard: list[str | None] = []
+        log = Log(os.devnull)
+        log_mod.watch(None, heard.append)
+        try:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                with patch("builtins.input", return_value="y"):
+                    _ = log.ask("Q1?")
+                    _ = log.ask_enter("Press Enter when done: ")
+                    _ = log.ask_input("Q3?")
+                    _ = log.ask_text("  > ", accept=("y",), label="Q4")
+                with patch("builtins.input", return_value="2"):
+                    _ = log.ask_choice("Q5?", ["a", "b"])
+                with patch("lib.log.getpass.getpass", return_value="pw"):
+                    _ = log.ask_password("Passphrase for black")
+                tty = MagicMock()
+                tty.isatty.return_value = True
+                tty.readline.return_value = "n\n"
+                with (
+                    patch("lib.log.sys.stdin", tty),
+                    patch("lib.log.select.select", return_value=([tty], [], [])),
+                ):
+                    _ = log.ask_timeout("Q7?", True, 5)
+                with patch("lib.log.sys.stdin", MagicMock(isatty=lambda: False)):
+                    _ = log.ask_timeout("never asked", True, 5)  # no terminal: no read
+                with patch("builtins.input", side_effect=EOFError):
+                    try:
+                        log.fatal("boom")
+                    except SystemExit:
+                        pass
+                with patch("builtins.input", side_effect=KeyboardInterrupt):
+                    try:
+                        _ = log.ask("Q9?")
+                    except KeyboardInterrupt:
+                        pass
+        finally:
+            log_mod.watch(None, None)
+        prompts = heard[0::2]
+        assert heard[1::2] == [None] * len(prompts), heard
+        assert prompts == [
+            "Q1?",
+            "Press Enter when done:",
+            "Q3?",
+            "Q4",
+            "Q5?",
+            "Passphrase for black",
+            "Q7?",
+            "Press Enter to cleanup and exit",
+            "Q9?",
+        ], prompts
+
+    def test_the_end_writes_status_json_then_removes_the_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            present: list[bool] = []
+            with _running(Path(td)) as (path, refresh):
+                refresh.side_effect = lambda *_a, **_k: present.append(path.exists())
+                up = status_file.DriveUpdate(space=_space(3))
+                progress.record(BLACK_GUID, up)
+            assert present == [True] and not path.exists()
+            args = refresh.call_args.args
+            assert args[2] == "backup" and args[3] == {BLACK_GUID: up}
+            assert not progress.active()
+
+    def test_the_end_runs_after_the_commands_cleanup(self):
+        # zark starts progress (which registers its end) before the command
+        # registers its Cleanup; atexit runs the later one first.
+        script = (
+            "import atexit, sys; sys.path.insert(0, sys.argv[1]);"
+            "from lib import progress;"
+            "atexit.register(lambda: print('end'));"  # stands for progress.end, registered first
+            "atexit.register(lambda: print('cleanup'))"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", script, str(REPO)], capture_output=True, text=True, check=True
+        )
+        order = out.stdout.split()
+        assert order == ["cleanup", "end"], order
+        source = (REPO / "zark").read_text("utf-8")
+        assert source.index("progress.start(cmd_name)") < source.index("mod.run(cmd_args)")
+
+    def test_an_orphan_is_recorded_then_replaced(self):
+        orphan = (FIXTURES / "running" / PROGRESS_REL).read_text("utf-8")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "run" / "zark" / "progress.json"
+            path.parent.mkdir(parents=True)
+            _ = path.write_text(orphan, encoding="utf-8")
+            with _running(root, "clean") as (_, refresh):
+                calls = list(refresh.call_args_list)
+                doc = _doc(path)
+            assert doc["command"] == "clean" and doc["pid"] == os.getpid()
+        assert len(calls) == 1, calls
+        _cfg, _log, by, updates = calls[0].args
+        assert by == "clean" and list(updates) == [BLACK_GUID]
+        up = updates[BLACK_GUID]
+        assert up.unless_started_at == "2026-10-24T09:02:11Z"
+        assert up.last_run is not None and up.last_run.result == "interrupted"
+        assert up.last_run.started_at == "2026-10-24T09:02:11Z"
+        assert up.last_run.ended_at == "2026-10-24T09:19:41Z"
+        assert up.last_run.point == "zark_2026-10-24_09:03:02Z"
+        assert not problems(status_file.LastRun(**vars(up.last_run)).to_json(), "last_run")
+
+    def test_orphans_that_record_nothing(self):
+        running = json.loads((FIXTURES / "running" / PROGRESS_REL).read_text("utf-8"))
+        cases = {
+            "not a backup": json.dumps({**running, "command": "prune"}),
+            "no drive": json.dumps({**running, "drive": None}),
+            "unreadable": (FIXTURES / "progress-unreadable" / PROGRESS_REL).read_text("utf-8"),
+            "newer": json.dumps({**running, "schema_version": 2}),
+        }
+        for what, text in cases.items():
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                path = root / "run" / "zark" / "progress.json"
+                path.parent.mkdir(parents=True)
+                _ = path.write_text(text, encoding="utf-8")
+                with _running(root, "clean") as (_, refresh):
+                    assert not refresh.call_args_list, what
+                    assert _doc(path)["command"] == "clean", what
+        # A drive no longer in the registry is dropped (D4).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "run" / "zark" / "progress.json"
+            path.parent.mkdir(parents=True)
+            _ = path.write_text(json.dumps(running), encoding="utf-8")
+            with _running(root, "clean", _config(("blue", "222"))) as (_, refresh):
+                assert not refresh.call_args_list
+
+    def test_a_failed_write_warns_once_and_fails_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = StringIO()
+            with (
+                redirect_stdout(out),
+                patch.object(
+                    progress.status_file,
+                    "write_atomic",
+                    side_effect=OSError(28, "No space left on device"),
+                ),
+                _running(Path(td)),
+            ):
+                time.sleep(1.0)
+            assert out.getvalue().count("No space left on device") == 1, out.getvalue()
+
+    def test_start_ticks_is_read_after_the_last_parenthesis(self):
+        with tempfile.TemporaryDirectory() as td:
+            proc = Path(td)
+            (proc / "42").mkdir()
+            fields = " ".join(str(n) for n in range(3, 53))  # field 3 onwards
+            _ = (proc / "42" / "stat").write_text(f"42 (a) (b) c) {fields}\n", encoding="ascii")
+            assert progress.start_ticks(42, proc) == 22

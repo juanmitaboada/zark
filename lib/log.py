@@ -27,7 +27,8 @@ import shutil
 import stat
 import sys
 import unicodedata
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
+from types import TracebackType
 from typing import NoReturn
 
 _YES_NO = ("y", "yes", "n", "no")
@@ -35,6 +36,42 @@ _SGR = re.compile(r"\x1b\[[0-9;]*m")
 # What a continuation line is indented by: the line's own indent and its bullet.
 _HANG = re.compile(r" *(?:[•→✓✗-] |\d+\. )?")
 _RESET = "\033[0m"
+
+# What lib.progress hears (M7-4, M7-9): a numbered step, and the terminal
+# reads, with their prompt while one waits and None once it returned or
+# raised. Set by progress.start; log itself imports nothing of zark's.
+_ON_STEP: list[Callable[[int, int, str], None]] = []
+_ON_WAIT: list[Callable[[str | None], None]] = []
+
+
+def watch(
+    on_step: Callable[[int, int, str], None] | None,
+    on_wait: Callable[[str | None], None] | None,
+) -> None:
+    """Hear every :meth:`Log.step` and every terminal read; None stops it."""
+    _ON_STEP[:] = [on_step] if on_step else []
+    _ON_WAIT[:] = [on_wait] if on_wait else []
+
+
+class _Reading:
+    """Around one read of the terminal: the watcher hears its prompt (no
+    colour codes) before it, and None after it, whatever ends it."""
+
+    def __init__(self, prompt: str):
+        self._prompt = " ".join(_SGR.sub("", prompt).split())
+
+    def __enter__(self) -> None:
+        for hear in _ON_WAIT:
+            hear(self._prompt)
+
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        _exc: BaseException | None,
+        _tb: TracebackType | None,
+    ) -> None:
+        for hear in _ON_WAIT:
+            hear(None)
 
 
 def text_width(s: str) -> int:
@@ -226,6 +263,8 @@ class Log:
     def step(self, num: int, total: int, msg: str):
         """Numbered step indicator."""
         self._emit(f"\n{self.C}[{num}/{total}]{self.N} {msg}")
+        for hear in _ON_STEP:
+            hear(num, total, self._strip(msg))
 
     def cmd(self, command: str):
         """Log a shell command being executed."""
@@ -365,7 +404,8 @@ class Log:
         self._show(self._box(f"{self.Y}?{self.N} {question}"), after=False)
         eof = False
         try:
-            answer = input(f"    {prompt}: ").strip().lower()
+            with _Reading(question):
+                answer = input(f"    {prompt}: ").strip().lower()
         except EOFError:
             answer, eof = "", True
         if eof and on_eof is not None:
@@ -380,7 +420,8 @@ class Log:
         """Wait for Enter (after a physical step). True on a line, False at
         EOF, where nobody did the step; the log says which."""
         try:
-            _ = input(prompt)
+            with _Reading(prompt):
+                _ = input(prompt)
         except EOFError:
             self._answer_to_file(prompt.strip(), "<eof>")
             return False
@@ -406,6 +447,11 @@ class Log:
             self._answer_to_file(question, f"<no tty> ({'yes' if default else 'no'})")
             return default
 
+        with _Reading(question):
+            return self._countdown(question, default, timeout, prompt)
+
+    def _countdown(self, question: str, default: bool, timeout: int, prompt: str) -> bool:
+        """:meth:`ask_timeout`'s wait on a terminal."""
         default_word = "yes" if default else "no"
         for remaining in range(timeout, 0, -1):
             # \r keeps the countdown on one line; pad to overwrite prior text.
@@ -447,7 +493,8 @@ class Log:
             rows.append(f"  (default: {self.W}{default}{self.N})")
         self._show(self._box(*rows), after=False, err=True)
         try:
-            answer = input("    > ").strip()
+            with _Reading(question):
+                answer = input("    > ").strip()
         except EOFError:
             answer = ""
         shown = self._loggable(answer, (*accept, default)) if answer else f"<default> {default}"
@@ -464,7 +511,8 @@ class Log:
         raising.
         """
         try:
-            answer = input(prompt).strip()
+            with _Reading(label or prompt):
+                answer = input(prompt).strip()
         except EOFError:
             answer = ""
         shown = self._loggable(answer, accept) if answer else "<empty>"
@@ -482,7 +530,8 @@ class Log:
         # (CPython Lib/getpass.py:52-58).
         sys.stdout.flush()
         try:
-            return getpass.getpass("    Passphrase: ", stream=sys.stdout)
+            with _Reading(question):
+                return getpass.getpass("    Passphrase: ", stream=sys.stdout)
         finally:
             sys.stdout.flush()  # getpass writes its closing newline unflushed (:101)
 
@@ -495,6 +544,11 @@ class Log:
             marker = " ←" if i == default else ""
             print(f"    {self.W}{i + 1}){self.N} {opt}{marker}")
         print()
+        with _Reading(question):
+            return self._choose(question, options, default)
+
+    def _choose(self, question: str, options: list[str], default: int) -> int:
+        """:meth:`ask_choice`'s reads, until an answer it accepts."""
         while True:
             try:
                 raw = input(f"    Select [1-{len(options)}, default={default + 1}]: ").strip()
@@ -536,7 +590,8 @@ class Log:
         print(f"  {self.Y}Open another terminal to debug if needed.{self.N}")
         print()
         try:
-            input("  Press Enter to cleanup and exit... ")
+            with _Reading("Press Enter to cleanup and exit"):
+                input("  Press Enter to cleanup and exit... ")
         except EOFError:
             pass
         raise SystemExit(1)

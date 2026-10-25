@@ -231,22 +231,3 @@ def due_notifications(
         if level and key not in sent:
             out.append((key, f"{pool} is {pct}% full - free space with: {zark_command()} prune"))
     return out
-
-
-def refresh_quietly(cfg: Config) -> None:
-    """:func:`refresh` at the end of a command: nothing to zark.log, and a
-    failure never turns a finished command into a failed one."""
-    try:
-        _ = refresh(cfg, Log(os.devnull))
-    except (OSError, ValueError, survey.ReadError) as e:
-        Log().warn(f"Could not refresh the status file: {e}")
-
-
-def refresh(cfg: Config, log: Log) -> Status:
-    """Gather and write the MOTD file; failures are logged, never fatal."""
-    st = gather(cfg, log)
-    try:
-        write_motd(motd_text(st))
-    except OSError as e:
-        log.warn(f"Could not write {MOTD_FILE}: {e}")
-    return st

@@ -112,6 +112,7 @@ import lib.selftest_l2 as st_l2  # pylint: disable=wrong-import-position # noqa:
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
+import lib.status_file as status_file_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.zfs_features as zfeat  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -301,6 +302,7 @@ from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E4
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 from tests.test_status_files import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestProgressFile,
     TestSpaceReads,
     TestStatusDirs,
     TestStatusFixtures,
@@ -312,6 +314,7 @@ from tests.test_status_files import (  # pylint: disable=wrong-import-position #
 # The status files' tests live in their own module (M7-15); main() runs the
 # Test* classes of this module's globals, so they are named here.
 STATUS_FILE_SUITES = (
+    TestProgressFile,
     TestSpaceReads,
     TestStatusDirs,
     TestStatusFixtures,
@@ -3161,6 +3164,7 @@ class TestLock:  # pylint: disable=missing-function-docstring,protected-access
         with (
             patch.object(sys, "argv", ["zark", "prune"]),
             patch("os.geteuid", return_value=0),
+            patch("lib.progress.start"),
             patch("lib.signals.guard_output"),
             patch.object(lock_mod, "guard", side_effect=SystemExit(lock_mod.EX_TEMPFAIL)) as g,
             patch.object(prune_mod, "run", side_effect=lambda _a: ran.append("prune")),
@@ -12834,6 +12838,7 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         with (
             patch.object(sys, "argv", ["zark", "prune"]),
             patch("os.geteuid", return_value=0),
+            patch("lib.progress.start"),
             patch("lib.signals.guard_output", side_effect=lambda *_a: order.append("guard")),
             patch.object(lock_mod, "guard"),
             patch("lib.signals.install", side_effect=lambda *_a: order.append("install")),
@@ -12931,6 +12936,7 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
         with (
             patch.object(sys, "argv", ["zark", "prune", "--dry-run"]),
             patch("os.geteuid", return_value=0),
+            patch("lib.progress.start"),
             patch("lib.signals.guard_output"),
             patch.object(lock_mod, "guard"),
             patch("lib.signals.install"),
@@ -18869,7 +18875,7 @@ class TestStatus:
         cfg = make_config()
         cfg.known_drives["black"] = DriveInfo("black", "111", "d")
         with patch_sh(fake), redirect_stdout(StringIO()):
-            st = status_lib.refresh(cfg, Log(os.devnull))
+            st = status_file_lib.refresh(cfg, Log(os.devnull), "timer")
             text = status_lib.MOTD_FILE.read_text(encoding="utf-8")
             mode = status_lib.MOTD_FILE.stat().st_mode & 0o777
         assert st.caps == {"rpool": 91, "bpool": 50}

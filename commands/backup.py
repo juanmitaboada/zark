@@ -1222,7 +1222,6 @@ def run(
         )
         anchored = None
     _report_rpo(cfg, pool_name, log, anchored, origin)
-    status.refresh_quietly(cfg)
     residues = inventory(origin, {i.guid: n for n, i in cfg.known_drives.items()}).residues
     if residues:
         log.info(status.residue_line(len(residues)))

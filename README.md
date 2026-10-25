@@ -248,6 +248,7 @@ zark/
 │   ├── origin_prune.py        # What `zark prune` can remove in origin
 │   ├── platform_facts.py      # The platform, as the self-test records it
 │   ├── pool_record.py         # How origin's pools were at a backup point (features, versions)
+│   ├── progress.py            # /run/zark/progress.json: what the running command does
 │   ├── reclaim.py             # What removing snapshots from a drive frees
 │   ├── registry.py            # known_drives.json: parsing, validation, atomic writes
 │   ├── replication.py         # Backup planner: what each dataset needs (pure)
