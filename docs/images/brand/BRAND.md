@@ -40,8 +40,8 @@ a large flat area that could read as an Ubuntu property. zark is "for Ubuntu".
 |--------------------------------------|-------------------------------------|
 | 48 px and up, headers, slides        | `zark-icon` (full: ring + shield)   |
 | 32 to 64 px when the ring matters    | `zark-icon-ringz` (ring + z)        |
-| 24 px and below, favicon             | `zark-icon-small` (shield + z)      |
-| GNOME panel indicator                | `zark-symbolic.svg` (16 px, recoloured by the theme) |
+| 24 px and below, favicon             | `zark-icon-small` (shield + z), except the GNOME panel |
+| GNOME panel indicator                | `zark-symbolic.svg` (ring + z, 16 px, recoloured by the theme) |
 | Avatars, app tiles                   | `zark-icon-tile`, `zark-icon-tile-dark` |
 | One colour printing, stamps          | `*-mono` (navy) / `*-mono-white`    |
 
@@ -73,11 +73,18 @@ Its SVG source is next to it.
 
 ## Notes for the GNOME extension
 
-- Panel: `zark-symbolic.svg`, installed as `zark-symbolic` in the extension's
-  `icons/` and loaded with `Gio.icon_new_for_string`. It is a single path with
-  the z knocked out, so the panel theme colours it; state colours are applied by
-  the extension's stylesheet on top (ok / overdue / running / attention), not
-  baked into the file.
+- Panel: the ring with z in every state, single-colour ones included, so the
+  icon keeps its shape when a backup starts or ends. This is the one exception
+  to the shield with z below 24 px.
+- `zark-symbolic.svg` is the panel's source: one path on a 16 px canvas (eight
+  sectors clockwise from the top, then the z), in `#2e3436` so the shell
+  recolours it. Its geometry is tuned for 16 px: the ring fills the box with a
+  0.5 px margin, the gaps are 32 units at 512 (about 1.1 px) instead of the
+  `ringz` variants' 24, and the z is scaled 1.4 instead of 1.3, so the gaps
+  stay open and the z stays the figure at 1x.
+- The extension's other panel icons (progress by sectors, waiting) are built
+  from that same geometry; state colours belong to the extension, not to this
+  file.
 - Menu header and about page: `zark-icon` at 48 or 64 px.
 - Accent for progress bars and the running state: orange `#E8592A`; ok state may
   use OK green `#5FCB7A`.
