@@ -32,9 +32,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import commands.status as status_cmd
-from lib import certificates, live, lock, status, statusdirs
+from lib import certificates, live, lock, status, statusdirs, zfs
 from lib.log import Log
 from tests import schema_check
+from tests.mock_sh import MockShell, patch_sh
 
 REPO = Path(__file__).resolve().parent.parent
 SCHEMAS = REPO / "docs" / "schema"
@@ -52,7 +53,11 @@ def schema(kind: str) -> dict[str, object]:
 
 
 def problems(doc: object, kind: str) -> list[str]:
-    """How ``doc`` fails the schema of ``kind`` (empty: valid)."""
+    """How ``doc`` fails the schema of ``kind`` (empty: valid): ``progress``
+    or ``status``, or ``space`` for the Space object both define."""
+    if kind == "space":
+        root = schema("status")
+        return schema_check.errors(doc, {"$ref": "#/$defs/space", "$defs": root["$defs"]})
     return schema_check.errors(doc, schema(kind))
 
 
@@ -314,3 +319,100 @@ class TestTmpfiles:  # pylint: disable=missing-function-docstring,too-few-public
         text = (REPO / "debian" / "zark.tmpfiles").read_text("ascii")
         assert text == "d /run/zark 0755 root root -\n", text
         assert str(statusdirs.RUN_DIR) == "/run/zark" and statusdirs.MODE == 0o755
+
+
+class TestSpaceReads:  # pylint: disable=missing-function-docstring
+    """R1 and R2: a pool's zfs and zpool figures in one pass, and its
+    datasets' usage; nothing partial when a read fails."""
+
+    _CARMEN_RPOOL = (
+        "917611225088\t71470788608\n",
+        "1005022347264\t902414041088\t102608306176\t89\n",
+    )
+
+    def _mock(self, zfs_out: str, zpool_out: str, rc: int = 0) -> MockShell:
+        mock = MockShell()
+        mock.on("zfs list -Hp -o used,avail rpool").returns(rc, zfs_out)
+        mock.on("zpool list -Hp -o size,alloc,free,capacity rpool").returns(rc, zpool_out)
+        return mock
+
+    def test_the_space_object_of_a_pool(self):
+        with (
+            patch_sh(self._mock(*self._CARMEN_RPOOL)),
+            patch.object(zfs, "now_utc_iso", lambda: "2026-10-24T08:58:12Z"),
+        ):
+            sp = zfs.read_space("rpool")
+        assert sp is not None
+        want = json.loads((FIXTURES / "idle" / STATUS_REL).read_text("utf-8"))
+        assert sp.to_json() == want["source_pools"][0]["space"]
+        assert not problems(sp.to_json(), "space")
+
+    def test_a_failed_or_odd_read_gives_no_space(self):
+        zf, zp = self._CARMEN_RPOOL
+        cases: list[tuple[str, str, int]] = [
+            (zf, zp, 1),
+            ("", zp, 0),
+            (zf, "1\t2\t3\n", 0),
+            ("12G\t3G\n", zp, 0),
+            (zf, "1\t2\t3\t-\n", 0),
+        ]
+        for zfs_out, zpool_out, rc in cases:
+            with patch_sh(self._mock(zfs_out, zpool_out, rc)):
+                assert zfs.read_space("rpool") is None, (zfs_out, zpool_out, rc)
+        with patch_sh(self._mock(zf, "1\t2\t3\t104\n")):
+            sp = zfs.read_space("rpool")
+        assert sp is not None and sp.capacity_pct == 100
+
+    def test_the_datasets_of_a_pool(self):
+        mock = MockShell()
+        mock.on(f"zfs list -Hp -t filesystem,volume -r -o {zfs.DATASET_USAGE} rpool").returns(
+            0,
+            "rpool\tfilesystem\t300\t10\t0\t290\t0\n"
+            + "rpool/keystore\tvolume\t200\t20\t0\t0\t180\n"
+            + "rpool/USERDATA\tfilesystem\t90\t5\t15\t70\t0\n"
+            + "rpool/USERDATA/home_x\tfilesystem\t70\t50\t20\t0\t0\n",
+        )
+        with patch_sh(mock):
+            got = zfs.read_datasets("rpool") or []
+        assert [d.name for d in got] == [
+            "rpool",
+            "rpool/USERDATA",
+            "rpool/USERDATA/home_x",
+            "rpool/keystore",
+        ]
+        own = sum(d.usedbydataset + d.usedbysnapshots + d.usedbyrefreservation for d in got)
+        assert own == got[0].used == 300
+        assert got[3].to_json() == {
+            "name": "rpool/keystore",
+            "type": "volume",
+            "used_bytes": 200,
+            "usedbydataset_bytes": 20,
+            "usedbysnapshots_bytes": 0,
+            "usedbychildren_bytes": 0,
+            "usedbyrefreservation_bytes": 180,
+        }
+
+    def test_a_listing_that_fails_gives_no_partial_list(self):
+        listing = f"zfs list -Hp -t filesystem,volume -r -o {zfs.DATASET_USAGE} rpool"
+        for rc, out in (
+            (1, ""),
+            (0, ""),
+            (0, "rpool\tfilesystem\t1\t1\t0\t0\t0\nrpool/x\tsnapshot\t1\t1\t0\t0\t0\n"),
+            (0, "rpool\tfilesystem\t1\t-\t0\t0\t0\n"),
+        ):
+            mock = MockShell()
+            mock.on(listing).returns(rc, out)
+            with patch_sh(mock):
+                assert zfs.read_datasets("rpool") is None, (rc, out)
+
+    def test_the_fixtures_shares_add_up_to_the_roots_used(self):
+        doc = json.loads((FIXTURES / "idle" / STATUS_REL).read_text("utf-8"))
+        for pool in doc["source_pools"]:
+            rows = pool["datasets"]
+            own = sum(
+                r["usedbydataset_bytes"]
+                + r["usedbysnapshots_bytes"]
+                + r["usedbyrefreservation_bytes"]
+                for r in rows
+            )
+            assert own == rows[0]["used_bytes"] == pool["space"]["used_bytes"], pool["name"]

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Protocol
 
 from lib import forensics
+from lib.config import now_utc_iso
 from lib.identity import BY_ID_DIR
 from lib.log import Log
 from lib.sh import run
@@ -58,6 +59,107 @@ class PoolInfo:  # pylint: disable=too-many-instance-attributes
     avail_bytes: int = 0
     size_bytes: int = 0
     pct_used: int = 0
+
+
+@dataclass(frozen=True)
+class Space:  # pylint: disable=too-many-instance-attributes
+    """A whole pool's space, ``zfs`` and ``zpool`` figures read in one pass
+    (docs/STATUS-FILES.md, "Space object"). The two tools account
+    differently (``used_bytes`` can exceed ``pool_alloc_bytes``), so neither
+    set is derived from the other."""
+
+    used_bytes: int
+    available_bytes: int
+    pool_size_bytes: int
+    pool_alloc_bytes: int
+    pool_free_bytes: int
+    capacity_pct: int
+    measured_at: str
+
+    def to_json(self) -> dict[str, int | str]:
+        """The Space object of the status files."""
+        return {
+            "used_bytes": self.used_bytes,
+            "available_bytes": self.available_bytes,
+            "pool_size_bytes": self.pool_size_bytes,
+            "pool_alloc_bytes": self.pool_alloc_bytes,
+            "pool_free_bytes": self.pool_free_bytes,
+            "capacity_pct": self.capacity_pct,
+            "measured_at": self.measured_at,
+        }
+
+
+def _ints(text: str, n: int) -> list[int] | None:
+    """``n`` tab-separated non-negative integers on one line, or None."""
+    fields = text.strip().split("\t")
+    if len(fields) != n or not all(f.isdigit() for f in fields):
+        return None
+    return [int(f) for f in fields]
+
+
+def read_space(pool: str) -> Space | None:
+    """The Space object of ``pool``, None when it is not imported or a
+    figure does not parse as an integer."""
+    measured_at = now_utc_iso()
+    zf = run(f"zfs list -Hp -o used,avail {pool}")
+    zp = run(f"zpool list -Hp -o size,alloc,free,capacity {pool}")
+    used = _ints(zf.output, 2) if zf.ok else None
+    pool_ = _ints(zp.output, 4) if zp.ok else None
+    if used is None or pool_ is None:
+        return None
+    # The status files' percentages are 0-100; zpool can report more for a
+    # pool that went past its size.
+    capacity = min(pool_[3], 100)
+    return Space(used[0], used[1], pool_[0], pool_[1], pool_[2], capacity, measured_at)
+
+
+DATASET_USAGE = "name,type,used,usedbydataset,usedbysnapshots,usedbychildren,usedbyrefreservation"
+
+
+@dataclass(frozen=True)
+class DatasetUsage:
+    """One dataset's space, as ``zfs list -p`` gives it (R2). Its own share,
+    ``usedbydataset + usedbysnapshots + usedbyrefreservation``, overlaps no
+    other dataset's, and the shares add up to the pool root's ``used``."""
+
+    name: str
+    type: str  # "filesystem" or "volume"
+    used: int
+    usedbydataset: int
+    usedbysnapshots: int
+    usedbychildren: int
+    usedbyrefreservation: int
+
+    def to_json(self) -> dict[str, int | str]:
+        """A ``datasets`` entry of the status files."""
+        return {
+            "name": self.name,
+            "type": self.type,
+            "used_bytes": self.used,
+            "usedbydataset_bytes": self.usedbydataset,
+            "usedbysnapshots_bytes": self.usedbysnapshots,
+            "usedbychildren_bytes": self.usedbychildren,
+            "usedbyrefreservation_bytes": self.usedbyrefreservation,
+        }
+
+
+def read_datasets(pool: str) -> list[DatasetUsage] | None:
+    """Every filesystem and volume of ``pool``, sorted by name; None when
+    the listing fails or a line does not parse (never a partial list)."""
+    r = run(f"zfs list -Hp -t filesystem,volume -r -o {DATASET_USAGE} {pool}")
+    if not r.ok:
+        return None
+    out: list[DatasetUsage] = []
+    for line in r.output.splitlines():
+        if not line.strip():
+            continue
+        name, _, rest = line.partition("\t")
+        kind, _, numbers = rest.partition("\t")
+        values = _ints(numbers, 5)
+        if not name or kind not in ("filesystem", "volume") or values is None:
+            return None
+        out.append(DatasetUsage(name, kind, *values))
+    return sorted(out, key=lambda d: d.name) if out else None
 
 
 @dataclass
