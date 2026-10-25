@@ -163,8 +163,12 @@ class MockShell:
             raise RuntimeError(f"Command failed: {cmd_str}")
         return r
 
-    def mock_run_pipe(self, cmd1, cmd2, _log=None) -> RunResult:
-        """Drop-in replacement for sh.run_pipe()."""
+    def mock_run_pipe(self, cmd1, cmd2, _log=None, meter=None) -> RunResult:
+        """Drop-in replacement for sh.run_pipe(); a meter hears one send of
+        nothing (the commands never run)."""
+        if meter is not None:
+            meter.begin(0)
+            meter.end(0)
         combined = f"{cmd1} | {cmd2}"
         return self.mock_run(combined)
 

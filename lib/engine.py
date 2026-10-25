@@ -49,6 +49,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from lib import sh
 from lib.anchors import POINT_FOR, anchor_point, point_owners, release_point
@@ -114,6 +115,31 @@ class Verdict:
     owner: str = ""  # a point left by another drive's run: anchor it for that drive first
 
 
+class TransferObserver(Protocol):
+    """Who hears the transfers (backup's progress.json, M7-8); see
+    :class:`lib.progress.TransferProgress`."""
+
+    @property
+    def meter(self) -> sh.PipeMeter:
+        """What counts each send's bytes (M7-2)."""
+        ...  # pylint: disable=unnecessary-ellipsis
+
+    def begin(self) -> None:
+        """The transfers start."""
+
+    def planned(self, estimate: int) -> None:
+        """One more transfer, of ``estimate`` stream bytes (0: unknown)."""
+
+    def sending(self, dataset: str, state: str) -> None:
+        """``dataset`` is being sent."""
+
+    def ended(self, ok: bool) -> None:
+        """The current transfer ended."""
+
+    def end(self) -> None:
+        """No more data moves."""
+
+
 @dataclass
 class Run:  # pylint: disable=too-many-instance-attributes
     """One replication run of origin into backup pool ``pool``."""
@@ -129,7 +155,12 @@ class Run:  # pylint: disable=too-many-instance-attributes
     started: set[str] = field(default_factory=set)  # datasets a receive began on
     # Subtree tops excluded from backups (D8, lib/exclusions.py): not expected.
     exclusions: frozenset[str] = field(default_factory=frozenset)
+    # Hears the transfers and meters each send; backup sets it, prepare does not (D2).
+    observer: TransferObserver | None = None
     _timer_was_active: bool = False
+    # `zfs send -nvP` sizes by their exact arguments (M7-8 8a): a round's
+    # planning asks again only for a send whose plan changed.
+    _estimates: dict[str, int] = field(default_factory=dict)
 
     # ── sanoid ───────────────────────────────────────────────────────────
 
@@ -278,11 +309,15 @@ class Run:  # pylint: disable=too-many-instance-attributes
             args_list = [f"{self._raw(p.rel)}-i {_q(p.base)} {_q(f'{p.rel}@{self.point}')}"]
         total = 0
         for args in args_list:
-            r = sh.run(f"zfs send -nvP {args}")
-            for line in (r.stdout + "\n" + r.stderr).splitlines():
-                fields = line.split("\t")
-                if len(fields) == 2 and fields[0] == "size" and fields[1].isdigit():
-                    total += int(fields[1])
+            if args not in self._estimates:
+                r = sh.run(f"zfs send -nvP {args}")
+                size = 0
+                for line in (r.stdout + "\n" + r.stderr).splitlines():
+                    fields = line.split("\t")
+                    if len(fields) == 2 and fields[0] == "size" and fields[1].isdigit():
+                        size += int(fields[1])
+                self._estimates[args] = size
+            total += self._estimates[args]
         return total
 
     # ── decisions (each one asked to the user by the caller) ─────────────
@@ -498,7 +533,12 @@ class Run:  # pylint: disable=too-many-instance-attributes
         self.started.add(p.rel)
         clone_from = p.clone_from if p.state is State.NEW else ""
         for args in self._send_args(p):
-            r = sh.run_pipe(f"zfs send {args}", self._recv(p.rel, resume, clone_from), log=self.log)
+            r = sh.run_pipe(
+                f"zfs send {args}",
+                self._recv(p.rel, resume, clone_from),
+                log=self.log,
+                meter=self.observer.meter if self.observer else None,
+            )
             if not r.ok:
                 err = pipe_message(r) or f"rc={r.returncode}"
                 enospc = sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout)
@@ -879,7 +919,50 @@ def replicate(run: Run, decide: Decide) -> Result:
 
 
 def _transfer(run: Run, res: Result) -> None:
-    """Every transfer round; ``res.plans`` holds the latest survey."""
+    """Every transfer round; ``res.plans`` holds the latest survey, and the
+    run's observer hears each one (M7-8)."""
+    obs = run.observer or _Unheard()
+    obs.begin()
+    try:
+        _rounds(run, res, obs)
+    finally:
+        obs.end()
+
+
+class _Unheard:
+    """No observer: prepare's run, and a backup's outside zark's main."""
+
+    @property
+    def meter(self) -> sh.PipeMeter:
+        """Never asked: Run.transfer meters only with an observer."""
+        raise AssertionError("an unheard run has no meter")
+
+    def begin(self) -> None:
+        """Nothing to tell."""
+
+    def planned(self, estimate: int) -> None:
+        """Nothing to tell."""
+
+    def sending(self, dataset: str, state: str) -> None:
+        """Nothing to tell."""
+
+    def ended(self, ok: bool) -> None:
+        """Nothing to tell."""
+
+    def end(self) -> None:
+        """Nothing to tell."""
+
+
+def _announce(run: Run, todo: list[DatasetPlan], obs: TransferObserver) -> None:
+    """Tell the observer a round's transfers and their estimates (none
+    without an observer: each costs a `zfs send -nvP`)."""
+    if run.observer is None:
+        return
+    for p in todo:
+        obs.planned(run.estimate(p))
+
+
+def _rounds(run: Run, res: Result, obs: TransferObserver) -> None:
     res.plans = run.survey()
     _ = run.clear_orphan_marks()
     _ = run.clear_excluded_kept()
@@ -893,14 +976,18 @@ def _transfer(run: Run, res: Result) -> None:
             break
         failed: set[str] = set()
         again = False
+        _announce(run, todo, obs)
         for p in todo:
             # Only a NEW child needs its parent on the drive (M2X.1, M4b-12).
             if p.state is State.NEW and blocked_by_parent(p.rel, failed):
                 res.outcomes[p.rel] = Outcome(p.rel, False, "parent did not reach the point")
                 failed.add(p.rel)
+                obs.ended(False)
                 continue
             run.log.info(f"  {p.rel}: {p.state}")
+            obs.sending(p.rel, str(p.state))
             out = run.transfer(p)
+            obs.ended(out.ok)
             res.outcomes[p.rel] = out
             if out.ok:
                 again = again or p.state is State.RESUME

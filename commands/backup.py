@@ -1143,6 +1143,8 @@ def run(
         log,
         point_name(datetime.now(UTC)),
         exclusions=declared.no_backup,
+        # progress.json's transfer and its byte counters (M7-8, M7-2).
+        observer=progress.TransferProgress() if progress.active() else None,
     )
     _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
     log.info(f"Tip: run '{zark_command()} monitor' in another terminal for progress")

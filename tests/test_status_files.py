@@ -40,6 +40,7 @@ from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
+from unittest import SkipTest
 from unittest.mock import MagicMock, patch
 
 import commands.status as status_cmd
@@ -50,6 +51,7 @@ from lib import (
     lock,
     log as log_mod,
     progress,
+    sh,
     status,
     status_file,
     statusdirs,
@@ -982,3 +984,173 @@ class TestProgressFile:  # pylint: disable=missing-function-docstring
             fields = " ".join(str(n) for n in range(3, 53))  # field 3 onwards
             _ = (proc / "42" / "stat").write_text(f"42 (a) (b) c) {fields}\n", encoding="ascii")
             assert progress.start_ticks(42, proc) == 22
+
+
+class TestByteMeter:  # pylint: disable=missing-function-docstring
+    """M7-2 2a: the kernel's count of what a send wrote, live from its
+    process group and exact at its end, outside the data path."""
+
+    @staticmethod
+    def _need_io() -> None:
+        # Linux lets only root read an exited child's /proc/<pid>/io (its
+        # zombie has no mm left for ptrace_may_access to judge); zark runs as root.
+        if os.geteuid() != 0:
+            raise SkipTest("needs root (an exited child's /proc/<pid>/io)")
+        try:
+            _ = sh.wchar(os.getpid())
+        except (OSError, ValueError) as e:
+            raise SkipTest(f"/proc/<pid>/io not readable here: {e}") from e
+
+    def test_run_pipe_reads_what_the_left_side_wrote_at_its_end(self):
+        self._need_io()
+        seen: list[tuple[str, int | None]] = []
+
+        class Rec:
+            """Records what run_pipe tells a meter."""
+
+            def begin(self, pgid: int) -> None:
+                seen.append(("begin", pgid))
+
+            def end(self, written: int | None) -> None:
+                seen.append(("end", written))
+
+        r = sh.run_pipe("head -c 3000000 /dev/zero", "cat > /dev/null", meter=Rec())
+        assert r.ok, r
+        assert [k for k, _ in seen] == ["begin", "end"] and seen[0][1], seen
+        assert seen[1][1] == 3000000, seen
+        # The same pipeline without a meter: nothing changes for the commands.
+        assert sh.run_pipe("printf abc", "cat").stdout == "abc"
+
+    def test_the_live_count_and_the_exact_end(self):
+        self._need_io()
+        meter = progress.ByteMeter()
+        holder: list[int] = []
+
+        class Probe:
+            """Passes run_pipe's calls on to the meter, keeping the group."""
+
+            def begin(self, pgid: int) -> None:
+                holder.append(pgid)
+                meter.begin(pgid)
+
+            def end(self, written: int | None) -> None:
+                meter.end(written)
+
+        def sample_until_sent() -> None:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                meter.sample()
+                done = meter.bytes_done()
+                if done is not None and done >= 1_000_000:
+                    holder.append(done)
+                    return
+                time.sleep(0.05)
+
+        sampler = threading.Thread(target=sample_until_sent)
+        sampler.start()
+        r = sh.run_pipe("head -c 1000000 /dev/zero; sleep 0.5", "cat > /dev/null", meter=Probe())
+        sampler.join()
+        assert r.ok and len(holder) == 2, holder
+        assert holder[1] >= 1_000_000  # read live, while sh still ran
+        assert meter.bytes_done() == 1_000_000
+
+    def test_sums_rate_and_null(self):
+        meter = progress.ByteMeter(proc=Path("/nonexistent"))
+        assert meter.bytes_done() == 0 and meter.rate() is None
+        meter.end(1000)
+        meter.sample(now=100.0)
+        meter.end(3000)
+        meter.sample(now=110.0)
+        assert meter.bytes_done() == 4000 and meter.rate() == 300
+        m2 = progress.ByteMeter(proc=Path("/nonexistent"))
+        m2.sample(now=0.0)
+        m2.end(500)
+        m2.sample(now=10.0)
+        m2.sample(now=50.0)  # the 0.0 and 10.0 samples fall out of the 30 s window
+        m2.sample(now=55.0)
+        assert m2.bytes_done() == 500 and m2.rate() == 0
+        m2.begin(4242)
+        m2.sample(now=56.0)  # the group cannot be read: not measured from here on
+        assert m2.bytes_done() is None and m2.rate() is None
+        m2.end(100)
+        assert m2.bytes_done() is None
+        m3 = progress.ByteMeter()
+        m3.end(None)
+        assert m3.bytes_done() is None
+
+    def test_a_group_read_never_goes_backwards(self):
+        meter = progress.ByteMeter()
+        meter.begin(77)
+        with patch.object(progress, "group_wchar", side_effect=[500, 200, 900]):
+            meter.sample(now=1.0)
+            assert meter.bytes_done() == 500
+            meter.sample(now=2.0)
+            assert meter.bytes_done() == 500
+            meter.sample(now=3.0)
+        assert meter.bytes_done() == 900 and meter.rate() == 200
+
+    def test_group_wchar_sums_the_groups_members(self):
+        with tempfile.TemporaryDirectory() as td:
+            proc = Path(td)
+            for pid, pgrp, written in ((10, 10, 0), (11, 10, 700), (12, 99, 5000)):
+                (proc / str(pid)).mkdir()
+                fields = ["S", "1", str(pgrp)] + ["0"] * 40
+                _ = (proc / str(pid) / "stat").write_text(
+                    f"{pid} (z) (x) {' '.join(fields)}\n", encoding="ascii"
+                )
+                _ = (proc / str(pid) / "io").write_text(
+                    f"rchar: 1\nwchar: {written}\n", encoding="ascii"
+                )
+            (proc / "self").mkdir()
+            assert progress.group_wchar(10, proc) == 700
+            (proc / "11" / "io").write_text("rchar: 1\n", encoding="ascii")
+            try:
+                _ = progress.group_wchar(10, proc)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("a member with no wchar was read as 0")
+
+
+class TestTransferProgress:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M7-8: progress.json's transfer while backup moves data, null around it."""
+
+    def test_the_counters_through_a_run(self):
+        with tempfile.TemporaryDirectory() as td, _running(Path(td)) as (path, _):
+            meter = progress.ByteMeter(proc=Path("/nonexistent"))
+            tp = progress.TransferProgress(meter)
+            tp.begin()
+            doc = _until(path, lambda d: d["transfer"] is not None)
+            assert doc["transfer"] == {
+                "datasets_total": 0,
+                "datasets_done": 0,
+                "datasets_failed": 0,
+                "dataset": None,
+                "dataset_state": None,
+                "bytes_total": None,
+                "bytes_total_partial": False,
+                "bytes_done": 0,
+                "rate_bytes_per_s": None,
+            }
+            tp.planned(1000)
+            tp.planned(0)
+            tp.planned(500)
+            tp.sending("rpool/USERDATA/home", "incremental")
+            meter.end(700)
+            doc = _until(path, lambda d: (d["transfer"] or {}).get("dataset") is not None)
+            t = doc["transfer"]
+            assert (t["datasets_total"], t["bytes_total"], t["bytes_total_partial"]) == (
+                3,
+                1500,
+                True,
+            )
+            assert t["dataset_state"] == "incremental" and t["bytes_done"] == 700
+            assert not problems(doc, "progress"), problems(doc, "progress")
+            tp.ended(True)
+            tp.sending("rpool/ROOT/be", "new")
+            tp.ended(False)
+            doc = _until(path, lambda d: (d["transfer"] or {}).get("datasets_done") == 2)
+            t = doc["transfer"]
+            assert (t["datasets_done"], t["datasets_failed"], t["dataset"]) == (2, 1, None)
+            tp.end()
+            assert _until(path, lambda d: d["transfer"] is None)["transfer"] is None

@@ -18,10 +18,12 @@ Every command is logged before and after execution.
 No 2>/dev/null anywhere - everything is captured and visible.
 """
 
+import os
 import shlex
 import signal
 import subprocess
 from dataclasses import dataclass
+from typing import Protocol
 
 from lib import signals
 from lib.log import Log
@@ -177,7 +179,41 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
     return r
 
 
-def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
+class PipeMeter(Protocol):
+    """Counts what the left side of :func:`run_pipe` writes (M7-2 2a)."""
+
+    def begin(self, pgid: int) -> None:
+        """The left side runs, in process group ``pgid`` (its shell's pid)."""
+
+    def end(self, written: int | None) -> None:
+        """The left side ended: everything it wrote, None when not readable."""
+
+
+def wchar(pid: int, proc: str = "/proc") -> int:
+    """``wchar`` of ``/proc/<pid>/io``: bytes the process wrote, its exited
+    threads and the children it reaped included (Linux fs/proc/base.c
+    do_io_accounting). Root only. Raises OSError or ValueError."""
+    with open(f"{proc}/{pid}/io", encoding="ascii") as f:
+        for line in f:
+            if line.startswith("wchar:"):
+                return int(line.split()[1])
+    raise ValueError(f"no wchar in {proc}/{pid}/io")
+
+
+def _written_at_exit(pid: int) -> int | None:
+    """What child ``pid`` wrote in all, read once it exited and before it
+    is reaped: ``waitid(WNOWAIT)`` leaves it a zombie whose counters still
+    hold its own writes and those of the children it reaped."""
+    try:
+        _ = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        return wchar(pid)
+    except (OSError, ValueError):
+        return None
+
+
+def run_pipe(
+    cmd1: str, cmd2: str, log: Log | None = None, meter: PipeMeter | None = None
+) -> RunResult:
     """Run cmd1 | cmd2 pipeline.
 
     Returns a RunResult whose returncode is non-zero if EITHER side of
@@ -193,6 +229,10 @@ def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
     right side already produces a non-zero p2.returncode, so ENOSPC was
     detected correctly even before this change. The fix is for the other
     failure modes.
+
+    ``meter`` hears when the left side starts and, once it ended, what it
+    wrote in all, measured by the kernel outside the data path (M7-2): the
+    pipe and both commands are as without it.
     """
     if log:
         log.cmd(f"{cmd1} | {cmd2}")
@@ -219,11 +259,15 @@ def run_pipe(cmd1: str, cmd2: str, log: Log | None = None) -> RunResult:
             process_group=0,
         ) as p2:
             p1.stdout.close()  # let p2 receive EOF when p1 finishes
+            if meter is not None:
+                meter.begin(p1.pid)
             try:
                 stdout, stderr_p2 = p2.communicate()
                 # p1 has finished by now (p2.communicate waited for downstream
                 # EOF, which only happens after p1 exits). Wait explicitly to
                 # reap it and capture its stderr.
+                if meter is not None:
+                    meter.end(_written_at_exit(p1.pid))
                 _ = p1.wait()
             except BaseException:
                 signals.stop_children([p1, p2])

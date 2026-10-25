@@ -41,6 +41,7 @@ import json
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +59,7 @@ PROGRESS_PATH = statusdirs.RUN_DIR / "progress.json"
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 HEARTBEAT_S = 2.0  # the contract's limit is 5 s
 MIN_GAP_S = 1.0  # never more than one write a second
+RATE_WINDOW_S = 30.0  # rate_bytes_per_s is bytes_done's rate over this window
 
 
 def start_ticks(pid: int, proc: Path = Path("/proc")) -> int:
@@ -65,6 +67,138 @@ def start_ticks(pid: int, proc: Path = Path("/proc")) -> int:
     last ``)``: the name may hold spaces and parentheses (contract rule 5)."""
     text = (proc / str(pid) / "stat").read_text(encoding="ascii", errors="replace")
     return int(text[text.rindex(")") + 2 :].split()[19])
+
+
+def group_wchar(pgid: int, proc: Path = Path("/proc")) -> int:
+    """What the live members of process group ``pgid`` wrote: ``sh -c`` and
+    the ``zfs send`` it runs (M7-2 2a). Raises OSError when a member's
+    counters cannot be read (not root)."""
+    total = 0
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat_line = (entry / "stat").read_text(encoding="ascii", errors="replace")
+            if int(stat_line[stat_line.rindex(")") + 2 :].split()[2]) != pgid:
+                continue
+            total += sh.wchar(int(entry.name), str(proc))
+        except FileNotFoundError:
+            continue  # it ended between the listing and the read
+        except ValueError as e:
+            raise OSError(f"{entry}: {e}") from e
+    return total
+
+
+class ByteMeter:
+    """``bytes_done`` and ``rate_bytes_per_s`` (M7-2 2a): the kernel's count
+    of what each ``zfs send`` wrote, sampled live from its process group and
+    read exactly when it ends (:func:`lib.sh.run_pipe`). One read that fails
+    leaves both null for the rest of the run: a null is never a zero."""
+
+    def __init__(self, proc: Path = Path("/proc")):
+        self._proc = proc
+        self._lock = threading.Lock()
+        self._done = 0  # sends that ended
+        self._live = 0  # the running one, as last sampled
+        self._pgid: int | None = None
+        self._broken = False
+        self._samples: deque[tuple[float, int]] = deque()
+
+    def begin(self, pgid: int) -> None:
+        """A send started in process group ``pgid``."""
+        with self._lock:
+            self._pgid, self._live = pgid, 0
+
+    def end(self, written: int | None) -> None:
+        """The send ended, having written ``written`` (None: not read)."""
+        with self._lock:
+            if written is None:
+                self._broken = True
+            else:
+                self._done += written
+            self._pgid, self._live = None, 0
+
+    def sample(self, now: float | None = None) -> None:
+        """Read the running send's count (from the heartbeat)."""
+        with self._lock:
+            if self._pgid is not None and not self._broken:
+                try:
+                    # Never backwards: a member may be reaped between two reads.
+                    self._live = max(self._live, group_wchar(self._pgid, self._proc))
+                except OSError:
+                    self._broken = True
+            if self._broken:
+                return
+            t = time.monotonic() if now is None else now
+            self._samples.append((t, self._done + self._live))
+            while self._samples and t - self._samples[0][0] > RATE_WINDOW_S:
+                _ = self._samples.popleft()
+
+    def bytes_done(self) -> int | None:
+        """Stream bytes sent so far in this run, None when not measured."""
+        with self._lock:
+            return None if self._broken else self._done + self._live
+
+    def rate(self) -> int | None:
+        """``bytes_done``'s rate over the last 30 s; None until two samples."""
+        with self._lock:
+            if self._broken or len(self._samples) < 2:
+                return None
+            (t0, b0), (t1, b1) = self._samples[0], self._samples[-1]
+            return int((b1 - b0) / (t1 - t0)) if t1 > t0 else None
+
+
+class TransferProgress:
+    """The engine's transfer, as progress.json's ``transfer`` says it (M7-8):
+    backup only (D2). ``datasets_total`` counts a transfer per dataset per
+    round; an estimate of 0 is unknown and makes ``bytes_total`` a floor."""
+
+    def __init__(self, meter: ByteMeter | None = None):
+        self.meter = meter or ByteMeter()
+        self._fields: dict[str, Any] = {}
+
+    def _show(self) -> None:
+        set_transfer(self._fields, self.meter)
+
+    def begin(self) -> None:
+        """The transfers start (step 7)."""
+        self._fields = {
+            "datasets_total": 0,
+            "datasets_done": 0,
+            "datasets_failed": 0,
+            "dataset": None,
+            "dataset_state": None,
+            "bytes_total": None,
+            "bytes_total_partial": False,
+        }
+        self._show()
+
+    def planned(self, estimate: int) -> None:
+        """One more transfer, of ``estimate`` stream bytes (0: unknown)."""
+        f = self._fields
+        f["datasets_total"] += 1
+        if estimate > 0:
+            f["bytes_total"] = (f["bytes_total"] or 0) + estimate
+        else:
+            f["bytes_total_partial"] = True
+        self._show()
+
+    def sending(self, dataset: str, state: str) -> None:
+        """``dataset`` is being sent, as its plan ``state`` says."""
+        self._fields.update(dataset=dataset, dataset_state=state)
+        self._show()
+
+    def ended(self, ok: bool) -> None:
+        """The current transfer ended."""
+        f = self._fields
+        f["datasets_done"] += 1
+        f["datasets_failed"] += 0 if ok else 1
+        f.update(dataset=None, dataset_state=None)
+        self._show()
+
+    def end(self) -> None:
+        """No more data moves: ``transfer`` is null again."""
+        set_transfer(None)
 
 
 @dataclass
@@ -83,6 +217,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
     drive: dict[str, Any] | None = None
     point: str | None = None
     transfer: dict[str, Any] | None = None
+    meter: ByteMeter | None = None
     updates: dict[str, DriveUpdate] = field(default_factory=dict)
     error: str = ""  # the last fatal error's message, or a crash's
     on_end: list[Callable[[], None]] = field(default_factory=list)
@@ -113,8 +248,15 @@ class _State:  # pylint: disable=too-many-instance-attributes
             "step": self.step,
             "drive": self.drive,
             "point": self.point,
-            "transfer": self.transfer,
+            "transfer": self._transfer(),
         }
+
+    def _transfer(self) -> dict[str, Any] | None:
+        if self.transfer is None:
+            return None
+        done = self.meter.bytes_done() if self.meter else None
+        rate = self.meter.rate() if self.meter else None
+        return {**self.transfer, "bytes_done": done, "rate_bytes_per_s": rate}
 
 
 _RUN: list[_State] = []
@@ -144,6 +286,8 @@ def _changed(update: Callable[[_State], None]) -> None:
 
 def _write(run: _State) -> None:
     """One write of the file (the caller holds ``run.lock``)."""
+    if run.meter is not None:
+        run.meter.sample()
     try:
         status_file.write_atomic(
             run.path, json.dumps(run.document(), indent=2) + "\n", durable=False
@@ -303,9 +447,15 @@ def set_point(point: str | None) -> None:
     _changed(lambda r: setattr(r, "point", point))
 
 
-def set_transfer(transfer: dict[str, Any] | None) -> None:
-    """The transfer's counters while a backup moves data; None otherwise."""
-    _changed(lambda r: setattr(r, "transfer", dict(transfer) if transfer else None))
+def set_transfer(transfer: dict[str, Any] | None, meter: ByteMeter | None = None) -> None:
+    """The transfer's counters while a backup moves data, with the meter of
+    its bytes; None once it ended."""
+
+    def update(r: _State) -> None:
+        r.transfer = dict(transfer) if transfer is not None else None
+        r.meter = meter if transfer is not None else None
+
+    _changed(update)
 
 
 def record(guid: str, update: DriveUpdate) -> None:

@@ -304,6 +304,7 @@ from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E4
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 from tests.test_status_files import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestByteMeter,
     TestProgressFile,
     TestSpaceReads,
     TestStatusDirs,
@@ -311,11 +312,14 @@ from tests.test_status_files import (  # pylint: disable=wrong-import-position #
     TestStatusJson,
     TestStatusSchemas,
     TestTmpfiles,
+    TestTransferProgress,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the
 # Test* classes of this module's globals, so they are named here.
 STATUS_FILE_SUITES = (
+    TestByteMeter,
+    TestTransferProgress,
     TestProgressFile,
     TestSpaceReads,
     TestStatusDirs,
@@ -14408,11 +14412,11 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         real_pipe = fake.mock_run_pipe
         failed: list[str] = []
 
-        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
             if " -t " in cmd1 and not failed:
                 failed.append(cmd1)
                 return RunResult(1, "", "cannot receive resume stream: I/O error\n", "")
-            return real_pipe(cmd1, cmd2, log)
+            return real_pipe(cmd1, cmd2, log, meter)
 
         fake.mock_run_pipe = pipe  # type: ignore[method-assign]
         res = _engine_run(fake, "backup", "111", P3)
@@ -15084,8 +15088,8 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)  # the hourly lands
         real_pipe = fake.mock_run_pipe
 
-        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
-            r = real_pipe(cmd1, cmd2, log)
+        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
+            r = real_pipe(cmd1, cmd2, log, meter)
             if "rpool/USERDATA/home" in cmd1 and not r.ok:
                 raise KeyboardInterrupt  # the Ctrl-C that cut that receive
             return r
@@ -15122,8 +15126,8 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
         real_pipe, real_run = fake.mock_run_pipe, fake.mock_run
 
-        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
-            r = real_pipe(cmd1, cmd2, log)
+        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
+            r = real_pipe(cmd1, cmd2, log, meter)
             if "rpool/USERDATA/home" in cmd1 and not r.ok:
                 raise KeyboardInterrupt
             return r
@@ -15964,10 +15968,10 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "backup", "111", P1).ok
         real_pipe = fake.mock_run_pipe
 
-        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
             if "rpool/var" in cmd2 and "rpool/var/" not in cmd2:
                 return RunResult(1, "", modified, "")
-            return real_pipe(cmd1, cmd2, log)
+            return real_pipe(cmd1, cmd2, log, meter)
 
         fake.mock_run_pipe = pipe  # type: ignore[method-assign]
         res = _engine_run(fake, "backup", "111", P2)
@@ -15984,10 +15988,10 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "backup", "111", P1).ok
         real_pipe = fake.mock_run_pipe
 
-        def pipe(cmd1: str, cmd2: str, log: object = None) -> RunResult:
+        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
             if "rpool/var" in cmd2 and "rpool/var/" not in cmd2:
                 return RunResult(1, "", send + recv, "", stderr_left=send, stderr_right=recv)
-            return real_pipe(cmd1, cmd2, log)
+            return real_pipe(cmd1, cmd2, log, meter)
 
         fake.mock_run_pipe = pipe  # type: ignore[method-assign]
         res = _engine_run(fake, "backup", "111", P2)
@@ -17266,6 +17270,95 @@ class TestBackupLastRun:  # pylint: disable=missing-function-docstring
         rc, drive, _ = self._ending(_fresh_fake(), patch.object(engine.Run, "transfer", boom))
         lr = drive["last_run"]
         assert rc == 1 and lr["result"] == "interrupted" and lr["message"] == "boom", lr
+
+
+class _Heard:  # pylint: disable=missing-function-docstring
+    """A transfer observer that records what the engine tells it."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, object]] = []
+        self.meter = self
+
+    def begin(self, pgid: int | None = None) -> None:
+        self.events.append(("begin", pgid))
+
+    def end(self, written: int | None = None) -> None:
+        self.events.append(("end", written))
+
+    def planned(self, estimate: int) -> None:
+        self.events.append(("planned", estimate))
+
+    def sending(self, dataset: str, state: str) -> None:
+        self.events.append(("sending", f"{dataset} {state}"))
+
+    def ended(self, ok: bool) -> None:
+        self.events.append(("ended", ok))
+
+
+class TestEngineTransferObserver:  # pylint: disable=missing-function-docstring
+    """M7-8 and M7-2: the engine tells its observer every planned transfer
+    with its estimate, each send and its outcome, and meters each send."""
+
+    def _run(self, fake: FakeZfs, heard: _Heard | None, point: str = P1) -> engine.Result:
+        with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            log = Log()
+            eng = engine.Run("backup", "111", log, point, sleep=lambda _s: None, observer=heard)
+            return engine.execute(eng, Cleanup(log), lambda _p, _r: True)
+
+    def test_every_transfer_is_told_and_metered(self):
+        fake = _fresh_fake()
+        heard = _Heard()
+        assert self._run(fake, heard).ok
+        kinds = [k for k, _ in heard.events]
+        sends = sum(1 for c in fake.calls if c.startswith("zfs send ") and " | " in c)
+        planned = [v for k, v in heard.events if k == "planned"]
+        # begin, the plan, then per transfer: sending, a meter begin/end per
+        # stream, ended; end last.
+        assert kinds[0] == "begin" and kinds[-1] == "end", kinds
+        assert len(planned) == kinds.count("sending") == kinds.count("ended") > 0
+        assert all(isinstance(v, int) and v > 0 for v in planned), planned
+        meter_ends = [v for k, v in heard.events[1:-1] if k == "end"]
+        assert meter_ends == [FakeZfs.SEND_BYTES] * sends, meter_ends
+        assert all(heard.events[i][0] == "planned" for i in range(1, 1 + len(planned)))
+
+    def test_no_observer_no_estimate_and_no_meter(self):
+        fake = _fresh_fake()
+        assert self._run(fake, None).ok
+        assert not [c for c in fake.calls if "-nvP" in c]
+
+    def test_an_estimate_is_asked_once_per_send(self):
+        fake = _fresh_fake()
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P1, sleep=lambda _s: None)
+            assert eng.take_point()
+            plans = [p for p in eng.survey() if p.state in repl.TRANSFERABLE]
+            first = [eng.estimate(p) for p in plans]
+            calls = len([c for c in fake.calls if "-nvP" in c])
+            assert [eng.estimate(p) for p in plans] == first
+            assert len([c for c in fake.calls if "-nvP" in c]) == calls
+
+    def test_a_backup_shows_the_transfer_then_null(self):
+        shown: list[dict[str, Any] | None] = []
+        real = progress_mod.set_transfer
+
+        def spy(transfer: dict[str, Any] | None, meter: Any = None) -> None:
+            if transfer is None:
+                shown.append(None)
+            else:
+                shown.append(
+                    {**transfer, "bytes_done": meter.bytes_done() if meter else "no meter"}
+                )
+            real(transfer, meter)
+
+        rc, _, _ = TestBackupLastRun()._ending(  # pylint: disable=protected-access
+            _fresh_fake(), patch.object(progress_mod, "set_transfer", spy)
+        )
+        assert rc == 0 and shown and shown[-1] is None, shown[-3:]
+        last = shown[-2]
+        assert last is not None
+        assert last["datasets_done"] == last["datasets_total"] > 0 and last["datasets_failed"] == 0
+        assert last["bytes_total"] and last["bytes_total_partial"] is False
+        assert last["bytes_done"] == FakeZfs.SEND_BYTES * last["datasets_total"], last
 
 
 class TestM2R16Smalls:  # pylint: disable=missing-function-docstring,protected-access
@@ -20303,7 +20396,8 @@ class _PoisonShell(MockShell):
         out = "" if str(cmd).startswith(self.ACCESSORS) else self.text
         return RunResult(self.returncode, out, self.text, str(cmd))
 
-    def mock_run_pipe(self, cmd1, cmd2, _log=None) -> RunResult:
+    def mock_run_pipe(self, cmd1, cmd2, _log=None, meter=None) -> RunResult:
+        del meter
         return self.mock_run(f"{cmd1} | {cmd2}")
 
 

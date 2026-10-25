@@ -192,10 +192,19 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err(f"fake: unsupported: {cmd_str}", 127)
         return handler(argv[2:])
 
-    def mock_run_pipe(self, cmd1, cmd2, log=None) -> RunResult:  # pylint: disable=unused-argument
-        """Interpret ``zfs send ... | zfs receive ...``."""
+    # Stream bytes a fake send writes, as the kernel would count them for a meter.
+    SEND_BYTES = 4096
+
+    def mock_run_pipe(self, cmd1, cmd2, log=None, meter=None) -> RunResult:  # pylint: disable=unused-argument
+        """Interpret ``zfs send ... | zfs receive ...``; a meter hears a send
+        of :data:`SEND_BYTES`, or of nothing when the send fails."""
         self._calls.append(f"{cmd1} | {cmd2}")
-        return self._pipe(shlex.split(cmd1)[2:], shlex.split(cmd2)[2:])
+        if meter is not None:
+            meter.begin(0)
+        r = self._pipe(shlex.split(cmd1)[2:], shlex.split(cmd2)[2:])
+        if meter is not None:
+            meter.end(self.SEND_BYTES if r.ok else 0)
+        return r
 
     # ── zpool / systemctl ────────────────────────────────────────────────
 
