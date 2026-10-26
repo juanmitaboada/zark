@@ -57,7 +57,7 @@ zark automates the entire process:
 | `umount`           | Unmount a backup pool, or the local system (`umount local`)  |
 | `clean`            | Release what an interrupted zark run left mounted or imported |
 | `purge`            | Securely wipe a managed backup drive                         |
-| `monitor`          | Live progress monitor (run in a separate terminal)           |
+| `monitor`          | Live view of a running command and the backups' state (no root) |
 | `simulate`         | Boot the target disk in QEMU/KVM to verify the boot chain    |
 | `health`           | Non-destructive risk checks on a backup drive                |
 | `prune`            | Reclaim space in the source or on a backup drive (interactive) |
@@ -159,6 +159,8 @@ sudo ./zark backup
 ```
 
 zark detects the backup drive by GUID, takes one backup point `zark_<UTC>` of every dataset at once, and brings each dataset on the drive to it with an incremental raw send. Each backup adds a restore point and removes none. A typical incremental backup takes seconds.
+
+To watch it, run `zark monitor` in another terminal, as any user: it shows the running command's step, the bytes sent, the rate and the time left, says when zark is waiting for an answer, and below that the pools, the drives and their last backups. It only reads zark's status files (`docs/STATUS-FILES.md`) and lists the pools with `zfs list` and `zpool list`; it never takes the lock or imports a pool. `zark monitor --once` prints one screen, and `--once --state` only the state word, for scripts.
 
 ### Recover from scratch
 

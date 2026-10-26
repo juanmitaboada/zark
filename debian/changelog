@@ -1,3 +1,19 @@
+zark (2.1.0~rc2-1) UNRELEASED; urgency=medium
+
+  * Milestone M8 of zark 2.1 (zark monitor). Not for release: nothing is
+    published until the final 2.1.0.
+  * zark monitor reads the status files instead of polling, and runs as
+    any user: the running command, its step and, for a backup, bytes,
+    rate, ETA and transfers; what it waits for; the source pools live,
+    the drives, their last runs and contents, the datasets and the
+    notices. Full screen with curses, plain frames without a terminal,
+    --once and --once --state for scripts.
+  * lib/status_reader.py, the reference reader of the status files.
+  * Self-test check RDR-01: an unprivileged user reads what the monitor
+    reads.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 26 Oct 2026 17:37:02 +0100
+
 zark (2.1.0~rc1-1) UNRELEASED; urgency=medium
 
   * Milestone M7 of zark 2.1 (the status writer). Not for release:

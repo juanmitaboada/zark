@@ -512,3 +512,27 @@ What any program may rely on, and how to read the files safely.
 - Take or test `zark.lock` or `status.lock`.
 - Import, export or otherwise change a pool. Reading `zfs list` and
   `zpool list` is fine.
+
+### Reference reader
+
+`lib/status_reader.py` in zark's source tree applies every rule of this
+document: it reads both files as "Reading" says, classifies them with the
+orphan, stalled and stale rules, gives the indicator state, and computes the
+figures of "Space object", "Source pool entry" (with what the root's
+`used_bytes` holds beyond the datasets' shares, `pool_metadata_bytes`) and
+"Byte counters". `zark monitor` is built on it.
+
+- It depends on the Python standard library only. Copy the file into your
+  program, or import it from an installed zark by putting `/usr/share/zark`
+  on the module path (`import lib.status_reader`).
+- The names in its `__all__` keep their meaning and signature within schema
+  version 1; new names may be added. `read_all(root, now, alive)` gives both
+  files and their classes in one call; `root`, `now` and `alive` let a test
+  point it at a fixture, fix the clock and decide liveness, as the fixtures'
+  README describes.
+- It also reads a drive's optional contents, when a writer records them
+  (`drive_contents`, `drive_margin_bytes`, `retention_next_is_floor`); a
+  file without them gives None.
+- It never writes, takes no lock and runs no command. The fixtures in
+  `tests/fixtures/status/` with their `expected.json` are its tests, and the
+  tests of any other reader.

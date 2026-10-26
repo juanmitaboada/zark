@@ -11,6 +11,95 @@ zark 2.1 is being built as milestones on `main`, versioned `2.1.0-rcN`
 (`lib/config.py`) and `2.1.0~rcN-1` UNRELEASED (`debian/changelog`).
 Nothing is uploaded to the PPA until the final 2.1.0.
 
+### M8 - zark monitor, a reader of the status files (2.1.0-rc2)
+
+#### Added
+
+- **`lib/status_reader.py`, the reference reader of the status files**
+  (M8-1 1a, M8-2 2a): reads `progress.json` and `status.json` whole,
+  `kind` then `schema_version` first, applies the orphan, stalled and
+  stale rules with the reader's own clock, gives the indicator state, and
+  computes the contract's figures (reserved by ZFS, a chart's total, a
+  dataset's own share and what the root's `used` holds beyond the shares,
+  the pool's metadata (M7F-10), the byte fraction kept below 100 % while a transfer
+  runs, the ETA only under its four conditions). Standard library only, so
+  another program may copy it; its public names keep their meaning within
+  schema version 1. Tested on every case of `tests/fixtures/status/`
+  against its `expected.json`, and on real processes for the orphan rules.
+  `docs/STATUS-FILES.md` names it under "For third-party readers".
+- **The drive contents of contract R9.1, read ahead of their writer**
+  (M8F-5, Juanmi): `status_reader.drive_contents` and `drive_margin_bytes`
+  give what the fixtures' `expected.json` names per drive (the margin,
+  points by month, what the policy removes next and frees, the space after
+  it, the datasets), and `retention_next_is_floor` says when that forecast
+  is only a lower bound. The monitor shows them under each drive, never
+  next to a `space` measured at another time (a drive in use). M9 writes
+  the fields; until then no `status.json` has them and nothing is shown.
+- **`lib/live_pools.py`** (M8-4 4a, M8-5 5a): the monitor's two read-only
+  listings, `zpool list -Hp -o name,guid,size,alloc,free,capacity,health`
+  and `zfs list -Hp -t filesystem,volume -r` over the source pools, run
+  without a shell, with a 30 s timeout, and refused for any other command
+  line. A drive's live health comes from the same `zpool` listing while
+  zark has it imported; its fill only from the files.
+- **Self-test check RDR-01** (M8-11 11a): as `nobody` (`setpriv`), both
+  listings give root's rows for the bench's pools, `boot_id` and
+  `/proc/1/stat`'s start time read as root reads them, and
+  `/dev/disk/by-id` lists.
+- **`zark monitor --once --state`** (M8-7 7a) prints only the indicator
+  state, one word from the contract's table. `--root DIR` and `--no-live`
+  (M8-8 8a) read a tree laid out as the fixtures and skip the listings.
+
+#### Changed
+
+- **`zark monitor` reads the status files instead of polling** (M8): no
+  more `pgrep`, `zpool` and `zfs` on the drive, and no percentage of the
+  drive's used bytes over rpool's. It shows the state (RUNNING with the
+  command, its step and, for a backup, bytes, rate, ETA, transfers and the
+  dataset; WAITING FOR INPUT with what is asked; ATTENTION, CHECK,
+  OVERDUE, NO STATUS, OK, each with its reason), then the source pools
+  live, the drives, the datasets grouped as home, system and other with the
+  pool's metadata apart, and the notices (M8-10, X1 to X17). Full screen with curses on a terminal
+  (`NO_COLOR` keeps the screen without colour, M8-6 6a), a plain frame per
+  change otherwise. One bell when a command starts waiting for an answer
+  (M8-9 9a). Times in local time with the zone (M8-13 13a).
+- **`zark monitor` runs as any user** (M8-3 3a): `zark` dispatches it
+  before the root check, without the lock, the signal handlers, the live
+  session's probe stop or `zark.log`. As root it behaves the same.
+- **backup's tip names `zark monitor` without sudo** (M8-12 12a), through
+  `zark_command(sudo=False)`.
+
+#### Known limitations
+
+- With `/proc` mounted `hidepid=invisible`, another user's `/proc/<pid>`
+  does not exist, so the contract's rule 4 calls a running command an
+  orphan; Ubuntu mounts `/proc` without it.
+- The live listings run at the interval, not continuously: a pool's fill
+  is as old as the label beside it says.
+
+#### Rejected approaches
+
+- **The rules inside the command** (M8-1 1b): every other reader would
+  reimplement the orphan rules from prose.
+- **A separate `docs/READER.md`** (M8-2 2b): the contract's chapter for
+  third-party readers is where a reader looks.
+- **Keeping the root check for monitor** (M8-3 3b): nothing the monitor
+  reads needs root.
+- **The Space object's commands one by one per pool** (M8-4 4b): four
+  calls per pool per interval, and figures from different instants.
+- **No live figures for the drive in use** (M8-5 5b): the health of an
+  imported drive costs no extra call.
+- **Plain output under `NO_COLOR`** (M8-6 6b): `NO_COLOR` removes colour,
+  not the screen.
+- **`--json`** (M8-7 7b): a second interface to keep stable; **no output
+  for scripts** (M8-7 7c).
+- **Undocumented environment variables for testing** (M8-8 8b).
+- **A bell off by default, or none** (M8-9 9b, 9c).
+- **No self-test check for the unprivileged reads** (M8-11 11b).
+- **Keeping `sudo zark monitor` in the tip** (M8-12 12b).
+- **UTC on screen** (M8-13 13b).
+- **Leaving the README to the campaign** (M8-14 14b): the module tree's
+  test needs the new modules.
+
 ### M7 - the status writer (2.1.0-rc1)
 
 #### Added

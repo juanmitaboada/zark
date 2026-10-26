@@ -53,7 +53,7 @@ difference is the default location of the configuration file and log.
     printed if the command aborts with an unhandled exception. Without
     **--debug**, only the **\[FATAL\]** message is shown.
 
-All other commands must be run as **root** (typically via **sudo**(8))
+All other commands but **monitor** must be run as **root** (typically via **sudo**(8))
 because every action involves ZFS pool import/export, partition table
 manipulation, **cryptsetup**(8), or chrooting into a target system.
 
@@ -82,11 +82,43 @@ for the canonical end-to-end sequences.
     JSON snippet that should be added to **known_drives.json** to register
     them.
 
-**monitor**
-:   Live progress dashboard intended to be run in a second terminal while a
-    backup is in flight. Reports pool health, whether a **backup** or
-    **prepare** is running and for how long, the snapshot count on the
-    drive and its newest snapshot by creation time.
+**monitor** \[**--once** \[**--state**\]\] \[**--interval** *N*\] \[**--root** *DIR*\] \[**--no-live**\]
+:   A live view of what **zark** is doing and how the backups stand, for a
+    second terminal. Any user can run it: it needs no root, takes no lock,
+    writes nothing and never imports, exports or changes a pool. It reads
+    the status files (*/run/zark/progress.json* every second,
+    */var/lib/zark/status.json* when it changes; *docs/STATUS-FILES.md* in
+    the source tree) and lists the source pools with **zfs list** and
+    **zpool list** every *N* seconds (default 60, from 5 to 3600).
+
+    The state comes first: **RUNNING** with the command, its step, and for
+    a backup the bytes sent, the rate, the time left, the transfers and the
+    dataset being sent; **WAITING FOR INPUT** with what the command asks
+    (the terminal bell rings once); **ATTENTION** when a drive's last backup
+    run ended **incomplete**, **not_verified** or **interrupted**, or a
+    notice is critical; **CHECK** when a run was killed (its process is
+    gone), or *status.json* is old, unreadable or from a newer **zark**;
+    **OVERDUE**, **NO STATUS** or **OK**. Below it, the source pools (used,
+    free, reserved by ZFS, capacity, health), each registered drive
+    (connected or not, last backup, last run, fill and when it was
+    measured, the margin a backup tries to leave free, and, once zark
+    records them, the drive's points by month, what its retention policy
+    removes next and the largest datasets on it), the datasets of each
+    source pool with the pool's metadata apart, and the notices. Live
+    figures say so; figures from the files carry their date.
+
+    With a terminal it runs full screen. Keys: **q** quit, **d** datasets on
+    or off, **s** sort them (own size, snapshots, name), **-** and **+** the
+    interval (15, 30, 60, 120, 300, 600 s), **r** list the pools now, **b**
+    the bell on or off, **h** the key line. **NO_COLOR** turns colour off.
+    Without a terminal it prints a frame when something changes.
+    **--once** prints one frame and exits; with **--state** it prints only
+    the state: **waiting**, **running**, **attention**, **edge**,
+    **overdue**, **none** or **ok**. **--root** *DIR* reads
+    *DIR/run/zark/progress.json* and *DIR/var/lib/zark/status.json*, and
+    **--no-live** runs neither **zfs** nor **zpool**: both are for testing
+    and for looking at the example files in *tests/fixtures/status/*. A
+    usage error exits 2.
 
 **health** \[*device*\]
 :   Interactive drive analysis and debugging tool. With a *device* it checks
@@ -997,7 +1029,7 @@ After this, plugging in the drive and running **zark backup** is enough.
 
     sudo zark explore        # confirm the right drive is plugged in
     sudo zark backup         # do the work
-    sudo zark monitor        # in a second terminal, optional
+    zark monitor             # in a second terminal, optional; no sudo
 
 ## Bare-metal recovery
 
