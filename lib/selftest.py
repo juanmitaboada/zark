@@ -52,7 +52,7 @@ from typing import Any
 from lib import sh
 from lib.cleanup import Cleanup
 from lib.log import Log
-from lib.zfs import BACKUP_ALTROOT_BASE
+from lib.zfs import BACKUP_ALTROOT_BASE, remove_altroot_base
 
 # Changes when a check is added, removed or revised; the report carries it
 # as information only (coverage is per check ID and revision).
@@ -488,6 +488,7 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
             self.log.warn(f"An imported pool still uses {self.dir}: left in place")
             return
         _ = sh.run(f"rm -rf {shlex.quote(self.dir)}", log=self.log)
+        remove_altroot_base()
         self.cleanup.untrack_action(self.teardown)
 
 

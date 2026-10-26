@@ -45,7 +45,7 @@ from lib.config import zark_command
 from lib.keystore import KeystoreLike
 from lib.log import Log
 from lib.sh import run
-from lib.zfs import backup_altroot, remove_altroot_dir
+from lib.zfs import backup_altroot, remove_altroot_base, remove_altroot_dir
 
 # Why an export can still fail once zark released what it could, here and in
 # the other mount namespaces it could enter (W-1, X-5).
@@ -391,6 +391,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
                     flush_device_cache(self.log)
                     self._exported_pools.append(pool)
         self._pools.clear()
+        remove_altroot_base()
 
         # Remove temp dirs
         for d in reversed(self._dirs):

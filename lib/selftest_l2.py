@@ -30,7 +30,7 @@ from lib.cleanup import Cleanup
 from lib.identity import DiskIdentity
 from lib.log import Log
 from lib.selftest import Bench, Fail, check, exit_status, expect, observed, text_of
-from lib.zfs import ZFS, backup_altroot, create_command
+from lib.zfs import ZFS, backup_altroot, create_command, remove_altroot_base
 
 SETTLE = "udevadm settle --timeout=30"
 
@@ -158,6 +158,7 @@ class StickBench(Bench):
         if sh.run(f"blkid -p {self.disk}").returncode != 2:
             self.log.warn(f"{self.disk} still has a signature: wipe it with zark purge")
         _ = sh.run(f"rmdir {backup_altroot(self.s)}")
+        remove_altroot_base()
         self.cleanup.untrack_action(self.teardown)
 
 

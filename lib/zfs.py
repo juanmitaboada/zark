@@ -819,6 +819,13 @@ def remove_altroot_dir(path: str) -> None:
         pass
 
 
+def remove_altroot_base() -> None:
+    """:func:`remove_altroot_dir` of :data:`BACKUP_ALTROOT_BASE` itself, once
+    its pools' directories went (M7P.7): a pool still imported under it, by
+    this run or another, keeps it."""
+    remove_altroot_dir(BACKUP_ALTROOT_BASE)
+
+
 # Where `zpool create -o compatibility=<name>` looks, in order (OpenZFS 2.4.1
 # lib/libzfs/libzfs_pool.c:5170-5375).
 COMPAT_DIRS = ("/etc/zfs/compatibility.d", "/usr/share/zfs/compatibility.d")

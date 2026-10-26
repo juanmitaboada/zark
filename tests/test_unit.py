@@ -1513,6 +1513,28 @@ class TestCleanup:
                     cleanup.run()
                 assert d.exists() is not ok, ok
 
+    def test_cleanup_removes_the_altroot_parent_once_empty(self):
+        """M7P.7: after the pools' own directories, their parent, unless a
+        pool still imported (here or by another run) keeps a directory in it."""
+        for other in (False, True):
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td, "altroot")
+                with patch("lib.zfs.BACKUP_ALTROOT_BASE", str(base)):
+                    mock = MockShell()
+                    cleanup = Cleanup(make_log())
+                    mock.on("zpool list backup").succeeds()
+                    mock.on("zfs unload-key -r backup").succeeds()
+                    mock.on("zpool export backup").succeeds()
+                    mock.on("sync").succeeds()
+                    (base / "backup").mkdir(parents=True)
+                    if other:
+                        (base / "blue").mkdir()
+                    cleanup.track_pool("backup")
+                    with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0), patch_sh(mock):
+                        cleanup.run()
+                assert not (base / "backup").exists()
+                assert base.exists() is other, other
+
     def test_exported_pools_query(self):
         """exported_pools() reports drives that were successfully exported
         - used by callers to know which pools were flushed."""
@@ -21691,6 +21713,31 @@ class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-f
         assert not failed, failed
         assert not foreign, foreign
         assert accessors > 50, accessors  # the calls are recorded and parsed
+
+
+class TestAltrootParent:  # pylint: disable=missing-function-docstring
+    """M7P.7: a self-test's end removes the empty /run/zark/altroot too."""
+
+    def test_a_benchs_teardown_removes_the_empty_parent(self):
+        for other in (False, True):
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td, "altroot")
+                (base / "zstabcd1234a").mkdir(parents=True)
+                (base / "zstabcd1234a").rmdir()  # its pool's directory already went
+                if other:
+                    (base / "black").mkdir()  # a drive another run still has imported
+                bench = stest.Bench(make_log(), Cleanup(make_log()), root=td)
+                os.makedirs(bench.dir)
+                mock = MockShell()
+                mock.on("zpool list -vHP").succeeds("")
+                mock.on_prefix("rm -rf").succeeds()
+                with patch("lib.zfs.BACKUP_ALTROOT_BASE", str(base)), patch_sh(mock):
+                    bench.teardown()
+                assert base.exists() is other, other
+
+    def test_a_sticks_teardown_removes_the_empty_parent(self):
+        src = inspect.getsource(st_l2.StickBench.teardown)
+        assert src.index("rmdir {backup_altroot(self.s)}") < src.index("remove_altroot_base()")
 
 
 class TestDst04:  # pylint: disable=missing-function-docstring,too-few-public-methods
