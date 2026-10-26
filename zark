@@ -44,7 +44,7 @@ COMMANDS = {
     "umount": "Unmount a previously mounted backup pool",
     "chroot": "Open an interactive chroot into the installed ZFS system (live USB)",
     "explore": "Scan for ZFS pools, show known/unknown status",
-    "monitor": "Live progress monitor (run in separate terminal)",
+    "monitor": "Live view of a running command and the backups' state (no root)",
     "clean": "Release what an interrupted zark run left mounted or imported",
     "health": "Non-destructive risk checks on a backup drive",
     "registry": "List, forget or fix entries in known_drives.json",
@@ -118,6 +118,12 @@ def main():
     if args[0] in ("--version", "-v"):
         print(f"zark v{VERSION}")
         sys.exit(0)
+
+    if args[0] in ("monitor", "--monitor"):
+        # A reader of the status files: no root, no lock, no zark.log (M8-3).
+        from commands import monitor  # pylint: disable=import-outside-toplevel
+
+        sys.exit(monitor.run(args[1:]))
 
     if os.geteuid() != 0:
         _, invoke_name = _invocation_hint()

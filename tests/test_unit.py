@@ -30,20 +30,25 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 import ast
 import atexit
 import fcntl
+import functools
 import hashlib
 import importlib.machinery
 import importlib.util
 import itertools
 import json
 import os
+import pty
 import re
+import select
 import shlex
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import urllib.parse
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -102,6 +107,7 @@ import lib.initrd as initrd_mod  # pylint: disable=wrong-import-position # noqa:
 import lib.live as live_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.live_pools as livep  # pylint: disable=wrong-import-position # noqa: E402
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.monitor_view as mview  # pylint: disable=wrong-import-position # noqa: E402
 import lib.mount as lib_mount  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.origin_prune as oprune  # pylint: disable=wrong-import-position # noqa: E402
@@ -126,7 +132,6 @@ from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E
     _report_rpo,
     _show_table,
 )
-from commands.monitor import _draw_bar  # pylint: disable=wrong-import-position # noqa: E402
 from commands.recover import (  # pylint: disable=wrong-import-position # noqa: E402
     _abort_missing_keystore,
     _check_sizes,
@@ -3218,23 +3223,6 @@ class TestCleanOnRealMounts:  # pylint: disable=missing-function-docstring
         # M4a review mutation C9: rmdir never walks into a filesystem mounted below a root.
         r = self._run("otherfs")
         assert r == {"inner": True}, r
-
-
-# ═════════════════════════════════════════════════════════════════════════
-#  commands/monitor.py - progress bar
-# ═════════════════════════════════════════════════════════════════════════
-
-
-class TestMonitor:  # pylint: disable=missing-function-docstring,too-few-public-methods
-    """Tests for progress bar drawing logic in monitor command."""
-
-    def test_draw_bar(self):
-        bar_0 = _draw_bar(0, width=10)
-        bar_50 = _draw_bar(50, width=10)
-        bar_100 = _draw_bar(100, width=10)
-        assert bar_0 == "░" * 10
-        assert bar_50 == "█" * 5 + "░" * 5
-        assert bar_100 == "█" * 10
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -20429,6 +20417,34 @@ class TestDriveContents:  # pylint: disable=missing-function-docstring
         assert sreader.retention_next_is_floor(short, measured)
 
 
+class TestDriveContentsView:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M8F-5: the monitor shows the drive contents."""
+
+    def test_the_monitor_shows_them_with_the_files_space_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _ = shutil.copytree(_STATUS_FIXTURES / "idle", root, dirs_exist_ok=True)
+            path = root / "var/lib/zark/status.json"
+            doc = json.loads(path.read_text("utf-8"))
+            doc["drives"][0] = _drive_with_contents()
+            path.write_text(json.dumps(doc), "utf-8")
+            now = sreader.parse_timestamp(doc["generated_at"])
+            r = sreader.read_all(root, now)
+            lines = mview.frame(mview.Inputs(reading=r), mview.ViewOptions())
+            text = "\n".join(mview.line_text(li) for li in lines)
+            assert "points 3: 2026-10 1, 2026-09 1, 2026-08 1" in text
+            assert "next under the policy: 1 point(s) from 2026-08, frees 4.0 KiB" in text
+            assert "other snapshots: 5 intermediate (1.0 KiB), 0 other (0 B)" in text
+            assert "largest: rpool/USERDATA/home_x 2.0 KiB, rpool/ROOT/be 900 B" in text
+            assert "margin " in text
+            (root / "run/zark").mkdir(parents=True)
+            _ = shutil.copy(_STATUS_FIXTURES / "running/run/zark/progress.json", root / "run/zark")
+            running = sreader.read_all(root, now, lambda _d: True)
+            lines = mview.frame(mview.Inputs(reading=running), mview.ViewOptions())
+            text = "\n".join(mview.line_text(li) for li in lines)
+            assert "connected, in use" in text and "points 3" not in text  # another space's time
+
+
 _ZPOOL_OUT = (
     "bpool\t11\t2013265920\t290586624\t1722679296\t14\tONLINE\n"
     "black\t14361060171807873218\t4000762036224\t2575477139046\t1425284897178\t64\tONLINE\n"
@@ -20530,26 +20546,396 @@ class TestLivePools:  # pylint: disable=missing-function-docstring
         assert rc == 124 and "within 5 s" in err
 
 
-class TestMonitorLatest:
-    """M1P.3: the monitor's "latest" is the newest snapshot by creation."""
+def _frame_text(case: str, width: int = 80, **opts: Any) -> str:
+    r = _reading_of(_STATUS_FIXTURES / case)
+    inp = mview.Inputs(reading=r, live=opts.pop("live", None), by_id=Path("/nonexistent"))
+    lines = mview.frame(inp, mview.ViewOptions(width=width, version="2.1.0", **opts))
+    return "\n".join(mview.line_text(li) for li in lines)
 
-    def test_latest_by_creation_not_name(self):
-        """A local-time sanoid name sorting after a newer UTC point loses."""
-        mock = MockShell()
-        mock.on("zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r blue/rpool").succeeds(
-            "blue/rpool@autosnap_2026-10-07_19:00:00_hourly\t1\t10\t1759856400\n"
-            "blue/rpool@zark_2026-10-07_18:30:00Z\t2\t11\t1759861800\n",
+
+class TestMonitorView:  # pylint: disable=missing-function-docstring
+    """M8-10: what each state shows (X1 to X17)."""
+
+    def test_running_shows_bytes_rate_eta_and_the_dataset(self) -> None:
+        text = _frame_text("running")
+        assert "RUNNING  backup to black   step 7/8  Replicating" in text
+        assert "7.0 GiB of 17.0 GiB  41 %" in text
+        assert "107.0 MiB/s   ETA 1m36s" in text
+        assert "transfers 9 of 21 (0 failed)" in text
+        assert "now rpool/USERDATA/home_bf193q (incremental)" in text
+        assert "elapsed 17m33s   point zark_2026-10-24_09:03:02Z" in text
+        assert "connected, in use" in text
+        assert "written by zark" not in text  # same version as the writer
+
+    def test_the_null_and_partial_rules(self) -> None:
+        text = _frame_text("no-byte-counts")
+        assert (
+            "bytes not measured" in text
+            and "ETA" not in text
+            and " % " not in text.split("POOLS", maxsplit=1)[0]
         )
-        with patch_sh(mock):
-            latest = monitor_mod._latest("blue")  # pylint: disable=protected-access
-        assert latest.startswith("zark_2026-10-07_18:30:00Z")
+        text = _frame_text("partial-estimate")
+        assert " of >= " in text and "ETA -" in text
 
-    def test_running_means_a_zark_backup_or_prepare(self):
-        """Transfers are zark's own children now, not a syncoid process."""
-        pattern = re.compile(monitor_mod._RUNNING)  # pylint: disable=protected-access
-        assert pattern.search("/usr/bin/python3 /usr/share/zark/zark backup")
-        assert pattern.search("python3 ./zark prepare /dev/sdb")
-        assert not pattern.search("python3 ./zark monitor")
+    def test_waiting_says_what_it_asks(self) -> None:
+        assert "WAITING FOR INPUT" in _frame_text("waiting")
+        assert "asks: Passphrase for black" in _frame_text("waiting")
+        assert "asks: Eject drive 'black' now?" in _frame_text("waiting-eject")
+
+    def test_stalled_is_running_with_its_figures_not_current(self) -> None:
+        text = _frame_text("stalled")
+        assert "RUNNING" in text and "no heartbeat for 1m35s" in text
+
+    def test_the_states_that_need_a_reason(self) -> None:
+        orphan = _frame_text("orphan", clean_hint="sudo ./zark clean")
+        assert "CHECK" in orphan and "(pid 4194304) is gone" in orphan
+        assert "sudo ./zark clean releases what it left" in orphan
+        assert "the next zark command" in _frame_text("orphan")
+        interrupted = _frame_text("interrupted")
+        assert "ATTENTION" in interrupted and "black: last backup run interrupted" in interrupted
+        incomplete = _frame_text("incomplete")
+        assert "2 dataset(s) missing" in incomplete
+        assert "status.json is from a newer zark" in _frame_text("newer-schema")
+        assert "is zark's alerts timer installed?" in _frame_text("stale")
+        assert "progress.json not readable: not valid JSON" in _frame_text("progress-unreadable")
+        assert "NO STATUS" in _frame_text("no-status")
+        assert "OVERDUE" in _frame_text("overdue")
+        assert _frame_text("aborted").splitlines()[3] == "OK"
+
+    def test_pools_drives_datasets_and_notices(self) -> None:
+        text = _frame_text("idle")
+        assert "rpool [##########..]  854.6 GiB   66.6 GiB   29.0 GiB   89 %" in text
+        assert "warning" in text.split("DRIVES", maxsplit=1)[0]
+        assert "blue   not connected" in text
+        assert "home     733.0 GiB   snapshots 133.0 GiB" in text
+        assert "rpool is 89% full" in text
+        rows = [li for li in text.splitlines() if li.endswith("USERDATA/home_bf193q")]
+        assert len(rows) == 1 and rows[0].split()[-2] == "18"  # snapshot % of its own share
+        assert "DATASETS" not in _frame_text("idle", show_datasets=False)
+        # M7F-10: a metadata line exactly when the root holds more than the shares.
+        doc = json.loads((_STATUS_FIXTURES / "idle/var/lib/zark/status.json").read_text("utf-8"))
+        rpool = next(p for p in doc["source_pools"] if p["name"] == "rpool")
+        hidden = sreader.pool_metadata_bytes("rpool", rpool["datasets"])
+        assert ("metadata" in text.split("DATASETS bpool", maxsplit=1)[0]) == (hidden > 0)
+        limited = _frame_text("idle", dataset_rows=2)
+        assert "... 24 more" in limited
+
+    def test_live_figures_win_and_say_so(self) -> None:
+        live = livep.read_live(
+            _FakeListings((0, _ZPOOL_OUT, ""), (0, _ZFS_OUT, "")),
+            datetime(2026, 10, 24, 9, 0, 30, tzinfo=UTC),
+        )
+        text = _frame_text("running", live=live)
+        assert "(live " in text and "ONLINE" in text
+        assert "DATASETS rpool   (live)" in text and "keystore" in text
+        # _ZFS_OUT's roots hold more than their listed children's shares (M7F-10).
+        assert "metadata" in text and "not in any dataset" in text
+        failed = livep.read_live(_FakeListings((1, "", "no /dev/zfs")))
+        assert "live figures unavailable: no /dev/zfs" in _frame_text("idle", live=failed)
+
+    def test_the_live_health_of_the_drive_in_use(self) -> None:
+        degraded = _ZPOOL_OUT.replace("64\tONLINE", "64\tDEGRADED")
+        live = livep.read_live(_FakeListings((0, degraded, ""), (0, _ZFS_OUT, "")))
+        assert "DEGRADED" in _frame_text("running", live=live)
+        assert "DEGRADED" not in _frame_text("idle", live=live)  # not imported by zark: unknown
+
+    def test_file_strings_cannot_reach_the_terminal_raw(self) -> None:
+        assert mview.clean("a\x1b[2Jb\x07c\u200bd\u2014e\u2026") == "a?[2Jb?c?d-e..."
+        frames = "".join(_frame_text(c.name) for c in _fixture_cases())
+        assert not re.search("[\u2013\u2014\u2026\x00-\x09\x0b-\x1f\x7f]", frames)
+
+    def test_the_formats(self) -> None:
+        assert mview.fmt_bytes(917611225088) == "854.6 GiB"
+        assert mview.fmt_bytes(0) == "0 B" and mview.fmt_bytes(None) == "-"
+        assert mview.fmt_duration(95) == "1m35s" and mview.fmt_duration(7300) == "2h01m"
+        assert mview.fmt_ago(-5) == "just now" and mview.fmt_ago(3 * 86400) == "3 days ago"
+        assert mview.meter(0.5, 4, False) == "[##..]" and mview.meter(None, 2, True) == "[  ]"
+        assert mview.truncate([("abc", ""), ("def", "bold")], 4) == [
+            ("abc", ""),
+            ("d", "bold"),
+        ]
+
+
+class TestMonitorOptions:  # pylint: disable=missing-function-docstring
+    """M8-6 to M8-8: the command line and the keys."""
+
+    def test_parse_args(self) -> None:
+        opts = monitor_mod.parse_args(["--once", "--state", "--no-live", "--interval", "15"])
+        assert opts == monitor_mod.Options(once=True, state=True, interval=15, live=False)
+        for bad in (
+            ["--state"],
+            ["--interval"],
+            ["--interval", "4"],
+            ["--interval", "x"],
+            ["--root", "/nonexistent"],
+            ["--bogus"],
+        ):
+            assert isinstance(monitor_mod.parse_args(bad), str), bad
+        root = monitor_mod.parse_args(["--root", str(_STATUS_FIXTURES / "idle")])
+        assert isinstance(root, monitor_mod.Options) and root.root.name == "idle"
+
+    def test_intervals_and_keys(self) -> None:
+        assert monitor_mod.next_interval(60, up=True) == 120
+        assert monitor_mod.next_interval(600, up=True) == 600
+        assert monitor_mod.next_interval(45, up=False) == 30
+        assert monitor_mod.next_interval(15, up=False) == 15
+        session = monitor_mod.Session(monitor_mod.Options(live=False))
+        screen = monitor_mod.Screen()
+        for key, check_ in (
+            ("d", lambda: not screen.show_datasets),
+            ("s", lambda: screen.sort == "snapshots"),
+            ("+", lambda: session.interval == 120),
+            ("-", lambda: session.interval == 60),
+            ("b", lambda: not screen.bell),
+            ("h", lambda: screen.help_line),
+        ):
+            assert monitor_mod.handle_key(ord(key), screen, session), key
+            assert check_(), key
+        assert not monitor_mod.handle_key(ord("q"), screen, session)
+
+    def test_the_screen_fits_its_terminal(self) -> None:
+        session = monitor_mod.Session(
+            monitor_mod.Options(root=_STATUS_FIXTURES / "idle", live=False),
+            clock=lambda: datetime(2026, 10, 24, 9, 1, tzinfo=UTC),
+        )
+        screen = monitor_mod.Screen(help_line=True)
+        reading = session.poll()
+        for rows, cols in ((12, 40), (24, 80), (60, 120)):
+            lines = monitor_mod.screen_lines(session, screen, reading, (rows, cols))
+            assert len(lines) <= rows, (rows, len(lines))
+            assert all(len(mview.line_text(li)) <= cols - 1 for li in lines), cols
+            assert mview.line_text(lines[-1]).startswith("q quit")
+
+    def test_once_and_state(self) -> None:
+        for case in _fixture_cases():
+            e = _expected(case)
+            now = sreader.parse_timestamp(e["now"]) or datetime.now(UTC)
+            session = monitor_mod.Session(
+                monitor_mod.Options(once=True, state=True, root=case, live=False),
+                clock=functools.partial(lambda when: when, now),
+                alive=_alive_for(e),
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                assert monitor_mod.run_once(session) == 0
+            assert out.getvalue() == e["indicator"] + "\n", case.name
+
+    def test_plain_output_prints_on_change_only(self) -> None:
+        session = monitor_mod.Session(
+            monitor_mod.Options(root=_STATUS_FIXTURES / "idle", live=False, interval=3600)
+        )
+        ticks: list[float] = []
+
+        def sleep(_s: float) -> None:
+            ticks.append(_s)
+            if len(ticks) == 3:
+                raise KeyboardInterrupt
+
+        out = StringIO()
+        with redirect_stdout(out):
+            try:
+                monitor_mod.run_plain(session, sleep=sleep)
+            except KeyboardInterrupt:
+                pass
+        text = out.getvalue()
+        assert text.count("zark monitor ") == 1 and "\x1b[" not in text
+
+    def test_colour_only_when_asked(self) -> None:
+        line = [("OK", "bold ok")]
+        assert monitor_mod.render_plain([line], True) == "\x1b[1;32mOK\x1b[0m"
+        assert monitor_mod.render_plain([line], False) == "OK"
+
+    def test_usage_errors_exit_2(self) -> None:
+        err = StringIO()
+        with redirect_stderr(err):
+            assert monitor_mod.run(["--bogus"]) == 2
+        assert "unknown option: --bogus" in err.getvalue()
+
+
+# The child that runs `zark monitor --once` under an audit hook: every write,
+# lock and command it attempts is recorded and printed at exit.
+_AUDIT_CHILD = r"""
+import atexit, json, os, runpy, sys
+seen = []
+WRITE = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+def hook(event, args):
+    if event == "open":
+        path, mode, flags = args
+        writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) or (
+            isinstance(flags, int) and flags & WRITE)
+        if writing and path != "/dev/null":
+            seen.append(["write", str(path)])
+    elif event in ("os.mkdir", "os.rename", "os.remove", "os.rmdir", "os.chmod", "os.chown",
+                   "os.truncate", "os.link", "os.symlink", "os.utime", "fcntl.flock",
+                   "fcntl.lockf"):
+        seen.append([event, repr(args)[:200]])
+    elif event == "subprocess.Popen":
+        seen.append(["run", [str(a) for a in args[1]]])
+atexit.register(lambda: sys.stderr.write("AUDIT " + json.dumps(seen) + "\n"))
+sys.addaudithook(hook)
+sys.argv = ["zark", "monitor", "--once", "--root", sys.argv[1]]
+runpy.run_path(os.environ["ZARK_ENTRY"], run_name="__main__")
+"""
+
+_FAKE_LISTER = """#!/bin/sh
+case "$1" in
+  list) ;;
+  *) echo "refused: $*" >&2; exit 9 ;;
+esac
+cat "$(dirname "$0")/$(basename "$0").out"
+"""
+
+
+class TestMonitorNeverWrites:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M8: the monitor never writes, never locks, and runs only its two
+    listings (plan section 6, item 7)."""
+
+    def test_once_under_an_audit_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td, "root")
+            _ = shutil.copytree(_STATUS_FIXTURES / "running", root)
+            bin_dir = Path(td, "bin")
+            bin_dir.mkdir()
+            for tool, out in (("zpool", _ZPOOL_OUT), ("zfs", _ZFS_OUT)):
+                exe = bin_dir / tool
+                exe.write_text(_FAKE_LISTER, "ascii")
+                exe.chmod(0o755)
+                (bin_dir / f"{tool}.out").write_text(out, "ascii")
+            before = {p: sreader.file_key(p) for p in root.rglob("*")}
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "ZARK_ENTRY": str(_REPO_ROOT / "zark"),
+                "PYTHONPATH": str(_REPO_ROOT),
+            }
+            r = subprocess.run(
+                [sys.executable, "-B", "-c", _AUDIT_CHILD, str(root)],
+                capture_output=True,
+                text=True,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+            assert r.returncode == 0, r.stderr
+            assert "rpool" in r.stdout and "(live " in r.stdout, r.stdout
+            audit = json.loads(r.stderr.split("AUDIT ", 1)[1])
+            runs = [a[1] for a in audit if a[0] == "run"]
+            assert runs == [livep.zpool_argv(), livep.zfs_argv(["rpool", "bpool"])], runs
+            assert not [a for a in audit if a[0] != "run"], audit
+            assert {p: sreader.file_key(p) for p in root.rglob("*")} == before
+
+
+def _without_escapes(raw: bytes) -> str:
+    text = raw.decode("utf-8", "replace")
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\x1b[=>]", " ", text)
+
+
+class TestMonitorScreen:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M8-6, M8-9: the curses screen through a pseudo terminal."""
+
+    def test_waiting_rings_once_shows_help_and_quits(self) -> None:
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import curses; curses.setupterm('xterm-256color', 1)",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        if probe.returncode != 0:
+            raise SkipTest("no terminfo for xterm-256color here")
+        child = subprocess.Popen(["sleep", "60"])  # pylint: disable=consider-using-with
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                root = _live_root(Path(td), child.pid, updated=datetime.now(UTC), waiting=True)
+                raw = _drive_pty(root, [(2.0, b"h"), (1.5, b"q")])
+        finally:
+            child.kill()
+            _ = child.wait()
+        status, out = raw
+        text = _without_escapes(out)
+        assert status == 0, text[-500:]
+        assert "WAITING FOR INPUT" in text and "Passphrase for black" in text
+        assert out.count(b"\x07") == 1  # one bell for the transition, not per redraw
+        assert "q quit" in text
+
+
+def _drive_pty(root: Path, keys: list[tuple[float, bytes]]) -> tuple[int, bytes]:
+    """Run ``zark monitor --root <root> --no-live`` on a pseudo terminal,
+    send each key after its delay, and return (exit status, output)."""
+    pid, fd = pty.fork()
+    if pid == 0:  # pragma: no cover - the child
+        os.environ["TERM"] = "xterm-256color"
+        os.environ.pop("NO_COLOR", None)
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                "-B",
+                str(_REPO_ROOT / "zark"),
+                "monitor",
+                "--root",
+                str(root),
+                "--no-live",
+            ],
+        )
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 110, 0, 0))
+    out = b""
+
+    def pump(seconds: float) -> None:
+        nonlocal out
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            ready, _w, _x = select.select([fd], [], [], 0.05)
+            if ready:
+                try:
+                    out += os.read(fd, 65536)
+                except OSError:
+                    return
+
+    for delay, key in keys:
+        pump(delay)
+        os.write(fd, key)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            pump(0.2)
+            os.close(fd)
+            return os.waitstatus_to_exitcode(status), out
+        pump(0.1)
+    os.kill(pid, signal.SIGKILL)
+    _ = os.waitpid(pid, 0)
+    os.close(fd)
+    return -1, out
+
+
+class TestMonitorDispatch:  # pylint: disable=missing-function-docstring
+    """M8-3: zark monitor needs no root and writes no zark.log."""
+
+    def test_an_unprivileged_user_runs_it(self) -> None:
+        entry = str(_REPO_ROOT / "zark")
+        cmd = [sys.executable, "-B", entry, "monitor", "--once", "--state"]
+        cmd += ["--root", str(_STATUS_FIXTURES / "no-status")]
+        if os.geteuid() == 0:
+            if not shutil.which("setpriv"):
+                raise SkipTest("setpriv (util-linux) is not installed")
+            nobody = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--"]
+            # nobody needs this Python and the checkout: a private home holds either.
+            probe = [sys.executable, "-B", "-c", f"open({entry!r}).close()"]
+            if subprocess.run([*nobody, *probe], capture_output=True, check=False).returncode:
+                raise SkipTest("nobody cannot run this Python or read this checkout")
+            cmd = [*nobody, *cmd]
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60, check=False, stdin=subprocess.DEVNULL
+        )
+        assert (r.returncode, r.stdout, r.stderr) == (0, "none\n", ""), r
+
+    def test_it_is_dispatched_before_the_root_check(self) -> None:
+        source = (_REPO_ROOT / "zark").read_text("utf-8")
+        assert source.index('("monitor", "--monitor")') < source.index("os.geteuid() != 0:")
 
 
 class TestRunner:

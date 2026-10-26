@@ -243,6 +243,7 @@ zark/
 │   ├── live_pools.py          # The monitor's two read-only pool listings
 │   ├── lock.py                # One lock for every command that changes state
 │   ├── log.py                 # Colored output, frames, logging
+│   ├── monitor_view.py        # What zark monitor shows, as styled lines
 │   ├── mount.py               # Mounting the installed system's pools from a live USB
 │   ├── mount_props.py         # Where a restored dataset's mount properties come from
 │   ├── notify.py              # Desktop notifications from root
@@ -280,7 +281,7 @@ zark/
 │   ├── finish.py              # Post-recovery finalization
 │   ├── fix_rpool_mountpoint.py  # Give a restored rpool back mountpoint=/
 │   ├── health.py              # Drive analysis: read-only and destructive
-│   ├── monitor.py             # Live progress display
+│   ├── monitor.py             # Live view, a reader of the status files
 │   ├── mount.py               # Backup pool mounting (+ `mount local` for the system)
 │   ├── prepare.py             # New drive initialization
 │   ├── prune.py               # Reclaim space in origin or on a drive
