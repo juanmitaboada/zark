@@ -27,6 +27,7 @@ finds them; run that file, not this one.
 import atexit
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -560,9 +561,10 @@ class TestStatusJson:  # pylint: disable=missing-function-docstring
             )
             cfg = _config(("black", "111"), ("blue", "222"), ("old", "333"))
             up = status_file.DriveUpdate(run, _space(5), "zark_2026-10-24_09:00:05Z")
-            assert self._write(root, cfg, updates={"111": up, "333": up})[0]
+            assert self._write(root, cfg, updates={"111": up, "222": up, "333": up})[0]
             # The timer: nothing measured. blue was prepared again (a new
-            # GUID), old left the registry.
+            # GUID: what the old blue had is not the new one's, M7R-4 S1),
+            # old left the registry.
             cfg = _config(("black", "111"), ("blue", "999"))
             assert self._write(root, cfg)[0]
             doc = self._read(root)
@@ -629,6 +631,14 @@ class TestStatusJson:  # pylint: disable=missing-function-docstring
             ok, out = self._write(root, cfg)
             assert ok and "cannot be used" not in out, out
             assert self._read(root)["drives"] == []
+
+    def test_a_drive_without_a_drive_id_is_written_unknown(self):
+        # M7R-4 S11 (M7F-7): the schema's minLength 1.
+        cfg = _config()
+        cfg.known_drives["black"] = DriveInfo("black", "111", "", None, False)
+        doc = status_file.build(_status(), cfg, "timer", None)
+        assert doc["drives"][0]["drive_id"] == "<unknown>"
+        assert not problems(doc, "status"), problems(doc, "status")
 
     def test_the_lock_is_waited_for_then_the_write_is_skipped(self):
         with tempfile.TemporaryDirectory() as td:
@@ -784,15 +794,19 @@ BLACK_GUID = "14361060171807873218"
 
 @contextmanager
 def _running(
-    root: Path, command: str = "backup", cfg: Config | None = None
+    root: Path,
+    command: str = "backup",
+    cfg: Config | None = None,
+    beat: float = 0.3,
+    gap: float = 0.05,
 ) -> Iterator[tuple[Path, MagicMock]]:
     """A progress run of ``command`` writing under ``root``, ended on exit;
     status_file.refresh is the mock yielded."""
     path = root / "run" / "zark" / "progress.json"
     with (
         patch.object(progress, "atexit"),
-        patch.object(progress, "HEARTBEAT_S", 0.3),
-        patch.object(progress, "MIN_GAP_S", 0.05),
+        patch.object(progress, "HEARTBEAT_S", beat),
+        patch.object(progress, "MIN_GAP_S", gap),
         patch.object(progress, "now_utc_iso", _Clock()),
         patch.object(progress.status_file, "refresh") as refresh,
         patch.object(progress.Config, "load", return_value=cfg or _config(("black", BLACK_GUID))),
@@ -857,6 +871,35 @@ class TestProgressFile:  # pylint: disable=missing-function-docstring
                 "space": _space(7).to_json(),
             }
             assert not problems(doc, "progress"), problems(doc, "progress")
+
+    def test_a_step_without_a_number_is_not_recorded(self):
+        # M7R-4 P19: the schema's minimum index is 1.
+        with tempfile.TemporaryDirectory() as td, _running(Path(td)) as (path, _):
+            progress.on_step(3, 8, "Gathering pool info...")
+            progress.on_step(0, 8, "not a step")
+            progress.on_step(4, 0, "not a step either")
+            doc = _until(path, lambda d: d["step"] is not None)
+            time.sleep(0.4)  # past a heartbeat: every event is in the file
+            doc = _doc(path)
+        assert doc["step"] == {"index": 3, "total": 8, "label": "Gathering pool info..."}, doc
+
+    def test_events_are_written_at_most_once_a_second(self):
+        # M7R-4 P7: a burst of events is coalesced, not one write each.
+        real = status_file.write_atomic
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.object(progress.status_file, "write_atomic", wraps=real) as writes,
+            _running(Path(td), beat=5.0, gap=1.0) as (path, _),
+        ):
+            t0 = time.monotonic()
+            for i in range(1, 41):
+                progress.on_step(i % 8 + 1, 8, f"step {i}")
+                time.sleep(0.01)
+            burst = writes.call_count
+            assert time.monotonic() - t0 < 0.9, "the burst took too long to tell"
+            _ = _until(path, lambda d: (d["step"] or {}).get("label") == "step 40", timeout=3.0)
+            settled = writes.call_count
+        assert burst <= 2 and settled <= 3, (burst, settled)
 
     def test_waiting_for_input_during_a_read(self):
         seen: list[dict[str, Any]] = []
@@ -1133,6 +1176,39 @@ class TestByteMeter:  # pylint: disable=missing-function-docstring
         sampler.join()
         assert r.ok and len(holder) == 2, holder
         assert holder[1] >= 1_000_000  # read live, while sh still ran
+        assert meter.bytes_done() == 1_000_000
+
+    def test_the_live_count_is_the_senders_with_a_silent_receiver(self):
+        # M7R-4 H3: zfs receive writes nothing; the live count is the left side's group.
+        self._need_io()
+        meter = progress.ByteMeter()
+        ended = threading.Event()
+        counts: list[int] = []
+
+        class Probe:
+            """Passes run_pipe's calls on to the meter; marks the end."""
+
+            def begin(self, pgid: int) -> None:
+                meter.begin(pgid)
+
+            def end(self, written: int | None) -> None:
+                ended.set()
+                meter.end(written)
+
+        def sample_until_ended() -> None:
+            deadline = time.monotonic() + 10  # an end never told must not hang the suite
+            while not ended.wait(0.05) and time.monotonic() < deadline:
+                meter.sample()
+                if not ended.is_set():
+                    counts.append(meter.bytes_done() or 0)
+
+        sampler = threading.Thread(target=sample_until_ended)
+        sampler.start()
+        silent = f"{shlex.quote(sys.executable)} -c 'import sys; sys.stdin.buffer.read()'"
+        r = sh.run_pipe("head -c 1000000 /dev/zero; sleep 0.5", silent, meter=Probe())
+        sampler.join()
+        assert r.ok, r
+        assert counts and max(counts) == 1_000_000, counts[-3:]
         assert meter.bytes_done() == 1_000_000
 
     def test_sums_rate_and_null(self):

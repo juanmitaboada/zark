@@ -17271,6 +17271,29 @@ class TestBackupLastRun:  # pylint: disable=missing-function-docstring
         lr = drive["last_run"]
         assert rc == 1 and lr["result"] == "interrupted" and lr["message"] == "boom", lr
 
+    def test_a_backups_progress_json_names_its_drive_and_both_files_its_space(self):
+        # M7R-4 B8, B9: the orphan rule needs the drive; space is measured at the end.
+        seen: list[dict[str, Any]] = []
+        until, space = tsf._until, tsf._space(7)  # pylint: disable=protected-access
+
+        def at_prompt(*_a: object, **_k: object) -> None:
+            path = progress_mod._RUN[0].path  # pylint: disable=protected-access
+            seen.append(until(path, lambda d: bool((d["drive"] or {}).get("space"))))
+
+        rc, drive, _ = self._ending(
+            _fresh_fake(),
+            patch.object(progress_mod, "MIN_GAP_S", 0.05),
+            patch.object(progress_mod, "HEARTBEAT_S", 0.1),
+            patch.object(backup_mod, "read_space", return_value=space),
+            patch.object(backup_mod, "prompt_eject_or_attach", side_effect=at_prompt),
+        )
+        assert rc == 0 and len(seen) == 1, (rc, seen)
+        assert not tsf.problems(seen[0], "progress"), tsf.problems(seen[0], "progress")
+        named = seen[0]["drive"]
+        assert (named["name"], named["guid"], named["drive_id"]) == ("backup", "111", "usb-X-0:0")
+        assert named["space"] == space.to_json(), named
+        assert drive["space"] == space.to_json(), drive
+
     def test_a_completed_time_write_that_raises_warns_and_the_backup_goes_on(self):
         # M7R-3: the write before the eject prompt is shielded as progress.end's is.
         real = status_file_lib.refresh
@@ -17290,6 +17313,55 @@ class TestBackupLastRun:  # pylint: disable=missing-function-docstring
         assert rc == 0 and seen == [1], (rc, seen)
         assert "Could not refresh the status files: gather broke" in warned, warned
         assert by == ["backup"] and drive["last_run"]["result"] == "completed"
+
+
+class TestEntryPointProgress:  # pylint: disable=missing-function-docstring
+    """M7R-4 X1, X2: zark's main starts progress.json for a command that
+    holds the lock only, and a command's crash reaches its last_run."""
+
+    @staticmethod
+    def _main(argv: list[str], command: Any, *extra: AbstractContextManager[object]) -> MagicMock:
+        path = str(Path(__file__).resolve().parent.parent / "zark")
+        loader = importlib.machinery.SourceFileLoader("zark_entry", path)
+        spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
+        assert spec is not None
+        entry = importlib.util.module_from_spec(spec)
+        loader.exec_module(entry)
+        mod = argv[1].replace("-", "_")
+        with ExitStack() as stack:
+            started = stack.enter_context(patch("lib.progress.start"))
+            cms: list[AbstractContextManager[object]] = [
+                patch.object(sys, "argv", argv),
+                patch("os.geteuid", return_value=0),
+                patch("lib.signals.guard_output"),
+                patch.object(lock_mod, "guard"),
+                patch("lib.signals.install"),
+                patch.object(live_mod, "stop_installer_probe"),
+                patch(f"commands.{mod}.run", side_effect=command),
+                redirect_stdout(StringIO()),
+                *extra,
+            ]
+            for cm in cms:
+                _ = stack.enter_context(cm)
+            try:
+                entry.main()
+            except SystemExit:
+                pass
+        return started
+
+    def test_only_a_command_that_holds_the_lock_writes_progress_json(self):
+        for argv in (["zark", "status"], ["zark", "explore"], ["zark", "monitor"]):
+            assert not self._main(argv, lambda _a: None).called, argv
+        started = self._main(["zark", "backup"], lambda _a: None)
+        assert [c.args for c in started.call_args_list] == [("backup",)], started.call_args_list
+
+    def test_a_commands_crash_is_noted_for_its_last_run(self):
+        def boom(_args: list[str]) -> None:
+            raise RuntimeError("boom")
+
+        with patch("lib.progress.note_error") as noted:
+            _ = self._main(["zark", "backup"], boom)
+        assert [c.args for c in noted.call_args_list] == [("boom",)], noted.call_args_list
 
 
 class _Heard:  # pylint: disable=missing-function-docstring
@@ -17340,6 +17412,28 @@ class TestEngineTransferObserver:  # pylint: disable=missing-function-docstring
         meter_ends = [v for k, v in heard.events[1:-1] if k == "end"]
         assert meter_ends == [FakeZfs.SEND_BYTES] * sends, meter_ends
         assert all(heard.events[i][0] == "planned" for i in range(1, 1 + len(planned)))
+
+    def test_the_plans_states_and_a_blocked_child_are_told(self):
+        # M7R-4 G2, G6: dataset_state is the plan's; a child skipped for its
+        # failed parent counts as a failed transfer.
+        real = engine.Run.transfer
+
+        def transfer(self: engine.Run, p: repl.DatasetPlan) -> engine.Outcome:
+            if p.rel == "rpool/var":
+                return engine.Outcome(p.rel, False, "broken pipe")
+            return real(self, p)
+
+        heard = _Heard()
+        with patch.object(engine.Run, "transfer", transfer):
+            _ = self._run(_fresh_fake(), heard)
+        sent = [str(v).split(" ", 1) for k, v in heard.events if k == "sending"]
+        ended = [v for k, v in heard.events if k == "ended"]
+        planned = [v for k, v in heard.events if k == "planned"]
+        # A fresh drive: every dataset is sent in full, told as the plan says.
+        assert sent and {st for _, st in sent} == {str(repl.State.NEW)}, sent
+        assert [rel for rel, _ in sent].count("rpool/var/lib") == 0, sent
+        assert len(ended) == len(planned), (ended, planned)
+        assert ended.count(False) == 3, ended  # rpool/var and its two children
 
     def test_no_observer_no_estimate_and_no_meter(self):
         fake = _fresh_fake()
