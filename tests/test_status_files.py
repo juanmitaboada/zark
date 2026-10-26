@@ -197,9 +197,10 @@ class TestStatusFixtures:  # pylint: disable=missing-function-docstring
     _STATUS = ("ok", "stale", "newer", "unreadable", "absent")
     _INDICATOR = ("waiting", "running", "attention", "edge", "overdue", "none", "ok")
 
-    def test_the_eighteen_cases_are_there(self):
+    def test_the_twenty_cases_are_there(self):
+        # R9.2 (M9a): drive-contents and drive-contents-partial join the 18.
         names = [p.name for p in _cases()]
-        assert len(names) == 18, names
+        assert len(names) == 20, names
         readme = (FIXTURES / "README.md").read_text("utf-8")
         for name in names:
             assert f"| `{name}` |" in readme, name
@@ -224,12 +225,14 @@ class TestStatusFixtures:  # pylint: disable=missing-function-docstring
                     continue
                 assert not got, (case.name, kind, got)
                 checked += 1
-        assert checked == 23, checked  # 16 status.json and 7 progress.json
+        assert checked == 25, checked  # 18 status.json and 7 progress.json
 
     def test_every_case_says_what_a_reader_concludes(self):
         for case in _cases():
             exp = json.loads((case / "expected.json").read_text("utf-8"))
-            assert set(exp) == {
+            # R9.1: `drives` only in the two drive contents cases.
+            optional = {"drives"} if case.name.startswith("drive-contents") else set()
+            assert set(exp) - optional == {
                 "now",
                 "progress_process",
                 "progress",

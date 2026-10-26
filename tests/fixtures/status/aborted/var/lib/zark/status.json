@@ -37,17 +37,17 @@
         {
           "name": "rpool/ROOT",
           "type": "filesystem",
-          "used_bytes": 129927670989,
+          "used_bytes": 129468570829,
           "usedbydataset_bytes": 196608,
           "usedbysnapshots_bytes": 0,
-          "usedbychildren_bytes": 129927474381,
+          "usedbychildren_bytes": 129468374221,
           "usedbyrefreservation_bytes": 0
         },
         {
           "name": "rpool/ROOT/ubuntu_7k2m4p",
           "type": "filesystem",
-          "used_bytes": 129927474381,
-          "usedbydataset_bytes": 48539621792,
+          "used_bytes": 129468374221,
+          "usedbydataset_bytes": 48080521632,
           "usedbysnapshots_bytes": 4402341478,
           "usedbychildren_bytes": 76985511111,
           "usedbyrefreservation_bytes": 0
@@ -286,17 +286,17 @@
         {
           "name": "bpool/BOOT",
           "type": "filesystem",
-          "used_bytes": 290091008,
+          "used_bytes": 286916608,
           "usedbydataset_bytes": 98304,
           "usedbysnapshots_bytes": 0,
-          "usedbychildren_bytes": 289992704,
+          "usedbychildren_bytes": 286818304,
           "usedbyrefreservation_bytes": 0
         },
         {
           "name": "bpool/BOOT/ubuntu_7k2m4p",
           "type": "filesystem",
-          "used_bytes": 289992704,
-          "usedbydataset_bytes": 226029568,
+          "used_bytes": 286818304,
+          "usedbydataset_bytes": 222855168,
           "usedbysnapshots_bytes": 63963136,
           "usedbychildren_bytes": 0,
           "usedbyrefreservation_bytes": 0

@@ -102,48 +102,7 @@
           "datasets": {
             "type": "array",
             "items": {
-              "type": "object",
-              "required": [
-                "name",
-                "type",
-                "used_bytes",
-                "usedbydataset_bytes",
-                "usedbysnapshots_bytes",
-                "usedbychildren_bytes",
-                "usedbyrefreservation_bytes"
-              ],
-              "properties": {
-                "name": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "type": {
-                  "enum": [
-                    "filesystem",
-                    "volume"
-                  ]
-                },
-                "used_bytes": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "usedbydataset_bytes": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "usedbysnapshots_bytes": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "usedbychildren_bytes": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "usedbyrefreservation_bytes": {
-                  "type": "integer",
-                  "minimum": 0
-                }
-              }
+              "$ref": "#/$defs/dataset"
             }
           }
         }
@@ -307,6 +266,171 @@
                 "type": "null"
               }
             ]
+          },
+          "datasets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/dataset"
+            }
+          },
+          "points": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "created_at",
+                "complete",
+                "whole",
+                "datasets",
+                "used_bytes"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^zark_\\d{4}-\\d{2}-\\d{2}_\\d{2}:\\d{2}:\\d{2}Z$"
+                },
+                "created_at": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "whole": {
+                  "type": "boolean"
+                },
+                "datasets": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "used_bytes": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "non_point_snapshots": {
+            "type": "object",
+            "required": [
+              "intermediate",
+              "other"
+            ],
+            "properties": {
+              "intermediate": {
+                "type": "object",
+                "required": [
+                  "count",
+                  "used_bytes"
+                ],
+                "properties": {
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "used_bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "other": {
+                "type": "object",
+                "required": [
+                  "count",
+                  "used_bytes"
+                ],
+                "properties": {
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "used_bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "retention_next": {
+            "type": "object",
+            "required": [
+              "horizon_days",
+              "points",
+              "snapshots",
+              "datasets_whole",
+              "reclaim_bytes"
+            ],
+            "properties": {
+              "horizon_days": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "points": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^zark_\\d{4}-\\d{2}-\\d{2}_\\d{2}:\\d{2}:\\d{2}Z$"
+                }
+              },
+              "snapshots": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "datasets_whole": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "reclaim_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "reclaim_by_age": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "before",
+                "points",
+                "last_point",
+                "reclaim_bytes"
+              ],
+              "properties": {
+                "before": {
+                  "$ref": "#/$defs/month"
+                },
+                "points": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "last_point": {
+                  "type": "string",
+                  "pattern": "^zark_\\d{4}-\\d{2}-\\d{2}_\\d{2}:\\d{2}:\\d{2}Z$"
+                },
+                "reclaim_bytes": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
           }
         }
       }
@@ -390,6 +514,54 @@
           "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
         }
       }
+    },
+    "dataset": {
+      "type": "object",
+      "required": [
+        "name",
+        "type",
+        "used_bytes",
+        "usedbydataset_bytes",
+        "usedbysnapshots_bytes",
+        "usedbychildren_bytes",
+        "usedbyrefreservation_bytes"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "filesystem",
+            "volume"
+          ]
+        },
+        "used_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usedbydataset_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usedbysnapshots_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usedbychildren_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "usedbyrefreservation_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "month": {
+      "type": "string",
+      "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"
     }
   }
 }

@@ -459,7 +459,7 @@ def drive_connected(drive_id: object, by_id: Path = BY_ID) -> bool:
 
 @dataclass(frozen=True)
 class DriveContents:  # pylint: disable=too-many-instance-attributes
-    """What a drive's tab shows from its four optional fields, as the
+    """What a drive's tab shows from its five optional fields, as the
     fixtures' ``expected.json`` names it. A field the drive entry lacks
     leaves out only what it feeds (None)."""
 
@@ -469,9 +469,12 @@ class DriveContents:  # pylint: disable=too-many-instance-attributes
     next_reclaim_bytes: int | None
     available_after_policy_bytes: int | None
     datasets: int | None
+    # R9.2: per `before` month, what removing every older candidate frees;
+    # a value is None when not measured, never 0.
+    frees_if_older: dict[str, int | None] | None = None
 
 
-_CONTENTS = ("datasets", "points", "non_point_snapshots", "retention_next")
+_CONTENTS = ("datasets", "points", "non_point_snapshots", "retention_next", "reclaim_by_age")
 
 
 def drive_margin_bytes(drive: Mapping[str, Any]) -> int | None:
@@ -489,7 +492,7 @@ def drive_margin_bytes(drive: Mapping[str, Any]) -> int | None:
 
 
 def drive_contents(drive: Mapping[str, Any]) -> DriveContents | None:
-    """The drive contents, or None when all four fields are absent (or there
+    """The drive contents, or None when all five fields are absent (or there
     is no ``space`` to date them: they never come without it)."""
     if not isinstance(drive.get("space"), dict) or not any(k in drive for k in _CONTENTS):
         return None
@@ -507,6 +510,14 @@ def drive_contents(drive: Mapping[str, Any]) -> DriveContents | None:
     reclaim = _int(nxt.get("reclaim_bytes")) if nxt else None
     avail = _int(drive["space"].get("available_bytes"))
     datasets = drive.get("datasets")
+    by_age = drive.get("reclaim_by_age")
+    frees: dict[str, int | None] | None = None
+    if isinstance(by_age, list):
+        frees = {
+            e["before"]: _int(e.get("reclaim_bytes"))
+            for e in by_age
+            if isinstance(e, dict) and isinstance(e.get("before"), str)
+        }
     return DriveContents(
         points=len(points) if isinstance(points, list) else None,
         months=months,
@@ -516,6 +527,7 @@ def drive_contents(drive: Mapping[str, Any]) -> DriveContents | None:
         if reclaim is not None and avail is not None
         else None,
         datasets=len(datasets) if isinstance(datasets, list) else None,
+        frees_if_older=frees,
     )
 
 

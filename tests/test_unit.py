@@ -20123,11 +20123,11 @@ class TestStatusReaderFixtures:  # pylint: disable=missing-function-docstring
 
     def test_every_case_has_its_expected_json(self) -> None:
         cases = _fixture_cases()
-        assert len(cases) >= 18, [c.name for c in cases]
+        assert len(cases) >= 20, [c.name for c in cases]
         assert all((c / "expected.json").is_file() for c in cases), cases
-        # M7F-3: a .gitignore with `var/` drops these silently; 17 in contract v1.
+        # M7F-3: a .gitignore with `var/` drops these silently; 19 in R9.2.
         statuses = [c for c in cases if (c / "var/lib/zark/status.json").is_file()]
-        assert len(statuses) >= 17, [c.name for c in statuses]
+        assert len(statuses) >= 19, [c.name for c in statuses]
 
     def test_every_case_classifies_as_expected(self) -> None:
         wrong: list[str] = []
@@ -20370,12 +20370,12 @@ class TestDriveContents:  # pylint: disable=missing-function-docstring
     """M8F-5: the drive contents (R9.1, optional in schema 1)."""
 
     def test_every_case_with_drives_matches_its_expected_json(self) -> None:
-        # The R9.1 cases (drive-contents, drive-contents-partial) arrive with
-        # M9; until then no case has a `drives` block and this checks none.
+        checked = []
         for case in _fixture_cases():
             e = _expected(case)
             if "drives" not in e:
                 continue
+            checked.append(case.name)
             doc = json.loads((case / "var/lib/zark/status.json").read_text("utf-8"))
             for drive in doc["drives"]:
                 got = sreader.drive_contents(drive)
@@ -20383,6 +20383,7 @@ class TestDriveContents:  # pylint: disable=missing-function-docstring
                     "margin_bytes": sreader.drive_margin_bytes(drive),
                     "contents": dc_asdict(got) if got else None,
                 } == e["drives"][drive["name"]], (case.name, drive["name"])
+        assert checked == ["drive-contents", "drive-contents-partial"], checked
 
     def test_the_figures(self) -> None:
         drive = _drive_with_contents()

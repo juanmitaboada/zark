@@ -48,7 +48,8 @@ zark itself, with no resident process.
 - Sizes: integers in bytes; readers choose the units they show (zark itself
   shows binary units, KiB to TiB, as `zfs list` and `zpool list` do).
   Percentages: integers 0-100.
-- Dataset names: full names in the source pool (`rpool/USERDATA/home_abc123`).
+- Dataset names: full names in their pool (`rpool/USERDATA/home_abc123` in
+  a source pool, `black/rpool/USERDATA/home_abc123` on a drive).
 - The top-level object of each file carries `kind` and `schema_version`.
 - Some strings are for people only and carry no meaning a program may parse:
   `step.label`, `waiting_for`, `last_run.message` and a notice's `text`. They
@@ -344,8 +345,8 @@ children's `reservation` they do not use. A reader that shows the whole of
 pool metadata (and reservations, where any is set). Grouping (homes, system,
 other) is the reader's.
 
-Drives carry no `datasets`: their datasets can only be listed while zark has
-the drive imported.
+A drive entry may carry the same listing for the drive's pool (see "Drive
+contents").
 
 ### Drive entry
 
@@ -361,6 +362,11 @@ the drive imported.
 | `last_backup_point` | string or null | the point of that backup |
 | `last_run` | object or null | the last backup run to this drive, whatever its result; null if none recorded |
 | `space` | Space object or null | last measured while zark had the drive imported; null if never |
+| `datasets` | array, optional | every dataset of the drive's pool (see "Drive contents") |
+| `points` | array, optional | every backup point on the drive, oldest first |
+| `non_point_snapshots` | object, optional | the drive's other snapshots, counted |
+| `retention_next` | object, optional | what the drive's policy would remove at a backup a few days later |
+| `reclaim_by_age` | array, optional | per month, what removing every older point zark would remove frees |
 
 `last_run`:
 
@@ -397,6 +403,169 @@ previous `status.json`, matching drives by `guid`, not by name: a drive
 prepared again gets a new GUID and starts empty. A drive no longer in the
 writer's registry is dropped. If the previous file is absent, unreadable or
 of another `kind`, nothing is carried forward and a warning is logged.
+
+The drive contents (`datasets`, `points`, `non_point_snapshots`,
+`retention_next`, `reclaim_by_age`) are carried with `space` as one group: a writer either
+measures them in the same pass as the `space` it writes, or copies them
+together with the `space` they were measured with, or leaves them out. It
+never pairs them with a `space` measured at another time. A writer that does
+not know these fields leaves them out when it rewrites the entry.
+
+### Drive contents
+
+Five optional fields of a drive entry describe what the drive holds, what
+its retention policy removes next, and what removing its oldest points
+would free. They are measured while zark has the
+drive imported: at the end of a backup, after its retention and before the
+export, and when `zark prune` works on a connected drive. They are dated by
+the `space` they come with (`space.measured_at`) and are never present
+without it. Each field may be absent on its own: a writer that could not
+read it leaves it out, and writers of schema 1 that predate these fields
+never write them.
+
+#### `datasets`
+
+The same listing and fields as a source pool's `datasets`, run on the
+drive's pool: names start with the drive's pool name
+(`black/rpool/USERDATA/home_abc123`), the pool's root first, every dataset
+sorted by name, archived lineages and kept orphans included. As for a
+source pool, the own shares do not overlap and sum to a little less than
+the drive's `space.used_bytes`: the rest is the drive's pool metadata
+(`$MOS` and the other directories `zfs list` never shows, charged to the
+root's `usedbychildren`), and, where a dataset on the drive has a
+`reservation`, the part of it its children do not use, which stays in
+their parent's `usedbychildren`. A reader that shows the whole of
+`used_bytes` takes the rest as pool metadata.
+
+#### `points`
+
+One entry per backup point on the drive (snapshots named
+`zark_YYYY-MM-DD_HH:MM:SSZ`), oldest first.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | the point |
+| `created_at` | timestamp | the `creation` of the point's newest snapshot on the drive: the time retention judges it by, its month included |
+| `complete` | boolean | its run reached every expected dataset: the run's mark is on its snapshots (or, on a drive with no mark at all, the legacy rule) |
+| `whole` | boolean | complete, and no dataset skipped it since; retention prefers a whole point as its month's point. Never true when `complete` is false |
+| `datasets` | integer | how many datasets hold it (an archived lineage counts as its dataset) |
+| `used_bytes` | integer | the sum of `used` of its snapshots: what they hold alone |
+
+A snapshot's `used` counts only the blocks no other snapshot shares, so
+removing several neighbouring points frees more than the sum of their
+`used_bytes`. Readers label the figure as "held by this point alone" and use
+`retention_next.reclaim_bytes` or `reclaim_by_age` for what a removal
+frees.
+
+#### `non_point_snapshots`
+
+The drive's snapshots that are not backup points, as retention sorts them,
+each kind as `{"count": <integer>, "used_bytes": <integer>}`:
+
+- `intermediate`: snapshots that travelled with the points (sanoid's
+  `autosnap_*`, another drive's bpool anchors), removed by the policy once
+  outside the window;
+- `other`: names neither zark nor sanoid wrote (`syncoid_*` from zark 1.x
+  among them), which the policy never removes.
+
+#### `retention_next`
+
+What the drive's policy would remove at a complete backup `horizon_days`
+after `space.measured_at`. It is the policy run on the drive as measured,
+with the clock moved forward; nothing is removed to compute it.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `horizon_days` | integer | how far the clock was moved; 7 |
+| `points` | array of strings | the points of which it would remove at least one snapshot, oldest first |
+| `snapshots` | integer | every snapshot it would remove, intermediates included |
+| `datasets_whole` | integer | archived lineages and kept orphans it would destroy whole |
+| `reclaim_bytes` | integer or null | what ZFS says the removal frees (`zfs destroy -nvp` over those snapshots, as zark measures a removal); null when not measured |
+
+- The figure assumes no other change: the next backup's own point is not in
+  it. When `window_days` is at least `horizon_days` it is what that backup's
+  retention removes; with a shorter window it is a lower bound.
+- After `space.measured_at + horizon_days` it is still a lower bound for the
+  next backup's retention, and readers say so.
+- It says nothing about the space plan a backup may also propose (the oldest
+  monthly points, asked at that backup): that depends on the size of the
+  next transfer, which is not known in advance.
+
+#### `reclaim_by_age`
+
+What removing the drive's oldest points frees, month by month, as zark
+itself would remove them: the list `zark prune` offers beyond the policy on
+a connected drive ("the oldest monthly backup points", each with what it
+frees "with the ones above"), which is also what a backup's space plan
+offers.
+
+The points it counts, the candidates, are fixed by zark's rules at
+`space.measured_at`:
+
+- each month's point that the policy keeps outside the window (the month's
+  newest complete point, a whole one preferred), oldest first, so there is
+  at most one candidate per month;
+- never the drive's newest complete point, and nothing the policy itself
+  removes at that time;
+- never a point inside the window: no zark command removes those by age,
+  so no figure is given for them;
+- only a point of which at least one snapshot can go.
+
+Removing a candidate removes its snapshots by exact name, except:
+
+- the newest snapshot of a live dataset (the base of its next incremental);
+- a snapshot with a `zfs hold`, or that is the origin of a clone (ZFS
+  refuses to destroy either).
+
+An archived lineage or a kept orphan is not live, so its snapshots of the
+point go too; one that is left with no snapshot is destroyed whole, and its
+`used` counts in the figure. Intermediates (sanoid's) and the history from
+before the drive's first backup point are not counted: the policy removes
+the first, and `zark prune` offers the second on its own.
+
+One entry per candidate, oldest first. Entry *k* is the removal of the *k*
+oldest candidates together:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `before` | string, `YYYY-MM` | the UTC month after the newest point this removal takes: removing it leaves no candidate created before this month |
+| `points` | integer | how many points it removes (*k*) |
+| `last_point` | string | the newest point it removes |
+| `reclaim_bytes` | integer or null | bytes: what ZFS says the whole removal frees (`zfs destroy -nvp` over its snapshots, one dataset at a time, plus `used` of what goes whole), cumulative; null when not measured |
+
+- The figure is cumulative and only grows from one entry to the next. It is
+  at least the sum of what the removed points hold alone, and usually more.
+- ZFS frees destroyed blocks in the background (`zpool get freeing`), so
+  `available_bytes` reaches the figure some time after a removal.
+- It describes the drive as it was at `space.measured_at`. Any removal, a
+  backup, or a month leaving the window changes it; the next measurement
+  replaces it, and until then it is carried with `space`, like every drive
+  content.
+- When a writer stops measuring part way (a time limit), the rest of the
+  entries have `reclaim_bytes` null; entries are never left out for that
+  reason, so `points` and `last_point` still name every candidate.
+
+#### Reading the drive contents
+
+- Margin: `(space.used_bytes + space.available_bytes) * retention.margin_pct
+  / 100`, rounded down: the free space a backup tries to leave on the
+  drive, as zark computes it.
+- After the policy: `space.available_bytes + retention_next.reclaim_bytes`,
+  shown next to the margin; when `reclaim_bytes` is null, nothing is
+  computed.
+- Points by month: group `points` by the UTC month of `created_at`.
+- What removing older points frees: on the row of month M, the entry whose
+  `before` is M. A month with no entry gets no figure: it holds the oldest
+  point, or a point inside the window, or no candidate. A null
+  `reclaim_bytes` is shown as not measured, never as zero.
+- Without `reclaim_by_age`, the month table shows only what each month holds
+  alone (`points[].used_bytes` summed by month) and says that those figures
+  do not add up: removing several months frees more than their sum.
+- When all five fields are absent, a reader shows what it shows without
+  them: the drive's space bar and its margin. When one is absent, only what
+  it feeds is left out (the months without `points`, the next removal
+  without `retention_next`, the largest datasets without `datasets`, the
+  figure per month without `reclaim_by_age`).
 
 ### Notice entry
 
@@ -469,6 +638,10 @@ What any program may rely on, and how to read the files safely.
   optional; enumerations marked open may gain values, closed ones do not
   (`last_run.result`, a notice's `level`, a source pool's `level`, a
   dataset's `type`). Every other change increments `schema_version`.
+- An optional field may be absent from any file: a reader works without it.
+  A writer drops the optional fields it does not know when it rewrites an
+  entry (an older zark run from a stick, say), so a field present once may
+  be gone from the next file.
 - Both files are replaced atomically: a reader never sees a partial file.
 - Nothing in them is secret, and nothing needs root: files 0644, directories
   0755, and every read the orphan rules need works unprivileged.
