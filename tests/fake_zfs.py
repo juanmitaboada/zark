@@ -87,6 +87,9 @@ def _err(msg: str, rc: int = 1) -> RunResult:
     return RunResult(returncode=rc, stdout="", stderr=msg + "\n", command="")
 
 
+_USEDBY = ("usedbydataset", "usedbysnapshots", "usedbychildren", "usedbyrefreservation")
+
+
 class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-instance-attributes
     """Model of origin pools plus one backup pool."""
 
@@ -460,6 +463,11 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 vals.append(d.token or "-")
             elif f == "used" and s is None:
                 vals.append(str(1024 * (1 + len(d.snaps))))
+            elif f in _USEDBY and s is None:
+                # The parts of the `used` above: 1024 of its own, 1024 per snapshot.
+                vals.append(
+                    str({"usedbydataset": 1024, "usedbysnapshots": 1024 * len(d.snaps)}.get(f, 0))
+                )
             elif f == "clones" and s is not None:
                 vals.append(s.clones or "")
             elif f == "userrefs" and s is not None:

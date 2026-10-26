@@ -119,19 +119,26 @@ def reclaim(pool: str, removals: list[Removal], tops: list[str] | None = None) -
 
 
 def measure(
-    pool: str, removals: list[Removal], tops: list[str], deadline: float | None = None
+    pool: str,
+    removals: list[Removal],
+    tops: list[str],
+    deadline: float | None = None,
+    tally: list[int] | None = None,
 ) -> int | None:
     """What :func:`reclaim` gives, exactly or not at all: None when any dry
     run or ``used`` could not be read, or when ``deadline`` (a
     :func:`time.monotonic` value) passes before the last command starts.
     The status file's figures use it: null when not measured, never a
-    guess (contract, "Drive contents")."""
+    guess (contract, "Drive contents"). Each dry run appends 1 to
+    ``tally``, for the pass's log line."""
     by_ds = _by_dataset([f"{pool}/{r.target}" for r in removals if not _under_any(r.rel, tops)])
     total = 0
     for ds, snaps in sorted(by_ds.items()):
         if deadline is not None and time.monotonic() >= deadline:
             return None
         got = dry_run(ds, snaps)
+        if tally is not None:
+            tally.append(1)
         if got is None:
             return None
         total += got

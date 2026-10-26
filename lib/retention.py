@@ -102,7 +102,7 @@ def is_live(rel: str, d: Dest) -> bool:
     return not is_archived(rel) and not d.orphan.startswith("kept@")
 
 
-def _kind(name: str) -> str:
+def snapshot_kind(name: str) -> str:
     """Kind of snapshot: a backup point, an intermediate (sanoid's, or another
     drive's bpool anchor), or another name."""
     if POINT_RE.match(name):
@@ -200,7 +200,7 @@ def plan_prune(  # pylint: disable=too-many-arguments,too-many-locals
         newest = d.newest if is_live(rel, d) else None
         for s in d.snaps:
             target = f"{rel}@{s.name}"
-            kind = _kind(s.name)
+            kind = snapshot_kind(s.name)
             when = times.get(s.name, s.creation) if kind == "point" else s.creation
             why = _keep_reason(s, kind, when, newest, keep_point, start, target, protected)
             if why:

@@ -143,6 +143,26 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
     return dest
 
 
+def read_dest_used(pool: str) -> dict[str, int]:
+    """``rel@name`` → ``used`` of every snapshot under ``<pool>/rpool`` and
+    ``<pool>/bpool`` (what each holds alone), read strictly as
+    :func:`read_dest` reads them: :class:`ReadError` when a listing of a
+    root that exists fails (M9a: a point's ``used_bytes`` is never a sum
+    over part of its snapshots)."""
+    out: dict[str, int] = {}
+    strip = f"{pool}/"
+    children = checked(sh.run(f"zfs list -H -o name -d 1 {_q(pool)}"), True).lines
+    for root in (f"{pool}/rpool", f"{pool}/bpool"):
+        if root not in children:
+            continue
+        r = checked(sh.run(f"zfs list -Hp -t snapshot -o name,used -r {_q(root)}"), True)
+        for line in r.lines:
+            f = line.split("\t")
+            if len(f) == 2 and f[0].startswith(strip) and "@" in f[0] and f[1].isdigit():
+                out[f[0][len(strip) :]] = int(f[1])
+    return out
+
+
 ORPHAN = "org.zark:orphan"
 
 

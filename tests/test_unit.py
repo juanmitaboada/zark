@@ -168,6 +168,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
     backup_layout,
     boot_chain,
+    drive_contents,
     drive_marks,
     engine,
     forensics,
@@ -18275,6 +18276,213 @@ class TestRetentionOnDrive:
             _ = reclaim.apply_prune("backup", prune, Log())
         assert arch not in fake.ds
         assert f"zfs destroy -r {arch}" in fake.calls
+
+
+def _contents_doc(contents: dict[str, Any]) -> dict[str, Any]:
+    """The drive-contents fixture with black's five fields replaced."""
+    doc = json.loads(
+        (_STATUS_FIXTURES / "drive-contents/var/lib/zark/status.json").read_text("utf-8")
+    )
+    black = doc["drives"][0]
+    for k in drive_contents.CONTENT_FIELDS:
+        black.pop(k, None)
+    black.update(contents)
+    return doc
+
+
+class TestDriveContentsWriter:  # pylint: disable=missing-function-docstring
+    """M9a: the drive's datasets, points, non_point_snapshots,
+    retention_next and reclaim_by_age (R9, R9.1, R9.2), measured on a drive
+    the engine wrote."""
+
+    def _drive(self) -> FakeZfs:
+        return TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+
+    def _measure(self, fake: FakeZfs, **kw: Any) -> drive_contents.DriveContents:
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            return drive_contents.measure("backup", ret.Policy(), Log(), now=NOW, **kw)
+
+    def test_every_field_is_there_and_valid(self) -> None:
+        got = self._measure(self._drive()).to_json()
+        assert set(got) == set(drive_contents.CONTENT_FIELDS), sorted(got)
+        assert not tsf.problems(_contents_doc(got), "status")
+        assert got["datasets"][0]["name"] == "backup"
+        assert [d["name"] for d in got["datasets"]] == sorted(d["name"] for d in got["datasets"])
+
+    def test_the_points_oldest_first_with_what_they_hold_alone(self) -> None:
+        fake = self._drive()
+        pts = self._measure(fake).points
+        assert pts is not None
+        times = [p["created_at"] for p in pts]
+        assert times == sorted(times) and len(pts) == 4
+        for p in pts:
+            holders = [ds for ds, d in fake.ds.items() if any(x.name == p["name"] for x in d.snaps)]
+            assert p["datasets"] == len(holders)
+            assert p["used_bytes"] == len(holders) * (1 << 20)
+            assert p["complete"] and p["whole"]
+
+    def test_a_point_whose_run_was_not_complete(self) -> None:
+        """No mark of a complete run: neither complete nor whole."""
+        fake = self._drive()
+        late = "zark_2026-10-11_10:00:00Z"
+        _tick(fake, "2026-10-05_08:00:00_hourly")
+        assert _engine_run(fake, "backup", "111", late).ok  # its mark never recorded
+        for ds, d in fake.ds.items():
+            for snap in d.snaps:
+                if ds.startswith("backup/") and snap.name in (
+                    late,
+                    "autosnap_2026-10-05_08:00:00_hourly",
+                ):
+                    snap.creation = _days_ago(2)
+        pts = self._measure(fake).points
+        assert pts is not None and pts[-1]["name"] == late
+        assert (pts[-1]["complete"], pts[-1]["whole"]) == (False, False)
+        assert all(p["complete"] and p["whole"] for p in pts[:-1])
+
+    def test_retention_next_is_the_policy_a_week_later(self) -> None:
+        fake = self._drive()
+        nxt = self._measure(fake).retention_next
+        with patch_sh(fake):
+            dest = survey.read_dest("backup", strict=True)
+            complete = drive_marks.drive_complete("backup")
+            pins = drive_marks.drive_pins("backup", strict=True)
+        later = ret.plan_prune(
+            dest,
+            complete.run,
+            ret.Policy(),
+            NOW + 7 * ret.DAY,
+            whole=complete.whole,
+            pinned=pins,
+            first=complete.first,
+        )
+        assert nxt is not None
+        assert nxt["horizon_days"] == 7
+        assert nxt["snapshots"] == len(later.snapshots) > 0
+        assert set(nxt["points"]) == {
+            r.name for r in later.snapshots if repl.POINT_RE.match(r.name)
+        }
+        assert nxt["reclaim_bytes"] == len(later.snapshots) * (1 << 20)
+
+    def test_reclaim_by_age_follows_what_prune_offers(self) -> None:
+        """The candidates are _beyond's; entry k frees the k oldest together,
+        cumulative; `before` is the month after the k-th."""
+        fake = self._drive()
+        by_age = self._measure(fake).reclaim_by_age
+        with patch_sh(fake):
+            dest = survey.read_dest("backup", strict=True)
+            complete = drive_marks.drive_complete("backup")
+            pins = drive_marks.drive_pins("backup", strict=True)
+        prune = ret.plan_prune(
+            dest,
+            complete.run,
+            ret.Policy(),
+            NOW,
+            whole=complete.whole,
+            pinned=pins,
+            first=complete.first,
+        )
+        names = [
+            n
+            for n in ret.space_candidates(
+                dest, complete.run, ret.Policy(), NOW, prune, complete.whole
+            )
+            if ret.point_removals(dest, n, pinned=pins)
+        ]
+        assert by_age is not None and names
+        assert [e["last_point"] for e in by_age] == names
+        assert [e["points"] for e in by_age] == list(range(1, len(names) + 1))
+        times = ret.point_times(dest)
+        assert [e["before"] for e in by_age] == [
+            drive_contents.month_after(times[n]) for n in names
+        ]
+        freed = [e["reclaim_bytes"] for e in by_age]
+        assert freed == sorted(freed) and all(isinstance(f, int) and f > 0 for f in freed)
+
+    def test_a_failed_dry_run_leaves_that_entry_and_the_later_ones_null(self) -> None:
+        fake = self._drive()
+        first = self._measure(fake).reclaim_by_age
+        assert first is not None and len(first) >= 2
+        oldest = first[0]["last_point"]
+        real = reclaim.dry_run
+        failed: list[str] = []
+
+        def flaky(ds: str, snaps: list[str]) -> int | None:
+            # Once only, on entry 1's set: entry 2 would measure, but must not.
+            if oldest in snaps and len(snaps) == 1 and not failed:
+                failed.append(ds)
+                return None
+            return real(ds, snaps)
+
+        with patch.object(reclaim, "dry_run", side_effect=flaky):
+            got = self._measure(fake)
+        assert got.reclaim_by_age is not None and got.retention_next is not None
+        freed = [e["reclaim_bytes"] for e in got.reclaim_by_age]
+        assert failed and freed == [None] * len(freed), (failed, freed)
+        assert [e["points"] for e in got.reclaim_by_age] == list(range(1, len(freed) + 1))
+
+    def test_past_its_limit_every_figure_is_null_and_every_entry_there(self) -> None:
+        fake = self._drive()
+        before = len(fake.calls)
+        got = self._measure(fake, budget_s=0.0)
+        assert got.retention_next is not None and got.retention_next["reclaim_bytes"] is None
+        assert got.reclaim_by_age and all(e["reclaim_bytes"] is None for e in got.reclaim_by_age)
+        assert not [c for c in fake.calls[before:] if c.startswith("zfs destroy")]
+
+    def test_nothing_to_remove_next_week_is_zero_without_a_dry_run(self) -> None:
+        fake = self._drive()
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            got = drive_contents.measure("backup", ret.Policy(window_days=400), Log(), now=NOW)
+        assert got.retention_next is not None
+        assert got.retention_next["points"] == [] and got.retention_next["reclaim_bytes"] == 0
+        assert got.reclaim_by_age == []
+
+    def test_a_listing_that_fails_leaves_only_the_datasets(self) -> None:
+        fake = self._drive()
+        with patch.object(survey, "read_dest_used", side_effect=survey.ReadError("no")):
+            got = self._measure(fake)
+        assert set(got.to_json()) == {"datasets"}
+
+    def test_a_drive_without_rpool_or_bpool(self) -> None:
+        fake = _fresh_fake()
+        got = self._measure(fake).to_json()
+        assert got["points"] == [] and got["reclaim_by_age"] == []
+        assert got["retention_next"]["snapshots"] == 0
+
+    def test_it_destroys_nothing_and_every_destroy_is_a_dry_run(self) -> None:
+        fake = self._drive()
+        snaps = {ds: [x.name for x in d.snaps] for ds, d in fake.ds.items()}
+        before = len(fake.calls)
+        self._measure(fake)
+        assert {ds: [x.name for x in d.snaps] for ds, d in fake.ds.items()} == snaps
+        destroys = [c for c in fake.calls[before:] if "destroy" in c]
+        assert destroys and all(c.startswith("zfs destroy -nvp ") for c in destroys)
+
+    def test_the_module_cannot_reach_a_real_destroy(self) -> None:
+        """The measuring module names no destroying function and spells no
+        destroy command; the dry run comes only from reclaim.measure."""
+        src = (_REPO_ROOT / "lib" / "drive_contents.py").read_text("utf-8")
+        tree = ast.parse(src)
+        names = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        assert not names & {"destroy_snapshots", "apply_prune", "destroy_held", "run_pipe"}
+        imported = {
+            a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names
+        }
+        assert "sh" not in imported and "sh" not in names, "runs no command of its own"
+        strings = [
+            n.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        ]
+        # Only the docstrings name it, and only as the dry run.
+        assert not [t for t in strings if "zfs destroy" in t and "zfs destroy -nvp" not in t]
+        cmd = reclaim._dry_run_command("p/rpool/x", ["a", "b"])  # pylint: disable=protected-access
+        assert cmd == "zfs destroy -nvp p/rpool/x@a,b"
+
+    def test_month_after(self) -> None:
+        assert drive_contents.month_after(1_764_460_800) == "2025-12"  # 2025-11-30
+        assert drive_contents.month_after(1_767_139_200) == "2026-01"  # 2025-12-31
+        assert drive_contents.month_after(1_767_225_600) == "2026-02"  # 2026-01-01
 
 
 class TestBackupSpace:
