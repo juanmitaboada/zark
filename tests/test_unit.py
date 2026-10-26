@@ -65,7 +65,7 @@ from dataclasses import asdict as dc_asdict, dataclass, replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21161,6 +21161,99 @@ class TestMonitorViewM8F:  # pylint: disable=missing-function-docstring
         assert styles["completed"] == "ok"
         plain = monitor_mod.render_plain(self._lines("idle"), True)
         assert "\x1b[1;36mPOOLS" in plain
+
+    # M8P.3: what a warning or critical frame colours, case by case (the
+    # fixtures' frames as monitor_view draws them at 80 columns).
+    _ALARMS: ClassVar[dict[str, tuple[str, list[tuple[str, str]]]]] = {
+        "incomplete": (
+            "ATTENTION",
+            [
+                ("black: last backup run incomplete", "crit"),
+                ("incomplete", "crit"),
+                ("ended 11:27:53, 2 dataset(s) missing", "crit"),
+                ("2 dataset(s) not backed up", "crit"),
+            ],
+        ),
+        "interrupted": (
+            "ATTENTION",
+            [
+                ("black: last backup run interrupted", "crit"),
+                ("interrupted", "crit"),
+                ("ended 11:19:41", "crit"),
+                ("the run ended without recording a result", "crit"),
+            ],
+        ),
+        "not-verified": (
+            "ATTENTION",
+            [
+                ("black: last backup run not_verified", "crit"),
+                ("not_verified", "crit"),
+                ("ended 11:27:53", "crit"),
+                ("black failed its read-back", "crit"),
+            ],
+        ),
+        "overdue": ("OVERDUE", [("last backups: black 9 day(s) ago, blue 13 day(s) ago", "warn")]),
+        "orphan": (
+            "CHECK",
+            [("zark backup to black (pid 4194304) is gone; last heard 11:19:41", "warn")],
+        ),
+        "stale": (
+            "CHECK",
+            [("status.json written 6 h ago: is zark's alerts timer installed?", "warn")],
+        ),
+        "newer-schema": (
+            "CHECK",
+            [
+                ("status.json newer", "warn"),
+                ("status.json is from a newer zark (schema_version 2): update zark", "warn"),
+            ],
+        ),
+        "progress-unreadable": ("CHECK", [("progress.json not readable: not valid JSON", "warn")]),
+        "stalled": (
+            "RUNNING",
+            [("no heartbeat for 1m35s: the figures below are not current", "warn")],
+        ),
+    }
+
+    @staticmethod
+    def _spans(lines: list[mview.Line]) -> list[tuple[str, str]]:
+        return [(t.strip(), st) for li in lines for t, st in li if t.strip()]
+
+    def test_warning_and_critical_frames_colour_what_they_say(self) -> None:
+        states = {k: mview.STATE_STYLE[k] for k in ("attention", "edge", "overdue")}
+        assert states == {"attention": "crit", "edge": "warn", "overdue": "warn"}
+
+        def hms(spans: list[tuple[str, str]]) -> list[tuple[str, str]]:
+            # The frame says times in local time: compare them as hh:mm:ss.
+            return [(re.sub(r"\d\d:\d\d:\d\d", "hh:mm:ss", t), st) for t, st in spans]
+
+        for case, (title, want) in self._ALARMS.items():
+            spans = hms(self._spans(self._lines(case)))
+            missing = [w for w in hms(want) if w not in spans]
+            assert not missing, (case, missing)
+            word = mview.STATE_WORD[_expected(_STATUS_FIXTURES / case)["indicator"]]
+            assert word == title, (case, word)
+            style = "bold " + mview.STATE_STYLE[_expected(_STATUS_FIXTURES / case)["indicator"]]
+            assert (title, style) in spans, (case, title, style)
+
+    def test_a_pools_capacity_is_coloured_by_its_level(self) -> None:
+        assert {("89 %", "warn"), ("warning", "warn")} <= set(self._spans(self._lines("idle")))
+        r = _reading_of(_STATUS_FIXTURES / "idle")
+        doc = json.loads(json.dumps(r.status.doc))
+        doc["source_pools"][0]["space"]["capacity_pct"] = 95
+        r = dc_replace(r, status=dc_replace(r.status, doc=doc))
+        inputs = mview.Inputs(reading=r, live=None, by_id=Path("/nonexistent"))
+        spans = set(self._spans(mview.frame(inputs, mview.ViewOptions(width=80, version="2.1.0"))))
+        assert {("95 %", "crit"), ("critical", "crit")} <= spans, spans
+
+    def test_the_alarm_colours_reach_the_terminal(self) -> None:
+        crit = monitor_mod.render_plain(self._lines("incomplete"), True)
+        assert "\x1b[1;31mATTENTION\x1b[0m" in crit
+        assert re.search(r"\x1b\[31m\s*black: last backup run incomplete\x1b\[0m", crit), crit
+        warn = monitor_mod.render_plain(self._lines("stale"), True)
+        assert "\x1b[1;33mCHECK\x1b[0m" in warn
+        assert "\x1b[1;33mOVERDUE\x1b[0m" in monitor_mod.render_plain(self._lines("overdue"), True)
+        assert "\x1b[" not in monitor_mod.render_plain(self._lines("incomplete"), False)
 
     def test_the_session_feeds_the_model_and_once_keeps_the_contract(self) -> None:
         case = _STATUS_FIXTURES / "running"
