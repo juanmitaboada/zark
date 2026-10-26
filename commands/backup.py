@@ -1147,7 +1147,7 @@ def run(
         observer=progress.TransferProgress() if progress.active() else None,
     )
     _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
-    log.info(f"Tip: run '{zark_command()} monitor' in another terminal for progress")
+    log.info(f"Tip: run '{zark_command(sudo=False)} monitor' in another terminal for progress")
 
     policy = cfg.drive_policy(pool_name)
 

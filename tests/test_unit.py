@@ -1615,6 +1615,13 @@ class TestZarkCommand:  # pylint: disable=missing-function-docstring,too-few-pub
             assert zark_command() == "sudo zark"
         with patch.object(Config, "zark_root", return_value=Path("/media/stick/zark")):
             assert zark_command() == "sudo ./zark"
+            assert zark_command(sudo=False) == "./zark"  # M8-12: monitor needs no root
+        with patch.object(Config, "zark_root", return_value=Path("/usr/share/zark")):
+            assert zark_command(sudo=False) == "zark"
+        backup_src = (Path(__file__).resolve().parent.parent / "commands/backup.py").read_text(
+            "utf-8"
+        )
+        assert "zark_command(sudo=False)} monitor" in backup_src
 
     def test_the_status_and_certificate_lines_name_the_command_as_run(self):
         # M4dP.1 (M5a-9): `sudo zark` was written out in the status lines and

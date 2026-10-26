@@ -38,12 +38,14 @@ if TYPE_CHECKING:
 VERSION = "2.1.0-rc1"
 
 
-def zark_command() -> str:
+def zark_command(sudo: bool = True) -> str:
     """How a tip names zark: ``sudo zark`` when installed (the package's
     /usr/bin/zark links /usr/share/zark/zark), else ``sudo ./zark`` (a
     checkout or a stick), the entry script's rule (zark's
-    _invocation_hint). Always with sudo: every command runs as root."""
-    return "sudo zark" if str(Config.zark_root()) == "/usr/share/zark" else "sudo ./zark"
+    _invocation_hint). ``sudo=False`` for ``monitor``, the one command any
+    user runs (M8-12)."""
+    name = "zark" if str(Config.zark_root()) == "/usr/share/zark" else "./zark"
+    return f"sudo {name}" if sudo else name
 
 
 def now_utc_iso() -> str:
