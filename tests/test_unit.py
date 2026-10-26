@@ -20714,6 +20714,18 @@ class TestTransferEta:  # pylint: disable=missing-function-docstring
         assert all(abs(eta - real) < 20 for eta, real in shown if real < 60)
         assert shown[-1][0] < 3
 
+    def test_tiny_first_transfers_do_not_set_the_rate(self) -> None:
+        # M8F-10, eli 2026-10-26: three sends of a few KiB, then 4 GiB; the
+        # first ETA was 1h02m with about 40 s left.
+        sizes = [_MIB // 5, _MIB // 10, _MIB // 3, 4200 * _MIB] + [_MIB // 2] * 18
+        model, shown = teta.TransferEta(), []
+        for t, transfer, real in _timeline(sizes, cost=2, rate=110 * _MIB):
+            model.feed(t, transfer)
+            eta = model.seconds()
+            if eta is not None:
+                shown.append((eta, real))
+        assert shown and all(abs(eta - real) < 15 for eta, real in shown)
+
     def test_nothing_until_two_transfers_ended(self) -> None:
         model = teta.TransferEta()
         for t, transfer, _real in _timeline([n * _MIB for n in _SIZES]):

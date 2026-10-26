@@ -114,7 +114,7 @@ for the canonical end-to-end sequences.
     Without a terminal it prints a frame when something changes. While it
     follows a backup the time left (**ETA ~**) comes from the run's own
     pace, bytes and the fixed cost of each transfer, and shows once two
-    transfers have ended.
+    transfers have ended and 64 MiB have moved.
     **--once** prints one frame and exits, with the time left from the
     current rate; with **--state** it prints only
     the state: **waiting**, **running**, **attention**, **edge**,

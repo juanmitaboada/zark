@@ -22,15 +22,19 @@ ETA jumps from seconds to days (eli, 2026-10-26: 8 s to 6 min within one
 run). This model times the run as it goes:
 
 - ``R``, the throughput while bytes are actually moving: bytes over the
-  seconds in which ``bytes_done`` grew;
+  seconds in which ``bytes_done`` grew, leaving out the seconds that moved
+  less than a tenth of the best one (a tiny send fills a fraction of its
+  second; counted whole, three of them made R a few KiB/s and the first
+  ETA 1h02m with 40 s left, eli 2026-10-26, M8F-10);
 - ``c``, the fixed cost of one transfer: for every transfer that ended, its
   time less its bytes over ``R``, averaged;
 - time left = bytes left over ``R`` + transfers left times ``c`` - the time
   the current transfer has already taken, at most ``c``.
 
 The figure is shown only where the contract allows an ETA (byte counts
-measured, an estimate that is not partial, a rate above 0) and once two
-transfers have ended, and it is smoothed: it counts down by the time that
+measured, an estimate that is not partial, a rate above 0), once two
+transfers have ended and once 64 MiB have moved (half the estimate when
+that is less), and it is smoothed: it counts down by the time that
 passed and moves a third of the way towards each new estimate.
 """
 
@@ -42,6 +46,8 @@ from lib import status_reader as sr
 
 MIN_ENDED = 2  # transfers ended before a figure is shown
 BLEND = 1 / 3  # how far each new estimate moves the shown one
+MIN_MOVED = 64 << 20  # bytes seen moving before R is trusted
+SLOW_SHARE = 0.1  # a second below this share of the best one is a partial second
 
 
 def _int(value: object) -> int | None:
@@ -53,8 +59,8 @@ class TransferEta:  # pylint: disable=too-many-instance-attributes
     """Feed it every reading of ``transfer`` with the reader's clock (seconds,
     any monotonic origin); :meth:`seconds` gives the time left or None."""
 
-    moving_s: float = 0.0  # seconds in which bytes_done grew
-    moved: int = 0  # bytes counted over those seconds
+    moved: int = 0  # bytes seen moving in this run
+    steps: list[tuple[float, int]] = field(default_factory=list)  # (seconds, bytes) per reading
     ended: list[tuple[float, int]] = field(default_factory=list)  # (seconds, bytes) per transfer
     readings: int = 0  # readings fed in this run
     _last_t: float | None = None
@@ -76,8 +82,8 @@ class TransferEta:  # pylint: disable=too-many-instance-attributes
         done = _int(transfer.get("datasets_done")) or 0
         if self._last_t is not None and done_bytes is not None and self._last_bytes is not None:
             if done_bytes > self._last_bytes:
-                self.moving_s += now - self._last_t
                 self.moved += done_bytes - self._last_bytes
+                self.steps.append((now - self._last_t, done_bytes - self._last_bytes))
         if self._last_done is None:
             self._start_t, self._start_bytes = now, done_bytes or 0
         elif done > self._last_done and self._start_t is not None:
@@ -91,7 +97,12 @@ class TransferEta:  # pylint: disable=too-many-instance-attributes
         self._update(now, transfer)
 
     def _rate(self) -> float | None:
-        return self.moved / self.moving_s if self.moving_s > 0 and self.moved > 0 else None
+        if not self.steps:
+            return None
+        best = max(moved / secs for secs, moved in self.steps if secs > 0)
+        full = [(secs, moved) for secs, moved in self.steps if moved >= SLOW_SHARE * best * secs]
+        secs = sum(s for s, _m in full)
+        return sum(m for _s, m in full) / secs if secs > 0 else None
 
     def _fixed_cost(self, rate: float) -> float:
         costs = [max(0.0, secs - moved / rate) for secs, moved in self.ended]
@@ -99,10 +110,15 @@ class TransferEta:  # pylint: disable=too-many-instance-attributes
 
     def _update(self, now: float, transfer: Mapping[str, Any]) -> None:
         rate = self._rate()
-        if sr.eta_seconds(transfer) is None or rate is None or len(self.ended) < MIN_ENDED:
+        total = _int(transfer.get("bytes_total")) or 0
+        if (
+            sr.eta_seconds(transfer) is None
+            or rate is None
+            or len(self.ended) < MIN_ENDED
+            or self.moved < min(MIN_MOVED, total // 2)
+        ):
             self._eta = None
             return
-        total = _int(transfer.get("bytes_total")) or 0
         done_bytes = _int(transfer.get("bytes_done")) or 0
         left = max(0, (_int(transfer.get("datasets_total")) or 0) - (self._last_done or 0))
         cost = self._fixed_cost(rate)

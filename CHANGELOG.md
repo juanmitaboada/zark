@@ -73,8 +73,11 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   30 s's rate, jumped from seconds to days on a daily incremental of small
   datasets (8 s to 6 min within one run). `lib/transfer_eta.py` times the
   run instead: the throughput while bytes move and the fixed cost of each
-  transfer, shown as `ETA ~` once two transfers ended and smoothed, under
-  the contract's own conditions; `--once` keeps the contract's formula, and
+  transfer, shown as `ETA ~` once two transfers ended and 64 MiB moved,
+  smoothed, under the contract's own conditions; seconds that moved less
+  than a tenth of the best one do not count towards the throughput (a
+  repeat of E5 opened at 1h02m with about 40 s left after three tiny
+  sends, M8F-10); `--once` keeps the contract's formula, and
   with every transfer ended the line says the step is finishing. While a
   command waits for an answer the title gives only the step number, not
   its label (the label was done work, "Loading encryption key..."), and
