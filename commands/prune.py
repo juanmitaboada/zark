@@ -43,7 +43,17 @@ import time
 from collections.abc import Callable
 from functools import partial
 
-from lib import anchors, drive_marks, exclusions, reclaim, sh, survey
+from lib import (
+    anchors,
+    drive_contents,
+    drive_marks,
+    exclusions,
+    progress,
+    reclaim,
+    sh,
+    status_file,
+    survey,
+)
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
@@ -64,7 +74,7 @@ from lib.retention import (
     space_candidates,
     whole_datasets,
 )
-from lib.zfs import ZFS
+from lib.zfs import ZFS, read_space
 
 WORD = "PRUNE"
 # What zark 1.x, or sanoid, writes to a dataset: zark 2 moves only its points.
@@ -337,8 +347,25 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
         log.ok(f"{pool}'s retention removes nothing now")
     _beyond(pool, dest, complete, pins, policy, now, prune, log)
     _excluded_held(pool, drive.guid, log)
+    _record_contents(pool, drive.guid, policy, log)
     cleanup.run()
     prompt_eject_or_attach(device, pool, log, default_eject=False)
+
+
+def _record_contents(pool: str, guid: str, policy: Policy, log: Log) -> None:
+    """The drive's space and contents after every removal, for status.json
+    (M9a-4 4a): no time limit here. A pass that fails records its space with
+    no contents, since the old ones would list points that are gone."""
+    space = read_space(pool)
+    if space is None:
+        log.warn(f"Could not read {pool}'s space: the status files keep what they had")
+        return
+    try:
+        contents = drive_contents.measure(pool, policy, log)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        log.warn(f"Could not measure what {pool} holds for the status files: {e}")
+        contents = drive_contents.DriveContents()
+    progress.record(guid, status_file.DriveUpdate(space=space, contents=contents))
 
 
 def _beyond(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals

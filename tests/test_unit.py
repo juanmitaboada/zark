@@ -17313,6 +17313,65 @@ class TestBackupLastRun:  # pylint: disable=missing-function-docstring
         assert "Could not refresh the status files: gather broke" in warned, warned
         assert by == ["backup"] and drive["last_run"]["result"] == "completed"
 
+    @staticmethod
+    def _space() -> AbstractContextManager[object]:
+        # The fake answers no `zpool list` of a drive's space.
+        return patch.object(backup_mod, "read_space", return_value=tsf._space(7))  # pylint: disable=protected-access
+
+    def test_a_complete_run_measures_the_drive_contents_with_its_space(self):
+        """M9a-2: after retention and before the export, one pass."""
+        rc, drive, _ = self._ending(_fresh_fake(), self._space())
+        up = self.writes[-1][1]["111"]
+        assert rc == 0 and up.contents is not None and up.space is not None
+        assert set(drive_contents.CONTENT_FIELDS) <= set(drive), sorted(drive)
+        assert drive["space"] == up.space.to_json()
+        assert drive["points"] and drive["points"][-1]["name"] == drive["last_backup_point"]
+
+    def test_a_run_that_is_not_complete_measures_no_contents(self):
+        """M9a-2, M9a-3: aborted and incomplete runs leave the previous pair."""
+        _ = self._ending(_fresh_fake(), self._space(), patch("lib.log.Log.ask", return_value=False))
+        assert self.writes[-1][1]["111"].contents is None
+        real = engine.Run.transfer
+
+        def transfer(self: engine.Run, p: repl.DatasetPlan) -> engine.Outcome:
+            if p.rel == "rpool/USERDATA/home":
+                return engine.Outcome(p.rel, False, "broken pipe")
+            return real(self, p)
+
+        rc, _, _ = self._ending(
+            _fresh_fake(), self._space(), patch.object(engine.Run, "transfer", transfer)
+        )
+        up = self.writes[-1][1]["111"]
+        assert rc == 1 and up.last_run is not None and up.last_run.result == "incomplete"
+        assert up.space is not None and up.contents is None
+
+    def test_a_pass_that_raises_warns_and_the_backup_completes(self):
+        warned: list[str] = []
+        rc, drive, _ = self._ending(
+            _fresh_fake(),
+            self._space(),
+            patch.object(drive_contents, "measure", side_effect=RuntimeError("no")),
+            patch.object(
+                Log, "warn", autospec=True, side_effect=lambda _s, m, *_a, **_k: warned.append(m)
+            ),
+        )
+        assert rc == 0 and drive["last_run"]["result"] == "completed"
+        assert "Could not measure what backup holds for the status files: no" in warned, warned
+        assert not set(drive_contents.CONTENT_FIELDS) & set(drive), sorted(drive)
+
+    def test_the_pass_has_its_limit(self):
+        seen: list[float | None] = []
+        real = drive_contents.measure
+
+        def spy(*a: Any, **k: Any) -> drive_contents.DriveContents:
+            seen.append(k.get("budget_s"))
+            return real(*a, **k)
+
+        rc, _, _ = self._ending(
+            _fresh_fake(), self._space(), patch.object(drive_contents, "measure", spy)
+        )
+        assert rc == 0 and seen == [backup_mod.CONTENTS_BUDGET_S] == [60.0]
+
 
 class TestEntryPointProgress:  # pylint: disable=missing-function-docstring
     """M7R-4 X1, X2: zark's main starts progress.json for a command that
@@ -18766,7 +18825,7 @@ class TestPruneLegacyHistory:  # pylint: disable=too-few-public-methods
         assert not any(r.target in pins for r in got.snapshots)
 
 
-class TestPruneCommand:
+class TestPruneCommand:  # pylint: disable=too-many-public-methods
     """`zark prune` on FakeZfs: origin and a drive."""
 
     @staticmethod
@@ -19262,6 +19321,47 @@ class TestPruneCommand:
             except SystemExit:
                 return out.getvalue(), True
         return out.getvalue(), False
+
+    def test_prune_records_the_drive_space_and_contents_at_its_end(self) -> None:
+        """M9a-4 4a: after every removal, from scratch, with no limit."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        seen: list[tuple[str, status_file_lib.DriveUpdate]] = []
+        budgets: list[float | None] = []
+        real = drive_contents.measure
+
+        def spy(*a: Any, **k: Any) -> drive_contents.DriveContents:
+            budgets.append(k.get("budget_s"))
+            return real(*a, **k)
+
+        out, stopped = self._prune_drive_run(
+            fake,
+            *self._answers([], ["0"], "", False),
+            patch.object(prune_mod, "read_space", return_value=tsf._space(3)),  # pylint: disable=protected-access
+            patch.object(
+                prune_mod.progress, "record", side_effect=lambda g, u: seen.append((g, u))
+            ),
+            patch.object(drive_contents, "measure", spy),
+        )
+        assert not stopped, out
+        assert budgets == [None] and [g for g, _ in seen] == ["111"]
+        up = seen[0][1]
+        assert up.space == tsf._space(3) and up.contents is not None  # pylint: disable=protected-access
+        assert up.contents.points and up.contents.reclaim_by_age is not None
+
+    def test_a_failed_measurement_records_the_space_with_no_contents(self) -> None:
+        """The old contents would list points that are gone."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        seen: list[status_file_lib.DriveUpdate] = []
+        out, stopped = self._prune_drive_run(
+            fake,
+            *self._answers([], ["0"], "", False),
+            patch.object(prune_mod, "read_space", return_value=tsf._space(3)),  # pylint: disable=protected-access
+            patch.object(prune_mod.progress, "record", side_effect=lambda _g, u: seen.append(u)),
+            patch.object(drive_contents, "measure", side_effect=RuntimeError("no")),
+        )
+        assert not stopped, out
+        assert "Could not measure what backup holds for the status files: no" in out
+        assert len(seen) == 1 and seen[0].contents == drive_contents.DriveContents()
 
     def test_what_the_policy_cannot_remove_is_named(self) -> None:
         """M3X.5: a held snapshot the policy would remove is reported as kept,

@@ -39,6 +39,7 @@ from commands.setup import sanoid_conf_gap
 from lib import (
     anchors,
     certificates,
+    drive_contents,
     drive_marks,
     engine,
     exclusions,
@@ -914,6 +915,11 @@ def _check_health(zfs: ZFS, pool: str, log: Log) -> None:
         )
 
 
+# The dry runs at a backup's end (M9a-5): black's 230 take about 25 s on eli
+# (plan, section 8); what is not reached is null, oldest month first.
+CONTENTS_BUDGET_S = 60.0
+
+
 class _RunRecord:
     """This run's ``last_run`` for its drive in status.json (M7-6).
 
@@ -928,12 +934,30 @@ class _RunRecord:
         self.eng: engine.Run | None = None
         self.point_taken = False
         self.space: Space | None = None
+        self.contents: drive_contents.DriveContents | None = None
         self.done = False
 
     def measure(self, pool: str) -> None:
         """Read the drive's space now (it is imported) and show it."""
         self.space = read_space(pool) or self.space
+        self.contents = None  # measured with an earlier space, if at all
         progress.set_space(self.space)
+
+    def measure_contents(self, pool: str, policy: Policy, log: Log) -> None:
+        """The drive's space and its contents in one pass (M9a), at a
+        complete run's end; a measurement never fails the backup."""
+        space = read_space(pool)
+        if space is None:
+            # Contents dated by an earlier space would be a pair from two times.
+            log.warn(f"Could not read {pool}'s space: its contents are not measured")
+            return
+        self.space, self.contents = space, None
+        progress.set_space(space)
+        try:
+            self.contents = drive_contents.measure(pool, policy, log, budget_s=CONTENTS_BUDGET_S)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            log.warn(f"Could not measure what {pool} holds for the status files: {e}")
+            self.contents = drive_contents.DriveContents()
 
     def result(self, result: str, *, missing: int = 0, message: str = "") -> None:
         """Record the run's result now."""
@@ -943,7 +967,8 @@ class _RunRecord:
             result, progress.started_at(), now_utc_iso(), point, missing, message
         )
         last = point if result == "completed" else None
-        progress.record(self.guid, status_file.DriveUpdate(run_, self.space, last))
+        up = status_file.DriveUpdate(run_, self.space, last, contents=self.contents)
+        progress.record(self.guid, up)
 
     def finish(self) -> None:
         """The end of a run with no result: what it left the drive with."""
@@ -1190,6 +1215,9 @@ def run(
         shared = eng.shared_with_origin()
         meta = drive_marks.read_metadata(pool_name)
     _write_metadata(pool_name, cfg.source_pool, eng.point if res.ok else "", log)
+    if res.ok:
+        # After retention and the drive's properties, before the export (M9a-2).
+        record.measure_contents(pool_name, policy, log)
 
     # ── Export and read back ─────────────────────────────────────────────
     ks.umount()
