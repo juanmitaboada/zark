@@ -82,8 +82,10 @@ def group_wchar(pgid: int, proc: Path = Path("/proc")) -> int:
             if int(stat_line[stat_line.rindex(")") + 2 :].split()[2]) != pgid:
                 continue
             total += sh.wchar(int(entry.name), str(proc))
-        except FileNotFoundError:
-            continue  # it ended between the listing and the read
+        except (FileNotFoundError, ProcessLookupError):
+            # It ended between the listing and the open (ENOENT) or between the
+            # open and the read (ESRCH, fs/proc/base.c:808-810): M7R-2.
+            continue
         except ValueError as e:
             raise OSError(f"{entry}: {e}") from e
     return total

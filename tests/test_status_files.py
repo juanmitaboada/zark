@@ -1166,6 +1166,43 @@ class TestByteMeter:  # pylint: disable=missing-function-docstring
             else:
                 raise AssertionError("a member with no wchar was read as 0")
 
+    def test_a_process_released_during_the_read_is_skipped_not_a_failure(self):
+        # M7R-2: ESRCH between the open and the read of a /proc file.
+        with tempfile.TemporaryDirectory() as td:
+            proc = Path(td)
+            for pid, pgrp, written in ((10, 10, 300), (11, 10, 700), (12, 99, 5000)):
+                (proc / str(pid)).mkdir()
+                fields = ["S", "1", str(pgrp)] + ["0"] * 40
+                _ = (proc / str(pid) / "stat").write_text(
+                    f"{pid} (z) (x) {' '.join(fields)}\n", encoding="ascii"
+                )
+                _ = (proc / str(pid) / "io").write_text(
+                    f"rchar: 1\nwchar: {written}\n", encoding="ascii"
+                )
+            real = sh.wchar
+
+            def gone(err: OSError) -> Callable[[int, str], int]:
+                def read(pid: int, where: str = "/proc") -> int:
+                    if pid == 11:
+                        raise err
+                    return real(pid, where)
+
+                return read
+
+            with patch.object(progress.sh, "wchar", side_effect=gone(ProcessLookupError(3, "x"))):
+                assert progress.group_wchar(10, proc) == 300
+                meter = progress.ByteMeter(proc=proc)
+                meter.begin(10)
+                meter.sample(now=1.0)
+                meter.sample(now=2.0)
+                assert meter.bytes_done() == 300
+            # A real failure still switches the meter off.
+            with patch.object(progress.sh, "wchar", side_effect=gone(PermissionError(13, "x"))):
+                meter = progress.ByteMeter(proc=proc)
+                meter.begin(10)
+                meter.sample(now=1.0)
+                assert meter.bytes_done() is None
+
     def test_a_launchs_exit_records_are_whole_accounting_records(self):
         # M7F-11: 0 here unless the host has process accounting on (atop).
         self._need_io()

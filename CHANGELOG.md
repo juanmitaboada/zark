@@ -42,7 +42,9 @@ Nothing is uploaded to the PPA until the final 2.1.0.
 - **bytes_done measured by the kernel**, outside the data path: the
   `wchar` count of each `zfs send` (its process group, live; the exited
   shell's, exactly, at the end). The send, its stderr and the pipe are
-  unchanged.
+  unchanged. A process anywhere on the system that ends while the meter
+  reads `/proc` is skipped; it no longer switches the counters off for the
+  rest of the run (M7R-2).
 - **`/run/zark` from the package's `tmpfiles.d` entry** at boot and on
   install, so a reader can watch it before zark first runs.
 - **Self-test checks SND-13, PRC-05, SYS-02 and POOL-14** (level 1 has
