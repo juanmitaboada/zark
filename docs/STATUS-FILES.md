@@ -401,8 +401,12 @@ the drive imported or at the end of a backup. A writer that did not measure
 them (the timer, any command other than backup) copies them from the
 previous `status.json`, matching drives by `guid`, not by name: a drive
 prepared again gets a new GUID and starts empty. A drive no longer in the
-writer's registry is dropped. If the previous file is absent, unreadable or
-of another `kind`, nothing is carried forward and a warning is logged.
+writer's registry is dropped. A writer whose registry
+(`known_drives.json`) cannot be read or parsed leaves `status.json` as it is
+and logs a warning that names the cause; a registry that does not exist is
+an empty one. If the previous file is unreadable or of another `kind`,
+nothing is carried forward and a warning is logged; if it is absent, this is
+a first write and nothing is logged.
 
 The drive contents (`datasets`, `points`, `non_point_snapshots`,
 `retention_next`, `reclaim_by_age`) are carried with `space` as one group: a writer either
