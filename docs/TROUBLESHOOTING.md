@@ -46,7 +46,7 @@ Since v1.0.7, `zark recover` proactively pins to `.latest` before reinstalling t
 
 After this rescue, your sanoid snapshots include the corrected boot chain - the next `zark backup` will be clean.
 
-To detect and fix the same issue on your live system before it's too late, run `zark setup`. Step 5 of setup now inspects the alternatives and offers (with confirmation) to switch them.
+To detect and fix the same issue on your live system before it's too late, run `zark setup`. Its step 6, "Verifying Secure Boot binaries", inspects the alternatives and offers (with confirmation) to switch them.
 
 ### "disk hdN,gptN not found" / "you need to load the kernel first" after cross-host recovery
 
@@ -72,7 +72,7 @@ sudo ./zark repair-boot
 
 **Can I use multiple backup drives?**
 
-Yes. Register additional drives in `etc/known_drives.json` with their GUID. zark will detect whichever drive is connected.
+Yes. Run `sudo zark prepare` once for each drive; it registers the drive in `known_drives.json` by its pool GUID. zark detects whichever registered drive is connected, and each drive keeps its own anchors and retention ([Drive rotation and retention](RETENTION.md)).
 
 **What if recovery drops to an emergency shell?**
 
@@ -80,4 +80,4 @@ Run `zpool import rpool && exit`. On subsequent boots this won't happen. Alterna
 
 **Does the recovered system require any custom components?**
 
-No. The boot chain is 100% standard Ubuntu - identical to a fresh installation. The only addition is the optional GRUB guard script, which can be safely removed.
+No. The boot chain is 100% standard Ubuntu - identical to a fresh installation. The only additions are zark's guards, the GRUB guard and the APT guard ([Design](DESIGN.md#the-grub-guard)), which can be removed.

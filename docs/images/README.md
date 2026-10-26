@@ -12,12 +12,12 @@ deb packaging consumes only the rendered manpage and the README itself.
 Screenshot of Ubuntu's "System program problem detected" Apport dialog
 that appears during disk-intensive operations on the live USB.
 
-Used by the README troubleshooting section ("System program problem
-detected" popup). The image is a small ~480x140 PNG showing the
+Used by `docs/TROUBLESHOOTING.md` ("System program problem detected"
+popup). The image is a small ~480x140 PNG showing the
 question-mark dialog with the `Cancel` and `Report problem...` buttons.
 
 If you regenerate this image, keep the filename the same so the
-README link doesn't need touching.
+link to it doesn't need touching.
 
 ## Brand assets
 

@@ -44,12 +44,16 @@ See `tests/test_integration.py` for harness internals and `tests/create_test_sys
 ### Static analysis
 
 ```bash
-make check        # py_compile every .py file (fast, no dependencies)
-make mypy         # type-check with mypy (fails on any error)
-make pylint       # run pylint
-make lint         # check + mypy + pylint
-make format       # black + isort
-make pre-commit   # run every pre-commit hook against every tracked file
+make check          # py_compile every .py file (fast, no dependencies)
+make ruff           # ruff's lint, full ruleset
+make format-check   # ruff's format check
+make mypy           # type-check with mypy (strict)
+make pylint         # run pylint
+make basedpyright   # type-check with basedpyright (strict)
+make lint           # check + ruff + format-check + mypy + pylint + basedpyright
+make format         # reformat and auto-fix with ruff (rewrites files)
+make pre-commit     # run every pre-commit hook against every tracked file
+make fulltest       # everything safe to run before a commit, with the pinned tools
 ```
 
-Tool configuration lives in `pyproject.toml` (mypy, pyright, black, isort, flake8) and `.pylintrc` (pylint, kept separate due to size). Pre-commit hooks are wired in `.pre-commit-config.yaml`.
+These targets run the tools in `PATH`; `make fulltest` and `make tox` run the versions pinned in `pyproject.toml` and `tox.ini`. Tool configuration lives in `pyproject.toml` (ruff, mypy, pyright for basedpyright, pylint). Pre-commit hooks are wired in `.pre-commit-config.yaml`.
