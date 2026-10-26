@@ -312,3 +312,19 @@ def refresh(
         log.warn(f"Could not write {status.MOTD_FILE}: {e}")
     _ = write(st, cfg, generated_by, log, updates=updates)
     return st
+
+
+def refresh_or_warn(
+    cfg: Config,
+    log: Log,
+    generated_by: str,
+    updates: dict[str, DriveUpdate] | None = None,
+    *,
+    warn: Log,
+) -> None:
+    """:func:`refresh`, with anything it raises a warning on ``warn``: a
+    status write never fails the command around it (M7R-3)."""
+    try:
+        _ = refresh(cfg, log, generated_by, updates)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        warn.warn(f"Could not refresh the status files: {e}")

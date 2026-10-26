@@ -1017,6 +1017,32 @@ class TestProgressFile:  # pylint: disable=missing-function-docstring
                 assert _doc(path)["command"] == "clean"
         assert status_file.unusable_registry(broken._load_error) in out.getvalue(), out.getvalue()
 
+    def test_an_orphans_recording_that_raises_warns_and_the_command_starts(self):
+        # M7R-3: the orphan's refresh runs before the command, outside main's try.
+        orphan = (FIXTURES / "running" / PROGRESS_REL).read_text("utf-8")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "run" / "zark" / "progress.json"
+            path.parent.mkdir(parents=True)
+            _ = path.write_text(orphan, encoding="utf-8")
+            out = StringIO()
+            with (
+                redirect_stdout(out),
+                patch.object(progress, "atexit"),
+                patch.object(progress, "now_utc_iso", _Clock()),
+                patch.object(progress.Config, "load", return_value=_config(("black", BLACK_GUID))),
+                patch.object(progress.sh, "is_live_usb", return_value=False),
+                patch.object(progress.signals, "teardown"),
+                patch.object(
+                    progress.status_file.status, "gather", side_effect=RuntimeError("gather broke")
+                ),
+            ):
+                try:
+                    assert progress.start("clean", Log(os.devnull), path)
+                    assert _doc(path)["command"] == "clean"
+                finally:
+                    progress.end()
+        assert "Could not refresh the status files: gather broke" in out.getvalue(), out.getvalue()
+
     def test_a_failed_write_warns_once_and_fails_nothing(self):
         with tempfile.TemporaryDirectory() as td:
             out = StringIO()

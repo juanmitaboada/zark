@@ -17271,6 +17271,26 @@ class TestBackupLastRun:  # pylint: disable=missing-function-docstring
         lr = drive["last_run"]
         assert rc == 1 and lr["result"] == "interrupted" and lr["message"] == "boom", lr
 
+    def test_a_completed_time_write_that_raises_warns_and_the_backup_goes_on(self):
+        # M7R-3: the write before the eject prompt is shielded as progress.end's is.
+        real = status_file_lib.refresh
+        seen: list[int] = []
+        warned: list[str] = []
+        rc, drive, by = self._ending(
+            _fresh_fake(),
+            patch.object(status_file_lib, "refresh", real),
+            patch.object(status_lib, "gather", side_effect=RuntimeError("gather broke")),
+            patch.object(
+                Log, "warn", autospec=True, side_effect=lambda _s, m, *_a, **_k: warned.append(m)
+            ),
+            patch.object(
+                backup_mod, "prompt_eject_or_attach", side_effect=lambda *_a, **_k: seen.append(1)
+            ),
+        )
+        assert rc == 0 and seen == [1], (rc, seen)
+        assert "Could not refresh the status files: gather broke" in warned, warned
+        assert by == ["backup"] and drive["last_run"]["result"] == "completed"
+
 
 class _Heard:  # pylint: disable=missing-function-docstring
     """A transfer observer that records what the engine tells it."""

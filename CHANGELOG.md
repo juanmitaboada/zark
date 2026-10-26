@@ -72,6 +72,9 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   `status.json` (a warning names the cause), so every drive's last run,
   space and point stay as they were until the registry is fixed (M7R-1).
   An absent registry is no drive, written as before.
+- A status write that fails for any reason is a warning: it never stops a
+  backup after BACKUP COMPLETED, nor a command whose start records an
+  earlier run's orphan (M7R-3).
 
 #### Known limitations
 

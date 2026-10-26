@@ -361,8 +361,12 @@ def _record_orphan(doc: dict[str, Any], command: str, log: Log) -> None:
         return
     if guid not in {i.guid for i in cfg.known_drives.values()}:
         return  # a drive no longer registered is dropped (D4)
-    _ = status_file.refresh(
-        cfg, Log(os.devnull), command, {guid: DriveUpdate(run, unless_started_at=began)}
+    status_file.refresh_or_warn(
+        cfg,
+        Log(os.devnull),
+        command,
+        {guid: DriveUpdate(run, unless_started_at=began)},
+        warn=log,
     )
 
 

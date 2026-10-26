@@ -1285,7 +1285,7 @@ def run(
     # that sees the prompt already finds the result.
     record.result("completed")
     if progress.active() and not sh.is_live_usb():
-        _ = status_file.refresh(cfg, Log(os.devnull), "backup", progress.updates())
+        status_file.refresh_or_warn(cfg, Log(os.devnull), "backup", progress.updates(), warn=log)
     origin: dict[str, Origin] = {}
     try:
         origin = survey.read_origin(survey.source_pools(), strict=True)
