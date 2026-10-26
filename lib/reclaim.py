@@ -67,25 +67,47 @@ def _under_any(rel: str, tops: list[str]) -> bool:
     return any(rel == t or rel.startswith(f"{t}/") for t in tops)
 
 
-def reclaim_names(names: list[str]) -> int:
-    """Bytes destroying these snapshots (full ``ds@snap`` names) would free,
-    measured by ZFS: one dry run per dataset over the exact names, comma
-    separated (``zfs destroy -nvp ds@a,b,c``, cmd/zfs/zfs_main.c:1756-1779;
-    only a ``%`` makes a range, lib/libzfs/libzfs_iter.c:429-460). 0 for
-    what cannot be measured."""
+def _dry_run_command(ds: str, snaps: list[str]) -> str:
+    """The only spelling of the dry run: ``-n`` is part of the constant, so
+    no caller can drop it (M9a, plan section 5)."""
+    spec = ",".join(dict.fromkeys(snaps))
+    return f"zfs destroy -nvp {_q(f'{ds}@{spec}')}"
+
+
+def dry_run(ds: str, snaps: list[str]) -> int | None:
+    """Bytes destroying these snapshots of ``ds`` together would free, as ZFS
+    measures it: one dry run over the exact names, comma separated
+    (``zfs destroy -nvp ds@a,b,c``, cmd/zfs/zfs_main.c:1756-1779; only a ``%``
+    makes a range, lib/libzfs/libzfs_iter.c:429-460). None when the command
+    fails or prints no ``reclaim`` line (a clone origin among them, every
+    name missing)."""
+    out = sh.run(_dry_run_command(ds, snaps))
+    for line in out.lines if out.ok else []:
+        f = line.split("\t")
+        if len(f) == 2 and f[0] == "reclaim" and f[1].isdigit():
+            return int(f[1])
+    return None
+
+
+def _by_dataset(names: list[str]) -> dict[str, list[str]]:
     by_ds: dict[str, list[str]] = {}
     for full in names:
         ds, _, snap = full.partition("@")
         by_ds.setdefault(ds, []).append(snap)
-    total = 0
-    for ds, snaps in sorted(by_ds.items()):
-        spec = ",".join(dict.fromkeys(snaps))
-        out = sh.run(f"zfs destroy -nvp {_q(f'{ds}@{spec}')}")
-        for line in out.lines if out.ok else []:
-            f = line.split("\t")
-            if len(f) == 2 and f[0] == "reclaim" and f[1].isdigit():
-                total += int(f[1])
-    return total
+    return by_ds
+
+
+def reclaim_names(names: list[str]) -> int:
+    """Bytes destroying these snapshots (full ``ds@snap`` names) would free:
+    :func:`dry_run` per dataset, summed. 0 for what cannot be measured (the
+    screens of ``zark prune`` and the space plan show it as freeing
+    nothing; :func:`measure` is the variant that says so)."""
+    return sum(dry_run(ds, snaps) or 0 for ds, snaps in sorted(_by_dataset(names).items()))
+
+
+def _used(name: str) -> int | None:
+    used = sh.run(f"zfs list -Hp -o used {_q(name)}")
+    return int(used.output.strip()) if used.ok and used.output.strip().isdigit() else None
 
 
 def reclaim(pool: str, removals: list[Removal], tops: list[str] | None = None) -> int:
@@ -93,10 +115,31 @@ def reclaim(pool: str, removals: list[Removal], tops: list[str] | None = None) -
     plus ``used`` of each subtree destroyed whole."""
     tops = tops or []
     total = reclaim_names([f"{pool}/{r.target}" for r in removals if not _under_any(r.rel, tops)])
+    return total + sum(_used(f"{pool}/{top}") or 0 for top in tops)
+
+
+def measure(
+    pool: str, removals: list[Removal], tops: list[str], deadline: float | None = None
+) -> int | None:
+    """What :func:`reclaim` gives, exactly or not at all: None when any dry
+    run or ``used`` could not be read, or when ``deadline`` (a
+    :func:`time.monotonic` value) passes before the last command starts.
+    The status file's figures use it: null when not measured, never a
+    guess (contract, "Drive contents")."""
+    by_ds = _by_dataset([f"{pool}/{r.target}" for r in removals if not _under_any(r.rel, tops)])
+    total = 0
+    for ds, snaps in sorted(by_ds.items()):
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
+        got = dry_run(ds, snaps)
+        if got is None:
+            return None
+        total += got
     for top in tops:
-        used = sh.run(f"zfs list -Hp -o used {_q(f'{pool}/{top}')}")
-        if used.ok and used.output.strip().isdigit():
-            total += int(used.output.strip())
+        got = _used(f"{pool}/{top}")
+        if got is None:
+            return None
+        total += got
     return total
 
 

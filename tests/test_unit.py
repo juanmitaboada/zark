@@ -18178,6 +18178,47 @@ class TestRetentionOnDrive:
         assert len(dry) == len({r.rel for r in prune.snapshots})
         assert not any("%" in c for c in dry)
 
+    def test_measure_is_reclaim_when_every_dry_run_answers(self) -> None:
+        """M9a: the exact variant gives the same figure, and every destroy it
+        runs is a dry run."""
+        fake = self._drive_with_history()
+        prune = self._plan(fake)
+        before = len(fake.calls)
+        with patch_sh(fake):
+            exact = reclaim.measure("backup", prune.snapshots, [])
+            loose = reclaim.reclaim("backup", prune.snapshots)
+        destroys = [c for c in fake.calls[before:] if c.startswith("zfs destroy")]
+        assert exact == loose == len(prune.snapshots) * (1 << 20)
+        assert destroys and all(c.startswith("zfs destroy -nvp ") for c in destroys)
+
+    def test_measure_is_none_when_a_dry_run_fails(self) -> None:
+        """A clone origin among the names fails its dataset's dry run: the
+        figure is not measured (None), while reclaim() counts it as 0."""
+        fake = self._drive_with_history()
+        prune = self._plan(fake)
+        first = prune.snapshots[0]
+        ds, _, name = f"backup/{first.target}".partition("@")
+        next(x for x in fake.ds[ds].snaps if x.name == name).clones = f"{ds}-clone"
+        with patch_sh(fake):
+            assert reclaim.measure("backup", prune.snapshots, []) is None
+            assert reclaim.reclaim("backup", prune.snapshots) < len(prune.snapshots) * (1 << 20)
+
+    def test_measure_stops_at_its_deadline(self) -> None:
+        """A deadline already past runs no dry run and gives None."""
+        fake = self._drive_with_history()
+        prune = self._plan(fake)
+        before = len(fake.calls)
+        with patch_sh(fake):
+            assert reclaim.measure("backup", prune.snapshots, [], deadline=0.0) is None
+        assert not [c for c in fake.calls[before:] if c.startswith("zfs destroy")]
+
+    def test_measure_of_nothing_runs_nothing(self) -> None:
+        """No removal: 0, and no command at all."""
+        mock = MockShell()
+        with patch_sh(mock):
+            assert reclaim.measure("backup", [], []) == 0
+        assert not mock.calls
+
     def test_a_subtree_destroy_names_every_dataset_it_takes(self) -> None:
         """M3R-11: a dataset below the top with no snapshot, and one with a
         partial receive, are logged before the -r; with the listing failing
