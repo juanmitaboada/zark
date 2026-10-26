@@ -101,9 +101,10 @@ for the canonical end-to-end sequences.
     **OVERDUE**, **NO STATUS** or **OK**. Below it, the source pools (used,
     free, reserved by ZFS, capacity, health), each registered drive
     (connected or not, last backup, last run, fill and when it was
-    measured, the margin a backup tries to leave free, and, once zark
-    records them, the drive's points by month, what its retention policy
-    removes next and the largest datasets on it), the datasets of each
+    measured, the margin a backup tries to leave free, and the drive's
+    points by month, what its retention policy removes next and the
+    largest datasets on it, as **backup** and **prune** last measured
+    them), the datasets of each
     source pool with the pool's metadata apart, and the notices. Live
     figures say so; figures from the files carry their date.
 
@@ -114,7 +115,11 @@ for the canonical end-to-end sequences.
     Without a terminal it prints a frame when something changes. While it
     follows a backup the time left (**ETA ~**) comes from the run's own
     pace, bytes and the fixed cost of each transfer, and shows once two
-    transfers have ended and 64 MiB have moved.
+    transfers have ended and 64 MiB have moved. It charges each transfer
+    left the mean fixed cost of those ended, so when the last transfers are
+    faster than the first it stays high near the end of the run (up to a
+    minute with 22 datasets); the status files give no size per dataset to
+    do better.
     **--once** prints one frame and exits, with the time left from the
     current rate; with **--state** it prints only
     the state: **waiting**, **running**, **attention**, **edge**,
@@ -438,6 +443,16 @@ for the canonical end-to-end sequences.
     its names are destroyed one by one), and the drive's keys are not
     needed. **prepare** asks
     the window and the maximum age; **registry retention** changes them.
+
+    **What the drive holds.** After the retention of a complete backup,
+    before the export, **backup** measures for *status.json* the drive's
+    datasets, its backup points by month, what its retention would remove a
+    week later and what removing its oldest monthly points would free,
+    month by month, from **zfs list** and dry runs of **zfs destroy -nvp**
+    (one per dataset and month; nothing is destroyed). The dry runs have
+    60 seconds; a figure not reached is recorded as not measured, the oldest
+    months first. A run that is not complete measures none of it, and
+    *status.json* keeps what the last complete one measured.
 
     **Clones.** A dataset new in the source that is a clone of a snapshot
     the drive already holds is sent as an incremental from it and received
@@ -810,6 +825,8 @@ for the canonical end-to-end sequences.
     then the drive's copy of every subtree excluded from backups, kept or
     not, with its size, each destroyed on a typed **PRUNE** as **backup**
     destroys it (its points stay complete; that drive's anchors on it go).
+    Last, what the drive holds is measured for *status.json*, as at the end
+    of a **backup** but with no time limit.
 
 **status**
 :   How full **rpool** and **bpool** are (a warning from 80 %, critical
@@ -1134,8 +1151,11 @@ roll its backup points back).
 
 */var/lib/zark/status.json*
 :   The state between runs: the source pools' space and datasets, every
-    registered drive with its last backup, its last run and its space as
-    last measured, and the lines the MOTD shows. Written at the end of
+    registered drive with its last backup, its last run, its space and what
+    it holds as last measured (its datasets, its backup points by month,
+    what its retention removes next and what removing its oldest points
+    frees, each from **zfs list** and dry runs of **zfs destroy -nvp**, never
+    a destroy), and the lines the MOTD shows. Written at the end of
     every command that changes state, by a backup when its result is
     known, and by **status** (by hand and from the timer); never from a
     live session. Its format is in the same document as *progress.json*'s.

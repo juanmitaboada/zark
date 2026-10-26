@@ -11,6 +11,84 @@ zark 2.1 is being built as milestones on `main`, versioned `2.1.0-rcN`
 (`lib/config.py`) and `2.1.0~rcN-1` UNRELEASED (`debian/changelog`).
 Nothing is uploaded to the PPA until the final 2.1.0.
 
+### M9a - the status files' second part (2.1.0-rc3)
+
+#### Added
+
+- **What a backup drive holds, in `status.json`** (contract R9, R9.1 and
+  R9.2, `lib/drive_contents.py`): each drive entry gains its `datasets`,
+  its backup `points` (oldest first, with their creation, whether
+  complete and whole, how many datasets hold them and what they hold
+  alone), its `non_point_snapshots`, `retention_next` (the drive's policy
+  with the clock a week forward: the points and snapshots it removes and
+  what that frees) and `reclaim_by_age` (per month, what removing every
+  older point `zark prune` would offer frees, cumulative). Every figure
+  comes from zark's own retention and removal rules, `zfs list` and dry
+  runs of `zfs destroy -nvp`, one per dataset; a figure that is not
+  measured is null, never a guess, and nothing is destroyed. They are
+  measured while zark has the drive imported: at the end of a complete
+  backup, after its retention and before the export (M9a-2), and at the
+  end of `zark prune` on a connected drive, after every removal (M9a-4
+  4a).
+- **A time limit for the dry runs at a backup's end** (M9a-5): 60 s, the
+  next week's removal first, then the months oldest first; a figure not
+  reached is null and its entry stays. On eli a dry run costs about 0.1 s
+  whatever the number of names, so a drive like black (10 months, 23
+  datasets) needs about 25 s. `zark prune` has no limit. The pass logs its
+  time and its dry runs (M9a-6).
+- **Self-test check DST-04**: `zfs destroy -nvp` over neighbouring
+  snapshots counts the blocks they share, which each one's `used` leaves
+  out, and frees exactly what a destroy of the same names frees; the dry
+  runs change nothing.
+- **The reference reader reads `reclaim_by_age`**: `DriveContents` gains
+  `frees_if_older`, per `before` month, None where not measured, as the
+  fixtures' `expected.json` names it.
+- **The contract as amended by R9.2 in the tree**: `docs/STATUS-FILES.md`,
+  `docs/schema/zark-status.schema.json` and `tests/fixtures/status/`, now
+  20 cases with `drive-contents` and `drive-contents-partial`.
+
+#### Changed
+
+- **A drive's contents travel with its `space`** (M9a-3 3a): a run that
+  measures a new `space` but no contents (an aborted, interrupted or
+  incomplete backup) leaves the drive's previous `space` and contents in
+  `status.json` when it had contents, so the contents are never dated by
+  a `space` from another time. A drive with no contents yet gets the new
+  `space` as before.
+- **`zark prune` records the drive's `space`** with its contents at the
+  end, for the `status.json` the command writes.
+- **The empty `/run/zark/altroot` goes** after a backup's cleanup and at
+  the end of a self-test (M7P.7); a pool still imported under it keeps
+  it.
+- **`docs/STATUS-FILES.md` says two things M7 already does** (M9C-4): a
+  registry that cannot be read leaves `status.json` as it is; an absent
+  previous file is a first write and logs nothing.
+
+#### Known limitations
+
+- `zark monitor`'s `ETA ~` may stay high near the end of a run whose last
+  transfers are faster than its first ones, up to a minute on eli's 22
+  datasets (M8P.4, M9C-3 3a); the status files give no size per dataset.
+  Now also in the manpage.
+- `zark monitor` does not show `reclaim_by_age` (the reference reader
+  gives it as `frees_if_older`).
+
+#### Rejected approaches
+
+- **Leaving `non_point_snapshots` out** (M9a-1 1b): the contract, the
+  schema and the monitor already have it.
+- **Measuring after an incomplete backup** (M9a-2 2b): its retention did
+  not run, so the next removal and the months would describe a drive in
+  the middle of a repair.
+- **Dropping the contents whenever a new `space` is measured** (M9a-3 3b):
+  a declined question or a Ctrl-C would blank the drive's months.
+- **Reusing the screen's figures at `zark prune`** (M9a-4 4b): it ties
+  the file to the screen; the pass measures the drive as it is left.
+- **30 s for the backup's dry runs** (S5a's estimate of 2 to 11 s): eli
+  measured 25 s for a drive like black; **no limit** (M9a-5 5b).
+- **A switch to skip the pass** (M9a-6): a second code path only a
+  checklist would use.
+
 ### M8 - zark monitor, a reader of the status files (2.1.0-rc2)
 
 #### Added

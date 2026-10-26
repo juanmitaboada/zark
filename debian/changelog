@@ -1,3 +1,16 @@
+zark (2.1.0~rc3-1) UNRELEASED; urgency=medium
+
+  * Milestone M9a of zark 2.1 (the status files' second part). Not for
+    release: nothing is published until the final 2.1.0.
+  * status.json describes what each drive holds: its datasets, its backup
+    points by month, what its retention removes next and what removing
+    its oldest points frees, measured at the end of a complete backup and
+    of zark prune from zfs list and dry runs of zfs destroy -nvp.
+  * Self-test check DST-04: a dry run frees what a destroy frees.
+  * The empty /run/zark/altroot is removed after a backup and a self-test.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 00:12:14 +0100
+
 zark (2.1.0~rc2-1) UNRELEASED; urgency=medium
 
   * Milestone M8 of zark 2.1 (zark monitor). Not for release: nothing is
