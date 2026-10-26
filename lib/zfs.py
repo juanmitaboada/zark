@@ -561,6 +561,9 @@ class ZFS:
         if reexported and cleanup is not None:
             cleanup.untrack_pool(name)
         if reexported:
+            # M7P.7: the import above made them again, after Cleanup removed them.
+            remove_altroot_dir(root)
+            remove_altroot_base()
             self.log.ok(f"Read-back of {name}: exported again")
         else:
             self.log.error(f"Read-back of {name}: could NOT export it again - still imported")

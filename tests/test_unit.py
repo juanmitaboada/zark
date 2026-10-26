@@ -5049,6 +5049,32 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         assert not rb.ok and not rb.reexported
         assert mock.was_called("zpool export -f black")
 
+    def test_the_altroot_it_made_goes_after_the_export(self):
+        """M7P.7: the read-back's import comes after Cleanup removed the
+        altroot; its export removes the drive's directory and the parent
+        too, unless another pool still has one there."""
+        for other in (False, True):
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td, "altroot")
+                with patch("lib.zfs.BACKUP_ALTROOT_BASE", str(base)):
+                    mock = MockShell()
+                    mock.on("sync").succeeds()
+                    mock.on("drop_caches").succeeds()
+                    mock.on_prefix("zpool import -o readonly=on").succeeds()
+                    mock.on("zpool list -H -o health black").succeeds("ONLINE")
+                    mock.on("zpool export black").succeeds()
+                    (base / "black").mkdir(parents=True)  # what the import made
+                    if other:
+                        (base / "blue").mkdir()
+                    with patch_sh(mock):
+                        assert (
+                            ZFS(make_log())
+                            .verify_exported_pool_readback("black", device=self.DEV)
+                            .ok
+                        )
+                assert not (base / "black").exists()
+                assert base.exists() is other, other
+
 
 class TestReadbackTracked:  # pylint: disable=missing-function-docstring
     """M4c-25 (M4bX.1): the read-back's import is the Cleanup's until exported."""

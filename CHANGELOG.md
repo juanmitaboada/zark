@@ -57,9 +57,9 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   `space` as before.
 - **`zark prune` records the drive's `space`** with its contents at the
   end, for the `status.json` the command writes.
-- **The empty `/run/zark/altroot` goes** after a backup's cleanup and at
-  the end of a self-test (M7P.7); a pool still imported under it keeps
-  it.
+- **The empty `/run/zark/altroot` goes** after a backup (its cleanup's
+  export and its read-back's) and at the end of a self-test (M7P.7); a
+  pool still imported under it keeps it.
 - **`docs/STATUS-FILES.md` says two things M7 already does** (M9C-4): a
   registry that cannot be read leaves `status.json` as it is; an absent
   previous file is a first write and logs nothing.
