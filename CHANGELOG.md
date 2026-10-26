@@ -94,6 +94,10 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   orphan; Ubuntu mounts `/proc` without it.
 - The live listings run at the interval, not continuously: a pool's fill
   is as old as the label beside it says.
+- `ETA ~` charges each transfer left the mean fixed cost of those ended,
+  so when the last transfers are faster than the first ones it stays high
+  near the end of the run: up to a minute on eli's 22 datasets (M8F-11).
+  The status files give no per-dataset size to do better.
 
 #### Rejected approaches
 
