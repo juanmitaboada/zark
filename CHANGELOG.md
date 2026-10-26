@@ -68,6 +68,22 @@ Nothing is uploaded to the PPA until the final 2.1.0.
 - **backup's tip names `zark monitor` without sudo** (M8-12 12a), through
   `zark_command(sudo=False)`.
 
+- **What eli's first monitored backup showed** (M8F-7 to M8F-9, Juanmi,
+  E5 of the M8 checklist): the contract's ETA, bytes left over the last
+  30 s's rate, jumped from seconds to days on a daily incremental of small
+  datasets (8 s to 6 min within one run). `lib/transfer_eta.py` times the
+  run instead: the throughput while bytes move and the fixed cost of each
+  transfer, shown as `ETA ~` once two transfers ended and smoothed, under
+  the contract's own conditions; `--once` keeps the contract's formula, and
+  with every transfer ended the line says the step is finishing. While a
+  command waits for an answer the title gives only the step number, not
+  its label (the label was done work, "Loading encryption key..."), and
+  the question is in bold blue. Colours tell what matters: section titles
+  bold cyan, labels dim, the key figures bold, pool and drive bars and
+  capacity green, yellow or red by level, `ONLINE`, `connected` and
+  `completed` green, a dataset's own share bold and its parts dim, and the
+  transfer bar cyan.
+
 #### Known limitations
 
 - With `/proc` mounted `hidepid=invisible`, another user's `/proc/<pid>`

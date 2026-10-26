@@ -34,7 +34,7 @@ Span = tuple[str, str]  # (text, style)
 Line = list[Span]
 
 # Styles the front ends know: "" plain, "bold", "dim", "ok", "warn", "crit",
-# "wait" (waiting for input), "run" (running).
+# "wait" (waiting for input), "run" (running), "head" (a section's title).
 STATE_STYLE = {
     "waiting": "wait",
     "running": "run",
@@ -187,6 +187,10 @@ class Inputs:
     # newer or unreadable (contract, Versioning).
     last_good_status: Mapping[str, Any] | None = None
     by_id: Any = sr.BY_ID
+    # The monitor's own ETA (lib.transfer_eta, M8F-8) when it follows the run;
+    # without it (``--once``) the contract's formula is used.
+    eta_model: bool = False
+    eta: float | None = None
 
 
 def _status_doc(inp: Inputs) -> tuple[Mapping[str, Any] | None, bool]:
@@ -216,11 +220,11 @@ def _file_ages(r: sr.Reading) -> Line:
         line.append(("status.json absent", "dim"))
     elif doc is not None:
         by = clean(doc.get("generated_by", "?"))
-        line.append((f"status.json {_ago(r.now, doc.get('generated_at'))} ({by})", ""))
+        line.append((f"status.json {_ago(r.now, doc.get('generated_at'))} ({by})", "dim"))
     else:
         line.append((f"status.json {r.status.state}", "warn"))
     if r.progress.doc is not None:
-        line.append((f"   progress.json {_ago(r.now, r.progress.doc.get('updated_at'))}", ""))
+        line.append((f"   progress.json {_ago(r.now, r.progress.doc.get('updated_at'))}", "dim"))
     return line
 
 
@@ -249,7 +253,7 @@ def _header(inp: Inputs, opt: ViewOptions) -> list[Line]:
     return lines
 
 
-def _progress_title(pdoc: Mapping[str, Any]) -> str:
+def _progress_title(pdoc: Mapping[str, Any], waiting: bool = False) -> str:
     title = clean(pdoc.get("command", "zark"))
     drive = pdoc.get("drive")
     if isinstance(drive, dict) and isinstance(drive.get("name"), str):
@@ -257,7 +261,11 @@ def _progress_title(pdoc: Mapping[str, Any]) -> str:
         title += f" {joiner} {clean(drive['name'])}"
     step = pdoc.get("step")
     if isinstance(step, dict) and _int(step.get("index")) and _int(step.get("total")):
-        title += f"   step {step['index']}/{step['total']}  {clean(step.get('label', ''))}"
+        # While zark waits for an answer the step's label is done work (M8F-7).
+        if waiting:
+            title += f"   (step {step['index']}/{step['total']})"
+        else:
+            title += f"   step {step['index']}/{step['total']}  {clean(step.get('label', ''))}"
     return title
 
 
@@ -267,20 +275,36 @@ def _byte_line(transfer: Mapping[str, Any], opt: ViewOptions, style: str) -> lis
     if fraction is not None:
         floor = ">= " if transfer.get("bytes_total_partial") is True else ""
         sent = f"  {fmt_bytes(done)} of {floor}{fmt_bytes(total)}  {int(fraction * 100)} %"
-        return [[("  " + meter(fraction, 40, opt.unicode_bars), style), (sent, style)]]
+        return [
+            [
+                ("  " + meter(fraction, 40, opt.unicode_bars), style or "run"),
+                (sent, style or "bold"),
+            ]
+        ]
     if done is not None:
         return [[(f"  {fmt_bytes(done)} sent, total not estimated", style)]]
     return []
 
 
-def _rate_line(transfer: Mapping[str, Any], style: str) -> Line:
+def _eta_text(inp: Inputs, transfer: Mapping[str, Any]) -> str:
+    done = _int(transfer.get("datasets_done")) or 0
+    planned = _int(transfer.get("datasets_total")) or 0
+    if planned and done >= planned:
+        return "   transfers done, finishing the step   "
+    if inp.eta_model:
+        return f"   ETA ~{fmt_duration(inp.eta)}   " if inp.eta is not None else "   ETA -   "
+    eta = sr.eta_seconds(transfer)
+    return f"   ETA {fmt_duration(eta)}   " if eta is not None else "   ETA -   "
+
+
+def _rate_line(inp: Inputs, transfer: Mapping[str, Any], style: str) -> Line:
     line: Line = []
     if _int(transfer.get("bytes_done")) is None:
         line.append(("  bytes not measured   ", "dim"))
     else:
-        rate, eta = _int(transfer.get("rate_bytes_per_s")), sr.eta_seconds(transfer)
+        rate = _int(transfer.get("rate_bytes_per_s"))
         line.append((f"  {fmt_bytes(rate)}/s" if rate is not None else "  rate -", style))
-        line.append((f"   ETA {fmt_duration(eta)}   " if eta is not None else "   ETA -   ", style))
+        line.append((_eta_text(inp, transfer), style or "bold"))
     done = _int(transfer.get("datasets_done")) or 0
     planned = _int(transfer.get("datasets_total")) or 0
     failed = _int(transfer.get("datasets_failed")) or 0
@@ -289,9 +313,11 @@ def _rate_line(transfer: Mapping[str, Any], style: str) -> Line:
     return line
 
 
-def _transfer_lines(transfer: Mapping[str, Any], opt: ViewOptions, style: str) -> list[Line]:
+def _transfer_lines(
+    inp: Inputs, transfer: Mapping[str, Any], opt: ViewOptions, style: str
+) -> list[Line]:
     lines = _byte_line(transfer, opt, style)
-    lines.append(_rate_line(transfer, style))
+    lines.append(_rate_line(inp, transfer, style))
     dataset = transfer.get("dataset")
     if isinstance(dataset, str):
         state = transfer.get("dataset_state")
@@ -316,12 +342,15 @@ def _active_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     style = "dim" if r.progress_class == "stalled" else ""
     state = r.indicator if r.indicator in ("waiting", "running") else "running"
     lines: list[Line] = [
-        [(STATE_WORD[state], "bold " + STATE_STYLE[state]), (f"  {_progress_title(pdoc)}", "")]
+        [
+            (STATE_WORD[state], "bold " + STATE_STYLE[state]),
+            (f"  {_progress_title(pdoc, waiting=r.indicator == 'waiting')}", ""),
+        ]
     ]
     if r.indicator == "waiting":
         asks = pdoc.get("waiting_for")
         lines.append(
-            [("  asks: ", "wait"), (clean(asks) if isinstance(asks, str) else "-", "bold")]
+            [("  asks: ", "wait"), (clean(asks) if isinstance(asks, str) else "-", "bold wait")]
         )
     started = _ts(pdoc.get("started_at"))
     info = f"  elapsed {fmt_duration((r.now - started).total_seconds())}" if started else "  "
@@ -334,7 +363,7 @@ def _active_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
         lines.append([(f"  no heartbeat for {silent}: the figures below are not current", "warn")])
     transfer = pdoc.get("transfer")
     if isinstance(transfer, dict):
-        return lines + _transfer_lines(transfer, opt, style)
+        return lines + _transfer_lines(inp, transfer, opt, style)
     return lines + _step_meter(pdoc, opt, style)
 
 
@@ -409,7 +438,8 @@ def _idle_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
 def _level_style(space: Mapping[str, Any], thresholds: Mapping[str, Any]) -> tuple[str, str]:
     cap = _int(space.get("capacity_pct"))
     level = sr.capacity_level(cap, thresholds) if cap is not None else "ok"
-    return level, {"critical": "crit", "warning": "warn"}.get(level, "")
+    # Every level has its colour, a healthy one included (M8F-9).
+    return level, {"critical": "crit", "warning": "warn"}.get(level, "ok")
 
 
 def _cap_fraction(space: Mapping[str, Any]) -> float | None:
@@ -433,7 +463,7 @@ def _space_row(
         (f"{fmt_bytes(_int(space.get('available_bytes'))):>11}", ""),
         (f"{fmt_bytes(sr.reserved_bytes(space)):>11}", ""),
         (f"{cap if cap is not None else '-':>5} %", style),
-        (f"  {clean(health):<8}", "" if health in ("ONLINE", "-") else "crit"),
+        (f"  {clean(health):<8}", {"ONLINE": "ok", "-": "dim"}.get(health, "crit")),
     ]
     if level != "ok":
         row.append((level, style))
@@ -469,7 +499,7 @@ def _pool_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     }
     head = f"{'':<22}{'used':>11}{'free':>11}{'reserved':>11}    cap  health"
     lines: list[Line] = [
-        [("POOLS", "bold"), (f"   ({_pools_when(inp, doc)})", "dim")],
+        [("POOLS", "head"), (f"   ({_pools_when(inp, doc)})", "dim")],
         [(head, "dim")],
     ]
     if live and live.error:
@@ -493,8 +523,14 @@ def _drive_row(drive: Mapping[str, Any], width: int, where: str, now: datetime) 
     run = drive.get("last_run")
     if isinstance(run, dict) and isinstance(run.get("result"), str):
         result = str(run["result"])
-        row.append(("   " + clean(result), "crit" if result in sr.ATTENTION_RESULTS else "dim"))
+        row.append(("   " + clean(result), _result_style(result)))
     return row
+
+
+def _result_style(result: str) -> str:
+    if result in sr.ATTENTION_RESULTS:
+        return "crit"
+    return "ok" if result == "completed" else "dim"
 
 
 def _run_lines(drive: Mapping[str, Any], pad: str, now: datetime) -> list[Line]:
@@ -529,7 +565,7 @@ def _fill_line(  # pylint: disable=too-many-arguments
         (f"  ({fmt_local(_ts(space.get('measured_at')), now)})", "dim"),
     ]
     if health:
-        line.append((f"  {health}", "" if health == "ONLINE" else "crit"))
+        line.append((f"  {health}", "ok" if health == "ONLINE" else "crit"))
     return line
 
 
@@ -557,13 +593,13 @@ def _drive_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     doc, _older = _status_doc(inp)
     drives = _dicts((doc or {}).get("drives"))
     if not drives:
-        return [[("DRIVES", "bold")], [("  no drive known", "dim")]]
+        return [[("DRIVES", "head")], [("  no drive known", "dim")]]
     pdoc = r.progress.doc if r.progress_class in ("running", "stalled") else None
     using = (pdoc or {}).get("drive")
     using = using if isinstance(using, dict) else {}
     width = max(len(clean(d.get("name", "?"))) for d in drives)
     pad = " " * (width + 4)
-    lines: list[Line] = [[("DRIVES", "bold")]]
+    lines: list[Line] = [[("DRIVES", "head")]]
     for drive in drives:
         in_use = bool(using) and using.get("guid") == drive.get("guid")
         lines.append(_drive_row(drive, width, _where(drive, in_use, inp.by_id), r.now))
@@ -591,7 +627,7 @@ def _points_line(c: sr.DriveContents, pad: str) -> list[Line]:
     shown = ", ".join(f"{m} {c.months[m]}" for m in months[:4])
     older = months[4:]
     rest = f"; {sum(c.months[m] for m in older)} in {len(older)} older months" if older else ""
-    return [[(f"{pad}points {c.points}: {shown}{rest}", "")]]
+    return [[(f"{pad}points ", "dim"), (f"{c.points}", "bold"), (f": {shown}{rest}", "")]]
 
 
 def _next_line(
@@ -604,13 +640,14 @@ def _next_line(
         return [[(f"{pad}next under the policy: nothing", "dim")]]
     points = _dicts(drive.get("points"))
     first = _month_of(str(nxt["points"][0]), points)
-    text = f"{pad}next under the policy: {c.next_points} point(s) from {first}"
+    label = f"{pad}next under the policy: "
+    text = f"{c.next_points} point(s) from {first}"
     if c.next_reclaim_bytes is not None:
         text += f", frees {fmt_bytes(c.next_reclaim_bytes)}"
     if c.available_after_policy_bytes is not None:
         text += f", then {fmt_bytes(c.available_after_policy_bytes)} free"
     floor = " (at least)" if sr.retention_next_is_floor(drive, now) else ""
-    return [[(text + floor, "")]]
+    return [[(label, "dim"), (text + floor, "")]]
 
 
 def _others_line(drive: Mapping[str, Any], pad: str) -> list[Line]:
@@ -634,7 +671,7 @@ def _largest_line(drive: Mapping[str, Any], pad: str) -> list[Line]:
     names = ", ".join(
         f"{_relative(pool, clean(d.get('name', '?')))} {fmt_bytes(sr.own_share(d))}" for d in top
     )
-    return [[(f"{pad}largest: {names}", "")]]
+    return [[(f"{pad}largest: ", "dim"), (names, "")]]
 
 
 def _contents_lines(drive: Mapping[str, Any], pad: str, now: datetime) -> list[Line]:
@@ -697,7 +734,11 @@ def _group_lines(pool: str, rows: Sequence[Mapping[str, Any]]) -> list[Line]:
         g[0] += sr.own_share(d)
         g[1] += _int(d.get("usedbysnapshots_bytes")) or 0
     lines: list[Line] = [
-        [(f"  {g:<7}{fmt_bytes(totals[g][0]):>11}   snapshots {fmt_bytes(totals[g][1])}", "")]
+        [
+            (f"  {g:<7}", "dim"),
+            (f"{fmt_bytes(totals[g][0]):>11}", "bold"),
+            (f"   snapshots {fmt_bytes(totals[g][1])}", "dim"),
+        ]
         for g in ("home", "system", "other")
         if g in totals
     ]
@@ -723,8 +764,13 @@ def _dataset_row(pool: str, d: Mapping[str, Any]) -> Line:
         _int(d.get("used_bytes")),
     )
     pct = f"{snaps * 100 // own}" if own else "-"
-    text = "  " + " ".join(f"{fmt_bytes(c):>10}" for c in cells) + f" {pct:>5}  "
-    return [(text, ""), (_relative(pool, clean(d.get("name", "?"))), "bold")]
+    # The own share is the figure to read; its parts follow in dim (M8F-9).
+    rest = " ".join(f"{fmt_bytes(c):>10}" for c in cells[1:]) + f" {pct:>5}  "
+    return [
+        (f"  {fmt_bytes(cells[0]):>10} ", "bold"),
+        (rest, "dim"),
+        (_relative(pool, clean(d.get("name", "?"))), ""),
+    ]
 
 
 def _dataset_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
@@ -732,7 +778,7 @@ def _dataset_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     for pool, rows, when in _dataset_sources(inp):
         if not rows:
             continue
-        lines.append([(f"DATASETS {clean(pool)}", "bold"), (f"   ({when})", "dim")])
+        lines.append([(f"DATASETS {clean(pool)}", "head"), (f"   ({when})", "dim")])
         lines += _group_lines(pool, rows) if pool == "rpool" else _metadata_line(pool, rows)
         head = "  " + " ".join(f"{h:>10}" for h in ("own", "data", "snapshots", "children", "used"))
         lines.append([(f"{head} {'snap%':>5}  name", "dim")])
@@ -761,7 +807,7 @@ def _sorted_datasets(rows: Sequence[Mapping[str, Any]], sort: str) -> list[Mappi
 
 def _notice_lines(inp: Inputs) -> list[Line]:
     doc, _older = _status_doc(inp)
-    lines: list[Line] = [[("NOTICES", "bold")]]
+    lines: list[Line] = [[("NOTICES", "head")]]
     notices = _dicts((doc or {}).get("notices"))
     if not notices:
         lines.append([("  none", "dim")])

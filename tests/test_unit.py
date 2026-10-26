@@ -122,6 +122,7 @@ import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: 
 import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status_file as status_file_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status_reader as sreader  # pylint: disable=wrong-import-position # noqa: E402
+import lib.transfer_eta as teta  # pylint: disable=wrong-import-position # noqa: E402
 import lib.zfs_features as zfeat  # pylint: disable=wrong-import-position # noqa: E402
 import tests.test_status_files as tsf  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -20661,6 +20662,133 @@ class TestMonitorView:  # pylint: disable=missing-function-docstring
             ("abc", ""),
             ("d", "bold"),
         ]
+
+
+def _timeline(
+    sizes: list[int], cost: int = 5, rate: int = 20 << 20
+) -> list[tuple[float, dict[str, Any], int]]:
+    """A run of transfers read once a second, as eli's daily incremental of
+    2026-10-26 (M8F-8): each transfer costs ``cost`` seconds before its bytes
+    move at ``rate``. Gives (time, transfer, real seconds left) per reading."""
+    plan: list[tuple[int, int]] = []
+    for i, size in enumerate(sizes):
+        plan += [(i, 0)] * cost
+        left = size
+        while left > 0:
+            plan.append((i, min(rate, left)))
+            left -= rate
+    readings, done_bytes, end = [], 0, len(plan)
+    for t, (i, moved) in enumerate(plan):
+        done_bytes += moved
+        last = t == end - 1 or plan[t + 1][0] != i
+        transfer = {
+            "datasets_total": len(sizes),
+            "datasets_done": i + 1 if last else i,
+            "datasets_failed": 0,
+            "bytes_total": sum(sizes),
+            "bytes_total_partial": False,
+            "bytes_done": done_bytes,
+            "rate_bytes_per_s": rate,
+        }
+        readings.append((float(t), transfer, end - 1 - t))
+    return readings
+
+
+_MIB = 1 << 20
+_SIZES = [2, 50, 1, 0, 3, 600, 0, 1, 10, 0, 0, 2]
+
+
+class TestTransferEta:  # pylint: disable=missing-function-docstring
+    """M8F-8: the monitor's ETA from the run's own pace."""
+
+    def test_it_follows_a_run_of_small_and_large_transfers(self) -> None:
+        model, shown = teta.TransferEta(), []
+        for t, transfer, real in _timeline([n * _MIB for n in _SIZES]):
+            model.feed(t, transfer)
+            eta = model.seconds()
+            if eta is not None:
+                shown.append((eta, real))
+        assert shown, "two transfers ended: a figure is due"
+        rises = [b[0] - a[0] for a, b in zip(shown, shown[1:], strict=False)]
+        assert max(rises) < 5  # the contract's ETA went from 8 s to over 3 min here
+        assert all(abs(eta - real) < 20 for eta, real in shown if real < 60)
+        assert shown[-1][0] < 3
+
+    def test_nothing_until_two_transfers_ended(self) -> None:
+        model = teta.TransferEta()
+        for t, transfer, _real in _timeline([n * _MIB for n in _SIZES]):
+            model.feed(t, transfer)
+            if transfer["datasets_done"] < teta.MIN_ENDED:
+                assert model.seconds() is None
+
+    def test_only_where_the_contract_allows_an_eta(self) -> None:
+        readings = _timeline([n * _MIB for n in _SIZES])
+        model = teta.TransferEta()
+        for t, transfer, _real in readings[:40]:
+            model.feed(t, transfer)
+        assert model.seconds() is not None
+        t, transfer, _real = readings[40]
+        model.feed(t, {**transfer, "bytes_total_partial": True})
+        assert model.seconds() is None
+        model.feed(t + 1, None)  # the run ended: its pace is forgotten
+        assert model.seconds() is None and model.moved == 0 and not model.ended
+
+
+class TestMonitorViewM8F:  # pylint: disable=missing-function-docstring
+    """M8F-7, M8F-8, M8F-9 in the frame."""
+
+    @staticmethod
+    def _lines(case: str, **inp: Any) -> list[mview.Line]:
+        r = _reading_of(_STATUS_FIXTURES / case)
+        inputs = mview.Inputs(reading=r, live=None, by_id=Path("/nonexistent"), **inp)
+        return mview.frame(inputs, mview.ViewOptions(width=80, version="2.1.0"))
+
+    def _text(self, case: str, **inp: Any) -> str:
+        return "\n".join(mview.line_text(li) for li in self._lines(case, **inp))
+
+    def test_waiting_names_the_step_but_not_its_finished_work(self) -> None:
+        title = next(li for li in self._text("waiting").splitlines() if "WAITING" in li)
+        assert "(step 5/8)" in title and "Loading encryption key" not in title
+        running = next(li for li in self._text("running").splitlines() if "RUNNING" in li)
+        assert "step 7/8  Replicating" in running
+
+    def test_the_eta_comes_from_the_model_when_it_follows_the_run(self) -> None:
+        assert "ETA ~1m05s" in self._text("running", eta_model=True, eta=65.0)
+        assert "ETA -" in self._text("running", eta_model=True, eta=None)
+        assert "ETA 1m36s" in self._text("running")  # --once: the contract's formula
+
+    def test_all_transfers_ended_says_the_step_is_finishing(self) -> None:
+        r = _reading_of(_STATUS_FIXTURES / "running")
+        doc = dict(r.progress.doc or {})
+        doc["transfer"] = {**doc["transfer"], "datasets_done": 21}
+        r = dc_replace(r, progress=dc_replace(r.progress, doc=doc))
+        inputs = mview.Inputs(reading=r, live=None, by_id=Path("/nonexistent"), eta_model=True)
+        lines = mview.frame(inputs, mview.ViewOptions(width=80, version="2.1.0"))
+        text = "\n".join(mview.line_text(li) for li in lines)
+        assert "transfers done, finishing the step" in text and "ETA" not in text
+
+    def test_colours_tell_the_sections_and_the_healthy_figures(self) -> None:
+        styles = {t.strip(): st for li in self._lines("idle") for t, st in li if t.strip()}
+        assert styles["POOLS"] == "head" and styles["DRIVES"] == "head"
+        assert styles["NOTICES"] == "head"
+        assert "ok" in {st for li in self._lines("idle") for _t, st in li if "[" in _t}
+        assert styles["completed"] == "ok"
+        plain = monitor_mod.render_plain(self._lines("idle"), True)
+        assert "\x1b[1;36mPOOLS" in plain
+
+    def test_the_session_feeds_the_model_and_once_keeps_the_contract(self) -> None:
+        case = _STATUS_FIXTURES / "running"
+        now = sreader.parse_timestamp(_expected(case)["now"])
+        assert now is not None
+        ticks = iter(range(100))
+        opts = monitor_mod.Options(root=case, live=False)
+        session = monitor_mod.Session(
+            opts, clock=lambda: now, alive=lambda _d: True, ticks=lambda: float(next(ticks))
+        )
+        inputs = session.inputs(session.poll())
+        assert inputs.eta_model and session.eta.readings == 1
+        once = monitor_mod.Session(opts, clock=lambda: now, alive=lambda _d: True, eta_model=False)
+        assert not once.inputs(once.poll()).eta_model
 
 
 class TestMonitorOptions:  # pylint: disable=missing-function-docstring

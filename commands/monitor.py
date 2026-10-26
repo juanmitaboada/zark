@@ -37,6 +37,7 @@ from typing import Any
 
 from lib import live_pools, monitor_view as view, status_reader as sr
 from lib.config import VERSION, zark_command
+from lib.transfer_eta import TransferEta
 
 INTERVALS = (15, 30, 60, 120, 300, 600)
 MIN_INTERVAL, MAX_INTERVAL = 5, 3600
@@ -64,6 +65,7 @@ _SGR = {
     "crit": "31",
     "wait": "34",
     "run": "36",
+    "head": "1;36",  # a section's title: bold cyan (M8F-9)
 }
 
 
@@ -125,12 +127,15 @@ class Session:  # pylint: disable=too-many-instance-attributes
         runner: live_pools.Runner = live_pools.run_command,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         alive: Callable[[Mapping[str, Any]], bool] = sr.process_alive,
+        eta_model: bool = True,
+        ticks: Callable[[], float] = time.monotonic,
     ):
         self.opts = opts
         self.interval = opts.interval
         self.runner = runner
         self.clock = clock
         self.alive = alive
+        self.ticks = ticks
         self.progress_path, self.status_path = sr.paths(opts.root)
         self.progress = sr.FileRead("absent")
         self.status = sr.FileRead("absent")
@@ -140,6 +145,8 @@ class Session:  # pylint: disable=too-many-instance-attributes
         self._live_started = 0.0
         self._worker: threading.Thread | None = None
         self._lock = threading.Lock()
+        self.eta = TransferEta()
+        self.eta_model = eta_model
 
     def poll(self) -> sr.Reading:
         """Read again whatever changed, then classify at the reader's clock."""
@@ -153,6 +160,7 @@ class Session:  # pylint: disable=too-many-instance-attributes
         sc = sr.classify_status(self.status, now)
         if sc in ("ok", "stale") and self.status.doc is not None:
             self.last_good = self.status.doc
+        self._feed_eta(pc)
         return sr.Reading(
             now=now,
             progress=self.progress,
@@ -162,11 +170,25 @@ class Session:  # pylint: disable=too-many-instance-attributes
             indicator=sr.indicator(pc, self.progress.doc, sc, self.status.doc),
         )
 
+    def _feed_eta(self, progress_class: str) -> None:
+        doc = self.progress.doc
+        transfer = doc.get("transfer") if isinstance(doc, dict) else None
+        if progress_class == "running" and isinstance(transfer, dict):
+            self.eta.feed(self.ticks(), transfer)
+        elif progress_class != "running":
+            self.eta.feed(self.ticks(), None)  # the run is over: forget its pace
+
     def inputs(self, reading: sr.Reading) -> view.Inputs:
         """What one frame shows."""
         with self._lock:
             live = self.live
-        return view.Inputs(reading=reading, live=live, last_good_status=self.last_good)
+        return view.Inputs(
+            reading=reading,
+            live=live,
+            last_good_status=self.last_good,
+            eta_model=self.eta_model,
+            eta=self.eta.seconds(),
+        )
 
     def live_now(self) -> None:
         """List the pools in this thread (``--once``)."""
@@ -353,6 +375,8 @@ def _attr(curses: Any, style: str, color: bool) -> int:
             attr |= curses.A_BOLD
         elif word == "dim":
             attr |= curses.A_DIM
+        elif word == "head":
+            attr |= curses.A_BOLD | (curses.color_pair(_PAIRS["run"]) if color else 0)
         elif color and word in _PAIRS:
             attr |= curses.color_pair(_PAIRS[word])
     return attr
@@ -455,7 +479,8 @@ def run(args: list[str]) -> int:
         print(USAGE, end="", file=sys.stderr)
         return EX_USAGE
     try:
-        return _run_session(Session(opts))
+        # One reading has no pace to learn from: --once keeps the contract's ETA.
+        return _run_session(Session(opts, eta_model=not opts.once))
     except KeyboardInterrupt:
         return 0
     except BrokenPipeError:

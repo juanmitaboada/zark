@@ -271,6 +271,7 @@ zark/
 │   ├── status_reader.py       # The reference reader of the status files
 │   ├── statusdirs.py          # /run/zark and /var/lib/zark, readable by anyone
 │   ├── survey.py              # Reads of origin and of a drive, and the checks before a run
+│   ├── transfer_eta.py        # The monitor's time left, from the run's own pace
 │   ├── zfs.py                 # ZFS pool and dataset operations
 │   └── zfs_features.py        # OpenZFS pool features and their first release
 ├── commands/

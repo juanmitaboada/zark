@@ -111,8 +111,12 @@ for the canonical end-to-end sequences.
     or off, **s** sort them (own size, snapshots, name), **-** and **+** the
     interval (15, 30, 60, 120, 300, 600 s), **r** list the pools now, **b**
     the bell on or off, **h** the key line. **NO_COLOR** turns colour off.
-    Without a terminal it prints a frame when something changes.
-    **--once** prints one frame and exits; with **--state** it prints only
+    Without a terminal it prints a frame when something changes. While it
+    follows a backup the time left (**ETA ~**) comes from the run's own
+    pace, bytes and the fixed cost of each transfer, and shows once two
+    transfers have ended.
+    **--once** prints one frame and exits, with the time left from the
+    current rate; with **--state** it prints only
     the state: **waiting**, **running**, **attention**, **edge**,
     **overdue**, **none** or **ok**. **--root** *DIR* reads
     *DIR/run/zark/progress.json* and *DIR/var/lib/zark/status.json*, and
