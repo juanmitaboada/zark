@@ -48,6 +48,7 @@ import commands.status as status_cmd
 from lib import (
     alerts,
     certificates,
+    drive_contents,
     live,
     lock,
     log as log_mod,
@@ -576,6 +577,54 @@ class TestStatusJson:  # pylint: disable=missing-function-docstring
         assert black["last_backup_point"] == "zark_2026-10-24_09:00:05Z"
         assert blue["guid"] == "999" and blue["last_run"] is None and blue["space"] is None
         assert [d["name"] for d in doc["drives"]] == ["black", "blue"]
+
+    def test_the_drive_contents_travel_with_their_space(self):
+        """M9a-3 3a: contents never pair with a space from another time."""
+        fig = drive_contents.DriveContents(
+            points=[],
+            non_point_snapshots={
+                "intermediate": {"count": 1, "used_bytes": 2},
+                "other": {"count": 0, "used_bytes": 0},
+            },
+            retention_next={
+                "horizon_days": 7,
+                "points": [],
+                "snapshots": 0,
+                "datasets_whole": 0,
+                "reclaim_bytes": 0,
+            },
+            reclaim_by_age=[],
+        )
+
+        def black(root: Path, cfg: Config, up: status_file.DriveUpdate | None) -> dict[str, Any]:
+            assert self._write(root, cfg, updates={"111": up} if up else {})[0]
+            return self._read(root)["drives"][0]
+
+        keys = set(fig.to_json())
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cfg = _config(("black", "111"))
+            # A space alone over an entry without contents: written as before.
+            got = black(root, cfg, status_file.DriveUpdate(space=_space(1)))
+            assert got["space"] == _space(1).to_json() and not keys & set(got)
+            # A pass: the new pair.
+            up = status_file.DriveUpdate(space=_space(2), contents=fig)
+            got = black(root, cfg, up)
+            assert got["space"] == _space(2).to_json() and keys <= set(got)
+            # The timer: the pair copied whole.
+            got = black(root, cfg, None)
+            assert got["space"] == _space(2).to_json() and keys <= set(got)
+            # An aborted run's space: the previous pair stays (3a).
+            got = black(root, cfg, status_file.DriveUpdate(space=_space(3, "2026-10-25T08:00:00Z")))
+            assert got["space"] == _space(2).to_json() and keys <= set(got)
+            # A pass that measured nothing: the new space alone, the group gone.
+            up = status_file.DriveUpdate(space=_space(4), contents=drive_contents.DriveContents())
+            got = black(root, cfg, up)
+            assert got["space"] == _space(4).to_json() and not keys & set(got)
+            # By GUID: the same name prepared again starts empty.
+            assert black(root, cfg, status_file.DriveUpdate(space=_space(5), contents=fig))
+            got = black(root, _config(("black", "999")), None)
+            assert got["space"] is None and not keys & set(got)
 
     def test_an_orphan_does_not_overwrite_the_result_its_run_recorded(self):
         with tempfile.TemporaryDirectory() as td:

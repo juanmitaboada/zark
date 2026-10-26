@@ -24,7 +24,8 @@ Every write is a read-merge-write under ``flock(LOCK_EX)`` on
 ``zark status`` takes no ``zark.lock`` and may run while a backup ends. What
 only a backup measures (a drive's ``space``, ``last_run`` and
 ``last_backup_point``) is carried forward from the previous file, by GUID; a
-drive no longer in the registry is dropped. A previous file of a newer
+drive no longer in the registry is dropped. A drive's contents (M9a) travel
+with the ``space`` they were measured with, never with another. A previous file of a newer
 ``schema_version`` is never written over. A failed write is a warning, never
 a failed command.
 """
@@ -40,6 +41,7 @@ from typing import Any
 
 from lib import sh, status, statusdirs
 from lib.config import VERSION, Config, now_utc_iso, parse_utc_iso
+from lib.drive_contents import CONTENT_FIELDS, DriveContents
 from lib.log import Log
 from lib.status import CAP_CRITICAL, CAP_WARNING, RPO_WARNING_DAYS, Status, cap_level, notices
 from lib.zfs import Space
@@ -84,12 +86,29 @@ class DriveUpdate:
     """What this writer measured for one drive; a None field is carried
     forward from the previous file. ``unless_started_at``: keep a previous
     ``last_run`` that started then (M7-7 7a: an orphan whose run had already
-    recorded its result)."""
+    recorded its result). ``contents``: the drive contents measured with
+    ``space`` (None: not looked at; all fields None: looked at, nothing
+    measured)."""
 
     last_run: LastRun | None = None
     space: Space | None = None
     last_backup_point: str | None = None
     unless_started_at: str = ""
+    contents: DriveContents | None = None
+
+
+def _space_and_contents(before: dict[str, Any], up: DriveUpdate) -> tuple[Any, dict[str, Any]]:
+    """The drive's ``space`` and its contents, one group (contract,
+    "Carried-forward fields"): a new pair, or the previous pair copied whole.
+    A new ``space`` without contents keeps the previous pair when it has
+    contents (M9a-3 3a: an aborted or interrupted run measured no contents,
+    and a figure from another time never joins them)."""
+    old = {k: before[k] for k in CONTENT_FIELDS if k in before} if before.get("space") else {}
+    if up.space is not None and up.contents is not None:
+        return up.space.to_json(), up.contents.to_json()
+    if up.space is not None and not old:
+        return up.space.to_json(), {}
+    return before.get("space"), old
 
 
 def unusable_registry(error: str) -> str:
@@ -163,6 +182,7 @@ def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,t
             and last_run.get("started_at") == up.unless_started_at
         ):
             last_run = up.last_run.to_json()
+        space, contents = _space_and_contents(before, up)
         drives.append(
             {
                 "name": name,
@@ -180,7 +200,8 @@ def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,t
                 "age_days": _age_days(info.last_backup_at, now),
                 "last_backup_point": up.last_backup_point or before.get("last_backup_point"),
                 "last_run": last_run,
-                "space": up.space.to_json() if up.space else before.get("space"),
+                "space": space,
+                **contents,
             }
         )
     return {
