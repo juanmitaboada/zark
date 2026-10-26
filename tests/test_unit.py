@@ -20938,6 +20938,68 @@ class TestMonitorDispatch:  # pylint: disable=missing-function-docstring
         assert source.index('("monitor", "--monitor")') < source.index("os.geteuid() != 0:")
 
 
+class TestSelftestRdr01:  # pylint: disable=missing-function-docstring
+    """M8-11: RDR-01, a user without privileges reads what the monitor reads."""
+
+    def _run(self, shell: MockShell) -> stest.Result:
+        check_ = next(c for c in all_selftest_checks() if c.cid == "RDR-01")
+        with tempfile.TemporaryDirectory() as td, patch_sh(shell):
+            log = make_log()
+            bench = stest.Bench(log, Cleanup(log), root=td)
+            bench.tag = "0badcafe"
+            with patch("lib.selftest_host.shutil.which", return_value="/usr/bin/setpriv"):
+                return stest.run_one(check_, bench)
+
+    def _shell(self, nobody_zpool: tuple[int, str, str] | None = None) -> MockShell:
+        rows = "zst0badcafea\t1\t2\t3\t4\t5\tONLINE\nzst0badcafeb\t6\t7\t8\t9\t1\tONLINE\n"
+        stat = "1 (systemd) S" + " 0" * 18 + " 23 0 0\n"
+        shell = MockShell()
+        nobody = "setpriv --reuid=65534 --regid=65534 --clear-groups -- "
+        zpool = shlex.join(livep.zpool_argv())
+        zfs = shlex.join([*livep.zfs_head(), "zst0badcafea"])
+        if nobody_zpool is None:
+            shell.on(nobody + zpool).succeeds(rows + "rpool\t1\t1\t1\t1\t1\tONLINE\n")
+        else:
+            shell.on(nobody + zpool).returns(*nobody_zpool)
+        shell.on(zpool).succeeds(rows)
+        shell.on(nobody + zfs).succeeds("zst0badcafea\tfilesystem\t1\t2\t3\t0\t0\t0\n")
+        shell.on(zfs).succeeds("zst0badcafea\tfilesystem\t1\t2\t3\t0\t0\t0\n")
+        for path, text in (
+            ("/proc/sys/kernel/random/boot_id", "b-1\n"),
+            ("/proc/1/stat", stat),
+        ):
+            shell.on(f"{nobody}cat {path}").succeeds(text)
+            shell.on(f"cat {path}").succeeds(text)
+        shell.on_prefix(nobody + "ls ").succeeds("ata-X\n")
+        return shell
+
+    def test_pass_when_nobody_reads_the_same(self) -> None:
+        res = self._run(self._shell())
+        assert res.result == "PASS", (res.expected, res.came)
+
+    def test_fail_when_nobody_cannot_list(self) -> None:
+        res = self._run(
+            self._shell((1, "", "Permission denied the ZFS utilities must be run as root."))
+        )
+        assert (res.result, res.expected, res.came) == (
+            "FAIL",
+            "zpool list to work as nobody",
+            "exit 1",
+        )
+
+    def test_skip_without_setpriv(self) -> None:
+        check_ = next(c for c in all_selftest_checks() if c.cid == "RDR-01")
+        with tempfile.TemporaryDirectory() as td:
+            log = make_log()
+            bench = stest.Bench(log, Cleanup(log), root=td)
+            with patch("lib.selftest_host.shutil.which", return_value=None):
+                res = stest.run_one(check_, bench)
+        assert (res.result, res.reason) == (
+            "SKIP",
+            "setpriv (util-linux) is not installed",
+        )
+
+
 class TestRunner:
     """The suite's own runner (M1P.26)."""
 
@@ -21137,7 +21199,8 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
 
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
-        assert len([c for c in checks if c.level == 1]) == 55  # M7: SND-13, PRC-05, SYS-02, POOL-14
+        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01
+        assert len([c for c in checks if c.level == 1]) == 56
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         for c in checks:

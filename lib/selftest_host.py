@@ -30,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from lib import alerts, progress, statusdirs
+from lib import alerts, live_pools, progress, statusdirs
 from lib.selftest import Bench, Fail, Skip, check, exit_status, expect, text_of
 from lib.selftest_l1 import reimport
 from lib.zfs import BACKUP_ALTROOT_BASE
@@ -479,6 +479,68 @@ def prc_05(b: Bench) -> None:
         "boot_id in the schema's form",
         f"{len(boot)} characters",
     )
+
+
+# ── readers ──────────────────────────────────────────────────────────────
+
+# setpriv(1) from util-linux: the commands below run as nobody, with no
+# supplementary group, as a user who runs zark monitor would.
+_NOBODY = "setpriv --reuid=65534 --regid=65534 --clear-groups --"
+
+
+def _rows(text: str, pools: tuple[str, ...]) -> list[str]:
+    return sorted(li for li in text.splitlines() if li.split("\t", 1)[0] in pools)
+
+
+@check(
+    "RDR-01",
+    1,
+    1,
+    "a user without privileges reads what zark monitor reads",
+    depends=(
+        "zark monitor runs as any user (commands/monitor.py, M8-3)",
+        "lib.live_pools listings",
+        "lib.status_reader.process_alive",
+    ),
+)
+def rdr_01(b: Bench) -> None:
+    """As nobody: ``zpool list`` and ``zfs list`` with the monitor's options
+    give root's rows for the bench's pools (``/dev/zfs`` 0666, OpenZFS 2.4.1
+    udev/rules.d/90-zfs.rules.in:10; list ioctls ``zfs_secpolicy_none`` and
+    ``zfs_secpolicy_read``, module/zfs/zfs_ioctl.c:379-398, :7645-7646,
+    :7687-7688, :7708-7709, :7734-7742); ``boot_id`` is readable (Linux 7.0
+    drivers/char/random.c:1694-1696); ``/proc/1/stat``'s ``starttime``, a
+    root process's, equals root's read (fs/proc/base.c:3338,
+    fs/proc/array.c:580, :606); ``/dev/disk/by-id`` lists."""
+    if not shutil.which("setpriv"):
+        raise Skip("setpriv (util-linux) is not installed")
+    pools = (b.a, b.b)
+    zpool = shlex.join(live_pools.zpool_argv())
+    zfs = shlex.join([*live_pools.zfs_head(), b.a])
+    for what, cmd, pick in (
+        ("zpool list", zpool, lambda t: _rows(t, pools)),
+        ("zfs list", zfs, lambda t: t.splitlines()),
+    ):
+        mine, theirs = b.ok(cmd), b.run(f"{_NOBODY} {cmd}")
+        expect(theirs.ok, f"{what} to work as nobody", exit_status(theirs), text_of(theirs))
+        expect(
+            bool(pick(mine.stdout)) and pick(theirs.stdout) == pick(mine.stdout),
+            f"{what} as nobody to give root's rows",
+            f"{len(pick(theirs.stdout))} rows, {len(pick(mine.stdout))} as root",
+            text_of(theirs),
+        )
+    for what, path in (("boot_id", "/proc/sys/kernel/random/boot_id"), ("stat", "/proc/1/stat")):
+        mine, theirs = b.ok(f"cat {path}"), b.run(f"{_NOBODY} cat {path}")
+        expect(theirs.ok, f"{what} readable as nobody", exit_status(theirs), text_of(theirs))
+        if what == "stat":
+            got = theirs.stdout[theirs.stdout.rfind(")") + 1 :].split()[19:20]
+            want = mine.stdout[mine.stdout.rfind(")") + 1 :].split()[19:20]
+        else:
+            got, want = [theirs.stdout.strip()], [mine.stdout.strip()]
+        expect(bool(want) and got == want, f"{what} as nobody equal to root's", "different")
+    if Path("/dev/disk/by-id").is_dir():
+        r = b.run(f"{_NOBODY} ls /dev/disk/by-id")
+        expect(r.ok, "/dev/disk/by-id listable as nobody", exit_status(r), text_of(r))
 
 
 # ── systemd, sanoid ──────────────────────────────────────────────────────
