@@ -22782,10 +22782,10 @@ class TestTypography:  # pylint: disable=missing-function-docstring
                 found.append(f"{rel}: names a GPL version")
         assert not found, found
 
-    def test_the_readme_tree_lists_every_module(self):
+    def test_the_architecture_tree_lists_every_module(self):
         # M2P.5, M4cP.1 (M4d-30): the tree lacked 31 modules of lib/ and 7 of commands/.
-        readme = (self._REPO / "README.md").read_text("utf-8")
-        tree = readme.split("```\nzark/\n", 1)[1].split("```", 1)[0]
+        design = (self._REPO / "docs" / "DESIGN.md").read_text("utf-8")
+        tree = design.split("```\nzark/\n", 1)[1].split("```", 1)[0]
         listed = {m.group(1) for m in re.finditer(r"[├└]── (\S+)", tree)}
         missing = [
             str(f.relative_to(self._REPO))
