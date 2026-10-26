@@ -601,6 +601,35 @@ class TestStatusJson:  # pylint: disable=missing-function-docstring
             assert ok and "unreadable; nothing carried forward" in out
             assert self._read(root)["drives"][0]["last_run"] is None
 
+    def test_a_registry_that_cannot_be_used_leaves_the_file_as_it_is(self):
+        # M7R-1: an empty drive list would drop every drive's carried-forward fields.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            run = status_file.LastRun("completed", "2026-10-24T09:00:00Z", "2026-10-24T09:30:00Z")
+            up = status_file.DriveUpdate(run, _space(5), "zark_2026-10-24_09:00:05Z")
+            assert self._write(root, _config(("black", "111")), updates={"111": up})[0]
+            before = (root / "status.json").read_bytes()
+            broken = _config()
+            broken._load_error = "Expecting value: line 1 column 1 (char 0)"
+            ok, out = self._write(root, broken)
+            assert not ok and status_file.unusable_registry(broken._load_error) in out, out
+            assert (root / "status.json").read_bytes() == before
+            assert self._write(root, _config(("black", "111")))[0]
+            assert self._read(root)["drives"][0]["last_run"] == run.to_json()
+
+    def test_an_absent_registry_is_no_drive_and_is_written(self):
+        # M7R-1: only a registry that cannot be read or parsed stops the write.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            empty = root / "etc"
+            empty.mkdir()
+            with patch.dict(os.environ, {"ZARK_CONFIG_DIR": str(empty)}):
+                cfg = Config.load()
+            assert cfg.load_error is None and not cfg.known_drives
+            ok, out = self._write(root, cfg)
+            assert ok and "cannot be used" not in out, out
+            assert self._read(root)["drives"] == []
+
     def test_the_lock_is_waited_for_then_the_write_is_skipped(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -971,6 +1000,22 @@ class TestProgressFile:  # pylint: disable=missing-function-docstring
             _ = path.write_text(json.dumps(running), encoding="utf-8")
             with _running(root, "clean", _config(("blue", "222"))) as (_, refresh):
                 assert not refresh.call_args_list
+
+    def test_an_orphan_with_a_registry_that_cannot_be_used_is_not_recorded(self):
+        # M7R-1: the registry cannot say whether the drive is still known.
+        broken = _config()
+        broken._load_error = "Expecting value: line 1 column 1 (char 0)"
+        orphan = (FIXTURES / "running" / PROGRESS_REL).read_text("utf-8")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "run" / "zark" / "progress.json"
+            path.parent.mkdir(parents=True)
+            _ = path.write_text(orphan, encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out), _running(root, "clean", broken) as (_, refresh):
+                assert not refresh.call_args_list
+                assert _doc(path)["command"] == "clean"
+        assert status_file.unusable_registry(broken._load_error) in out.getvalue(), out.getvalue()
 
     def test_a_failed_write_warns_once_and_fails_nothing(self):
         with tempfile.TemporaryDirectory() as td:

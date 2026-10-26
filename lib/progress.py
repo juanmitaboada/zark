@@ -354,6 +354,9 @@ def _record_orphan(doc: dict[str, Any], command: str, log: Log) -> None:
     if sh.is_live_usb():
         return
     cfg = Config.load()
+    if cfg.load_error is not None:
+        log.warn(status_file.unusable_registry(cfg.load_error))  # M7R-1: not dropped silently
+        return
     if guid not in {i.guid for i in cfg.known_drives.values()}:
         return  # a drive no longer registered is dropped (D4)
     _ = status_file.refresh(

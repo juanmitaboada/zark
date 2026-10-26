@@ -92,6 +92,11 @@ class DriveUpdate:
     unless_started_at: str = ""
 
 
+def unusable_registry(error: str) -> str:
+    """The warning when the registry cannot be read or parsed (M7R-1)."""
+    return f"known_drives.json cannot be used ({error}): status.json not written"
+
+
 def _warn(log: Log, text: str) -> None:
     log.warn(f"status.json: {text}")
 
@@ -244,7 +249,7 @@ def write_atomic(path: Path, text: str, *, durable: bool) -> None:
             os.close(dfd)
 
 
-def write(  # pylint: disable=too-many-arguments
+def write(  # pylint: disable=too-many-arguments,too-many-return-statements
     st: Status,
     cfg: Config,
     generated_by: str,
@@ -257,6 +262,10 @@ def write(  # pylint: disable=too-many-arguments
     """Read, merge and write status.json; True when written. Never raises
     for a write that fails: it logs a warning."""
     if sh.is_live_usb():
+        return False
+    if cfg.load_error is not None:
+        # An empty drive list would drop every drive's carried-forward fields (M7R-1).
+        log.warn(unusable_registry(cfg.load_error))
         return False
     path = path or STATUS_PATH
     try:

@@ -66,6 +66,10 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   pauses while the machine sleeps, the calendar one catches up on resume. The next
   `zark setup` or `zark alerts install` rewrites an installed unit.
 - `zark status` writes `status.json` too.
+- While `known_drives.json` cannot be read or parsed, no command writes
+  `status.json` (a warning names the cause), so every drive's last run,
+  space and point stay as they were until the registry is fixed (M7R-1).
+  An absent registry is no drive, written as before.
 
 #### Known limitations
 
