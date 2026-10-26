@@ -49,7 +49,7 @@ sudo ./zark prepare   # initialize a blank drive as a backup target
 sudo ./zark backup
 ```
 
-zark detects the backup drive by GUID, takes one backup point `zark_<UTC>` of every dataset at once, and brings each dataset on the drive to it with an incremental raw send. Each backup adds a restore point and removes none. A typical incremental backup takes seconds.
+zark detects the backup drive by GUID, takes one backup point `zark_<UTC>` of every dataset at once, and brings each dataset on the drive to it with an incremental raw send. Each backup adds a restore point; after a complete backup, the drive's retention removes what falls outside it (every snapshot of its window, 30 days by default, stays, and before that the newest point of each month; see [Retention on the drive](RETENTION.md#retention-on-the-drive)). A typical incremental backup takes seconds.
 
 To watch it, run `zark monitor` in another terminal, as any user: it shows the running command's step, the bytes sent, the rate and the time left, says when zark is waiting for an answer, and below that the pools, the drives and their last backups. It only reads zark's status files (`docs/STATUS-FILES.md`) and lists the pools with `zfs list` and `zpool list`; it never takes the lock or imports a pool. `zark monitor --once` prints one screen, and `--once --state` only the state word, for scripts.
 
