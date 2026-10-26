@@ -55,7 +55,7 @@ from contextlib import (
     redirect_stderr,
     redirect_stdout,
 )
-from dataclasses import dataclass, replace as dc_replace
+from dataclasses import asdict as dc_asdict, dataclass, replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -114,6 +114,7 @@ import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status_file as status_file_lib  # pylint: disable=wrong-import-position # noqa: E402
+import lib.status_reader as sreader  # pylint: disable=wrong-import-position # noqa: E402
 import lib.zfs_features as zfeat  # pylint: disable=wrong-import-position # noqa: E402
 import tests.test_status_files as tsf  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -20048,6 +20049,383 @@ class TestRecoverIncompletePoint:
         assert all(got[ds] is not None for ds in wanted), got
         home = got[self.HOME]
         assert home is not None and home.creation < newest.end
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  zark monitor, a reader of the status files (M8)
+# ═════════════════════════════════════════════════════════════════════════
+
+_STATUS_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "status"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _fixture_cases() -> list[Path]:
+    return sorted(p for p in _STATUS_FIXTURES.iterdir() if p.is_dir())
+
+
+def _expected(case: Path) -> dict[str, Any]:
+    return json.loads((case / "expected.json").read_text("utf-8"))
+
+
+def _alive_for(expected: dict[str, Any]) -> Any:
+    """The fixtures' README: ``alive`` cases inject liveness, ``dead`` ones
+    use the real check (pid 4194304 exists nowhere)."""
+    if expected["progress_process"] == "alive":
+        return lambda _doc: True
+    return sreader.process_alive
+
+
+def _reading_of(case: Path) -> sreader.Reading:
+    e = _expected(case)
+    return sreader.read_all(case, sreader.parse_timestamp(e["now"]), _alive_for(e))
+
+
+def _stdlib_only(name: str) -> bool:
+    tree = ast.parse((_REPO_ROOT / name).read_text("utf-8"))
+    mods = [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+    mods += [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+    return all(m.split(".")[0] in sys.stdlib_module_names for m in mods)
+
+
+def _ts(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _stat_ticks(pid: int) -> int:
+    line = Path(f"/proc/{pid}/stat").read_text("utf-8")
+    return int(line[line.rfind(")") + 1 :].split()[19])
+
+
+def _boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text("ascii").strip()
+
+
+def _live_root(tmp: Path, pid: int, *, updated: datetime, waiting: bool = False) -> Path:
+    """A tree with ``running``'s progress.json pointing at ``pid`` (the
+    fixtures' README recipe) and ``idle``'s status.json."""
+    doc = json.loads((_STATUS_FIXTURES / "running/run/zark/progress.json").read_text("utf-8"))
+    doc.update(
+        pid=pid,
+        pid_start_ticks=_stat_ticks(pid),
+        boot_id=_boot_id(),
+        updated_at=_ts(updated),
+        waiting_for_input=waiting,
+        waiting_for="Passphrase for black" if waiting else None,
+    )
+    (tmp / "run/zark").mkdir(parents=True, exist_ok=True)
+    (tmp / "run/zark/progress.json").write_text(json.dumps(doc), "utf-8")
+    status = tmp / "var/lib/zark"
+    status.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_STATUS_FIXTURES / "idle/var/lib/zark/status.json", status / "status.json")
+    return tmp
+
+
+class TestStatusReaderFixtures:  # pylint: disable=missing-function-docstring
+    """M8-1: the reference reader against every fixture's expected.json,
+    the same expectations the GNOME extension is tested on."""
+
+    def test_every_case_has_its_expected_json(self) -> None:
+        cases = _fixture_cases()
+        assert len(cases) >= 18, [c.name for c in cases]
+        assert all((c / "expected.json").is_file() for c in cases), cases
+        # M7F-3: a .gitignore with `var/` drops these silently; 17 in contract v1.
+        statuses = [c for c in cases if (c / "var/lib/zark/status.json").is_file()]
+        assert len(statuses) >= 17, [c.name for c in statuses]
+
+    def test_every_case_classifies_as_expected(self) -> None:
+        wrong: list[str] = []
+        for case in _fixture_cases():
+            e = _expected(case)
+            r = _reading_of(case)
+            got = (r.progress_class, r.status_class, r.indicator)
+            want = (e["progress"], e["status"], e["indicator"])
+            if got != want:
+                wrong.append(f"{case.name}: {got} != {want}")
+        assert not wrong, wrong
+
+    def test_the_reader_imports_the_standard_library_only(self) -> None:
+        # So another program can copy the file as it is.
+        assert _stdlib_only("lib/status_reader.py")
+
+    def test_the_public_names_exist(self) -> None:
+        missing = [n for n in sreader.__all__ if not hasattr(sreader, n)]
+        assert not missing, missing
+
+
+class TestStatusReaderProcesses:  # pylint: disable=missing-function-docstring
+    """M8-1: the orphan rules against real processes, unprivileged."""
+
+    def test_a_live_process_runs_then_stalls_then_is_an_orphan(self) -> None:
+        child = subprocess.Popen(["sleep", "60"])  # pylint: disable=consider-using-with
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                now = datetime.now(UTC).replace(microsecond=0)
+                root = _live_root(Path(td), child.pid, updated=now)
+                assert sreader.read_all(root, now).progress_class == "running"
+                assert sreader.read_all(root, now + timedelta(seconds=30)).indicator == "running"
+                stalled = sreader.read_all(root, now + timedelta(seconds=31))
+                assert (stalled.progress_class, stalled.indicator) == (
+                    "stalled",
+                    "running",
+                )
+                child.kill()
+                _ = child.wait()
+                gone = sreader.read_all(root, now)
+                assert (gone.progress_class, gone.indicator) == ("orphan", "edge")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                _ = child.wait()
+
+    def test_a_reused_pid_or_another_boot_is_an_orphan(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            now = datetime.now(UTC).replace(microsecond=0)
+            root = _live_root(Path(td), os.getpid(), updated=now)
+            path = root / "run/zark/progress.json"
+            doc = json.loads(path.read_text("utf-8"))
+            assert sreader.process_alive(doc)
+            assert not sreader.process_alive({**doc, "pid_start_ticks": doc["pid_start_ticks"] + 1})
+            assert not sreader.process_alive({**doc, "boot_id": "0" * 8})
+            assert not sreader.process_alive({**doc, "pid": 4194304})
+            assert not sreader.process_alive({**doc, "pid": True})
+
+    def test_an_unreadable_stat_skips_rule_5(self) -> None:
+        # hidepid: /proc/<pid> is there, its stat is not readable.
+        with tempfile.TemporaryDirectory() as td:
+            proc, boot = Path(td, "proc"), Path(td, "boot_id")
+            boot.write_text("b\n", "ascii")
+            (proc / "77").mkdir(parents=True)
+            doc = {"pid": 77, "pid_start_ticks": 5, "boot_id": "b"}
+            assert sreader.process_alive(doc, proc=proc, boot_id_path=boot)
+            # Field 22 is the 20th after the last ")".
+            stat = "77 (a) b) (c) S" + " 0" * 18 + " 5 0 0\n"
+            (proc / "77/stat").write_text(stat, "ascii")
+            assert sreader.process_alive(doc, proc=proc, boot_id_path=boot)
+            assert not sreader.process_alive(
+                {**doc, "pid_start_ticks": 6}, proc=proc, boot_id_path=boot
+            )
+            # An unreadable boot_id skips rule 3 as well.
+            assert sreader.process_alive(
+                {**doc, "boot_id": "x"}, proc=proc, boot_id_path=Path(td, "none")
+            )
+
+
+class TestStatusReaderEdges:  # pylint: disable=missing-function-docstring
+    """M8-1: files a reader must not half-read."""
+
+    def _progress(self, text: str) -> sreader.FileRead:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td, "progress.json")
+            p.write_text(text, "utf-8")
+            return sreader.read_progress(p)
+
+    def test_what_is_unknown(self) -> None:
+        good = json.loads((_STATUS_FIXTURES / "running/run/zark/progress.json").read_text("utf-8"))
+        now = sreader.parse_timestamp("2026-10-24T09:19:44Z")
+        assert now is not None
+        cases = {
+            "empty": "",
+            "array": "[]",
+            "kind": json.dumps({**good, "kind": "zark-status"}),
+            "newer": json.dumps({**good, "schema_version": 2}),
+            "bool version": json.dumps({**good, "schema_version": True}),
+            "no pid": json.dumps({k: v for k, v in good.items() if k != "pid"}),
+            "pid as text": json.dumps({**good, "pid": "1"}),
+            "bad time": json.dumps({**good, "updated_at": "2026-10-24 09:19:41"}),
+        }
+        for what, text in cases.items():
+            read = self._progress(text)
+            assert sreader.classify_progress(read, now, lambda _d: True) == "unknown", what
+        assert self._progress(json.dumps({**good, "schema_version": 2})).state == "newer"
+        assert sreader.read_progress(Path("/nonexistent/progress.json")).state == "absent"
+
+    def test_stale_is_strictly_after_the_limit(self) -> None:
+        read = sreader.read_status(_STATUS_FIXTURES / "idle/var/lib/zark/status.json")
+        doc = read.doc
+        assert doc is not None
+        gen = sreader.parse_timestamp(doc["generated_at"])
+        assert gen is not None
+        limit = doc["thresholds"]["stale_after_s"]
+        assert sreader.classify_status(read, gen + timedelta(seconds=limit)) == "ok"
+        assert sreader.classify_status(read, gen + timedelta(seconds=limit + 1)) == "stale"
+        # A file from the future (the reader's clock behind): not stale, age 0.
+        assert sreader.classify_status(read, gen - timedelta(days=1)) == "ok"
+        assert sreader.age_days(doc["generated_at"], gen - timedelta(days=1)) == 0
+
+    def test_a_status_without_a_valid_limit_is_unreadable(self) -> None:
+        doc = json.loads((_STATUS_FIXTURES / "idle/var/lib/zark/status.json").read_text("utf-8"))
+        now = sreader.parse_timestamp(doc["generated_at"])
+        assert now is not None
+        for limit in (0, -1, "3h", True, None):
+            bad = {**doc, "thresholds": {**doc["thresholds"], "stale_after_s": limit}}
+            read = sreader.FileRead("ok", doc=bad)
+            assert sreader.classify_status(read, now) == "unreadable", limit
+
+    def test_the_file_key_changes_with_a_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td, "status.json")
+            assert sreader.file_key(p) is None
+            p.write_text("{}", "utf-8")
+            first = sreader.file_key(p)
+            tmp = Path(td, ".status.json.x")
+            tmp.write_text("{}", "utf-8")
+            os.replace(tmp, p)
+            assert first is not None and sreader.file_key(p) != first
+
+
+class TestStatusReaderFigures:  # pylint: disable=missing-function-docstring
+    """M8-1: the contract's formulas on carmen's figures (the fixtures)."""
+
+    def test_reserved_and_shares(self) -> None:
+        doc = json.loads((_STATUS_FIXTURES / "idle/var/lib/zark/status.json").read_text("utf-8"))
+        pools = {p["name"]: p for p in doc["source_pools"]}
+        rpool, bpool = pools["rpool"], pools["bpool"]
+        assert sreader.reserved_bytes(rpool["space"]) == 31137517568  # 29.0 GiB, 1/32 slop
+        assert sreader.reserved_bytes(bpool["space"]) == 134213632  # 128 MiB, the minimum
+        space = rpool["space"]
+        assert sreader.chart_total(space) == (
+            space["used_bytes"] + space["available_bytes"] + 31137517568
+        )
+        for pool in (rpool, bpool):
+            # M7F-10: the shares plus the pool's hidden metadata make the root's
+            # used; the fixture's figures carry no hidden part.
+            shares = sum(sreader.own_share(d) for d in pool["datasets"])
+            hidden = sreader.pool_metadata_bytes(pool["name"], pool["datasets"])
+            assert shares + hidden == pool["space"]["used_bytes"], pool["name"]
+        # eli's POOL-14.1 figures (M7F-10): 417792 bytes in no dataset.
+        eli = [
+            {"name": "p", "used_bytes": 37920768, "usedbydataset_bytes": 98304},
+            {"name": "p/a", "used_bytes": 37404672, "usedbydataset_bytes": 37404672},
+        ]
+        assert sreader.pool_metadata_bytes("p", eli) == 417792
+        assert sreader.pool_metadata_bytes("q", eli) == 0
+        snaps = sum(d["usedbysnapshots_bytes"] for d in rpool["datasets"])
+        assert round(snaps / 1024**3) == 142
+        assert sreader.reserved_bytes({"pool_free_bytes": 1, "available_bytes": 5}) == 0
+        assert sreader.capacity_level(89, doc["thresholds"]) == "warning"
+        assert sreader.capacity_level(90, doc["thresholds"]) == "critical"
+        assert sreader.capacity_level(79, {}) == "ok"
+
+    def test_byte_fraction_and_eta(self) -> None:
+        t = {
+            "bytes_total": 1000,
+            "bytes_done": 250,
+            "rate_bytes_per_s": 10,
+            "bytes_total_partial": False,
+        }
+        assert sreader.byte_fraction(t) == 0.25
+        assert sreader.eta_seconds(t) == 75
+        assert (
+            sreader.byte_fraction({**t, "bytes_done": 1500}) == 0.999
+        )  # never 100 % while running
+        assert sreader.eta_seconds({**t, "bytes_done": 1500}) == 0
+        for no_eta in (
+            {"bytes_total": None},
+            {"rate_bytes_per_s": None},
+            {"rate_bytes_per_s": 0},
+            {"bytes_total_partial": True},
+            {"bytes_done": None},
+        ):
+            assert sreader.eta_seconds({**t, **no_eta}) is None, no_eta
+        assert sreader.byte_fraction({**t, "bytes_done": None}) is None  # a null is never a zero
+        assert sreader.byte_fraction({**t, "bytes_total": 0}) is None
+
+    def test_a_drive_is_connected_by_its_link(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            by_id = Path(td)
+            (by_id / "usb-X-0:0").symlink_to("../../sdz")  # dangling, as udev's are relative
+            assert sreader.drive_connected("usb-X-0:0", by_id)
+            assert not sreader.drive_connected("usb-Y-0:0", by_id)
+            for bad in ("", ".", "..", "../etc", None, 3):
+                assert not sreader.drive_connected(bad, by_id), bad
+
+
+def _drive_with_contents(**changes: Any) -> dict[str, Any]:
+    """``idle``'s black with the four optional fields of "Drive contents"."""
+    doc = json.loads((_STATUS_FIXTURES / "idle/var/lib/zark/status.json").read_text("utf-8"))
+    drive = dict(doc["drives"][0])
+    drive["datasets"] = [
+        {"name": "black", "type": "filesystem", "used_bytes": 3000, "usedbydataset_bytes": 10},
+        {"name": "black/rpool/USERDATA/home_x", "used_bytes": 2000, "usedbydataset_bytes": 2000},
+        {"name": "black/rpool/ROOT/be", "used_bytes": 900, "usedbydataset_bytes": 900},
+    ]
+    drive["points"] = [
+        {"name": "zark_2026-08-31_23:30:00Z", "created_at": "2026-08-31T23:30:30Z"},
+        {"name": "zark_2026-09-30_21:00:00Z", "created_at": "2026-09-30T21:00:30Z"},
+        {"name": "zark_2026-10-01_21:00:00Z", "created_at": "2026-10-01T21:00:30Z"},
+    ]
+    drive["non_point_snapshots"] = {
+        "intermediate": {"count": 5, "used_bytes": 1024},
+        "other": {"count": 0, "used_bytes": 0},
+    }
+    drive["retention_next"] = {
+        "horizon_days": 7,
+        "points": ["zark_2026-08-31_23:30:00Z"],
+        "snapshots": 23,
+        "datasets_whole": 0,
+        "reclaim_bytes": 4096,
+    }
+    drive.update(changes)
+    return drive
+
+
+class TestDriveContents:  # pylint: disable=missing-function-docstring
+    """M8F-5: the drive contents (R9.1, optional in schema 1)."""
+
+    def test_every_case_with_drives_matches_its_expected_json(self) -> None:
+        # The R9.1 cases (drive-contents, drive-contents-partial) arrive with
+        # M9; until then no case has a `drives` block and this checks none.
+        for case in _fixture_cases():
+            e = _expected(case)
+            if "drives" not in e:
+                continue
+            doc = json.loads((case / "var/lib/zark/status.json").read_text("utf-8"))
+            for drive in doc["drives"]:
+                got = sreader.drive_contents(drive)
+                assert {
+                    "margin_bytes": sreader.drive_margin_bytes(drive),
+                    "contents": dc_asdict(got) if got else None,
+                } == e["drives"][drive["name"]], (case.name, drive["name"])
+
+    def test_the_figures(self) -> None:
+        drive = _drive_with_contents()
+        c = sreader.drive_contents(drive)
+        assert c is not None
+        assert (c.points, c.months) == (3, {"2026-08": 1, "2026-09": 1, "2026-10": 1})
+        assert (c.next_points, c.next_reclaim_bytes, c.datasets) == (1, 4096, 3)
+        avail = drive["space"]["available_bytes"]
+        assert c.available_after_policy_bytes == avail + 4096
+        used = drive["space"]["used_bytes"]
+        assert sreader.drive_margin_bytes(drive) == (used + avail) * 10 // 100
+
+    def test_what_is_absent_leaves_out_only_what_it_feeds(self) -> None:
+        bare = {k: v for k, v in _drive_with_contents().items() if k not in ("datasets", "points")}
+        c = sreader.drive_contents(bare)
+        assert c is not None and (c.points, c.months, c.datasets) == (None, None, None)
+        assert c.next_points == 1
+        nxt = {**_drive_with_contents()["retention_next"], "reclaim_bytes": None}
+        c = sreader.drive_contents(_drive_with_contents(retention_next=nxt))
+        assert c is not None and (c.next_reclaim_bytes, c.available_after_policy_bytes) == (
+            None,
+            None,
+        )
+        none = {
+            k: v
+            for k, v in _drive_with_contents().items()
+            if k not in ("datasets", "points", "non_point_snapshots", "retention_next")
+        }
+        assert sreader.drive_contents(none) is None
+        assert sreader.drive_contents(_drive_with_contents(space=None)) is None
+        assert sreader.drive_margin_bytes(_drive_with_contents(retention={})) is None
+
+    def test_the_forecast_is_a_floor_after_its_horizon_or_with_a_short_window(self) -> None:
+        drive = _drive_with_contents()
+        measured = sreader.parse_timestamp(drive["space"]["measured_at"])
+        assert measured is not None
+        assert not sreader.retention_next_is_floor(drive, measured + timedelta(days=7))
+        assert sreader.retention_next_is_floor(drive, measured + timedelta(days=7, seconds=1))
+        short = _drive_with_contents(retention={**drive["retention"], "window_days": 3})
+        assert sreader.retention_next_is_floor(short, measured)
 
 
 class TestMonitorLatest:

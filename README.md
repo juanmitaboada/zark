@@ -264,6 +264,7 @@ zark/
 │   ├── signals.py             # How every command stops on a signal
 │   ├── status.py              # What status reports, the MOTD shows, the timer notifies
 │   ├── status_file.py         # /var/lib/zark/status.json, for other programs
+│   ├── status_reader.py       # The reference reader of the status files
 │   ├── statusdirs.py          # /run/zark and /var/lib/zark, readable by anyone
 │   ├── survey.py              # Reads of origin and of a drive, and the checks before a run
 │   ├── zfs.py                 # ZFS pool and dataset operations
