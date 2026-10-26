@@ -1511,6 +1511,83 @@ def dst_03(b: Bench) -> None:
         b.drop_pool(c)
 
 
+def _drop_files(b: Bench, ds: str) -> None:
+    """Remove every file :meth:`Bench.write` left in ``ds``, so their blocks
+    live on only in its snapshots; then the pool synced."""
+    mnt = _q(b.mnt)
+    script = (
+        f"mount -t zfs -o zfsutil {_q(ds)} {mnt} && rm -f {mnt}/f.* ; rc=$? ; "
+        + f"umount {mnt} && exit $rc"
+    )
+    _ = b.ok(f"unshare -m --propagation private sh -c {_q(script)}")
+    _ = b.ok(f"zpool sync {ds.split('/')[0]}")
+
+
+def _dry_reclaim(b: Bench, ds: str, names: str) -> int:
+    """The ``reclaim`` of ``zfs destroy -nvp ds@names``, as lib/reclaim.py reads it."""
+    r = b.ok(f"zfs destroy -nvp {_q(f'{ds}@{names}')}")
+    got = [ln.split("\t")[1] for ln in r.lines if ln.startswith("reclaim\t")]
+    expect(len(got) == 1 and got[0].isdigit(), "one reclaim line", f"{len(got)}", text_of(r))
+    return int(got[0])
+
+
+@check(
+    "DST-04",
+    1,
+    1,
+    "destroy -nvp frees what a destroy frees, shared blocks included",
+    depends=(
+        "status.json's retention_next and reclaim_by_age (lib/reclaim.py measure, M9a)",
+        "what zark prune and the space plan say a removal frees",
+    ),
+)
+def dst_04(b: Bench) -> None:
+    """Two neighbouring snapshots that share a removed file's blocks: each
+    one's ``used`` leaves them out, the dry run of both counts them. The dry
+    run of a non-adjacent set and of a single snapshot each equal the drop
+    of the dataset's ``usedbysnapshots`` when the same names are destroyed,
+    and the dry runs before changed neither the snapshots nor that figure.
+    OpenZFS cmd/zfs/zfs_main.c:1539-1599 (lzc_snaprange_space per run of
+    neighbours), module/zfs/dsl_dataset.c:4860-4905 (dsl_dataset_space_wouldfree),
+    :166-171 (a snapshot's used is its unique bytes); module/zfs/zfs_ioctl.c:7469-7472
+    (space_snaps is a read: zfs_secpolicy_read, not logged)."""
+    c = b.make_pool("c")
+    try:
+        x = b.fs(f"{c}/dst04")
+        b.write(x, 4096)  # A: held by @1 and @2 only, once removed
+        _ = b.ok(f"zfs snapshot {x}@1")
+        _ = b.ok(f"zfs snapshot {x}@2")
+        _drop_files(b, x)
+        _ = b.ok(f"zfs snapshot {x}@3")
+        b.write(x, 2048)  # B: held by @4 alone
+        _ = b.ok(f"zfs snapshot {x}@4")
+        _drop_files(b, x)
+        _ = b.ok(f"zfs snapshot {x}@5")
+        r = b.ok(f"zfs list -Hp -t snapshot -o name,used -d 1 {_q(x)}")
+        used = {ln.split("\t")[0].split("@")[1]: int(ln.split("\t")[1]) for ln in r.lines}
+        before = (b.snapshot_names(x), b.value("usedbysnapshots", x))
+        pair, apart = _dry_reclaim(b, x, "1,2"), _dry_reclaim(b, x, "2,4")
+        expect(
+            pair > used["1"] + used["2"] and pair >= 4 << 20,
+            "the pair to free its shared 4 MiB, more than its used",
+            f"{pair} for used {used['1']} + {used['2']}",
+        )
+        after = (b.snapshot_names(x), b.value("usedbysnapshots", x))
+        expect(after == before, "the dry runs to change nothing", f"{after} after {before}")
+        for names, want in (("2,4", apart), ("1", None)):
+            if want is None:
+                want = _dry_reclaim(b, x, names)
+            had = int(b.value("usedbysnapshots", x))
+            _ = b.ok(f"zfs destroy {_q(f'{x}@{names}')}")
+            _ = b.ok(f"zpool sync {c}")
+            freed = had - int(b.value("usedbysnapshots", x))
+            expect(freed == want, f"destroying {names} to free {want}", str(freed))
+        got = ", ".join(b.snapshot_names(x))
+        expect(got == "3, 5", "3 and 5 left", got)
+    finally:
+        b.drop_pool(c)
+
+
 @check(
     "CLN-01",
     1,

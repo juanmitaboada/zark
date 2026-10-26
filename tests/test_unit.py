@@ -34,6 +34,7 @@ import functools
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import itertools
 import json
 import os
@@ -116,6 +117,7 @@ import lib.progress as progress_mod  # pylint: disable=wrong-import-position # n
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.selftest as stest  # pylint: disable=wrong-import-position # noqa: E402
+import lib.selftest_l1 as selftest_l1_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.selftest_l2 as st_l2  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
 import lib.signals as _signals  # pylint: disable=wrong-import-position # noqa: E402
@@ -21691,13 +21693,26 @@ class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-f
         assert accessors > 50, accessors  # the calls are recorded and parsed
 
 
+class TestDst04:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M9a: DST-04 runs on the real platform only (the model's snapshot
+    used is a constant), and its commands are what it says."""
+
+    def test_it_is_a_real_platform_check_of_the_dry_run(self):
+        c = next(c for c in all_selftest_checks() if c.cid == "DST-04")
+        assert (c.level, c.rev, c.fake) == (1, 1, False)
+        src = inspect.getsource(c.fn)
+        assert "zfs destroy -nvp" not in src  # through _dry_reclaim only
+        dry = inspect.getsource(selftest_l1_mod._dry_reclaim)  # pylint: disable=protected-access
+        assert 'b.ok(f"zfs destroy -nvp' in dry
+
+
 class TestSelftestFramework:  # pylint: disable=missing-function-docstring
     """M4s-1, M4s-2, M4s-3: the registry, a check's result, the bench."""
 
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
-        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01
-        assert len([c for c in checks if c.level == 1]) == 56
+        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04
+        assert len([c for c in checks if c.level == 1]) == 57
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         for c in checks:
