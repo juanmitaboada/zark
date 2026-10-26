@@ -240,6 +240,7 @@ zark/
 │   ├── initrd.py              # initrd regeneration for a mounted target system
 │   ├── keystore.py            # The LUKS keystore and the key loads
 │   ├── live.py                # The live session's installer probe
+│   ├── live_pools.py          # The monitor's two read-only pool listings
 │   ├── lock.py                # One lock for every command that changes state
 │   ├── log.py                 # Colored output, frames, logging
 │   ├── mount.py               # Mounting the installed system's pools from a live USB

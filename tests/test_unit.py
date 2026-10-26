@@ -100,6 +100,7 @@ import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # n
 import lib.health as health_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.initrd as initrd_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.live as live_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.live_pools as livep  # pylint: disable=wrong-import-position # noqa: E402
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.mount as lib_mount  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -20426,6 +20427,107 @@ class TestDriveContents:  # pylint: disable=missing-function-docstring
         assert sreader.retention_next_is_floor(drive, measured + timedelta(days=7, seconds=1))
         short = _drive_with_contents(retention={**drive["retention"], "window_days": 3})
         assert sreader.retention_next_is_floor(short, measured)
+
+
+_ZPOOL_OUT = (
+    "bpool\t11\t2013265920\t290586624\t1722679296\t14\tONLINE\n"
+    "black\t14361060171807873218\t4000762036224\t2575477139046\t1425284897178\t64\tONLINE\n"
+    "rpool\t22\t1005022347264\t902414041088\t102608306176\t89\tONLINE\n"
+)
+_ZFS_OUT = (
+    "bpool\tfilesystem\t290189312\t1588465664\t98304\t0\t290091008\t0\n"
+    "bpool/BOOT\tfilesystem\t290091008\t1588465664\t98304\t0\t289992704\t0\n"
+    "rpool\tfilesystem\t917611225088\t71470788608\t196608\t0\t917611028480\t0\n"
+    "rpool/keystore\tvolume\t528482304\t71470788608\t12288\t0\t0\t528470016\n"
+)
+
+
+class _FakeListings:  # pylint: disable=too-few-public-methods
+    """A runner for lib.live_pools that records what it is asked to run."""
+
+    def __init__(self, zpool: tuple[int, str, str], zfs: tuple[int, str, str] = (0, "", "")):
+        self.answers = {"zpool": zpool, "zfs": zfs}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: Sequence[str], timeout: int) -> tuple[int, str, str]:
+        assert livep.allowed(argv), argv
+        assert timeout == livep.TIMEOUT_S
+        self.calls.append(list(argv))
+        return self.answers[argv[0]]
+
+
+class TestLivePools:  # pylint: disable=missing-function-docstring
+    """M8-4, M8-5: the two listings, and nothing else."""
+
+    def test_one_pass_gives_spaces_datasets_and_health(self) -> None:
+        fake = _FakeListings((0, _ZPOOL_OUT, ""), (0, _ZFS_OUT, ""))
+        live = livep.read_live(fake, datetime(2026, 10, 24, 9, 19, 12, tzinfo=UTC))
+        assert fake.calls == [livep.zpool_argv(), livep.zfs_argv(["rpool", "bpool"])]
+        assert live.error == ""
+        assert live.spaces["rpool"] == {
+            "used_bytes": 917611225088,
+            "available_bytes": 71470788608,
+            "pool_size_bytes": 1005022347264,
+            "pool_alloc_bytes": 902414041088,
+            "pool_free_bytes": 102608306176,
+            "capacity_pct": 89,
+            "measured_at": "2026-10-24T09:19:12Z",
+        }
+        assert [d["name"] for d in live.datasets["rpool"]] == [
+            "rpool",
+            "rpool/keystore",
+        ]
+        assert live.datasets["rpool"][1]["usedbyrefreservation_bytes"] == 528470016
+        assert live.pools["black"]["health"] == "ONLINE"
+        assert "black" not in live.spaces  # a drive's fill comes from the files
+
+    def test_a_pool_name_from_nowhere_never_reaches_a_command(self) -> None:
+        odd = "rpool;reboot\t1\t1\t1\t1\t1\tONLINE\n"
+        fake = _FakeListings((0, odd + _ZPOOL_OUT.split("\n", 1)[0] + "\n", ""), (0, _ZFS_OUT, ""))
+        _ = livep.read_live(fake)
+        assert fake.calls[1] == livep.zfs_argv(["bpool"])
+        for bad in (
+            ["zpool", "import", "black"],
+            ["zfs", "list"],
+            [*livep.zfs_head(), "black"],
+        ):
+            assert not livep.allowed(bad), bad
+        try:
+            _ = livep.run_command(["zpool", "export", "black"], 5)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("run_command ran a command other than its listings")
+
+    def test_failures_keep_the_first_line(self) -> None:
+        live = livep.read_live(_FakeListings((1, "", "failed to open /dev/zfs\nmore\n")))
+        assert live.error == "failed to open /dev/zfs" and not live.pools
+        fake = _FakeListings((0, _ZPOOL_OUT, ""), (124, "", "zfs list did not answer within 30 s"))
+        live = livep.read_live(fake)
+        assert live.error.startswith("zfs list did not answer") and not live.spaces
+        assert live.pools["rpool"]["health"] == "ONLINE"
+        assert livep.read_live(_FakeListings((2, "", ""))).error == "zpool list ended with status 2"
+
+    def test_no_source_pool_runs_one_listing(self) -> None:
+        fake = _FakeListings((0, _ZPOOL_OUT.split("\n")[1] + "\n", ""))
+        live = livep.read_live(fake)
+        assert len(fake.calls) == 1 and not live.spaces and not live.error
+
+    def test_a_faulted_pool_has_no_space(self) -> None:
+        rows = "rpool\t22\t-\t-\t-\t-\tFAULTED\n"
+        live = livep.read_live(_FakeListings((0, rows, ""), (0, _ZFS_OUT, "")))
+        assert live.pools["rpool"]["health"] == "FAULTED" and "rpool" not in live.spaces
+
+    def test_it_imports_the_standard_library_only(self) -> None:
+        assert _stdlib_only("lib/live_pools.py")
+
+    def test_run_command_handles_a_missing_tool(self) -> None:
+        with patch("lib.live_pools.subprocess.run", side_effect=FileNotFoundError):
+            assert livep.run_command(livep.zpool_argv(), 5)[0] == 127
+        timeout = subprocess.TimeoutExpired(["zpool"], 5)
+        with patch("lib.live_pools.subprocess.run", side_effect=timeout):
+            rc, _out, err = livep.run_command(livep.zpool_argv(), 5)
+        assert rc == 124 and "within 5 s" in err
 
 
 class TestMonitorLatest:
