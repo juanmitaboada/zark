@@ -22,6 +22,7 @@ not anchor or would leave ``/boot`` out.
 
 import re
 import shlex
+from typing import NoReturn
 
 from lib import sh
 from lib.config import zark_command
@@ -252,8 +253,32 @@ def _rpool_disks() -> set[str]:
     return disks
 
 
+def _refuse_without_bpool(log: Log) -> NoReturn:
+    """No bpool imported and none to import: a layout zark does not back up
+    (M6P.2, M9b-8 8a). ``/boot``'s file system is named when it is a mount
+    of its own (Ubuntu 26.10 with Secure Boot puts it on ext4)."""
+    r = sh.run("findmnt -n -o FSTYPE,SOURCE /boot")
+    fields = r.output.split() if r.ok else []
+    if len(fields) >= 2:
+        where = (
+            f"/boot is on {fields[0]} ({fields[1]}), outside ZFS: Ubuntu 26.10 and later "
+            + "install it there when Secure Boot is on"
+        )
+    else:
+        where = "/boot is not a mount of its own: it is a directory of the root file system"
+    log.fatal(
+        "This system has no bpool",
+        causes=[where, "zark backs up the layout Ubuntu's installer makes, with a bpool"],
+        solutions=[
+            "zark supports Ubuntu 24.04 LTS and 26.04 LTS as their installers lay out ZFS "
+            + "(rpool, bpool and the keystore), with Secure Boot on"
+        ],
+    )
+
+
 def require_boot_pool(log: Log) -> None:
-    """Refuse while a pool named bpool can be imported here but is not (M2R-4).
+    """Refuse while a pool named bpool can be imported here but is not
+    (M2R-4), and when there is no bpool at all (M9b-8).
 
     With bpool not imported ``/boot`` is not mounted either, so the pool's
     absence from ``zpool list`` is all there is to see; a run would then
@@ -271,7 +296,7 @@ def require_boot_pool(log: Log) -> None:
         return
     candidates = _importable_bpools()
     if not candidates:
-        return
+        _refuse_without_bpool(log)
     mine = _rpool_disks()
     own: list[str] = []
     unknown = False

@@ -17342,12 +17342,14 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
                 newest.append(fake.names("backup/rpool/ROOT/be")[-1])
         assert newest[0] != newest[1] and all(repl.POINT_RE.match(n) for n in newest), newest
 
-    def test_a_system_without_bpool_backs_up(self) -> None:
-        """No bpool anywhere: the backup runs without it."""
+    def test_a_system_without_bpool_is_refused(self) -> None:
+        """M6P.2, M9b-8 8a: no bpool anywhere is a layout zark does not back
+        up; before 2.1.0-rc4 the backup ran without /boot."""
         fake = self._without_bpool(importable=False)
         _cfg, rc = self._run(fake)
-        assert rc == 0
+        assert rc == 1
         assert "backup/bpool/BOOT/be" not in fake.ds
+        assert not any(c.startswith("zfs send") for c in fake.calls), fake.calls
 
     def test_incomplete_backup_exits_1_without_last_backup_at(self) -> None:
         """I-D/H2/I1: one dataset short is a failure, not a WARN plus success."""
@@ -18134,17 +18136,49 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
 
     def test_only_a_pool_named_bpool_counts(self):
         """M2V-5 N54: bpool is not imported, and the importable pools are a
-        drive and another disk's rpool: no bpool among them, no refusal."""
-        mock = MockShell()
-        mock.on("zpool list -H -o name bpool").fails("no such pool")
-        mock.on("env LC_ALL=C ZPOOL_VDEV_NAME_PATH=1 zpool import").succeeds(
+        drive and another disk's rpool: no bpool among them, so this system
+        has none (M9b-8), not one that is not imported."""
+        out = self._refusal(
             self._pool("blue", "444", f"{_USB}-part1") + self._pool("rpool", "555", f"{_USB}-part4")
         )
-        mock.on("zpool list -vHP rpool").succeeds(f"rpool\t1T\n\t{_NVME}-part4\t1T")
+        assert "This system has no bpool" in out
+        assert "bpool is not imported" not in out and "bpool id" not in out
+
+    def _without(self, findmnt: str | None) -> str:
+        mock = MockShell()
+        mock.on("zpool list -H -o name bpool").fails("no such pool")
+        mock.on("env LC_ALL=C ZPOOL_VDEV_NAME_PATH=1 zpool import").succeeds("")
+        if findmnt is None:
+            mock.on("findmnt -n -o FSTYPE,SOURCE /boot").returns(1)
+        else:
+            mock.on("findmnt -n -o FSTYPE,SOURCE /boot").succeeds(findmnt)
         out = StringIO()
         with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(out):
+            try:
+                survey.require_boot_pool(make_log())
+            except SystemExit:
+                return unframed(out.getvalue())
+        raise AssertionError("expected a refusal")
+
+    def test_a_system_with_boot_on_ext4_is_refused_naming_it(self):
+        """M6P.2, M9b-8 8a: Ubuntu 26.10 with Secure Boot, /boot on ext4."""
+        out = self._without("ext4 /dev/nvme0n1p2\n")
+        assert "This system has no bpool" in out
+        assert "/boot is on ext4 (/dev/nvme0n1p2), outside ZFS: Ubuntu 26.10 and later" in out
+        assert "zark supports Ubuntu 24.04 LTS and 26.04 LTS as their installers lay out" in out
+
+    def test_a_system_with_boot_in_its_root_is_refused(self):
+        """M9b-8 8a: /boot a directory of rpool's root, not a mount."""
+        out = self._without(None)
+        assert "This system has no bpool" in out
+        assert "/boot is not a mount of its own" in out and "outside ZFS" not in out
+
+    def test_an_imported_bpool_passes(self):
+        mock = MockShell()
+        mock.on("zpool list -H -o name bpool").succeeds("bpool")
+        with patch_sh(mock), redirect_stdout(StringIO()):
             survey.require_boot_pool(make_log())
-        assert "bpool is not imported" not in out.getvalue()
+        assert mock.was_not_called("findmnt -n -o FSTYPE,SOURCE /boot")
 
     def test_own_bpool_is_imported_by_id(self):
         out = self._refusal(self._bpool("111", f"{_NVME}-part3"))
