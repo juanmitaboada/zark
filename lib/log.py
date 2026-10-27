@@ -79,6 +79,18 @@ class _Reading:
             hear(None)
 
 
+def _read_line(prompt: str) -> str:
+    """``input(prompt)``, and a newline after the answer when stdin is a
+    terminal and stdout is not (``| tee``): the terminal echoes the typed
+    newline to itself only, so the transcript would join the prompt and the
+    next line (M5bP.6, M9b-12 12a). The screen shows one blank line there."""
+    answer = input(prompt)
+    if sys.stdin.isatty() and not sys.stdout.isatty():
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    return answer
+
+
 def text_width(s: str) -> int:
     """Terminal columns of ``s``: colour codes none, wide characters (the
     title emoji) 2, combining and format characters 0, the rest 1."""
@@ -410,7 +422,7 @@ class Log:
         eof = False
         try:
             with _Reading(question):
-                answer = input(f"    {prompt}: ").strip().lower()
+                answer = _read_line(f"    {prompt}: ").strip().lower()
         except EOFError:
             answer, eof = "", True
         if eof and on_eof is not None:
@@ -426,7 +438,7 @@ class Log:
         EOF, where nobody did the step; the log says which."""
         try:
             with _Reading(prompt):
-                _ = input(prompt)
+                _ = _read_line(prompt)
         except EOFError:
             self._answer_to_file(prompt.strip(), "<eof>")
             return False
@@ -499,7 +511,7 @@ class Log:
         self._show(self._box(*rows), after=False, err=True)
         try:
             with _Reading(question):
-                answer = input("    > ").strip()
+                answer = _read_line("    > ").strip()
         except EOFError:
             answer = ""
         shown = self._loggable(answer, (*accept, default)) if answer else f"<default> {default}"
@@ -517,7 +529,7 @@ class Log:
         """
         try:
             with _Reading(label or prompt):
-                answer = input(prompt).strip()
+                answer = _read_line(prompt).strip()
         except EOFError:
             answer = ""
         shown = self._loggable(answer, accept) if answer else "<empty>"
@@ -556,7 +568,7 @@ class Log:
         """:meth:`ask_choice`'s reads, until an answer it accepts."""
         while True:
             try:
-                raw = input(f"    Select [1-{len(options)}, default={default + 1}]: ").strip()
+                raw = _read_line(f"    Select [1-{len(options)}, default={default + 1}]: ").strip()
             except EOFError:
                 # No operator (stdin closed): never loop forever, never guess.
                 self._answer_to_file(question, "<EOF>")
@@ -598,7 +610,7 @@ class Log:
         print()
         try:
             with _Reading("Press Enter to cleanup and exit"):
-                input("  Press Enter to cleanup and exit... ")
+                _ = _read_line("  Press Enter to cleanup and exit... ")
         except EOFError:
             pass
         raise SystemExit(1)

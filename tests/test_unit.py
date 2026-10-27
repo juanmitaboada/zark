@@ -720,6 +720,46 @@ class TestLog:
         assert Log().log_file == os.path.join(_TEST_LOG_DIR, "zark.log")
         assert Log().log_file not in _REAL_LOG_FILES
 
+    def test_an_answer_ends_its_line_in_a_transcript(self):
+        """M5bP.6, M9b-12 12a: stdin a terminal, stdout a pipe (``| tee``):
+        the transcript gets a newline after each answer, so the next line
+        does not join the prompt."""
+        root = Path(__file__).resolve().parent.parent
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); from lib.log import Log; "
+            + "log = Log(log_file='/dev/null'); "
+            + "a = log.ask_text('Type YES: ', accept=('YES',)); print('next', a)"
+        )
+        master, slave = pty.openpty()
+        try:
+            _ = os.write(master, b"YES\n")  # waits in the terminal's input queue
+            proc = subprocess.run(
+                [sys.executable, "-c", code, str(root)],
+                stdin=slave,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+            )
+        finally:
+            os.close(slave)
+            os.close(master)
+        assert proc.returncode == 0, proc
+        assert proc.stdout.decode().splitlines() == ["Type YES: ", "next YES"], proc.stdout
+
+    def test_on_a_terminal_or_a_pipe_alone_no_newline_is_added(self):
+        """M9b-12 12a: only a terminal's stdin with a piped stdout gets it."""
+        for stdin_tty, stdout_tty in ((True, True), (False, False), (False, True)):
+            out = StringIO()
+            with (
+                patch("builtins.input", return_value="YES"),
+                patch.object(sys.stdin, "isatty", return_value=stdin_tty),
+                patch.object(out, "isatty", return_value=stdout_tty),
+                redirect_stdout(out),
+            ):
+                assert Log().ask_text("Type YES: ", accept=("YES",)) == "YES"
+            assert out.getvalue() == "", (stdin_tty, stdout_tty, out.getvalue())
+
     def test_passphrase_box_is_shown_before_the_prompt(self):
         """getpass writes to /dev/tty; with stdout piped (`| tee`, block
         buffered) the box came after "Passphrase:" (eli, N5)."""
