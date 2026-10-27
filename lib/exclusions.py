@@ -50,7 +50,7 @@ from lib.replication import (
     is_archived,
     is_bpool,
 )
-from lib.restore_points import COMPLETE_PROP, Snap, complete_points
+from lib.restore_points import COMPLETE_PROP, Snap, complete_points, point_losses
 from lib.survey import ReadError, checked, read_origin
 
 REPLICATE = "org.zark:replicate"
@@ -532,22 +532,16 @@ def _rewrites(
 ) -> dict[str, _Rewrite]:
     """For every point the destroy of ``top`` takes snapshots from, its marks
     as they must read afterwards: the count lowered by the datasets it no
-    longer holds, and those datasets recorded as excluded with the values
-    they had on the drive. A point marked before the count (rc2, "yes")
-    is left as it is: :func:`drive_marks.record_complete` counts it again.
-    A point whose record cannot be read raises :class:`ValueError`: its
-    rewrite would lose what it left out (M5bF-9)."""
+    longer holds (:func:`restore_points.point_losses`, shared with the
+    orphan's destroy), and those datasets recorded as excluded with the
+    values they had on the drive. A point marked before the count (rc2,
+    "yes") is left as it is: :func:`drive_marks.record_complete` counts it
+    again. A point whose record cannot be read raises :class:`ValueError`:
+    its rewrite would lose what it left out (M5bF-9)."""
     values = zark_props(pool)
     out: dict[str, _Rewrite] = {}
-    for name in sorted({s.name for s in snaps if under(s.stored, top) and s.mark.isdigit()}):
-        members = [s for s in snaps if s.name == name]
-        left = [s for s in members if not under(s.stored, top)]
-        lost = {s.dataset for s in members} - {s.dataset for s in left}
-        count = int(next(s.mark for s in members if s.mark.isdigit())) - len(lost)
-        if not lost or not left or count <= 0:
-            continue
-        stored = [f"{pool}/{s.stored}@{name}" for s in left]
-        held = [records[t] for t in stored if t in records]
+    for name, loss in point_losses(pool, snaps, [top]).items():
+        held = [records[t] for t in loss.targets if t in records]
         pm = parse_point_mark(held[0]) if held and held[0] is not None else None
         if held and pm is None:
             raise ValueError(f"the record of {name} cannot be read")
@@ -555,8 +549,8 @@ def _rewrites(
         pm.tops[top] = flags
         # Recorded on every received dataset since M2; "on" and the inherited
         # mountpoint when a drive lacks them.
-        pm.datasets |= {rel: values.get(rel, ("on", "")) for rel in lost}
-        out[name] = _Rewrite(stored, str(count), _dump(pm.tops, pm.datasets))
+        pm.datasets |= {rel: values.get(rel, ("on", "")) for rel in loss.lost}
+        out[name] = _Rewrite(loss.targets, str(loss.count), _dump(pm.tops, pm.datasets))
     return out
 
 

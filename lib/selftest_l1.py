@@ -1596,6 +1596,43 @@ def dst_04(b: Bench) -> None:
 
 
 @check(
+    "DST-05",
+    1,
+    1,
+    "destroy -r refuses a clone outside the tree and destroys nothing; one inside goes with it",
+    depends=("backup's orphan DESTROY and what it takes first (M5bV-3, replication.dependents)",),
+    fake=True,
+)
+def dst_05(b: Bench) -> None:
+    """``zfs destroy -r <ds>`` with a clone of one of its snapshots outside
+    its tree fails before anything is destroyed; a clone inside the tree
+    does not stop it; ``origin`` names the clone's snapshot; once the
+    outside clone is gone, the same command destroys the tree, the inside
+    clone with it. OpenZFS cmd/zfs/zfs_main.c:1399-1452, :1877-1901;
+    lib/libzfs/libzfs_iter.c:528-585 (2.2.2: :1353-1406, :1831-1855,
+    :527-584)."""
+    x = b.fs(f"{b.a}/dst05")
+    c = b.fs(f"{x}/c")
+    _ = b.ok(f"zfs snapshot -r {x}@s")
+    outside = f"{b.a}/dst05.archived-t"
+    inside = f"{x}/k"
+    # canmount=noauto: nothing mounts, with or without -u (2.2.2 lacks it).
+    _ = b.ok(f"zfs clone -o canmount=noauto {x}@s {outside}")
+    _ = b.ok(f"zfs clone -o canmount=noauto {c}@s {inside}")
+    got = b.value("origin", outside)
+    expect(got == f"{x}@s", f"origin of {outside} is {x}@s", got)
+    r = b.run(f"zfs destroy -r {x}")
+    expect(not r.ok, f"zfs destroy -r {x} refused", exit_status(r), text_of(r))
+    every = (x, c, inside, outside)
+    left = [n for n in every if b.run(f"zfs list -H -o name {n}").ok]
+    expect(left == list(every), "every dataset still there", ", ".join(left))
+    _ = b.ok(f"zfs destroy -r {outside}")
+    _ = b.ok(f"zfs destroy -r {x}")
+    left = [n for n in every if b.run(f"zfs list -H -o name {n}").ok]
+    expect(not left, f"{x} and the clone inside it destroyed", ", ".join(left))
+
+
+@check(
     "CLN-01",
     1,
     1,

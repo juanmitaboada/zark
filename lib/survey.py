@@ -127,7 +127,7 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
         # lib/retention.py is_live).
         r = sh.run(
             "zfs list -Hp -t filesystem,volume "
-            + f"-o name,type,receive_resume_token,{ORPHAN},used,written "
+            + f"-o name,type,receive_resume_token,{ORPHAN},used,written,origin "
             + f"-r {root}",
         )
         r = checked(r, strict)
@@ -136,6 +136,8 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
             if len(f) >= 6 and f[0].startswith(strip):
                 rel = f[0][len(strip) :]
                 dest[rel] = _dest_row(rel, f)
+                origin = f[6] if len(f) > 6 else "-"
+                dest[rel].clone_of = origin[len(strip) :] if origin.startswith(strip) else ""
         # The kept mark of an excluded copy only where it was set (M5bP.4):
         # its children do not carry it.
         r = checked(
@@ -184,7 +186,8 @@ ORPHAN = "org.zark:orphan"
 
 
 def _dest_row(rel: str, f: list[str]) -> Dest:
-    """One ``name type token orphan used written`` row."""
+    """One ``name type token orphan used written [origin]`` row (the origin,
+    a clone's, is read by :func:`read_dest`)."""
 
     def text(i: int) -> str:
         return "" if len(f) <= i or f[i] in ("-", "") else f[i]

@@ -476,6 +476,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 vals.append(str(s.used))
             elif f == "written" and s is None:
                 vals.append(str(d.written))
+            elif f == "origin" and s is None:
+                vals.append(d.origin or d.props.get("origin", "-"))
             elif ":" in f:
                 vals.append(self._inherited(name.split("@")[0].split("#")[0], s, f))
             else:
@@ -571,10 +573,33 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
                 return _err(f"cannot destroy snapshot {target}: it's being held.")
             lst.remove(hit[0])
             return _ok()
+        return self._destroy_tree(target, recursive)
+
+    def _destroy_tree(self, target: str, recursive: bool) -> RunResult:
+        """`zfs destroy [-r]` of a filesystem or volume."""
         kids = [n for n in self.ds if n.startswith(target + "/")]
         if kids and not recursive:
             return _err("filesystem has children")
-        for n in [*kids, target]:
+        gone = {target, *kids}
+        # A clone outside the tree of one of its snapshots refuses the whole
+        # destroy before anything goes (cmd/zfs/zfs_main.c:1399-1452,
+        # :1877-1889); one inside it goes with it.
+        outside = sorted(
+            n for n, x in self.ds.items() if n not in gone and x.origin.split("@")[0] in gone
+        )
+        if outside:
+            return _err(
+                f"cannot destroy '{target}': filesystem has dependent clones\n"
+                + "use '-R' to destroy the following datasets:\n"
+                + "\n".join(outside)
+            )
+        for n in sorted(gone):
+            src, _, name = self.ds[n].origin.partition("@")
+            if src and src not in gone:
+                for x in self.ds[src].snaps:
+                    if x.name == name and x.clones == n:
+                        x.clones = ""
+        for n in gone:
             self.ds.pop(n, None)
         return _ok()
 
@@ -666,8 +691,21 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err("dataset already exists")
         if dst.rsplit("/", 1)[0] not in self.ds:
             return _err("parent does not exist")
+
+        def moved(name: str) -> str:
+            return dst + name[len(src) :] if name == src or name.startswith(src + "/") else name
+
         for n in sorted(n for n in list(self.ds) if n == src or n.startswith(src + "/")):
             self.ds[dst + n[len(src) :]] = self.ds.pop(n)
+        # ZFS names a clone's origin, and a snapshot's clones, by object: a
+        # rename shows in both.
+        for d in self.ds.values():
+            if d.origin:
+                o_ds, _, o_snap = d.origin.partition("@")
+                d.origin = f"{moved(o_ds)}@{o_snap}"
+            for x in d.snaps:
+                if x.clones:
+                    x.clones = moved(x.clones)
         return _ok()
 
     def _rollback(self, args: list[str]) -> RunResult:

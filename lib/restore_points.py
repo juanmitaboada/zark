@@ -329,6 +329,38 @@ def is_complete(members: list[Snap]) -> bool:
     return mark.isdigit() and int(mark) == len({s.dataset for s in members})
 
 
+@dataclass(frozen=True)
+class PointLoss:
+    """One backup point once a destroy took part of its snapshots."""
+
+    targets: list[str]  # ``<pool>/<stored>@<name>`` of the snapshots left
+    lost: frozenset[str]  # datasets (archived lineages as theirs) that no longer hold it
+    count: int  # its completion count, lowered by them
+
+
+def point_losses(pool: str, snaps: list[Snap], tops: list[str]) -> dict[str, PointLoss]:
+    """For every backup point the destroy of the trees ``tops`` (paths as
+    stored on the drive) takes snapshots from: the snapshots it keeps, the
+    datasets it loses and its count lowered by them, so that
+    :func:`is_complete` still finds it whole (M5bV-4, M5b-10b). A point
+    marked before the count (``yes``), one left with no snapshot or a count
+    of 0 is not in the result."""
+
+    def gone(s: Snap) -> bool:
+        return any(s.stored == t or s.stored.startswith(f"{t}/") for t in tops)
+
+    out: dict[str, PointLoss] = {}
+    for name in sorted({s.name for s in snaps if gone(s) and s.mark.isdigit()}):
+        members = [s for s in snaps if s.name == name]
+        left = [s for s in members if not gone(s)]
+        lost = frozenset({s.dataset for s in members} - {s.dataset for s in left})
+        count = int(next(s.mark for s in members if s.mark.isdigit())) - len(lost)
+        if not lost or not left or count <= 0:
+            continue
+        out[name] = PointLoss([f"{pool}/{s.stored}@{name}" for s in left], lost, count)
+    return out
+
+
 def run_complete_points(snaps: list[Snap], last_point: str) -> set[str]:
     """Backup points whose run reached every dataset: any snapshot of the
     point carries a mark, or, on a drive with no mark at all,

@@ -76,6 +76,7 @@ from lib.replication import (
     Origin,
     Ref,
     State,
+    dependents,
     is_archived,
     point_name,
 )
@@ -254,26 +255,41 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         if p.kept:
             log.info(f"  {p.rel}: only on the backup, kept")
             continue
-        opts = [
-            "ask again next time",
-            "keep it (not asked again)",
-            f"destroy it on the backup (frees {_gib(p.used)})",
-        ]
+        # What `zfs destroy -r` refuses for (M5bV-3): an archived lineage kept
+        # by a ROLLBACK is a clone of one of the orphan's snapshots, and goes
+        # first; any other clone keeps the destroy from being offered.
+        deps = dependents(eng.dest, p.rel)
+        blocking = [d for d in deps if not d.archived]
+        opts = ["ask again next time", "keep it (not asked again)"]
+        destroy = len(opts) if not blocking else -1
+        if not blocking:
+            opts.append(f"destroy it on the backup (frees {_gib(p.used)})")
+        rename = len(opts) if p.rename_to else -1
         if p.rename_to:
             opts.append(f"follow the rename in origin: {p.rel} → {p.rename_to}")
+        for d in blocking:
+            log.warn(
+                f"  {p.rel} cannot be destroyed: {pool_name}/{d.rel} is a clone of "
+                + f"{pool_name}/{d.origin}, not an archived lineage of it"
+            )
+        taken = _on_drive(eng, p.rel)
+        if deps:
+            taken += ["    and what was cloned from its snapshots:"]
+            taken += [line for d in deps for line in _on_drive(eng, d.rel)]
+        also = f", and {len(deps)} archived lineage(s) cloned from it" if deps else ""
         pick = _ask_confirmed(
             log,
             f"{p.rel} exists only on the backup ({_gib(p.used)}):",
             opts,
-            {2: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it")},
-            {2: _on_drive(eng, p.rel)},
+            {destroy: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it{also}")},
+            {destroy: taken},
         )
         if pick == 1:
             actions.append(partial(eng.keep_orphan, p, datetime.now(UTC).strftime("%Y-%m-%d")))
-        elif pick == 2:
-            actions.append(partial(eng.destroy, p))
+        elif pick == destroy:
+            actions.append(partial(eng.destroy_orphan, p, deps))
             confirmed_any = True
-        elif pick == 3:
+        elif pick == rename:
             actions.append(partial(eng.follow_rename, p))
 
     held_actions, destroys = _held_excluded(plans, eng, declared or exclusions.Declared(), log)
@@ -757,7 +773,9 @@ def _ask_confirmed(
             return pick
         lines = (takes or {}).get(pick, [])
         if lines:
-            log.warn(f"{confirm[pick][0]} takes {len(lines)} dataset(s) on the backup:")
+            # A line ending in ":" heads a group of them; it is no dataset.
+            count = len([ln for ln in lines if not ln.endswith(":")])
+            log.warn(f"{confirm[pick][0]} takes {count} dataset(s) on the backup:")
             for line in lines:
                 log.warn(line)
         if _typed(log, *confirm[pick]):

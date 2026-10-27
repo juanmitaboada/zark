@@ -15554,6 +15554,33 @@ class TestSetupBookmarkV2:
         assert not ok
 
 
+class TestDependents:  # pylint: disable=missing-function-docstring
+    """M5bV-3: what `zfs destroy -r` of a tree refuses for, in the order the
+    dependents can be destroyed in."""
+
+    def test_a_clone_outside_the_tree_and_its_own_clone_deepest_first(self):
+        dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/x/c", "rpool/y")}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
+        dest["rpool/x.archived-20261028/c"] = repl.Dest("ac")
+        dest["rpool/x.archived-20261029"] = repl.Dest("b", clone_of="rpool/x.archived-20261028@s2")
+        dest["rpool/x/k"] = repl.Dest("k", clone_of="rpool/x@s1")  # inside: goes with -r
+        dest["rpool/z"] = repl.Dest("z", clone_of="rpool/y@s1")  # another tree's
+        deps = repl.dependents(dest, "rpool/x")
+        assert [(d.rel, d.depth, d.archived) for d in deps] == [
+            ("rpool/x.archived-20261029", 2, True),
+            ("rpool/x.archived-20261028", 1, True),
+        ], deps
+
+    def test_a_live_clone_is_not_an_archived_lineage(self):
+        dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/y")}
+        dest["rpool/w"] = repl.Dest("w", clone_of="rpool/x@s1")
+        dest["rpool/y.archived-20261028"] = repl.Dest("y", clone_of="rpool/x@s1")
+        assert [(d.rel, d.archived) for d in repl.dependents(dest, "rpool/x")] == [
+            ("rpool/w", False),
+            ("rpool/y.archived-20261028", False),
+        ]
+
+
 class TestBackupDecide:  # pylint: disable=too-many-public-methods
     """backup's questions before the first byte (decisions 7, 8, 18)."""
 
@@ -15935,6 +15962,110 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         ):
             return _engine_run(fake, "backup", "111", P3, decide)
 
+    P4 = "zark_2026-10-10_10:00:00Z"
+
+    def _orphan_with_its_archive(self) -> FakeZfs:
+        """rpool/var/lib/docker kept after a ROLLBACK (its archive a clone of
+        its autosnap_h1), every point marked complete with its count, then
+        the dataset gone from origin: an orphan with a dependent."""
+        fake = self._var_tree_rolled_ahead()
+        assert self._run_with_answers(fake, [1]).ok
+        for name in (P1, P2, P3):
+            members = [
+                (ds, x)
+                for ds, d in fake.ds.items()
+                if ds.startswith("backup/")
+                for x in d.snaps
+                if x.name == name
+            ]
+            count = len({logical(ds) for ds, _ in members})
+            for _, x in members:
+                x.props[COMPLETE_PROP] = str(count)
+        fake.ds.pop("rpool/var/lib/docker")
+        return fake
+
+    def _run_orphan(
+        self, fake: FakeZfs, choices: list[int], typed: str = ""
+    ) -> tuple["engine.Result", list[list[str]], str]:
+        """The run, the options of each question, and every WARN line."""
+        offered: list[list[str]] = []
+        warned: list[str] = []
+        real_warn = Log.warn
+
+        def ask(_self: Log, _q: str, opts: list[str], _d: int = 0) -> int:
+            offered.append(list(opts))
+            return choices[len(offered) - 1]
+
+        def warn(self_: Log, msg: str, *a: Any, **k: Any) -> None:
+            warned.append(msg)
+            real_warn(self_, msg, *a, **k)
+
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            return _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+
+        with (
+            patch.object(Log, "ask_choice", ask),
+            patch.object(Log, "ask_text", return_value=typed),
+            patch.object(Log, "warn", warn),
+        ):
+            res = _engine_run(fake, "backup", "111", self.P4, decide)
+        return res, offered, "\n".join(warned)
+
+    def test_an_orphans_destroy_takes_its_archived_lineage_and_keeps_its_points_whole(
+        self,
+    ) -> None:
+        """M5bV-3, M5bV-4: the question lists the archive cloned from the
+        orphan, DESTROY destroys it first and then the orphan, each by name,
+        and the points that held either stay complete."""
+        fake = self._orphan_with_its_archive()
+        archive = f"backup/rpool/var/lib/docker.archived-{TODAY}"
+        before = len(fake.calls)
+        res, offered, text = self._run_orphan(fake, [2], "DESTROY")
+        assert res.ok, res
+        assert offered[0][2].startswith("destroy it on the backup"), offered
+        assert "DESTROY takes 2 dataset(s) on the backup:" in text, text
+        assert "and what was cloned from its snapshots:" in text and archive in text
+        calls = [c for c in fake.calls[before:] if c.startswith("zfs destroy -r")]
+        assert calls == [
+            f"zfs destroy -r {archive}",
+            "zfs destroy -r backup/rpool/var/lib/docker",
+        ], calls
+        assert archive not in fake.ds and "backup/rpool/var/lib/docker" not in fake.ds
+        with patch_sh(fake):
+            snaps = drive_marks.drive_snapshots("backup", strict=True)
+        assert {P1, P2, P3} <= complete_points(snaps, ""), snaps
+
+    def test_an_orphan_with_another_clone_is_not_offered_for_destroy(self) -> None:
+        """M9b-2 2a: a clone that is not an archived lineage of the orphan
+        keeps the destroy from being offered; the question says why."""
+        fake = self._orphan_with_its_archive()
+        first = fake.names("backup/rpool/var/lib/docker")[0]
+        fake.ds["backup/rpool/other"] = FDataset(origin=f"backup/rpool/var/lib/docker@{first}")
+        res, offered, text = self._run_orphan(fake, [0, 0])  # rpool/other is an orphan too
+        assert res.ok, res
+        # rpool/other is asked about first; rpool/var/lib/docker second.
+        assert not any(o.startswith("destroy") for o in offered[1]), offered
+        assert "cannot be destroyed: backup/rpool/other is a clone of" in text, text
+        assert "backup/rpool/var/lib/docker" in fake.ds
+
+    def test_a_dependent_that_cannot_go_keeps_the_orphan(self) -> None:
+        """M5bV-3: the first failure stops the destroys; the orphan stays."""
+        fake = self._orphan_with_its_archive()
+        fake.fail_cmds.add(f"zfs destroy -r backup/rpool/var/lib/docker.archived-{TODAY}")
+        res, _, _ = self._run_orphan(fake, [2], "DESTROY")
+        assert res.ok, res
+        assert "backup/rpool/var/lib/docker" in fake.ds
+        assert not any(c == "zfs destroy -r backup/rpool/var/lib/docker" for c in fake.calls)
+
+    def test_an_orphans_destroy_reads_the_points_first(self) -> None:
+        """M5bV-4: no destroy when the drive's snapshots cannot be read."""
+        fake = self._orphan_with_its_archive()
+        fake.fail_cmds.add("-s local -t snapshot")
+        _, _, text = self._run_orphan(fake, [2], "DESTROY")
+        assert "not destroyed: cannot read the points that hold it" in text, text
+        assert "backup/rpool/var/lib/docker" in fake.ds
+        assert f"backup/rpool/var/lib/docker.archived-{TODAY}" in fake.ds
+
     def test_newer_snapshots_kept_and_each_lineage_continues(self) -> None:
         """M3R-1 (M4b-5): each rolled-ahead dataset keeps its newer snapshot
         in an archive, its children go back under it, and every one
@@ -16175,9 +16306,24 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         with patch_sh(_fresh_fake()), redirect_stdout(StringIO()) as buf:
             eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
             eng._report(  # pylint: disable=protected-access
-                RunResult(0, "", "", "zfs rollback"), f"rolled back rpool/ROOT/be to @{P1}"
+                RunResult(0, "", "", "zfs rollback"),
+                f"rolled back rpool/ROOT/be to @{P1}",
+                f"roll back rpool/ROOT/be to @{P1}",
             )
         assert f"Rolled back rpool/ROOT/be to @{P1}" in buf.getvalue()
+
+    def test_a_failure_says_what_could_not_be_done(self) -> None:
+        """M5bV-3: "Could not destroy ...", not "Failed: destroyed ..."."""
+        with patch_sh(_fresh_fake()), redirect_stdout(StringIO()) as buf:
+            eng = engine.Run("backup", "111", Log(), P2, sleep=lambda _s: None)
+            eng._report(  # pylint: disable=protected-access
+                RunResult(1, "", "dataset is busy", "zfs destroy"),
+                "destroyed backup/rpool/x on the backup",
+                "destroy backup/rpool/x on the backup",
+            )
+        text = buf.getvalue()
+        assert "Could not destroy backup/rpool/x on the backup: dataset is busy" in text, text
+        assert "Destroyed" not in text and "Failed" not in text, text
 
 
 class TestIncompleteBanner:
@@ -22365,7 +22511,7 @@ class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-f
 
     def test_every_fake_check_passes_on_the_fake(self):
         checks = [c for c in all_selftest_checks() if c.fake]
-        assert len(checks) == 21
+        assert len(checks) == 22
         failed: list[str] = []
         foreign: list[str] = []
         accessors = 0
@@ -22428,8 +22574,8 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
 
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
-        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04
-        assert len([c for c in checks if c.level == 1]) == 57
+        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05
+        assert len([c for c in checks if c.level == 1]) == 58
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         # A check whose expectations changed gets its next revision (M9b).

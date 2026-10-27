@@ -54,6 +54,7 @@ from typing import Protocol
 from lib import sh
 from lib.anchors import POINT_FOR, anchor_point, point_owners, release_point
 from lib.cleanup import Cleanup
+from lib.drive_marks import drive_snapshots
 from lib.log import Log
 from lib.replication import (
     EXCLUDED_KEPT_PROP,
@@ -61,6 +62,7 @@ from lib.replication import (
     STRUCTURAL,
     TRANSFERABLE,
     DatasetPlan,
+    Dependent,
     Dest,
     Origin,
     Ref,
@@ -78,6 +80,7 @@ from lib.replication import (
     reached,
     shared_snapshots,
 )
+from lib.restore_points import COMPLETE_PROP, point_losses
 from lib.survey import ORPHAN, ReadError, read_dest, read_origin, source_pools
 
 SANOID_UNITS = ("sanoid.service", "sanoid-prune.service")
@@ -140,8 +143,9 @@ class TransferObserver(Protocol):
         """No more data moves."""
 
 
+# One public method per action backup's plan and questions hand the run.
 @dataclass
-class Run:  # pylint: disable=too-many-instance-attributes
+class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     """One replication run of origin into backup pool ``pool``."""
 
     pool: str
@@ -328,7 +332,11 @@ class Run:  # pylint: disable=too-many-instance-attributes
     def rollback(self, p: DatasetPlan) -> bool:
         """ROLLBACK option b: ``zfs rollback -r`` to the newest common snapshot."""
         r = sh.run(f"zfs rollback -r {_q(self._dst(p.rel) + p.common)}", log=self.log)
-        self._report(r, f"rolled back {p.rel} to {p.common}, destroying {len(p.newer)} snapshot(s)")
+        self._report(
+            r,
+            f"rolled back {p.rel} to {p.common}, destroying {len(p.newer)} snapshot(s)",
+            f"roll back {p.rel} to {p.common}",
+        )
         return r.ok
 
     def discard_changes(self, p: DatasetPlan) -> bool:
@@ -350,6 +358,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
             r,
             f"restored {p.rel} on the backup to {p.common} "
             + "(undid what a read-write mount changed; no snapshot destroyed)",
+            f"restore {p.rel} on the backup to {p.common}",
         )
         return r.ok
 
@@ -357,7 +366,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
         """Rename the destination lineage aside; return its new name ("" on failure)."""
         new = archive_name(p.rel, set(self.dest), now or datetime.now(UTC))
         r = sh.run(f"zfs rename {_q(self._dst(p.rel))} {_q(self._dst(new))}", log=self.log)
-        self._report(r, f"archived {p.rel} as {new}")
+        self._report(r, f"archived {p.rel} as {new}", f"archive {p.rel} as {new}")
         if r.ok:
             self.dest[new] = self.dest.pop(p.rel, Dest(new))
         return new if r.ok else ""
@@ -414,13 +423,61 @@ class Run:  # pylint: disable=too-many-instance-attributes
     def destroy(self, p: DatasetPlan) -> bool:
         """Destroy a destination tree (DIVERGED, ORPHAN, ROLLBACK when chosen)."""
         r = sh.run(f"zfs destroy -r {_q(self._dst(p.rel))}", log=self.log)
-        self._report(r, f"destroyed {self._dst(p.rel)} on the backup")
+        self._report(
+            r,
+            f"destroyed {self._dst(p.rel)} on the backup",
+            f"destroy {self._dst(p.rel)} on the backup",
+        )
         return r.ok
+
+    def destroy_orphan(self, p: DatasetPlan, deps: list[Dependent]) -> bool:
+        """An orphan's DESTROY (M5bV-3, M5bV-4): the archived lineages cloned
+        from its snapshots first, deepest first, each by its exact name (the
+        question listed them; ``zfs destroy -r`` refuses the orphan while one
+        exists, cmd/zfs/zfs_main.c:1399-1452), then the orphan's tree. A
+        failure stops there. The points that held what went are then
+        rewritten with their completion count lowered, so they stay whole
+        (the orphan is gone from origin: nothing is recorded for recover to
+        recreate). Nothing is destroyed when the drive's snapshots cannot
+        be read first."""
+        try:
+            snaps = drive_snapshots(self.pool, strict=True)
+        except ReadError as e:
+            self.log.warn(
+                f"{self._dst(p.rel)} not destroyed: cannot read the points that hold it: {e}"
+            )
+            return False
+        gone: list[str] = []
+        ok = True
+        for dep in deps:
+            r = sh.run(f"zfs destroy -r {_q(self._dst(dep.rel))}", log=self.log)
+            self._report(
+                r,
+                f"destroyed {self._dst(dep.rel)} on the backup (cloned from {dep.origin})",
+                f"destroy {self._dst(dep.rel)} on the backup",
+            )
+            if not r.ok:
+                ok = False
+                break
+            gone.append(dep.rel)
+        if ok:
+            ok = self.destroy(p)
+            if ok:
+                gone.append(p.rel)
+        for name, loss in point_losses(self.pool, snaps, gone).items():
+            r = sh.run(["zfs", "set", f"{COMPLETE_PROP}={loss.count}", *loss.targets], log=self.log)
+            if r.ok:
+                self.log.info(f"  {name}: whole without {', '.join(sorted(loss.lost))}")
+            else:
+                self.log.warn(f"{name} now reads PARTLY REMOVED: {r.stderr.strip()}")
+        return ok
 
     def keep_orphan(self, p: DatasetPlan, stamp: str) -> bool:
         """Remember that the user keeps this orphan (not asked again)."""
         r = sh.run(f"zfs set {ORPHAN}={_q('kept@' + stamp)} {_q(self._dst(p.rel))}", log=self.log)
-        self._report(r, f"keeping {p.rel} (only on backup)")
+        self._report(
+            r, f"keeping {p.rel} (only on backup)", f"mark {p.rel} as kept (only on backup)"
+        )
         return r.ok
 
     def clear_orphan_marks(self) -> list[str]:
@@ -466,7 +523,11 @@ class Run:  # pylint: disable=too-many-instance-attributes
             f"zfs rename {_q(self._dst(p.rel))} {_q(self._dst(p.rename_to))}",
             log=self.log,
         )
-        self._report(r, f"renamed {p.rel} → {p.rename_to} on the backup")
+        self._report(
+            r,
+            f"renamed {p.rel} → {p.rename_to} on the backup",
+            f"rename {p.rel} → {p.rename_to} on the backup",
+        )
         return r.ok
 
     def ensure_containers(self) -> list[str]:
@@ -485,19 +546,24 @@ class Run:  # pylint: disable=too-many-instance-attributes
                 f"zfs create -o canmount=off -o mountpoint=none {_q(self._dst(rel))}",
                 log=self.log,
             )
-            self._report(r, f"created container {self._dst(rel)}")
+            self._report(
+                r, f"created container {self._dst(rel)}", f"create container {self._dst(rel)}"
+            )
             if r.ok:
                 self.dest[rel] = Dest(rel)
             else:
                 failed.append(rel)
         return failed
 
-    def _report(self, r: sh.RunResult, what: str) -> None:
+    def _report(self, r: sh.RunResult, done: str, failed: str) -> None:
+        """One line for a change on the drive: ``done`` in the past tense, or
+        ``failed`` after "Could not" (M5bV-3: "Failed: destroyed ..." read
+        as if it had happened)."""
         if r.ok:
             # Only the first letter: capitalize() would lowercase the dataset names.
-            self.log.ok(what[:1].upper() + what[1:])
+            self.log.ok(done[:1].upper() + done[1:])
         else:
-            self.log.error(f"Failed: {what}: {r.stderr.strip()}")
+            self.log.error(f"Could not {failed}: {r.stderr.strip()}")
 
     # ── transfer ─────────────────────────────────────────────────────────
 
