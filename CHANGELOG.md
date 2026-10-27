@@ -113,6 +113,12 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   M9bP.2).
 - zark is for Ubuntu's own ZFS layout only; other layouts may be weighed
   in a later release.
+- After a recover, the restored root's `/etc/zfs/zfs-list.cache` is
+  origin's at the point and still names the datasets recover did not
+  create (below an excluded top, among others): at the first boot systemd
+  makes their mountpoints as empty directories, inside the excluded top
+  for M9b-1's case (M9bF-2, M9bP.4). zed rewrites the cache after the
+  boot; the directories can be removed with `rmdir`.
 
 #### Rejected approaches
 
