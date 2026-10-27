@@ -352,8 +352,8 @@ def _no_record_why(rec: pool_record.PoolRecord | None, known: set[str]) -> str:
             + "features cannot be checked against it"
         )
     return (
-        "This point does not record origin's pool features (written before zark "
-        + f"2.0.0-rc11{'' if rec is None else ', or incomplete'})"
+        "This point does not record origin's pool features (written by zark 1.x or an "
+        + f"early 2.0.0 development build{'' if rec is None else ', or incomplete'})"
     )
 
 

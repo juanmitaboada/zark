@@ -28,10 +28,10 @@ from lib.identity import disks_under
 from lib.log import Log
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
-# Additional bpool features for Ubuntu 25.04+ (dracut systems).
+# Additional bpool features for dracut systems (Ubuntu 26.04).
 #
 # These are the bpool features Ubuntu's installer activates by default on
-# 25.04+. Enabling them on the recovered bpool keeps the pool layout
+# dracut systems (Ubuntu 26.04). Enabling them on the recovered bpool keeps the pool layout
 # consistent with a stock install and avoids surprises on the first
 # `apt upgrade` (which may auto-enable them).
 #
@@ -108,7 +108,7 @@ def _force_latest_signed_alternative(
 
 
 def _install_keystore_dracut(recover_mnt: str, ubuntu_name: str, log: Log):
-    """Install dracut 89keystore module (Ubuntu 25.04+)."""
+    """Install dracut 89keystore module (dracut systems, Ubuntu 26.04)."""
     ks_mod_dir = Path(f"{recover_mnt}/usr/lib/dracut/modules.d/89keystore")
     ks_mod_dir.mkdir(parents=True, exist_ok=True)
 
@@ -388,13 +388,13 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     # This is needed because systemd-cryptsetup runs BEFORE ZFS import (the zvol
     # device doesn't exist yet), creating a chicken-and-egg problem.
     #
-    # dracut (Ubuntu 25.04+): 89keystore module with pre-mount hook
+    # dracut systems (Ubuntu 26.04): 89keystore module with pre-mount hook
     # initramfs-tools (Ubuntu 24.04): its zfs script does it (below)
 
     if Path(f"{RECOVER_MNT}/usr/bin/dracut").exists():
         _install_keystore_dracut(RECOVER_MNT, ubuntu_name, log)
         # Without origin's record of bpool (M6-6): the extended features (safe
-        # for GRUB on 25.04+); with it, bpool already has what origin's had.
+        # for GRUB on dracut systems, Ubuntu 26.04); with it, bpool already has what origin's had.
         if not bpool_as_recorded:
             for feat in BPOOL_FEATURES_EXTENDED.split():
                 _ = sh.run(f"zpool set feature@{feat}=enabled bpool")

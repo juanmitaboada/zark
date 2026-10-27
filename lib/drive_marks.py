@@ -209,7 +209,9 @@ def log_metadata(pool: str, log: Log, strict: bool = False) -> dict[str, str]:
     (recover: an empty read would be taken for a drive without metadata)."""
     meta = read_metadata(pool, strict=strict)
     if not meta:
-        log.info(f"{pool}: no zark metadata (written by zark <= 2.0.0-rc1)")
+        log.info(
+            f"{pool}: no zark metadata (written by zark 1.x or an early 2.0.0 development build)"
+        )
         return meta
     log.info(
         f"{pool}: written by zark {meta.get('version', '?')} on {meta.get('origin-host', '?')}"

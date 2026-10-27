@@ -18249,7 +18249,7 @@ class TestDriveMetadata:
         out = StringIO()
         with patch_sh(fake), redirect_stdout(out):
             assert not drive_marks.log_metadata("backup", Log())
-        assert "zark <= 2.0.0-rc1" in out.getvalue()
+        assert "zark 1.x or an early 2.0.0 development build" in out.getvalue()
 
 
 def _marked(fake: FakeZfs, pool: str = "backup") -> set[str]:

@@ -317,7 +317,7 @@ def _list_candidate_disks() -> list[tuple[str, str]]:
 
 
 # Default QEMU virtio-vga resolution. Targets mainstream modern monitors
-# (the typical ZFS-on-Ubuntu 24.04+ machine has at least 1080p, often
+# (the typical ZFS-on-Ubuntu 24.04 and 26.04 machine has at least 1080p, often
 # higher). Override per-run with `--display WxH`. We don't ship 1080p
 # as the default because 2560×1440 feels right on the 4K screens
 # common on developer hardware and still fits cleanly inside any

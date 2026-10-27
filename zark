@@ -47,7 +47,7 @@ COMMANDS = {
     "monitor": "Live view of a running command and the backups' state (no root)",
     "clean": "Release what an interrupted zark run left mounted or imported",
     "health": "Non-destructive risk checks on a backup drive",
-    "registry": "List, forget or fix entries in known_drives.json",
+    "registry": "List, forget or fix entries in known_drives.json, or set a drive's retention",
     "prune": "Reclaim space in origin or on a backup drive (interactive)",
     "exclude": "Leave datasets out of backups or of local snapshots (list/add/remove)",
     "status": "Source pools' fill level and each drive's backup age",
