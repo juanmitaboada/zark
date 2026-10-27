@@ -23504,10 +23504,9 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
     @classmethod
     @contextmanager
     def _host_dirs_lock(cls) -> Iterator[None]:
-        """Exclusive lock around the harness and the removal of the mount
-        points it made: they are on the host, shared by every suite as root.
-        Two suites at once otherwise remove each other's directories while
-        the other's namespace uses them. The kernel drops it on any death."""
+        """Exclusive lock around the harness: one run at a time on the host,
+        shared by every suite as root (M4dR-10). The kernel drops it on any
+        death."""
         fd = os.open(cls._lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -23528,8 +23527,6 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
             )
             assert r.returncode == 0, (case, r.returncode, r.stderr[-2000:])
             result: dict[str, Any] = json.loads(r.stdout.strip().splitlines()[-1])
-            for d in result["made"]:  # empty mount points the harness had to make
-                os.rmdir(d)
         return result
 
     def _run(self, case: str) -> dict[str, Any]:
@@ -23539,13 +23536,17 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
         avail = stest._mem_available()  # pylint: disable=protected-access
         if avail is not None and avail < stest.MIN_MEM_AVAILABLE:
             raise SkipTest("too little memory for the bench")
-        return self._run_harness(case)
+        # M9aP.3: the harness makes what it needs inside its namespace only.
+        host = ("/run/zark", "/var/lib/zark")
+        before = [os.path.isdir(d) for d in host]
+        result = self._run_harness(case)
+        assert [os.path.isdir(d) for d in host] == before, (before, host)
+        return result
 
-    def test_the_host_directories_are_made_and_removed_under_a_lock(self):
+    def test_the_harness_runs_under_the_host_lock(self):
         # M4dR-10: needs no root (the harness call is replaced). A second
-        # opener of the lock file must be refused for as long as the
-        # harness runs and the made directories are removed, and admitted
-        # after.
+        # opener of the lock file is refused for as long as the harness runs
+        # and admitted after.
         seen: list[bool] = []
 
         def other_can_lock() -> bool:
@@ -23560,16 +23561,7 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
 
         def fake_run(*_a: Any, **_k: Any) -> Any:
             seen.append(other_can_lock())
-            out = json.dumps({"made": ["/nonexistent/zark-made"]})
-            return subprocess.CompletedProcess([], 0, out, "")
-
-        real_rmdir = os.rmdir
-
-        def fake_rmdir(d: str, *a: Any, **k: Any) -> None:
-            if d == "/nonexistent/zark-made":
-                seen.append(other_can_lock())
-            else:  # the temporary directory's own cleanup
-                real_rmdir(d, *a, **k)
+            return subprocess.CompletedProcess([], 0, json.dumps({}), "")
 
         # A lock file of its own: another suite on the host may hold the real
         # one at this very moment (that is what the lock is for).
@@ -23578,10 +23570,9 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
             with (
                 patch.object(type(self), "_lock_path", staticmethod(lambda: private)),
                 patch("subprocess.run", fake_run),
-                patch("os.rmdir", fake_rmdir),
             ):
                 self._run_harness("sig:INT")
-                assert seen == [False, False], seen
+                assert seen == [False], seen
                 assert other_can_lock()  # released afterwards
 
     def _stopped(self, name: str) -> None:

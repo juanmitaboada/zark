@@ -20,8 +20,9 @@ Must run as root. It moves itself into a new mount namespace and checks that
 the namespace changed before doing anything else, then makes every mount
 there private and mounts a tmpfs over ``/var/log``, ``/var/lib/zark``,
 ``/run/zark`` and ``/dev/shm``, so the run writes nothing of the machine's.
-A mount point that is missing is made first and named in the result, for
-the caller to remove.
+A mount point missing on the host is made inside the namespace only, in an
+overlay over its parent whose upper layer is a tmpfs (M9aP.3): nothing is
+created or removed on the host.
 
 ``zpool`` and ``zfs`` are scripts in ``<workdir>/fake``, first in PATH: they
 keep each pool as a file and append every call to a list. ``zpool create``
@@ -38,7 +39,7 @@ Prints one JSON object: ``rc``, ``created`` (pools whose create finished),
 ``destroyed``, ``left`` (pools still there), ``benches`` (bench directories
 left in /dev/shm), ``child_alive``, ``log`` (zark.log's lines about the stop
 and the cleanup), ``rm_after_destroys``, ``report`` (the record's
-``partial``, ``stopped`` and ``checks``) and ``made``.
+``partial``, ``stopped`` and ``checks``).
 """
 
 import glob
@@ -107,15 +108,29 @@ def _check(args: list[str]) -> None:
     _ = subprocess.run(args, check=True, capture_output=True)
 
 
-def _private_tree() -> list[str]:
-    """The namespace and its tmpfs mounts; the mount points it had to make."""
-    made = [d for d in _MOUNTS if not os.path.isdir(d)]
-    for d in made:
-        os.makedirs(d)
+def _overlay_parent(path: str, work: str) -> None:
+    """Make ``path`` inside this namespace only: an overlay over its parent,
+    the parent as the lower layer and a tmpfs for the upper one, so the new
+    directory never reaches the host's file system (M9aP.3)."""
+    parent = os.path.dirname(path)
+    base = os.path.join(work, "overlay" + parent.replace("/", "_"))
+    os.makedirs(base)
+    _check(["mount", "-t", "tmpfs", "-o", "size=16m", "zarkstop-upper", base])
+    upper, scratch = os.path.join(base, "upper"), os.path.join(base, "work")
+    os.makedirs(upper)
+    os.makedirs(scratch)
+    opts = f"lowerdir={parent},upperdir={upper},workdir={scratch}"
+    _check(["mount", "-t", "overlay", "-o", opts, "zarkstop-overlay", parent])
+    os.makedirs(path)
+
+
+def _private_tree(work: str) -> None:
+    """The namespace's private tree and its tmpfs mounts."""
     _check(["mount", "--make-rprivate", "/"])
     for d in _MOUNTS:
+        if not os.path.isdir(d):
+            _overlay_parent(d, work)
         _check(["mount", "-t", "tmpfs", "-o", "size=2g", "zarkstop", d])
-    return made
 
 
 def _fakes(work: str) -> tuple[str, str]:
@@ -185,7 +200,7 @@ def main() -> int:  # pylint: disable=too-many-locals
     if os.readlink("/proc/self/ns/mnt") == before:
         print("not in a new mount namespace: refusing to run", file=sys.stderr)
         return 1
-    made = _private_tree()
+    _private_tree(work)
     fake, state = _fakes(work)
     env = dict(os.environ, PATH=f"{fake}:{os.environ.get('PATH', '/usr/bin:/bin')}")
     # The dead pipe is seen at zark's next write, after the child ends.
@@ -232,7 +247,6 @@ def main() -> int:  # pylint: disable=too-many-locals
                 "log": kept,
                 "rm_after_destroys": bool(removes and destroys and removes[0] > destroys[-1]),
                 "report": _report(),
-                "made": made,
             }
         )
     )
