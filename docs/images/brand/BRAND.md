@@ -22,9 +22,9 @@ on installed fonts. PNGs are rendered from the SVGs and carry no metadata chunks
 | OK green     | `#5FCB7A` | `[OK]` and success frames in terminal mockups              |
 | Step cyan    | `#56C8D8` | Step counters in terminal mockups                          |
 
-Orange is the only accent. Keep it to the mark, one headline or one highlight per
-view; it is close to Ubuntu orange, so it must never become a background colour or
-a large flat area that could read as an Ubuntu property. zark is "for Ubuntu".
+Orange is the only accent: the mark, one headline or one highlight per view. It
+may resemble Ubuntu's orange; what zark material never does is use the Ubuntu logo
+or style the Ubuntu name as if zark were Canonical's. zark is "for Ubuntu".
 
 ## Typography
 
