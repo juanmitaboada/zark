@@ -203,12 +203,15 @@ def parse(lines: list[str], origin: dict[str, Origin]) -> Declared:
 
 
 def read(pools: list[str], origin: dict[str, Origin], strict: bool = False) -> Declared:
-    """The exclusions declared in ``pools`` (one ``zfs get`` per pool)."""
+    """The exclusions declared in ``pools`` (one ``zfs get`` per pool). ``-t
+    filesystem,volume``: without it ``zfs get -r`` walks every snapshot and
+    bookmark of the pool too (OpenZFS cmd/zfs/zfs_iter.c:97-98, :150-160)."""
     lines: list[str] = []
     for pool in pools:
         r = checked(
             sh.run(
-                f"zfs get -H -s local -o name,property,value {REPLICATE},{SNAPSHOT} -r {_q(pool)}"
+                "zfs get -H -s local -t filesystem,volume -o name,property,value "
+                + f"{REPLICATE},{SNAPSHOT} -r {_q(pool)}"
             ),
             strict,
         )

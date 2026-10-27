@@ -3871,7 +3871,7 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
     def test_the_exclusions_are_read_strictly(self):
         """M5bR-4: a failed read is never "nothing excluded from snapshots"."""
         fake = _fresh_fake(())
-        fake.fail_cmds.add("zfs get -H -s local -o name,property,value")
+        fake.fail_cmds.add("zfs get -H -s local -t filesystem,volume -o name,property,value")
         with patch_sh(fake), patch.object(setup_mod.survey, "source_pools", return_value=["rpool"]):
             try:
                 _ = setup_mod._drained()  # pylint: disable=protected-access
@@ -6787,7 +6787,10 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
 
     def test_it_reads_local_values_only(self):
         mock = MockShell()
-        cmd = f"zfs get -H -s local -o name,property,value {self.R},{self.S} -r rpool"
+        cmd = (
+            "zfs get -H -s local -t filesystem,volume -o name,property,value "
+            + f"{self.R},{self.S} -r rpool"
+        )
         mock.on(cmd).succeeds("rpool/data\torg.zark:replicate\tno\n")
         with patch_sh(mock):
             d = excl.read(["rpool"], _excl_origin("rpool/data"), strict=True)
@@ -13939,6 +13942,21 @@ P1, P2, P3 = (
 
 class TestEngineExclusions:
     """D8 replicate=no (M5b-9, M5b-11): an excluded subtree is not expected."""
+
+    def test_the_kept_mark_is_read_where_it_was_set_and_the_orphan_mark_as_inherited(self):
+        """M5bP.4, M9b-10: a kept excluded copy's children do not read as
+        kept; a kept orphan's children do (retention reads them so)."""
+        fake = _fresh_fake()
+        for rel in ("rpool", "rpool/x", "rpool/x/c", "rpool/o", "rpool/o/c"):
+            fake.ds[f"backup/{rel}"] = FDataset()
+        fake.ds["backup/rpool/x"].props[excl.KEPT] = "kept@2026-10-27"
+        fake.ds["backup/rpool/o"].props[survey.ORPHAN] = "kept@2026-10-27"
+        with patch_sh(fake):
+            dest = survey.read_dest("backup", strict=True)
+        assert dest["rpool/x"].excluded_kept == "kept@2026-10-27"
+        assert dest["rpool/x/c"].excluded_kept == ""
+        assert dest["rpool/o/c"].orphan == "kept@2026-10-27"
+        assert fake.was_called("zfs get -H -s local -t filesystem,volume -o name,value")
 
     DOCKER = frozenset({"rpool/var/lib/docker"})
 
@@ -22326,9 +22344,11 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
         assert len([c for c in checks if c.level == 1]) == 57
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
+        # A check whose expectations changed gets its next revision (M9b).
+        revs = {"SNP-07": 2}
         for c in checks:
             assert re.fullmatch(r"[A-Z]{3,4}-\d\d", c.cid), c.cid
-            assert c.rev == 1 and c.depends, c.cid
+            assert c.rev == revs.get(c.cid, 1) and c.depends, c.cid
             doc = c.fn.__doc__ or ""
             assert re.search(r"\.(c|py|rules\.in|rules|md|8):\d+", doc) or "sanoid:" in doc, c.cid
         assert [c.level for c in checks] == sorted(c.level for c in checks)

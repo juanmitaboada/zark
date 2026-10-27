@@ -758,17 +758,19 @@ def snp_06(b: Bench) -> None:
 
 @check(
     "SNP-07",
-    1,
+    2,
     1,
     "a user property set on a dataset is local there, inherited below, listed with -s local",
-    depends=("zark exclude and exclusions.read (lib/exclusions.py:195)", "D7, M5b-4 4a"),
+    depends=("zark exclude and exclusions.read (lib/exclusions.py:205)", "D7, M5b-4 4a"),
     fake=True,
 )
 def snp_07(b: Bench) -> None:
     """``org.zark:replicate=no`` set on a dataset is ``local`` there and
-    ``inherited from`` it on a child; ``zfs get -s local -r`` lists the
-    dataset only, and ``zfs inherit`` removes it. OpenZFS
-    cmd/zfs/zfs_main.c:2292-2312; man/man7/zfsprops.7:2279-2280;
+    ``inherited from`` it on a child; ``zfs get -s local -t
+    filesystem,volume -r`` lists the dataset only, not a snapshot that
+    carries a local value of its own (rev 2, M5b review 3 (1)), and ``zfs
+    inherit`` removes it. OpenZFS cmd/zfs/zfs_main.c:2292-2312, :2318-2350,
+    cmd/zfs/zfs_iter.c:97-98, :150-160; man/man7/zfsprops.7:2279-2280;
     module/zfs/dsl_prop.c:105, :115-121."""
     top = b.fs(f"{b.a}/snp07")
     child = b.fs(f"{top}/c")
@@ -778,9 +780,14 @@ def snp_07(b: Bench) -> None:
     expect(got == "local", f"{prop} local on {top}", got)
     got = b.source(prop, child)
     expect(got == f"inherited from {top}", f"{prop} inherited from {top} on {child}", got)
-    listing = f"zfs get -H -s local -o name,property,value {prop},org.zark:snapshot -r {b.a}"
+    _ = b.ok(f"zfs snapshot {top}@snp07")
+    _ = b.ok(f"zfs set {prop}=no {top}@snp07")
+    listing = (
+        "zfs get -H -s local -t filesystem,volume -o name,property,value "
+        + f"{prop},org.zark:snapshot -r {b.a}"
+    )
     got = ", ".join(b.ok(listing).lines)
-    expect(got == f"{top}\t{prop}\tno", f"{top} alone with -s local", got)
+    expect(got == f"{top}\t{prop}\tno", f"{top} alone with -s local -t filesystem,volume", got)
     _ = b.ok(f"zfs inherit {prop} {top}")
     got = ", ".join(b.ok(listing).lines)
     expect(got == "", "nothing listed after zfs inherit", got)

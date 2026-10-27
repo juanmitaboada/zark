@@ -122,9 +122,12 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
             continue
         if children is None and not sh.run(f"zfs list -H -o name {root}").ok:
             continue
+        # org.zark:orphan is read as the effective value: a kept orphan's
+        # children are kept with it, and retention reads them so (I-E,
+        # lib/retention.py is_live).
         r = sh.run(
             "zfs list -Hp -t filesystem,volume "
-            + f"-o name,type,receive_resume_token,{ORPHAN},used,written,{EXCLUDED_KEPT_PROP} "
+            + f"-o name,type,receive_resume_token,{ORPHAN},used,written "
             + f"-r {root}",
         )
         r = checked(r, strict)
@@ -133,6 +136,20 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
             if len(f) >= 6 and f[0].startswith(strip):
                 rel = f[0][len(strip) :]
                 dest[rel] = _dest_row(rel, f)
+        # The kept mark of an excluded copy only where it was set (M5bP.4):
+        # its children do not carry it.
+        r = checked(
+            sh.run(
+                f"zfs get -H -s local -t filesystem,volume -o name,value {EXCLUDED_KEPT_PROP} "
+                + f"-r {root}"
+            ),
+            strict,
+        )
+        for line in r.lines if r.ok else []:
+            f = line.split("\t")
+            rel = f[0][len(strip) :] if f[0].startswith(strip) else ""
+            if len(f) == 2 and rel in dest and f[1] not in ("", "-"):
+                dest[rel].excluded_kept = f[1]
         r = checked(
             sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}"),
             strict,
@@ -167,7 +184,7 @@ ORPHAN = "org.zark:orphan"
 
 
 def _dest_row(rel: str, f: list[str]) -> Dest:
-    """One ``name type token orphan used written excluded-kept`` row."""
+    """One ``name type token orphan used written`` row."""
 
     def text(i: int) -> str:
         return "" if len(f) <= i or f[i] in ("-", "") else f[i]
@@ -182,7 +199,6 @@ def _dest_row(rel: str, f: list[str]) -> Dest:
         orphan=text(3),
         used=number(4),
         written=number(5),
-        excluded_kept=text(6),
     )
 
 
