@@ -52,6 +52,7 @@ import tempfile
 import termios
 import time
 import urllib.parse
+import zlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import (
     AbstractContextManager,
@@ -18592,6 +18593,280 @@ class TestDriveContentsWriter:  # pylint: disable=missing-function-docstring
         assert drive_contents.month_after(1_764_460_800) == "2025-12"  # 2025-11-30
         assert drive_contents.month_after(1_767_139_200) == "2026-01"  # 2025-12-31
         assert drive_contents.month_after(1_767_225_600) == "2026-02"  # 2026-01-01
+
+
+# M9aR-1: a drive whose figures depend on every rule the writer follows.
+_NINE_DAYS = (
+    (1, 10),
+    (2, 10),
+    (3, 10),
+    (5, 10),
+    (6, 10),
+    (8, 10),
+    (9, 10),
+    (9, 20),
+    (10, 26),
+    (10, 28),
+    (11, 10),
+)
+_NINE = [f"zark_2026-{m:02d}-{d:02d}_10:00:00Z" for m, d in _NINE_DAYS]
+_NINE_NOW = int(datetime(2026, 11, 20, 8, tzinfo=UTC).timestamp())
+_NINE_ARCH = "backup/rpool/var.archived-20260215"
+_NINE_FIRST = "zark_2025-12-10_10:00:00Z"
+_NINE_HISTORY = "autosnap_2025-12-20_08:00:00_daily"
+
+
+def _nine_utc(month: int, day: int, hour: int = 10, year: int = 2026) -> int:
+    return int(datetime(year, month, day, hour, tzinfo=UTC).timestamp())
+
+
+def _nine_month_drive() -> FakeZfs:
+    """Points in nine months of 2026 (April and July skipped; two in
+    September, two in October), NOW 2026-11-20:
+
+    - October 26 is inside the window now and two days outside it at
+      NOW + 7 days, where October 28 is still the month's point;
+    - September 20 is skipped by rpool/var/lib (not whole), so September 10
+      is the month's point;
+    - an archived lineage holds only the two oldest points;
+    - home's March snapshot is a clone's origin, every June snapshot is held;
+    - the first point recorded is 2025-12-10 and a sanoid snapshot of
+      2025-12-20 stays on ROOT/be; one name neither zark nor sanoid wrote;
+    - every snapshot's used differs, and a point's snapshots differ in
+      creation by a few seconds per dataset."""
+    fake = _fresh_fake()
+    for (month, day), point in zip(_NINE_DAYS, _NINE, strict=True):
+        _tick(fake, f"2026-{month:02d}-{day - 1:02d}_08:00:00_hourly")
+        assert _engine_run(fake, "backup", "111", point).ok
+        _record(fake, point)
+    fake.dataset(_NINE_ARCH)
+    for point in _NINE[:2]:
+        fake.snap(_NINE_ARCH, point)
+    var_lib = fake.ds["backup/rpool/var/lib"]
+    var_lib.snaps = [s for s in var_lib.snaps if s.name != _NINE[7]]
+    for ds, extra in (
+        ("backup/rpool/ROOT/be", _NINE_HISTORY),
+        ("backup/rpool/var", "syncoid_old_2025"),
+    ):
+        s = fake.snap(ds, extra)
+        s.txg = 0  # older than every other snapshot of the dataset
+        fake.ds[ds].snaps.insert(0, fake.ds[ds].snaps.pop())
+    fake.ds["backup"].props["org.zark:first-point"] = _NINE_FIRST
+    for ds, d in fake.ds.items():
+        if not ds.startswith("backup/"):
+            continue
+        for s in d.snaps:
+            if repl.POINT_RE.match(s.name):
+                s.creation = _nine_utc(int(s.name[10:12]), int(s.name[13:15])) + len(ds) % 7
+            elif s.name.startswith("autosnap_2026"):
+                s.creation = _nine_utc(int(s.name[14:16]), int(s.name[17:19]), 8)
+            elif s.name == _NINE_HISTORY:
+                s.creation = _nine_utc(12, 20, 8, 2025)
+            else:
+                s.creation = _nine_utc(6, 1, 8, 2025)
+            s.used = (1 << 20) * (1 + zlib.crc32(f"{ds}@{s.name}".encode()) % 5)
+            s.clones = (
+                "backup/rpool/USERDATA/home-clone"
+                if (ds, s.name) == ("backup/rpool/USERDATA/home", _NINE[2])
+                else s.clones
+            )
+            s.userrefs = 1 if s.name == _NINE[4] else s.userrefs
+    return fake
+
+
+class TestDriveContentsNineMonths:  # pylint: disable=missing-function-docstring
+    """M9aR-1: every figure of the drive contents against the rule that
+    makes it, on _nine_month_drive (the rules the suite's other drive
+    cannot tell apart)."""
+
+    def _measure(
+        self, fake: FakeZfs, policy: ret.Policy | None = None
+    ) -> tuple[drive_contents.DriveContents, str]:
+        out = StringIO()
+        with patch_sh(fake), redirect_stdout(out):
+            got = drive_contents.measure("backup", policy or ret.Policy(), Log(), now=_NINE_NOW)
+        return got, out.getvalue()
+
+    @staticmethod
+    def _reads(fake: FakeZfs) -> tuple[dict[str, repl.Dest], Any, dict[str, str], dict[str, int]]:
+        with patch_sh(fake):
+            dest = survey.read_dest("backup", strict=True)
+            complete = drive_marks.drive_complete("backup")
+            pins = drive_marks.drive_pins("backup", strict=True)
+            used = survey.read_dest_used("backup")
+        return dest, complete, pins, used
+
+    def _plan(self, fake: FakeZfs, now: int, policy: ret.Policy | None = None) -> ret.Prune:
+        dest, complete, pins, _ = self._reads(fake)
+        return ret.plan_prune(
+            dest,
+            complete.run,
+            policy or ret.Policy(),
+            now,
+            whole=complete.whole,
+            pinned=pins,
+            first=complete.first,
+        )
+
+    def _candidates(self, fake: FakeZfs, policy: ret.Policy | None = None) -> list[str]:
+        """What `zark prune` offers beyond the policy (_beyond's list)."""
+        dest, complete, pins, _ = self._reads(fake)
+        policy = policy or ret.Policy()
+        prune = self._plan(fake, _NINE_NOW, policy)
+        return [
+            n
+            for n in ret.space_candidates(
+                dest, complete.run, policy, _NINE_NOW, prune, complete.whole
+            )
+            if ret.point_removals(dest, n, pinned=pins)
+        ]
+
+    def test_the_drive_is_what_the_tests_rely_on(self) -> None:
+        dest, complete, pins, _ = self._reads(_nine_month_drive())
+        assert set(_NINE) <= complete.run and _NINE[7] not in complete.whole
+        assert complete.first == _NINE_FIRST
+        assert f"rpool/USERDATA/home@{_NINE[2]}" in pins and f"rpool/ROOT/be@{_NINE[4]}" in pins
+        assert [s.name for s in dest["rpool/var.archived-20260215"].snaps] == _NINE[:2]
+
+    def test_retention_next_is_the_policy_a_week_later(self) -> None:
+        """D8, D19: October 26 leaves the window within the week; the
+        sanoid snapshot after the recorded first point is the policy's."""
+        fake = _nine_month_drive()
+        nxt = self._measure(fake)[0].retention_next
+        later, now = self._plan(fake, _NINE_NOW + 7 * ret.DAY), self._plan(fake, _NINE_NOW)
+        assert nxt is not None
+        assert _NINE[8] in nxt["points"] and _NINE[8] not in {r.name for r in now.snapshots}
+        assert f"rpool/ROOT/be@{_NINE_HISTORY}" in {r.target for r in later.snapshots}
+        times = ret.point_times(self._reads(fake)[0])
+        names = sorted(
+            {r.name for r in later.snapshots if repl.POINT_RE.match(r.name)},
+            key=lambda n: (times[n], n),
+        )
+        assert (nxt["points"], nxt["snapshots"], nxt["datasets_whole"]) == (
+            names,
+            len(later.snapshots),
+            len(later.datasets),
+        )
+        with patch_sh(fake):
+            want = reclaim.reclaim("backup", later.snapshots, [t for t, _ in later.datasets])
+        assert nxt["reclaim_bytes"] == want > 0
+
+    def test_the_candidates_are_what_prune_offers(self) -> None:
+        """D10, D20: June (every snapshot held) is not offered; September's
+        point is the whole one, not the newer one a dataset skipped."""
+        fake = _nine_month_drive()
+        by_age = self._measure(fake)[0].reclaim_by_age
+        assert by_age is not None
+        names = [e["last_point"] for e in by_age]
+        assert names == self._candidates(fake)
+        assert names == [_NINE[0], _NINE[1], _NINE[2], _NINE[3], _NINE[5], _NINE[6]]
+
+    def test_a_point_the_policy_removes_is_not_a_candidate(self) -> None:
+        """D14: with max_age 300 days the policy takes January itself."""
+        fake = _nine_month_drive()
+        policy = ret.Policy(max_age_days=300)
+        by_age = self._measure(fake, policy)[0].reclaim_by_age
+        assert by_age is not None
+        assert [e["last_point"] for e in by_age] == self._candidates(fake, policy)
+        assert _NINE[0] not in [e["last_point"] for e in by_age]
+
+    def test_every_figure_is_prunes_over_the_oldest_together(self) -> None:
+        """D11, D13, D15, R5, R6: entry k is reclaim() over the k oldest
+        candidates' removals, pins kept, and the archived lineage they
+        leave empty counted whole (its used, not its snapshots)."""
+        fake = _nine_month_drive()
+        by_age = self._measure(fake)[0].reclaim_by_age
+        dest, _, pins, _ = self._reads(fake)
+        assert by_age is not None
+        removals: list[ret.Removal] = []
+        tops_seen: list[list[str]] = []
+        for e in by_age:
+            removals += ret.point_removals(dest, e["last_point"], pinned=pins)
+            tops = [t for t, _ in ret.whole_datasets(dest, removals)]
+            tops_seen.append(tops)
+            with patch_sh(fake):
+                want = reclaim.reclaim("backup", removals, tops)
+            assert e["reclaim_bytes"] == want, (e, want)
+        assert tops_seen[0] == [] and tops_seen[1] == ["rpool/var.archived-20260215"]
+        alone = [ret.point_removals(dest, e["last_point"], pinned=pins) for e in by_age]
+        with patch_sh(fake):
+            third_alone = reclaim.reclaim("backup", alone[2])
+        assert by_age[2]["reclaim_bytes"] > third_alone
+        assert f"rpool/USERDATA/home@{_NINE[2]}" not in {r.target for r in alone[2]}
+
+    def test_points_are_dated_and_sized_by_their_snapshots(self) -> None:
+        """D21: created_at is the newest snapshot's creation."""
+        fake = _nine_month_drive()
+        pts = self._measure(fake)[0].points
+        assert pts is not None and [p["name"] for p in pts] == _NINE
+        for p in pts:
+            snaps = [
+                (ds, s)
+                for ds, d in fake.ds.items()
+                if ds.startswith("backup/")
+                for s in d.snaps
+                if s.name == p["name"]
+            ]
+            newest = max(s.creation for _, s in snaps)
+            assert p["created_at"] == datetime.fromtimestamp(newest, UTC).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            assert newest != min(s.creation for _, s in snaps)
+            assert p["used_bytes"] == sum(s.used for _, s in snaps)
+
+    def test_non_point_snapshots_by_kind(self) -> None:
+        """D7, D23: counted over the drive by retention's kind."""
+        fake = _nine_month_drive()
+        got = self._measure(fake)[0].non_point_snapshots
+        want = {
+            "intermediate": {"count": 0, "used_bytes": 0},
+            "other": {"count": 0, "used_bytes": 0},
+        }
+        for ds, d in fake.ds.items():
+            if ds.startswith(("backup/rpool", "backup/bpool")):
+                for s in d.snaps:
+                    kind = ret.snapshot_kind(s.name)
+                    if kind != "point":
+                        want[kind]["count"] += 1
+                        want[kind]["used_bytes"] += s.used
+        assert got == want and want["other"]["count"] == 1
+
+    def test_a_used_listing_that_misses_a_snapshot(self) -> None:
+        """D6: a name the used listing lacks leaves out the field it feeds."""
+        real = survey.read_dest_used
+        for missing, field_ in (
+            (f"rpool/var@{_NINE[3]}", "points"),
+            ("rpool/var@syncoid_old_2025", "non_point_snapshots"),
+        ):
+            fake = _nine_month_drive()
+
+            def partial(pool: str, gone: str = missing) -> dict[str, int]:
+                return {k: v for k, v in real(pool).items() if k != gone}
+
+            with patch.object(survey, "read_dest_used", side_effect=partial):
+                got = self._measure(fake)[0].to_json()
+            assert field_ not in got and "retention_next" in got, (missing, sorted(got))
+
+    def test_a_used_listing_that_fails(self) -> None:
+        """V1: strict, as read_dest: no partial map."""
+        fake = _nine_month_drive()
+        fake.fail_cmds.add("zfs list -Hp -t snapshot -o name,used -r backup/bpool")
+        with patch_sh(fake):
+            try:
+                _ = survey.read_dest_used("backup")
+                raise AssertionError("a failed listing gave a map")
+            except survey.ReadError:
+                pass
+        assert set(self._measure(fake)[0].to_json()) == {"datasets"}
+
+    def test_the_log_line_counts_the_dry_runs(self) -> None:
+        """R7, D22 (M9a-6)."""
+        fake = _nine_month_drive()
+        before = len(fake.calls)
+        _, out = self._measure(fake)
+        runs = len([c for c in fake.calls[before:] if c.startswith("zfs destroy -nvp ")])
+        found = re.search(r"Measured what backup holds in [\d.]+ s \((\d+) dry run\(s\)\)", out)
+        assert found and int(found.group(1)) == runs > 0, (out, runs)
 
 
 class TestBackupSpace:
