@@ -63,6 +63,9 @@ class RestoreRow:  # pylint: disable=too-many-instance-attributes
     # an exclusion's top its flags (``backups`` or ``both``).
     empty: bool = False
     flags: str = ""
+    # Datasets below this excluded top that the point left out too: not
+    # created, only the top is (M9b-1).
+    below: int = 0
 
     @property
     def restored(self) -> bool:
@@ -281,7 +284,8 @@ def build_plan(  # pylint: disable=too-many-locals,too-many-branches
 ) -> RestorePlan:
     """Resolve every dataset for ``point`` and decide its mount properties.
     What the point left out (``excluded``, its org.zark:excluded mark) is
-    never restored from an earlier snapshot: it is created empty."""
+    never restored from an earlier snapshot: each excluded top is created
+    empty, and nothing below it (M9b-1)."""
     excluded = excluded or PointMark()
     stored = _list_datasets(pool)
     # Archived lineages count as earlier snapshots of their dataset (decision 19).
@@ -308,9 +312,10 @@ def build_plan(  # pylint: disable=too-many-locals,too-many-branches
     effective: dict[str, str] = {"rpool": root_mp, **CREATED_CONTAINERS, **BPOOL_CONTAINERS}
     claimed: dict[str, str] = {}  # guessed mountpoint → dataset that got it
     rows: list[RestoreRow] = []
+    tops: dict[str, RestoreRow] = {}
     for ds in wanted:
         if excluded.covers(ds):
-            rows.append(_empty_row(ds, excluded, zark, effective))
+            _add_excluded(ds, excluded, zark, effective, tops, rows)
             continue
         snap = resolved.get(ds)
         row = RestoreRow(rel=ds, snap=snap)
@@ -367,6 +372,25 @@ def build_plan(  # pylint: disable=too-many-locals,too-many-branches
         rpool_mountpoint=root_mp,
         rpool_mountpoint_source=root_src,
     )
+
+
+def _add_excluded(
+    ds: str,
+    excluded: PointMark,
+    zark: dict[str, tuple[str, str]],
+    effective: dict[str, str],
+    tops: dict[str, RestoreRow],
+    rows: list[RestoreRow],
+) -> None:
+    """An excluded subtree comes back as its top alone, empty (M9b-1): what
+    is below it is the application's own layout (docker's zfs driver keeps a
+    dataset per layer), which nothing would use; the top counts it."""
+    top = covering(ds, excluded.left_out)
+    if top == ds:
+        tops[ds] = _empty_row(ds, excluded, zark, effective)
+        rows.append(tops[ds])
+    elif top in tops:
+        tops[top].below += 1
 
 
 def _empty_row(
@@ -473,9 +497,10 @@ def show_plan(plan: RestorePlan, log: Log, drives: dict[str, str] | None = None)
     for r in plan.rows:
         if r.empty:
             assert r.props is not None
+            below = f"; {r.below} dataset(s) below it not created" if r.below else ""
             log.raw(
                 f"  {r.rel:44} excluded from backups at this point: recreated empty  "
-                + f"{r.props.canmount} {r.effective}"
+                + f"{r.props.canmount} {r.effective}{below}"
             )
             continue
         if not r.restored:

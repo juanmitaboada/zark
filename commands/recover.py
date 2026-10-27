@@ -1192,7 +1192,10 @@ def run(
         summary += [f"  • {r.rel} - {r.note}" for r in plan.skipped]
     if plan.empty_rows:
         summary += ["", "Created empty (excluded from backups at this point):"]
-        summary += [f"  • {r.rel}" for r in plan.empty_rows]
+        summary += [
+            f"  • {r.rel}" + (f" ({r.below} dataset(s) below it not created)" if r.below else "")
+            for r in plan.empty_rows
+        ]
     if errors:
         summary += ["", f"{log.R}Errors:{log.N}"]
         summary += [f"  • {e}" for e in errors]

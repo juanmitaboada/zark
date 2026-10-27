@@ -10082,31 +10082,33 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert rows[f"rpool/ROOT/{_BE}/var"].options == ["-o canmount=off"]
 
     def test_what_the_point_left_out_is_created_empty_never_restored(self):
-        """M5b-13 13a: an excluded dataset with an earlier snapshot on the
-        drive is not restored from it; one the drive never held is listed
-        too; each gets origin's canmount and mountpoint (set only when not
-        inherited), and the top its exclusion."""
+        """M5b-13 13a, M9b-1: an excluded top with an earlier snapshot on the
+        drive is not restored from it but created empty, with origin's
+        canmount and mountpoint (the mountpoint given at create only when it
+        would not inherit it: M5bP.3) and its exclusion; nothing below the
+        top is created, and the plan says how many were left out."""
         mark = excl.PointMark(
             tops={"rpool/var/lib/docker": excl.BOTH},
             datasets={
-                "rpool/var/lib/docker": ("on", "/var/lib/docker"),
+                "rpool/var/lib/docker": ("on", "/srv/docker"),
                 "rpool/var/lib/docker/vol": ("noauto", "/srv/vol"),
             },
         )
         plan = _run_plan(cache=True, excluded=mark)
         rows = {r.rel: r for r in plan.rows}
-        docker, vol = rows["rpool/var/lib/docker"], rows["rpool/var/lib/docker/vol"]
+        docker = rows["rpool/var/lib/docker"]
+        assert "rpool/var/lib/docker/vol" not in rows
         assert docker.empty and docker.snap is None and not docker.restored
-        assert docker.options == ["-o canmount=on"] and docker.flags == excl.BOTH
-        assert vol.empty and vol.options == ["-o canmount=noauto", "-o mountpoint=/srv/vol"]
-        assert not vol.flags
-        assert [r.rel for r in plan.empty_rows] == [docker.rel, vol.rel]
+        assert docker.options == ["-o canmount=on", "-o mountpoint=/srv/docker"]
+        assert docker.flags == excl.BOTH and docker.below == 1
+        assert [r.rel for r in plan.empty_rows] == [docker.rel]
         assert not plan.skipped and docker not in plan.rpool_rows
         out = StringIO()
         with redirect_stdout(out):
             restore_plan.show_plan(plan, Log())
         assert "rpool/var/lib/docker" in out.getvalue()
         assert "excluded from backups at this point: recreated empty" in out.getvalue()
+        assert "1 dataset(s) below it not created" in out.getvalue()
 
     def test_a_snapshot_exclusion_is_set_again_on_what_is_restored(self):
         """M5b-13: a raw send carries no user property, so the point's
@@ -10142,10 +10144,10 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert not recover_mod.needs_userdata(dc_replace(full, rows=others))
 
     def test_the_empty_datasets_are_created_unmounted_with_their_exclusion(self):
-        """M5b-13 13a: `zfs create -u`, parents first; the exclusion only on
-        its top; a failure is an error line, not fatal."""
+        """M5b-13 13a, M9b-1: `zfs create -u` of each excluded top, with its
+        exclusion, nothing below it; a failure is an error line, not fatal."""
         mark = excl.PointMark(
-            tops={"rpool/var/lib/docker": excl.BOTH},
+            tops={"rpool/var/lib/docker": excl.BOTH, "rpool/gone/x": excl.BACKUPS},
             datasets={
                 "rpool/var/lib/docker": ("on", "/var/lib/docker"),
                 "rpool/var/lib/docker/vol": ("noauto", "/srv/vol"),
@@ -10165,10 +10167,7 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
             "org.zark:replicate": "no",
             "org.zark:snapshot": "no",
         }, top
-        assert fake.ds["rpool/var/lib/docker/vol"].props == {
-            "canmount": "noauto",
-            "mountpoint": "/srv/vol",
-        }
+        assert "rpool/var/lib/docker/vol" not in fake.ds
         assert all(c.startswith("zfs create -u ") for c in fake.calls if "create" in c)
         assert len(errors) == 1 and errors[0].startswith("rpool/gone/x:"), errors
 
