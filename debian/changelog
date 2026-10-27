@@ -1,3 +1,20 @@
+zark (2.1.0~rc4-1) UNRELEASED; urgency=medium
+
+  * Milestone M9b of zark 2.1 (what 2.0 left). Not for release: nothing is
+    published until the final 2.1.0.
+  * An orphan on a drive is destroyed with the archived lineages cloned
+    from it, and the points that held it stay whole.
+  * recover creates each excluded subtree's top only; its pools follow the
+    point's record for legacy compatibility and the root properties that
+    need a feature; bpool's root is at /boot.
+  * backup and prepare refuse a system without its own bpool.
+  * purge reads the partitions after udev settled; setup splits a
+    recursive rule around a dataset whose rule differs.
+  * Self-test checks DST-05 and POOL-15; POOL-13 and SNP-07 revised.
+  * make test-real and the QEMU harness of 1.x are retired.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 20:36:57 +0100
+
 zark (2.1.0~rc3-1) UNRELEASED; urgency=medium
 
   * Milestone M9a of zark 2.1 (the status files' second part). Not for

@@ -35,7 +35,7 @@ from lib.retention import Policy
 if TYPE_CHECKING:
     from lib.log import Log
 
-VERSION = "2.1.0-rc3"
+VERSION = "2.1.0-rc4"
 
 
 def zark_command(sudo: bool = True, installed: bool | None = None) -> str:

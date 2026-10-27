@@ -25,9 +25,16 @@ together with the experimental ZFS option).
 Backups are written to a dedicated external drive with raw **zfs send**
 streams, so native ZFS encryption is preserved end-to-end: the backup drive
 holds ciphertext only, and the original passphrase is the only thing that can
-unlock it. Every backup adds one restore point to the drive and removes
-none; the only thing **zark** keeps in the source pool between backups is a
+unlock it. Every complete backup adds one restore point, and the drive's
+retention removes the points outside its window but the newest of each
+month; the only thing **zark** keeps in the source pool between backups is a
 bookmark per drive.
+
+**zark** supports Ubuntu 24.04 LTS and 26.04 LTS as their installers lay out
+ZFS (**rpool**, **bpool** and the keystore), with Secure Boot on. **backup**
+and **prepare** refuse a system without a **bpool** of its own, naming where
+*/boot* is: Ubuntu 26.10 and later put */boot* on ext4 when Secure Boot is
+on.
 
 A full restore - partitioning, **rpool** + **bpool** recreation, LUKS keystore
 reconstruction, GRUB and initramfs regeneration - runs from an Ubuntu Live USB
@@ -713,7 +720,9 @@ for the canonical end-to-end sequences.
     the point's **org.zark:excluded**, read strictly) is never restored
     from an earlier snapshot: the table says "excluded from backups at
     this point: recreated empty", and after **zfs change-key -i**, with
-    the backup pool exported, it is created empty with **zfs create -u**,
+    the backup pool exported, it is created empty with **zfs create -u**
+    (only the top of each excluded subtree: what was below it is not
+    created, and the table and the banner say how many),
     its canmount, its mountpoint when it would not inherit it, and on the
     exclusion's top the exclusion itself, so the restored system keeps
     it; its encryption is **rpool**'s. A dataset the point had excluded

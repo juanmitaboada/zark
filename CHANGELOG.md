@@ -11,6 +11,123 @@ zark 2.1 is being built as milestones on `main`, versioned `2.1.0-rcN`
 (`lib/config.py`) and `2.1.0~rcN-1` UNRELEASED (`debian/changelog`).
 Nothing is uploaded to the PPA until the final 2.1.0.
 
+### M9b - what 2.0 left (2.1.0-rc4)
+
+#### Added
+
+- **An orphan with archived lineages cloned from it can be destroyed**
+  (M5bV-3, M9b-2 2a): `zfs destroy -r` refuses a top whose snapshots are
+  the origin of a clone outside it, so the orphan's DESTROY failed after
+  its question. The question now lists the archived lineages cloned from
+  the orphan (recursively, deepest first), the typed DESTROY names them,
+  and they go first. When a clone of it is not an archived lineage of the
+  same dataset, DESTROY is not offered and the warning names the clone and
+  its origin.
+- **Self-test checks DST-05 and POOL-15**: `zfs destroy -r` refuses a
+  dependent clone outside the subtree before destroying anything, and
+  takes one inside; a root property that needs a feature is refused at
+  create without it and leaves no pool, and a root at a path with
+  `canmount=off` is not mounted.
+
+#### Changed
+
+- **The points that held a destroyed orphan stay whole** (M5bV-4, M9b-3
+  3a): their completion count is lowered with it, so recover offers them
+  without "PARTLY REMOVED". The points are read first; a failed read keeps
+  the orphan.
+- **recover creates only the top of each excluded subtree** (M9b-1 1b):
+  empty, with origin's canmount and mountpoint and its exclusion; what was
+  below it (docker's layers, for one) is not created, and the plan's line
+  and the closing banner say how many. Before, every dataset of the
+  subtree came back empty. What backup and prepare record is unchanged.
+- **recover's pools follow the record further** (M6 review 3 (1), (3),
+  M9b-9 9a): a `legacy` compatibility is kept (`-d -o
+  compatibility=legacy`); `compression=lz4` and `dnodesize=auto` are left
+  to the default, with an INFO line, when the record does not enable
+  `lz4_compress` or `large_dnode` (zpool create would refuse them after
+  the wipe); a record whose rpool lacks `encryption` is a FATAL before
+  anything is erased. The warning for a point without a record names both
+  `zfs version` lines.
+- **bpool's root is at `/boot`** with `canmount=off`, as the installer
+  has it (M6X.1).
+- **recover's closing banner names how finish runs on the restored
+  system** (RELP.7, M9b-13 13a): `sudo zark finish` when the restored root
+  has the package, else `sudo ./zark finish` from the stick or checkout.
+- **backup and prepare refuse a system without its own bpool** (M6P.2,
+  M9b-8 8a), naming `/boot`'s file system when it is a mount of its own
+  (Ubuntu 26.10 with Secure Boot puts it on ext4) and the series zark
+  supports. Before, such a system was backed up without `/boot` and the
+  run called itself complete.
+- **setup splits a recursive sanoid rule around a dataset whose rule
+  differs** (M5bP.7, M9b-11 11a): sanoid reads its sections in hash order,
+  so a zvol's `autosnap = no` under a recursive rule held on some runs
+  only.
+- **The exclusions' texts** (M5bX.3, M5bP.1, M5bP.2, M5bP.5, M5b review 3
+  (2) to (4)): DRIVE PREPARED lists the excluded subtrees as BACKUP
+  COMPLETED does; backup's table reads "excluded from backups"; `zark
+  exclude remove` says what each drive's next backup does; setup names a
+  drained section "no snapshots (drained)"; a zvol's value reads "zark
+  exclude does not apply to a zvol (zvols are never backed up)"; a zvol
+  inside an excluded subtree is no longer a row of its own; `both` is
+  recorded only when the snapshot exclusion is set on the top itself.
+- **A prompt's answer ends its line in a transcript** (M5bP.6, M9b-12
+  12a): with stdout through `tee` and stdin a terminal, a newline follows
+  each answer; the screen shows one blank line there.
+- **Texts**: "written by zark 1.x or an early 2.0.0 development build"
+  where two messages named an rc (RELP.1); dracut comments say Ubuntu
+  26.04 (RELP.5); `zark`'s table names registry's retention setting
+  (RELR-3 (c)).
+- **`docs/STATUS-FILES.md`**: `zark prune` on a connected drive measures
+  `space` too (M9aP.1); `reclaim_by_age` is at least what the snapshots a
+  removal takes hold alone (M9aR-2). No schema change.
+- **The manpage** names the supported series and the refusal, and says
+  the drive's retention removes points (it said "removes none").
+
+#### Fixed
+
+- **A pipeline whose left side writes more than 64 KiB to stderr no
+  longer hangs** (M7P.1, M9b-5 5a): `run_pipe` drains it from the start.
+- **An OSError from starting a command is a failed command** (M5bX.1),
+  return code 126, instead of a traceback.
+- **purge reads the partitions after udev settled** (MIGR-1, M9b-7 7a):
+  a blank disk could be reported with partitions still present.
+- **The exclusions read datasets only** (M5b review 3 (1)): `zfs get -t
+  filesystem,volume`, without walking every snapshot and bookmark.
+- **A kept excluded copy's mark is read where it was set** (M5bP.4, M9b-10
+  10a): its children no longer read as kept.
+
+#### Tests
+
+- POOL-13 rev 2 (legacy compatibility, created and upgraded) and SNP-07
+  rev 2 (the listing with `-t`) are revised; DST-05 runs on the model of
+  ZFS too, which now refuses a `destroy -r` with a clone outside the tree.
+- The self-test stop harness makes no directory on the host (M9aP.3, M9b-15
+  15a): it mounts an overlay over the parent inside its namespace.
+- `make test-real` and the QEMU harness of 1.x are retired (RELP.3, M9b-6
+  6a): validation on hardware is the self-test and the checklist.
+
+#### Known limitations
+
+- DIVERGED's destroy and the excluded copy's destroy are still refused by
+  ZFS when a kept ROLLBACK archive was cloned from the lineage (M9bP.1,
+  M9bP.2).
+- zark is for Ubuntu's own ZFS layout only; other layouts may be weighed
+  in a later release.
+
+#### Rejected approaches
+
+- **Every dataset of an excluded subtree created empty** (M9b-1 1a): the
+  layout below the top belongs to the application.
+- **Offering DESTROY when a clone is not an archived lineage, for ZFS to
+  refuse** (M9b-2 2b): a question that cannot succeed is the defect
+  M5bV-3 describes.
+- **A FATAL before the wipe for every missing feature** (M9b-9 9b): every
+  point of a drive carries the same record, a dead end.
+- **Only the existing refusal's words** (M9b-8 8b): a system with no bpool
+  was not refused at all.
+- **Rebuilding the QEMU harness** (M9b-6 6b): a milestone of work, and
+  it would still need eli's hardware.
+
 ### M9a - the status files' second part (2.1.0-rc3)
 
 #### Added
