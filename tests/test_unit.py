@@ -850,6 +850,13 @@ class TestSh:  # pylint: disable=missing-function-docstring
         assert not r.ok
         assert r.returncode == 127
 
+    def test_a_command_that_cannot_start_is_a_failed_result(self):
+        # M5bX.1: an argument over Linux's MAX_ARG_STRLEN (32 pages) makes
+        # execve fail with E2BIG; that is a failed command, not a traceback.
+        r = run(["/bin/echo", "x" * (256 * 1024)])
+        assert not r.ok and r.returncode == 126, r
+        assert "Argument list too long" in r.stderr, r.stderr
+
     def test_the_child_is_named_by_executable_and_subcommand(self):
         # M4bF-7 7a: what the interruption line says it is stopping.
         name = _signals.child_name

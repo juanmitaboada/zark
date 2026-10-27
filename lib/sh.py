@@ -130,6 +130,15 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
             stderr=str(e),
             command=cmd_str,
         )
+    except OSError as e:
+        # E2BIG, EACCES, ENOEXEC...: the command could not start (M5bX.1),
+        # 126 as a shell says it of a command it cannot execute.
+        return RunResult(
+            returncode=126,
+            stdout="",
+            stderr=str(e),
+            command=cmd_str,
+        )
     signals.running(signals.child_name(cmd_str))
     with proc:
         try:
