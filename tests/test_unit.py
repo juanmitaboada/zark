@@ -8756,6 +8756,24 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert rc == 0 and not data
         assert self.dropped == ["3446866051930726346", "222"], self.dropped
 
+    def test_the_partitions_are_read_after_udev_settled(self):
+        """MIGR-1, M9b-7 7a: lsblk runs after the zap and a udev settle."""
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock)
+        mock.on("udevadm settle --timeout=30").succeeds()
+        _, rc, _ = self._purge(mock)
+        assert rc == 0
+        zap = mock.calls.index("sgdisk --zap-all /dev/sdb")
+        settle = mock.calls.index("udevadm settle --timeout=30", zap)
+        assert mock.calls.index("lsblk -nr -o NAME,TYPE /dev/sdb", zap) > settle, mock.calls
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdb").succeeds("sdb disk\nsdb1 part")  # first wins
+        _wipe_succeeds(mock)
+        out, rc, _ = self._purge(mock)
+        assert rc == 1 and "✗ partitions still present after udev settled: sdb1" in out, out
+
     def test_failing_wipefs_is_incomplete(self):
         mock = MockShell()
         mock.on("zpool destroy backup").succeeds()

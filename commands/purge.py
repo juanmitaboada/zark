@@ -269,10 +269,13 @@ def _wipe(target_dev: str, part1: str, log: Log, steps: bool = True) -> Wiped:
     )
 
     _ = sh.run(f"blockdev --flushbufs {target_dev}")
+    # udev drops the partitions' nodes after the zap's re-read; lsblk before it
+    # settles can still list them (MIGR-1), as DSK-07 found.
+    _ = sh.run("udevadm settle --timeout=30", log=log)
     parts = sh.run(f"lsblk -nr -o NAME,TYPE {target_dev}")
     left = [ln.split()[0] for ln in parts.lines if ln.split()[1:2] == ["part"]]
     checks.append(
-        (False, f"partitions still present: {', '.join(left)}")
+        (False, f"partitions still present after udev settled: {', '.join(left)}")
         if left
         else (True, "no partition left")
     )
