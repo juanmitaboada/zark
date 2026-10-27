@@ -17423,6 +17423,123 @@ class TestBackupLastRun:  # pylint: disable=missing-function-docstring
         )
         assert rc == 0 and seen == [backup_mod.CONTENTS_BUDGET_S] == [60.0]
 
+    @staticmethod
+    def _contents() -> drive_contents.DriveContents:
+        nothing = {"count": 0, "used_bytes": 0}
+        nxt = {"horizon_days": 7, "points": [], "snapshots": 0, "datasets_whole": 0}
+        return drive_contents.DriveContents(
+            points=[],
+            non_point_snapshots={"intermediate": {"count": 3, "used_bytes": 4}, "other": nothing},
+            retention_next={**nxt, "reclaim_bytes": 0},
+            reclaim_by_age=[],
+        )
+
+    def _over_a_previous_pair(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The drive's entry this run gives over a previous status.json whose
+        entry has a pair of its own (an older space with contents)."""
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "usb-X-0:0", autoeject=False)
+        old = status_file_lib.DriveUpdate(
+            space=tsf._space(1, "2026-10-01T08:00:00Z"),  # pylint: disable=protected-access
+            contents=self._contents(),
+        )
+        prev = status_file_lib.build(status_lib.Status(), cfg, "backup", None, {"111": old})
+        doc = status_file_lib.build(status_lib.Status(), cfg, "backup", prev, self.writes[-1][1])
+        assert not tsf.problems(doc, "status"), tsf.problems(doc, "status")
+        return prev["drives"][0], doc["drives"][0]
+
+    def test_the_pass_runs_after_retention_and_before_the_export(self):
+        """M9aR-1 (B3, B11m, B12m): after the run's mark, its retention and
+        the drive's properties, before Cleanup exports the drive."""
+        events: list[str] = []
+
+        def spy(obj: Any, name: str) -> AbstractContextManager[object]:
+            real = getattr(obj, name)
+
+            def call(*a: Any, **k: Any) -> Any:
+                events.append(name)
+                return real(*a, **k)
+
+            return patch.object(obj, name, call)
+
+        real_run = Cleanup.run
+
+        def cleanup_run(self_: Cleanup, *a: Any, **k: Any) -> Any:
+            events.append("cleanup")
+            return real_run(self_, *a, **k)
+
+        rc, _, _ = self._ending(
+            _fresh_fake(),
+            self._space(),
+            spy(backup_mod.drive_marks, "record_complete"),
+            spy(backup_mod, "_apply_retention"),
+            spy(backup_mod, "_write_metadata"),
+            spy(drive_contents, "measure"),
+            patch.object(Cleanup, "run", cleanup_run),
+        )
+        assert rc == 0 and events.count("measure") == 1, events
+        at = events.index("measure")
+        assert (
+            events.index("record_complete")
+            < events.index("_apply_retention")
+            < events.index("_write_metadata")
+            < at
+        ), events
+        assert "cleanup" in events[at:] and "cleanup" not in events[:at], events
+
+    def test_a_space_that_cannot_be_read_at_the_pass_measures_nothing(self):
+        """M9aR-1 (B7): never contents dated by the space of step 4; the
+        previous pair stays."""
+        measured: list[int] = []
+        real = drive_contents.measure
+
+        def space(_pool: str) -> Any:
+            # None only when the pass reads it (the mock's own frames come first).
+            at_pass = any(f.function == "measure_contents" for f in inspect.stack())
+            return None if at_pass else tsf._space(7)  # pylint: disable=protected-access
+
+        def spy(*a: Any, **k: Any) -> drive_contents.DriveContents:
+            measured.append(1)
+            return real(*a, **k)
+
+        rc, _, _ = self._ending(
+            _fresh_fake(),
+            patch.object(backup_mod, "read_space", side_effect=space),
+            patch.object(drive_contents, "measure", spy),
+        )
+        up = self.writes[-1][1]["111"]
+        assert rc == 0 and not measured and up.contents is None
+        assert up.space == tsf._space(7)  # pylint: disable=protected-access
+        before, after = self._over_a_previous_pair()
+        assert after["space"] == before["space"] and after["points"] == before["points"] == []
+
+    def test_a_pass_that_raises_drops_the_previous_pair(self):
+        """M9aR-1 (B9): a failed pass looked at the drive: the old contents
+        do not survive it, the new space is written alone."""
+        rc, _, _ = self._ending(
+            _fresh_fake(),
+            self._space(),
+            patch.object(drive_contents, "measure", side_effect=RuntimeError("no")),
+        )
+        up = self.writes[-1][1]["111"]
+        assert rc == 0 and up.contents == drive_contents.DriveContents()
+        _, after = self._over_a_previous_pair()
+        assert after["space"] == tsf._space(7).to_json()  # pylint: disable=protected-access
+        assert not set(drive_contents.CONTENT_FIELDS) & set(after), sorted(after)
+
+    def test_a_later_space_clears_contents_measured_with_an_earlier_one(self):
+        """M9aR-1 (B8): _RunRecord.measure after measure_contents."""
+        rec = backup_mod._RunRecord("111")  # pylint: disable=protected-access
+        with (
+            patch.object(backup_mod, "read_space", return_value=tsf._space(7)),  # pylint: disable=protected-access
+            patch.object(drive_contents, "measure", return_value=self._contents()),
+            patch.object(backup_mod.progress, "set_space"),
+        ):
+            rec.measure_contents("backup", ret.Policy(), Log(os.devnull))
+            assert rec.contents == self._contents()
+            rec.measure("backup")
+        assert rec.contents is None and rec.space == tsf._space(7)  # pylint: disable=protected-access
+
 
 class TestEntryPointProgress:  # pylint: disable=missing-function-docstring
     """M7R-4 X1, X2: zark's main starts progress.json for a command that
@@ -19672,6 +19789,45 @@ class TestPruneCommand:  # pylint: disable=too-many-public-methods
         up = seen[0][1]
         assert up.space == tsf._space(3) and up.contents is not None  # pylint: disable=protected-access
         assert up.contents.points and up.contents.reclaim_by_age is not None
+
+    def test_prune_measures_the_drive_after_its_removals(self) -> None:
+        """M9aR-1 (P2): a point removed beyond the policy is not in the
+        contents recorded at the end."""
+        fake = TestRetentionOnDrive()._drive_with_history()  # pylint: disable=protected-access
+        with patch_sh(fake):
+            dest = survey.read_dest("backup", strict=True)
+            complete = drive_marks.drive_complete("backup")
+            pins = drive_marks.drive_pins("backup", strict=True)
+        prune = ret.plan_prune(
+            dest,
+            complete.run,
+            ret.Policy(),
+            NOW,
+            whole=complete.whole,
+            pinned=pins,
+            first=complete.first,
+        )
+        oldest = next(
+            n
+            for n in ret.space_candidates(
+                dest, complete.run, ret.Policy(), NOW, prune, complete.whole
+            )
+            if ret.point_removals(dest, n, pinned=pins)
+        )
+        seen: list[status_file_lib.DriveUpdate] = []
+        out, stopped = self._prune_drive_run(
+            fake,
+            *self._answers([], ["1"], "PRUNE", False),
+            patch.object(prune_mod, "read_space", return_value=tsf._space(3)),  # pylint: disable=protected-access
+            patch.object(prune_mod.progress, "record", side_effect=lambda _g, u: seen.append(u)),
+        )
+        assert not stopped, out
+        assert oldest not in fake.names("backup/rpool/ROOT/be"), out
+        assert (
+            len(seen) == 1 and seen[0].contents is not None and seen[0].contents.points is not None
+        )
+        recorded = [p["name"] for p in seen[0].contents.points]
+        assert oldest not in recorded and recorded, recorded
 
     def test_a_failed_measurement_records_the_space_with_no_contents(self) -> None:
         """The old contents would list points that are gone."""
