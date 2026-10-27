@@ -131,6 +131,9 @@ ROOT_PROPS = {
     ),
 }
 
+# The package's entry script, as the restored root has it when installed.
+INSTALLED_ZARK = "/usr/share/zark/zark"
+
 TOTAL_STEPS = 16
 
 # Partition layout written in step 6, in MiB before the rpool partition:
@@ -374,6 +377,29 @@ def needs_userdata(plan: RestorePlan) -> bool:
     """Whether step 8 creates the structural ``rpool/USERDATA``: a dataset
     the point restores below it, or one it recreates empty (M5b-13 13a)."""
     return any(r.rel.startswith("rpool/USERDATA/") for r in [*plan.rpool_rows, *plan.empty_rows])
+
+
+def next_steps(log: Log, installed: bool) -> list[str]:
+    """The closing banner's steps. finish runs on the restored system, so its
+    line names how zark is reached there: the package's ``sudo zark`` when
+    the restored root has it (``installed``), else the stick or checkout
+    (RELP.7, M9b-13 13a). repair-boot runs from the live, as invoked."""
+    finish = f"{log.W}{zark_command(installed=installed)} finish{log.N}" + (
+        "" if installed else " from the stick or checkout you use"
+    )
+    return [
+        "",
+        f"{log.W}Next steps:{log.N}",
+        "  1. Remove the live USB",
+        f"  2. {log.Y}Disconnect the backup drive{log.N}",
+        "  3. Reboot - enter your rpool passphrase at the prompt",
+        f"  {log.Y}⚠  If it drops to emergency shell on first boot:{log.N}",
+        f"     {log.W}zpool import rpool && exit{log.N}",
+        f"  4. Run: {finish}  (it also regenerates grub.cfg)",
+        "",
+        f"  {log.Y}If boot fails:{log.N} boot from live USB and run:",
+        f"     {log.W}{zark_command()} repair-boot{log.N}",
+    ]
 
 
 def _rpool_create_cmd(
@@ -1212,6 +1238,8 @@ def run(
     # ── 16. Cleanup and summary ──────────────────────────────────────────
     log.step(16, TOTAL_STEPS, "Cleanup...")
 
+    # Read before the cleanup unmounts the restored root (RELP.7).
+    installed = Path(f"{RECOVER_MNT}{INSTALLED_ZARK}").exists()
     cleanup.run()  # also removes the system.key copy
 
     restore_end = time.time()
@@ -1238,19 +1266,7 @@ def run(
     if errors:
         summary += ["", f"{log.R}Errors:{log.N}"]
         summary += [f"  • {e}" for e in errors]
-    summary += [
-        "",
-        f"{log.W}Next steps:{log.N}",
-        "  1. Remove the live USB",
-        f"  2. {log.Y}Disconnect the backup drive{log.N}",
-        "  3. Reboot - enter your rpool passphrase at the prompt",
-        f"  {log.Y}⚠  If it drops to emergency shell on first boot:{log.N}",
-        f"     {log.W}zpool import rpool && exit{log.N}",
-        f"  4. Run: {log.W}{zark_command()} finish{log.N}  (it also regenerates grub.cfg)",
-        "",
-        f"  {log.Y}If boot fails:{log.N} boot from live USB and run:",
-        f"     {log.W}{zark_command()} repair-boot{log.N}",
-    ]
+    summary += next_steps(log, installed)
     if errors:
         log.banner_error("RECOVERY COMPLETED WITH ERRORS", summary)
     else:

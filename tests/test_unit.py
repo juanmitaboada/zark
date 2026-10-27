@@ -10956,6 +10956,19 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             assert ("recovers from Ubuntu 26.04 or newer" in text) is warned
             assert len([c for c in mock.calls if c.startswith("zpool create")]) == 2, rel
 
+    def test_the_closing_banner_names_how_finish_runs_on_the_restored_system(self):
+        """RELP.7, M9b-13 13a: the package's zark when the restored root has
+        it, else the stick or checkout; repair-boot as invoked."""
+        log = Log()
+        # Recover runs from a stick here: repair-boot keeps that form.
+        with patch.object(Config, "zark_root", return_value=Path("/media/stick/zark")):
+            pkg = "\n".join(recover_mod.next_steps(log, True))
+            stick = "\n".join(recover_mod.next_steps(log, False))
+        pkg, stick = (Log._STRIP_RE.sub("", t) for t in (pkg, stick))  # pylint: disable=protected-access
+        assert "4. Run: sudo zark finish  (it also" in pkg, pkg
+        assert "4. Run: sudo ./zark finish from the stick or checkout you use" in stick, stick
+        assert "sudo ./zark repair-boot" in pkg and "sudo ./zark repair-boot" in stick
+
     def test_no_wipe_when_not_confirmed(self):
         mock = self._run("NO")
         assert mock.was_not_called("wipefs")

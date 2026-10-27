@@ -38,13 +38,16 @@ if TYPE_CHECKING:
 VERSION = "2.1.0-rc3"
 
 
-def zark_command(sudo: bool = True) -> str:
+def zark_command(sudo: bool = True, installed: bool | None = None) -> str:
     """How a tip names zark: ``sudo zark`` when installed (the package's
     /usr/bin/zark links /usr/share/zark/zark), else ``sudo ./zark`` (a
     checkout or a stick), the entry script's rule (zark's
     _invocation_hint). ``sudo=False`` for ``monitor``, the one command any
-    user runs (M8-12)."""
-    name = "zark" if str(Config.zark_root()) == "/usr/share/zark" else "./zark"
+    user runs (M8-12). ``installed`` for another system than this one
+    (recover's restored root, RELP.7); None: this one."""
+    if installed is None:
+        installed = str(Config.zark_root()) == "/usr/share/zark"
+    name = "zark" if installed else "./zark"
     return f"sudo {name}" if sudo else name
 
 
