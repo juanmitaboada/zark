@@ -398,8 +398,9 @@ attention; `aborted` changed nothing.
 
 `space`, `last_run` and `last_backup_point` are only known while zark has
 the drive imported or at the end of a backup. A writer that did not measure
-them (the timer, any command other than backup) copies them from the
-previous `status.json`, matching drives by `guid`, not by name: a drive
+them (the timer, and any command other than backup; `zark prune` on a
+connected drive measures `space` too, with the drive contents) copies them
+from the previous `status.json`, matching drives by `guid`, not by name: a drive
 prepared again gets a new GUID and starts empty. A drive no longer in the
 writer's registry is dropped. A writer whose registry
 (`known_drives.json`) cannot be read or parsed leaves `status.json` as it is
@@ -538,7 +539,9 @@ oldest candidates together:
 | `reclaim_bytes` | integer or null | bytes: what ZFS says the whole removal frees (`zfs destroy -nvp` over its snapshots, one dataset at a time, plus `used` of what goes whole), cumulative; null when not measured |
 
 - The figure is cumulative and only grows from one entry to the next. It is
-  at least the sum of what the removed points hold alone, and usually more.
+  at least the sum of what the snapshots it removes hold alone, and usually
+  more; a pinned snapshot, or the newest of a live dataset, stays, and its
+  `used` is not in the figure.
 - ZFS frees destroyed blocks in the background (`zpool get freeing`), so
   `available_bytes` reaches the figure some time after a removal.
 - It describes the drive as it was at `space.measured_at`. Any removal, a
