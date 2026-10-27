@@ -316,6 +316,11 @@ def run(
             f"Drive ID: {log.W}{base_drive_id}{log.N}",
             f"Point:    {log.W}{eng.point}{log.N}",
             f"Duration: {log.W}{mins}m {secs}s{log.N}",
+            # As BACKUP COMPLETED lists them (M5bX.3).
+            *exclusions.banner_lines(
+                [(p.rel, p.used) for p in res.plans if p.state is State.EXCLUDED and p.declared],
+                declared,
+            ),
             "",
             f"Registered in: {log.W}{cfg.drives_file_path}{log.N}",
             "",

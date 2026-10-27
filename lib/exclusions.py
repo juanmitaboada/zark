@@ -104,7 +104,10 @@ def never_excluded(rel: str, origin: dict[str, Origin] | None = None) -> str:
             rel in STRUCTURAL,
             "a structural container is not replicated itself: exclude its children instead",
         ),
-        (o is not None and o.kind == "volume", "a zvol is never backed up already"),
+        (
+            o is not None and o.kind == "volume",
+            "zark exclude does not apply to a zvol (zvols are never backed up)",
+        ),
         (is_archived(rel), "zark leaves .archived- names out already"),
     )
     why = next((text for hit, text in rules if hit), "")
@@ -160,8 +163,12 @@ class Declared:
         return _minimal({t for t, e in self.tops.items() if e.snapshot})
 
     def flags_of(self, top: str) -> str:
-        """``backups``, ``snapshots`` or ``both`` for a top of :attr:`no_backup`."""
-        return BOTH if covering(top, set(self.no_snapshot)) else BACKUPS
+        """``backups`` or ``both`` for a top of :attr:`no_backup`: ``both`` only
+        when the snapshot exclusion is set on that top itself. One set above
+        it is recorded as a top of its own (M5b review 3 (4)), so recover
+        does not set it again on a dataset origin had it inherited on."""
+        ex = self.tops.get(top)
+        return BOTH if ex is not None and ex.snapshot else BACKUPS
 
 
 def _values(lines: list[str]) -> dict[str, dict[str, str]]:
@@ -457,6 +464,21 @@ def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:
             ],
         )
     return declared, mark
+
+
+def banner_lines(left_out: list[tuple[str, int]], declared: Declared) -> list[str]:
+    """The final banner's lines for the subtrees a run left out (D12): each
+    top with what a first full send would carry and its flags. Shared by
+    backup's and prepare's banners (M5bX.3)."""
+    if not left_out:
+        return []
+    return [
+        f"Excluded:       {len(left_out)} dataset subtree(s), by zark exclude:",
+        *(
+            f"  {rel} ({sh.humanize_bytes(used)}, {declared.flags_of(rel)})"
+            for rel, used in left_out
+        ),
+    ]
 
 
 def record(  # pylint: disable=too-many-arguments,too-many-positional-arguments

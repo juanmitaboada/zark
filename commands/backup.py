@@ -776,6 +776,8 @@ def _show_table(res: engine.Result, point: str, log: Log) -> None:
                 mark = "ok, but its anchor could not be created (next run may need a decision)"
         elif p.state is State.ORPHAN:
             mark = "only on backup" + (", kept" if p.kept else "")
+        elif p.state is State.EXCLUDED and p.declared:
+            mark = "excluded from backups"  # as the plan's line says (M5bP.1)
         elif p.state is State.EXCLUDED:
             mark = f"NOT BACKED UP ({p.note})"
         elif out is None:
@@ -785,7 +787,7 @@ def _show_table(res: engine.Result, point: str, log: Log) -> None:
         else:
             mark = f"NOT at the point: {out.error or p.state}"
         line = f"  {p.rel:<48} {mark}"
-        if p.state is State.AT_POINT:
+        if p.state is State.AT_POINT or (p.state is State.EXCLUDED and p.declared):
             log.info(line)
         else:
             log.warn(line)
@@ -1301,12 +1303,7 @@ def run(
             ),
             *[f"{log.Y}  {p.rel} ({p.note}){log.N}" for p in not_backed_up],
             # D12: what the user excluded, with what a first full send would carry.
-            *(
-                [f"Excluded:       {len(left_out)} dataset subtree(s), by zark exclude:"]
-                if left_out
-                else []
-            ),
-            *[f"  {p.rel} ({_gib(p.used)}, {declared.flags_of(p.rel)})" for p in left_out],
+            *exclusions.banner_lines([(p.rel, p.used) for p in left_out], declared),
         ],
     )
     # In status.json before the eject prompt, which may wait (M7-6): a reader

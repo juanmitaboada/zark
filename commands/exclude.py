@@ -159,7 +159,11 @@ def _next_backups(dataset: str, origin: dict[str, Origin], log: Log) -> None:
     anchored = {anchor_disk(b.name) for b in origin[dataset].bookmarks} - {""}
     for name, info in sorted(Config.load().known_drives.items()):
         if info.guid in anchored:
-            log.info(f"  {name}: an incremental if it still holds {dataset}, else in full")
+            # Without importing the drive this is all that is known (M5bP.2).
+            log.info(
+                f"  {name}: it has an anchor here: an incremental if it still holds {dataset} "
+                + "as it was then; otherwise its next backup asks"
+            )
         else:
             log.info(
                 f"  {name}: in full (no anchor of it for this drive; if it holds an older "

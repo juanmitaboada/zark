@@ -150,6 +150,7 @@ from commands.setup import (  # pylint: disable=wrong-import-position # noqa: E4
     _diff_rules,
     _discover_rules,
     _format_rule,
+    _format_settings,
     _generate_sanoid_conf,
     _parse_sanoid_conf,
     _print_diff,
@@ -3831,6 +3832,10 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
             assert f"{key} = 0" in text
         assert "autosnap = no" in text and "autoprune = yes" in text
         assert "recursive = yes" in text and "use_template" not in text
+        # M5bP.5: the change list names it as the policy column does.
+        settings = dict(ln.split(" = ") for ln in lines[1:])
+        assert _format_settings(settings) == "no snapshots (drained)"
+        assert _format_settings({"autosnap": "no", "autoprune": "no"}) == "autosnap=no"
         planned = [("rpool/x", {"template": "drained", "recursive": True, "explain": ""})]
         parsed = _parse_sanoid_conf(_generate_sanoid_conf(planned))  # type: ignore[arg-type]
         diff = _diff_rules(parsed, planned)  # type: ignore[arg-type]
@@ -6744,6 +6749,56 @@ class TestExclusions:  # pylint: disable=missing-function-docstring
         both = excl.parse(_excl_lines(("rpool/a", self.R, "no"), ("rpool/a", self.S, "no")), origin)
         assert both.tops["rpool/a"].flags == excl.BOTH and both.flags_of("rpool/a") == excl.BOTH
 
+    def test_a_snapshot_exclusion_above_a_top_is_not_recorded_on_it(self):
+        """M5b review 3 (4): a top excluded from backups inside one excluded
+        from snapshots is "backups"; the snapshot top is recorded apart."""
+        origin = _excl_origin("rpool/s", "rpool/s/b")
+        d = excl.parse(_excl_lines(("rpool/s", self.S, "no"), ("rpool/s/b", self.R, "no")), origin)
+        assert d.flags_of("rpool/s/b") == excl.BACKUPS
+        mark = excl.parse_point_mark(excl.point_mark(d, origin))
+        assert mark is not None
+        assert mark.tops == {"rpool/s/b": excl.BACKUPS, "rpool/s": excl.SNAPSHOTS}
+
+    def test_a_zvol_inside_an_excluded_subtree_is_in_its_tops_row(self):
+        """M5b review 3 (3): one Excluded row for the subtree, no NOT BACKED
+        UP row of its own for the zvol inside it; one outside keeps its row."""
+        origin = _excl_origin("rpool/d", volume=("rpool/d/vm", "rpool/vm2"))
+        plans = repl.plan(origin, {}, "zark_2026-10-28_10:00:00Z", {"rpool/d"})
+        excluded = {p.rel: p for p in plans if p.state is repl.State.EXCLUDED}
+        assert "rpool/d/vm" not in excluded and excluded["rpool/d"].declared
+        assert excluded["rpool/vm2"].note == "zvol, not backed up"
+
+    def test_a_declared_row_reads_as_the_plan_says_in_the_table(self):
+        """M5bP.1: "excluded from backups", at INFO, not "NOT BACKED UP"."""
+        res = engine.Result(
+            plans=[
+                repl.DatasetPlan(
+                    "rpool/d",
+                    repl.State.EXCLUDED,
+                    note="excluded from backups (zark exclude)",
+                    declared=True,
+                ),
+                repl.DatasetPlan("rpool/vm", repl.State.EXCLUDED, note="zvol, not backed up"),
+            ]
+        )
+        log = make_log()
+        with patch.object(log, "info") as info, patch.object(log, "warn") as warn:
+            backup_mod._show_table(res, "zark_2026-10-28_10:00:00Z", log)  # pylint: disable=protected-access
+        infos = [c.args[0] for c in info.call_args_list]
+        warns = [c.args[0] for c in warn.call_args_list]
+        assert any(
+            x.startswith("  rpool/d ") and x.endswith(" excluded from backups") for x in infos
+        )
+        assert any("NOT BACKED UP (zvol, not backed up)" in x for x in warns), warns
+
+    def test_a_zvol_is_named_as_outside_zark_exclude(self):
+        """M5b review 3 (2): the reason fits either flag."""
+        origin = _excl_origin(volume=("rpool/vm",))
+        d = excl.parse(_excl_lines(("rpool/vm", self.S, "no")), origin)
+        assert dict(d.ignored)["rpool/vm"] == (
+            "zark exclude does not apply to a zvol (zvols are never backed up)"
+        )
+
     def test_the_blacklist_is_ignored_with_its_reason(self):
         origin = _excl_origin("rpool/data", volume=("rpool/vm",))
         lines = _excl_lines(
@@ -7180,7 +7235,9 @@ class TestExcludeCommand:  # pylint: disable=missing-function-docstring
         fake.ds["rpool/var"].props["org.zark:replicate"] = "no"
         fake.ds["rpool/var"].bookmarks.append(FSnap(repl.anchor_name("999", P1), "7", 1, 1))
         out, rc, _ = self._run(fake, ["remove", "rpool/var", "backups"])
-        assert rc == 0 and "  blue: an incremental if it still holds rpool/var, else" in out, out
+        # M5bP.2: what is known without importing the drive, no more.
+        assert rc == 0 and "  blue: it has an anchor here: an incremental if it still holds " in out
+        assert "otherwise its next backup asks" in out, out
 
     def test_enter_excludes_nothing(self):
         # M5bR-5 (e): the question's default is no, answered by the terminal.
@@ -9135,6 +9192,11 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
             mark = excl.read_point_mark("blue", point, snaps)
         assert mark is not None and mark.left_out == {"rpool/var/lib/docker"}
         assert set(mark.datasets) == {"rpool/var/lib/docker", "rpool/var/lib/docker/vol"}
+        # M5bX.3: DRIVE PREPARED lists it, as BACKUP COMPLETED does.
+        text = out.getvalue()
+        banner = text[text.index("DRIVE PREPARED") :]
+        assert "Excluded:       1 dataset subtree(s), by zark exclude:" in banner, banner
+        assert "  rpool/var/lib/docker (" in banner and ", backups)" in banner, banner
 
     def test_prepare_records_origins_pools_on_its_point(self):
         """M6-5: the first point carries how origin's pools are."""

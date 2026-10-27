@@ -332,7 +332,12 @@ def plan(
     for p in plans:
         if p.state is State.NEW:
             _clone_base(p, origin, live)
-    plans += [DatasetPlan(rel, State.EXCLUDED, note=why) for rel, why in excluded(origin)]
+    # What an excluded subtree holds is in its top's row (M5b review 3 (3)).
+    plans += [
+        DatasetPlan(rel, State.EXCLUDED, note=why)
+        for rel, why in excluded(origin)
+        if not is_excluded(rel, skip)
+    ]
     plans += _declared_rows(origin, live, skip)
 
     # A structural container is never offered for destruction: its absence

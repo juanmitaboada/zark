@@ -568,6 +568,9 @@ def _diff_rules(
 
 def _format_settings(settings: dict[str, str]) -> str:
     """Render a section's settings as a compact one-line string for diff output."""
+    drained = {k: v for k, v in _DRAINED_SETTINGS.items() if k != "recursive"}
+    if all(settings.get(k) == v for k, v in drained.items()):
+        return "no snapshots (drained)"  # as the policy column says (M5bP.5)
     if "autosnap" in settings and settings["autosnap"] == "no":
         return "autosnap=no"
     parts = []
