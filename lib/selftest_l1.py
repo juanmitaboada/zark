@@ -1548,7 +1548,7 @@ def dst_04(b: Bench) -> None:
     of the dataset's ``usedbysnapshots`` when the same names are destroyed,
     and the dry runs before changed neither the snapshots nor that figure.
     OpenZFS cmd/zfs/zfs_main.c:1539-1599 (lzc_snaprange_space per run of
-    neighbours), module/zfs/dsl_dataset.c:4860-4905 (dsl_dataset_space_wouldfree),
+    neighbours), module/zfs/dsl_dataset.c:4877-4905 (dsl_dataset_space_wouldfree),
     :166-171 (a snapshot's used is its unique bytes); module/zfs/zfs_ioctl.c:7469-7472
     (space_snaps is a read: zfs_secpolicy_read, not logged)."""
     c = b.make_pool("c")

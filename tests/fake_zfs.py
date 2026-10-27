@@ -612,7 +612,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err("could not find any snapshots to destroy; check snapshot names.")
         if any(x.clones for x in hit):
             # A clone origin fails the dry run too, with no reclaim line
-            # (snapshot_to_nvl_cb, cmd/zfs/zfs_main.c:1604-1621, 1735-1739).
+            # (snapshot_to_nvl_cb, cmd/zfs/zfs_main.c:1604-1621, 1756-1760).
             x = next(x for x in hit if x.clones)
             return _err(f"cannot destroy '{ds}@{x.name}': snapshot has dependent clones")
         lines = [f"destroy\t{ds}@{x.name}\n" for x in hit]
