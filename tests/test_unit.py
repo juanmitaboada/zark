@@ -918,6 +918,13 @@ class TestShRunPipe:  # pylint: disable=missing-function-docstring
         assert r.stderr_left.strip() == "p1err"
         assert r.stderr_right.strip() == "p2err"
 
+    def test_a_left_side_that_writes_much_to_stderr_does_not_block(self):
+        # M7P.1: 1 MiB on stderr, far more than a pipe holds, then a line on
+        # stdout; read only at the end, the left side would block forever.
+        r = _sh.run_pipe("sh -c 'yes e | head -c 1048576 >&2; echo data'", "cat")
+        assert r.ok and r.output == "data", r.returncode
+        assert len(r.stderr_left) == 1048576 and set(r.stderr_left) == {"e", "\n"}
+
     def test_pipe_p2_takes_precedence_when_both_fail(self):
         # If both sides fail, the downstream (p2) returncode is what
         # the caller usually cares about - it's the more direct symptom.

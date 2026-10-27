@@ -22,8 +22,9 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 from dataclasses import dataclass
-from typing import Protocol
+from typing import IO, Protocol
 
 from lib import signals
 from lib.log import Log
@@ -220,6 +221,49 @@ def _written_at_exit(pid: int) -> int | None:
         return None
 
 
+class _Drain:
+    """A pipe read to its end on a thread of its own while its writer runs
+    (M7P.1): unread, 64 KiB of the left side's stderr would block the send
+    and the pipeline with it."""
+
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self._fd = -1
+        self._thread: threading.Thread | None = None
+
+    def start(self, stream: IO[bytes]) -> None:
+        """Read ``stream`` from now on. A descriptor of its own: closing the
+        Popen's file object while a thread reads it would wait for that read,
+        and so for every process that still holds the pipe."""
+        self._fd = os.dup(stream.fileno())
+        stream.close()
+        thread = threading.Thread(target=self._read, daemon=True)
+        # Started with every signal blocked, so it inherits that mask: a
+        # signal the kernel gave to the reader instead would leave the main
+        # thread asleep in its wait, and the pipeline running.
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, signal.valid_signals())
+        try:
+            thread.start()
+        finally:
+            _ = signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        self._thread = thread
+
+    def _read(self) -> None:
+        try:
+            while chunk := os.read(self._fd, 65536):
+                self.chunks.append(chunk)
+        finally:
+            os.close(self._fd)
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for the end of the pipe; a descriptor never read is closed."""
+        if self._thread is not None:
+            self._thread.join(timeout)
+        elif self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+
 def run_pipe(
     cmd1: str, cmd2: str, log: Log | None = None, meter: PipeMeter | None = None
 ) -> RunResult:
@@ -267,23 +311,28 @@ def run_pipe(
             stderr=subprocess.PIPE,
             process_group=0,
         ) as p2:
-            p1.stdout.close()  # let p2 receive EOF when p1 finishes
-            if meter is not None:
-                meter.begin(p1.pid)
+            left = _Drain()
             try:
+                p1.stdout.close()  # let p2 receive EOF when p1 finishes
+                assert p1.stderr is not None  # guaranteed by stderr=PIPE above
+                left.start(p1.stderr)
+                if meter is not None:
+                    meter.begin(p1.pid)
                 stdout, stderr_p2 = p2.communicate()
                 # p1 has finished by now (p2.communicate waited for downstream
                 # EOF, which only happens after p1 exits). Wait explicitly to
-                # reap it and capture its stderr.
+                # reap it.
                 if meter is not None:
                     meter.end(_written_at_exit(p1.pid))
                 _ = p1.wait()
             except BaseException:
                 signals.stop_children([p1, p2])
+                left.join(timeout=5)
                 raise
             finally:
                 signals.running(None)
-        stderr_p1 = p1.stderr.read() if p1.stderr is not None else b""
+            left.join()
+        stderr_p1 = b"".join(left.chunks)
 
     # Combine stderr from both sides for transparent error inspection.
     stderr_p1_s = stderr_p1.decode(errors="replace")
