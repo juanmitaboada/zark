@@ -238,11 +238,12 @@ def _discover_rules(
       1. Classify each dataset independently.
       2. Drop rules whose parent has ``recursive=yes`` AND would apply the
          same effective policy. Two overlapping rules with the same policy
-         add noise; two with *different* policies (e.g. zvol exclusion under
-         a recursive filesystem parent) must both stay so the more specific
-         one overrides the inherited one.
-      3. The subtrees in ``drained`` (excluded from snapshots) are written
-         outside every recursive rule (:func:`_split_around`).
+         add noise; one with a *different* policy (e.g. zvol exclusion under
+         a recursive filesystem parent) stays, as an override.
+      3. The subtrees in ``drained`` (excluded from snapshots) and every
+         override are written outside every recursive rule
+         (:func:`_split_around`): sanoid would apply an override inside a
+         recursive rule on some runs only (M5bP.7).
     """
     initial: list[tuple[str, SanoidRule]] = []
     seen: set[str] = set()
@@ -270,6 +271,7 @@ def _discover_rules(
         return None
 
     pruned: list[tuple[str, SanoidRule]] = []
+    overrides: set[str] = set()
     for name, rule in initial:
         anc = _nearest_recursive_ancestor(name)
         if anc is None:
@@ -281,15 +283,22 @@ def _discover_rules(
         if anc["template"] == rule["template"] and anc["recursive"] == rule["recursive"]:
             continue  # redundant - drop
         pruned.append((name, rule))
+        overrides.add(name)
 
-    return _split_around(pruned, sorted(seen), drained) if drained else pruned
+    if not (drained or overrides):
+        return pruned
+    return _split_around(pruned, sorted(seen), drained, frozenset(overrides))
 
 
 def _split_around(
-    rules: list[tuple[str, SanoidRule]], datasets: list[str], drained: frozenset[str]
+    rules: list[tuple[str, SanoidRule]],
+    datasets: list[str],
+    drained: frozenset[str],
+    overrides: frozenset[str] = frozenset(),
 ) -> list[tuple[str, SanoidRule]]:
     """``rules`` with every subtree in ``drained`` as a drained section of its
-    own, and no recursive rule containing one (M5b-6 6a).
+    own, every dataset in ``overrides`` with its own rule, and no recursive
+    rule containing either (M5b-6 6a, M5bP.7).
 
     sanoid reads its sections in Perl hash order, and a recursive section
     writes its values into every child's config, autosnap included, before
@@ -299,7 +308,7 @@ def _split_around(
     a drained subtree becomes a non-recursive section for each dataset on
     the way down to it, and a recursive one for each other subtree that
     branches off that way. The rules inside a drained subtree go: the
-    drained section covers it.
+    drained section covers it. An override keeps its own rule.
     """
     by_name = dict(rules)
 
@@ -312,7 +321,9 @@ def _split_around(
     def expand(name: str, rule: SanoidRule) -> list[tuple[str, SanoidRule]]:
         if name in drained:
             return [(name, {"template": DRAINED, "recursive": True, "explain": "excluded"})]
-        if not any(exclusions.under(t, name) for t in drained):
+        if name in overrides or not any(
+            t != name and exclusions.under(t, name) for t in drained | overrides
+        ):
             return [(name, rule)]
         out: list[tuple[str, SanoidRule]] = [(name, {**rule, "recursive": False})]
         for child in children(name):

@@ -3970,6 +3970,33 @@ class TestSanoidDiscoveryPruning:  # pylint: disable=missing-function-docstring
         # Verify it kept the right policy
         assert rules_dict["rpool/data/swap"]["template"] is None  # autosnap=no
 
+    def test_a_zvol_under_a_recursive_rule_splits_it(self):
+        """M5bP.7, M9b-11: sanoid reads its sections in hash order and a
+        recursive section copies autosnap into each child (sanoid 2.3.0
+        sanoid:970, :1109-1113), so the zvol's override holds on some runs
+        only: no recursive rule contains it, and what branches off keeps
+        the parent's template, recursively."""
+        rules = dict(
+            self._run_discovery(
+                [
+                    ("rpool", "filesystem"),
+                    ("rpool/data", "filesystem"),
+                    ("rpool/data/vms", "filesystem"),
+                    ("rpool/data/vms/disk", "volume"),
+                    ("rpool/data/vms/conf", "filesystem"),
+                    ("rpool/data/www", "filesystem"),
+                ],
+            )
+        )
+        assert rules["rpool/data/vms/disk"]["template"] is None
+        for name in ("rpool/data", "rpool/data/vms"):
+            assert rules[name]["template"] == "minimal" and not rules[name]["recursive"], name
+        for name in ("rpool/data/vms/conf", "rpool/data/www"):
+            assert rules[name]["template"] == "minimal" and rules[name]["recursive"], name
+        for name, rule in rules.items():
+            if rule["recursive"]:
+                assert not "rpool/data/vms/disk".startswith(f"{name}/"), name
+
 
 class TestSanoidDiff:  # pylint: disable=missing-function-docstring
     """Verify the comparator that decides whether to overwrite sanoid.conf.
