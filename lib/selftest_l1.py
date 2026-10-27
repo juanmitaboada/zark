@@ -637,7 +637,8 @@ def pool_15(b: Bench) -> None:
     :1503-1507, :1061-1065). With the feature, each is accepted. A root with
     ``mountpoint=/boot`` and ``canmount=off`` created with ``-R`` is not
     mounted and its directory is not made (lib/libzfs/libzfs_mount.c:241-262,
-    :341-350, both releases)."""
+    :341-350, both releases); ``zfs get`` prints that mountpoint under the
+    altroot (lib/libzfs/libzfs_dataset.c:2705-2734; 2.2.2 :2721-2750)."""
     c = b.pool("c")
     vdev = b.vdev(c)
     key = f"{b.dir}/pool15.key"
@@ -668,8 +669,15 @@ def pool_15(b: Bench) -> None:
     b.guids[c] = b.pool_value("guid", c)
     b.creating.discard(c)
     try:
-        got = b.ok(f"zfs get -H -o value mounted,mountpoint {c}").lines
-        expect(got == ["no", "/boot"], "not mounted, mountpoint /boot", observed(", ".join(got)))
+        # zfs get prints a path mountpoint under the pool's altroot
+        # (lib/libzfs/libzfs_dataset.c:2705-2734; 2.2.2 :2721-2750).
+        r = b.ok(f"zfs get -H -o value mounted,mountpoint {c}")
+        expect(
+            r.lines == ["no", f"{altroot}/boot"],
+            f"not mounted, mountpoint {altroot}/boot",
+            observed(", ".join(r.lines)),
+            text_of(r),
+        )
         expect(
             not os.path.exists(f"{altroot}/boot"),
             f"no {altroot}/boot made",
