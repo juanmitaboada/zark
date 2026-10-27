@@ -39,6 +39,7 @@ from pathlib import Path
 from lib import identity, pool_record, progress, sh, zfs_features
 from lib.keystore import ZVOL_ID, Keystore
 from lib.selftest import (
+    VDEV_BYTES,
     Bench,
     Fail,
     Skip,
@@ -478,9 +479,10 @@ def pool_12(b: Bench) -> None:
 
 @check(
     "POOL-13",
+    2,
     1,
-    1,
-    "zpool create -d with a feature list enables only those, as the record reads them",
+    "zpool create -d with a feature list enables only those, as the record reads them; "
+    + "compatibility=legacy enables none, and an upgrade none either",
     depends=(
         "recover's pools as origin had them (M6-6): pool_record.create_spec and options",
         "prepare's and backup's record of origin's pools (M6-5): pool_record.parse_get",
@@ -493,7 +495,11 @@ def pool_13(b: Bench) -> None:
     with its state and zark's reader gives back the same set. OpenZFS
     cmd/zpool/zpool_main.c:1997-1998, :2246-2288; module/zfs/zfeature.c:340-358;
     module/zcommon/zfeature_common.c:387-390, :629-651;
-    lib/libzfs/libzfs_pool.c:1174-1185."""
+    lib/libzfs/libzfs_pool.c:1174-1185. Rev 2: a record with
+    ``compatibility=legacy`` gives ``-d -o compatibility=legacy``, which
+    creates a pool with no feature, and ``zpool upgrade`` then enables none
+    (lib/libzfs/libzfs_pool.c:5199-5206; cmd/zpool/zpool_main.c:11491-11510;
+    2.2.2 :4876-4883, :9091-9103)."""
     known = set(zfs_features.parse_upgrade_v(b.ok("zpool upgrade -v").stdout))
     asked = {"async_destroy": "enabled", "encryption": "enabled", "lz4_compress": "active"}
     spec = pool_record.create_spec(pool_record.PoolState("off", asked), known)
@@ -521,6 +527,26 @@ def pool_13(b: Bench) -> None:
         )
         expect(not wrong, "each feature in its state", ", ".join(wrong), text_of(r))
         expect(got.compatibility == "off", "compatibility off", observed(got.compatibility))
+    finally:
+        b.drop_pool(c)
+    legacy = pool_record.create_spec(pool_record.PoolState("legacy", {}), known)
+    expect(
+        legacy.options() == "-d -o compatibility=legacy",
+        "-d -o compatibility=legacy for a legacy record",
+        observed(legacy.options()),
+    )
+    c = b.make_pool("c", legacy.options())
+    try:
+        for when in ("created", "upgraded"):
+            got = pool_record.parse_get(b.ok(f"zpool get -H -p -o property,value all {c}").stdout)
+            expect(not got.features, f"no feature once {when}", ", ".join(sorted(got.features)))
+            expect(
+                got.compatibility == "legacy",
+                f"compatibility legacy once {when}",
+                observed(got.compatibility),
+            )
+            if when == "created":
+                _ = b.ok(f"zpool upgrade {c}")
     finally:
         b.drop_pool(c)
 
@@ -587,6 +613,71 @@ def pool_14(b: Bench) -> None:
         )
     finally:
         b.drop_pool(c)
+
+
+@check(
+    "POOL-15",
+    1,
+    1,
+    "a root property that needs a feature is refused at create without it, leaving no pool; "
+    + "a root at a path with canmount=off is not mounted",
+    depends=(
+        "recover's root options follow the record (M9b-9): pool_record.root_options",
+        "recover's FATAL before the wipe for a record whose rpool lacks encryption",
+        "recover's bpool root at /boot with canmount=off (M6X.1)",
+    ),
+)
+def pool_15(b: Bench) -> None:
+    """``zpool create -d`` with ``-O compression=lz4`` (no ``lz4_compress``),
+    ``-O dnodesize=auto`` (no ``large_dnode``) or ``-O encryption=on`` (no
+    ``encryption``) is refused and no pool is left: the kernel sets the root
+    properties after the pool is made and destroys it when one fails
+    (module/zfs/zfs_ioctl.c:4966-4977, :5028-5043, :1527-1531;
+    lib/libzfs/libzfs_crypto.c:1065-1069; 2.2.2 :4630-4641, :4692-4707,
+    :1503-1507, :1061-1065). With the feature, each is accepted. A root with
+    ``mountpoint=/boot`` and ``canmount=off`` created with ``-R`` is not
+    mounted and its directory is not made (lib/libzfs/libzfs_mount.c:241-262,
+    :341-350, both releases)."""
+    c = b.pool("c")
+    vdev = b.vdev(c)
+    key = f"{b.dir}/pool15.key"
+    with open(key, "wb") as f:
+        f.write(b"k" * 32)
+    enc = f"-O encryption=on -O keyformat=raw -O keylocation=file://{key}"
+    cases = (
+        ("lz4_compress", "-O compression=lz4", ()),
+        ("large_dnode", "-O dnodesize=auto", ()),
+        ("encryption", enc, ("Encryption feature not enabled",)),
+    )
+    altroot = f"{BACKUP_ALTROOT_BASE}/{c}"
+
+    def create(opts: str) -> str:
+        with open(vdev, "wb") as f:
+            f.truncate(VDEV_BYTES)
+        b.creating.add(c)
+        return " ".join(f"zpool create -o ashift=12 -d {opts} -R {altroot} {c} {vdev}".split())
+
+    for feature, opts, said in cases:
+        _ = b.refused(create(opts), *said)
+        expect(not b.run(f"zpool list -H {c}").ok, f"no pool left without {feature}", "a pool")
+        _ = b.ok(create(f"-o feature@{feature}=enabled {opts}"))
+        b.guids[c] = b.pool_value("guid", c)
+        b.creating.discard(c)
+        b.drop_pool(c)
+    _ = b.ok(create("-O mountpoint=/boot -O canmount=off"))
+    b.guids[c] = b.pool_value("guid", c)
+    b.creating.discard(c)
+    try:
+        got = b.ok(f"zfs get -H -o value mounted,mountpoint {c}").lines
+        expect(got == ["no", "/boot"], "not mounted, mountpoint /boot", observed(", ".join(got)))
+        expect(
+            not os.path.exists(f"{altroot}/boot"),
+            f"no {altroot}/boot made",
+            "the directory is there",
+        )
+    finally:
+        b.drop_pool(c)
+        os.unlink(key)
 
 
 def _zfs_userland(b: Bench) -> str:

@@ -7171,9 +7171,33 @@ class TestPoolRecord:  # pylint: disable=missing-function-docstring
             spec = pool_record.create_spec(st, {"async_destroy"})
         assert spec.compatibility == "" and spec.compat_missing == "grub2"
         assert "compatibility" not in spec.options()
-        for off in ("off", "legacy", ""):
+        for off in ("off", ""):
             spec = pool_record.create_spec(pool_record.PoolState(off, {}), set())
             assert spec.compatibility == spec.compat_missing == "" and spec.options() == "-d"
+
+    def test_a_legacy_record_is_created_legacy_with_no_file_to_check(self):
+        """M6 review 3 (1): legacy names no file; zpool create takes it as
+        every feature off."""
+        with patch.object(pool_record, "compat_installed", side_effect=AssertionError):
+            spec = pool_record.create_spec(pool_record.PoolState("legacy", {}), {"encryption"})
+        assert spec.compatibility == "legacy" and spec.compat_missing == ""
+        assert spec.options() == "-d -o compatibility=legacy"
+
+    def test_root_options_leave_out_what_the_record_cannot_have_had(self):
+        """M9b-9 9a: compression=lz4 needs lz4_compress, dnodesize=auto
+        large_dnode; without a record every option is kept."""
+        props = ("xattr=sa", "compression=lz4", "dnodesize=auto")
+        spec = pool_record.create_spec(
+            pool_record.PoolState("off", {"large_dnode": "enabled"}), {"large_dnode"}
+        )
+        assert pool_record.root_options(spec, props) == (
+            "-O xattr=sa -O dnodesize=auto",
+            ("compression=lz4",),
+        )
+        assert pool_record.root_options(None, props) == (
+            "-O xattr=sa -O compression=lz4 -O dnodesize=auto",
+            (),
+        )
 
     def test_compat_installed_needs_every_file_named(self):
         with tempfile.TemporaryDirectory() as td:
@@ -10703,7 +10727,9 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         + "encryption\n"
         + "     Support for dataset level encryption\n"
         + "lz4_compress\n"
-        + "     LZ4 compression algorithm support.\n\n"
+        + "     LZ4 compression algorithm support.\n"
+        + "large_dnode\n"
+        + "     Variable on-disk size of dnodes.\n\n"
         + "The following legacy versions are also supported:\n"
     )
 
@@ -10775,7 +10801,9 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             plain = self._run_to_create(td, extra=[redirect_stdout(StringIO())])
         with tempfile.TemporaryDirectory() as td:
             recorded, _ = self._with_record(
-                td, {"encryption": "active"}, {"lz4_compress": "active"}
+                td,
+                {"encryption": "active", "lz4_compress": "active", "large_dnode": "enabled"},
+                {"lz4_compress": "active"},
             )
         for mock in (plain, recorded):
             creates = [c for c in mock.calls if c.startswith("zpool create")]
@@ -10784,6 +10812,39 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
                 for prop in self._INSTALLER_ROOT:
                     assert f" -O {prop} " in cmd, (prop, cmd)
             assert " -O dnodesize=auto " in creates[1] and "dnodesize" not in creates[0]
+
+    def test_a_root_option_origin_could_not_have_is_left_to_the_default(self):
+        """M9b-9 9a: without lz4_compress or large_dnode in the record, the
+        create does not ask for compression=lz4 or dnodesize=auto (zpool
+        create would refuse it after the wipe); an INFO line says so."""
+        with tempfile.TemporaryDirectory() as td:
+            mock, out = self._with_record(td, {"encryption": "active"}, {})
+        creates = [c for c in mock.calls if c.startswith("zpool create")]
+        assert len(creates) == 2, mock.calls[-30:]
+        for cmd in creates:
+            assert "compression" not in cmd and "dnodesize" not in cmd, cmd
+            assert " -O xattr=sa " in cmd and " -O devices=off " in cmd, cmd
+        assert "rpool: compression=lz4 left to the default, origin's pool did not have " in out
+        assert "rpool: dnodesize=auto left to the default" in out and "large_dnode" in out
+        assert "bpool: compression=lz4 left to the default" in out
+
+    def test_a_record_whose_rpool_lacks_encryption_stops_before_erasing(self):
+        """M9b-9 9a: rpool is created encrypted, which needs the feature."""
+        with tempfile.TemporaryDirectory() as td:
+            mock, out = self._with_record(td, {"async_destroy": "active"}, {})
+        assert mock.was_not_called("wipefs")
+        assert mock.was_not_called("zpool create")
+        assert "Origin's rpool did not have the encryption feature at this point" in out
+        assert "Nothing was erased" in out
+
+    def test_bpools_root_is_at_boot_and_not_mounted(self):
+        """M6X.1: bpool's root gets mountpoint=/boot with canmount=off, as the
+        installer has it; bpool/BOOT keeps mountpoint=none."""
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_to_create(td, extra=[redirect_stdout(StringIO())])
+        bpool = next(c for c in mock.calls if c.startswith("zpool create") and " bpool " in c)
+        assert " -O mountpoint=/boot -O canmount=off " in bpool, bpool
+        assert "mountpoint=none" not in bpool
 
     def test_a_feature_origin_had_active_that_this_zfs_lacks_stops_before_erasing(self):
         """M6-6: recover refuses such a point before it erases the target."""
@@ -10820,9 +10881,15 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         """M6-7, M6-9: a point written before 2.0.0-rc11 is restored as before,
         with a warning naming the live's ZFS."""
         out = StringIO()
+
+        def shell(mock: MockShell) -> None:
+            _ = mock.on("zfs version").succeeds("zfs-2.4.1\nzfs-kmod-2.4.1\n")
+
         with tempfile.TemporaryDirectory() as td:
-            mock = self._run_to_create(td, extra=[redirect_stdout(out)])
+            mock = self._run_to_create(td, shell_setup=shell, extra=[redirect_stdout(out)])
         assert "does not record origin's pool features" in out.getvalue()
+        # M6 review 3 (4): both lines, the tools' and the module's.
+        assert "of this live's ZFS (zfs-2.4.1, zfs-kmod-2.4.1)" in out.getvalue()
         creates = [c for c in mock.calls if c.startswith("zpool create")]
         assert len(creates) == 2, mock.calls[-30:]
         assert " -d -o feature@async_destroy=enabled " in creates[0]
@@ -22574,12 +22641,12 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
 
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
-        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05
-        assert len([c for c in checks if c.level == 1]) == 58
+        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05, POOL-15
+        assert len([c for c in checks if c.level == 1]) == 59
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         # A check whose expectations changed gets its next revision (M9b).
-        revs = {"SNP-07": 2}
+        revs = {"SNP-07": 2, "POOL-13": 2}
         for c in checks:
             assert re.fullmatch(r"[A-Z]{3,4}-\d\d", c.cid), c.cid
             assert c.rev == revs.get(c.cid, 1) and c.depends, c.cid

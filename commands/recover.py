@@ -109,6 +109,28 @@ BPOOL_FEATURES_BASE = (
 )
 
 
+# The installer's root properties (subiquity manipulator.py:242-265), M6R-1;
+# relatime is on by default since 2.2, local here as the installer sets it.
+ROOT_PROPS = {
+    "bpool": (
+        "devices=off",
+        "acltype=posixacl",
+        "xattr=sa",
+        "compression=lz4",
+        "normalization=formD",
+        "relatime=on",
+    ),
+    "rpool": (
+        "acltype=posixacl",
+        "xattr=sa",
+        "dnodesize=auto",
+        "normalization=formD",
+        "relatime=on",
+        "compression=lz4",
+        "devices=off",
+    ),
+}
+
 TOTAL_STEPS = 16
 
 # Partition layout written in step 6, in MiB before the rpool partition:
@@ -269,10 +291,12 @@ def _pools_from_record(
         rec = None
     known = set(zfs_features.parse_upgrade_v(sh.run("zpool upgrade -v").stdout))
     if rec is None or not known or not all(p in rec.pools for p in ("rpool", "bpool")):
-        live = sh.run("zfs version").lines
+        live = ", ".join(ln.strip() for ln in sh.run("zfs version").lines) or "unknown"
+        # Both lines: without -d, zpool create enables what the module supports
+        # (fi_zfs_mod_supported, cmd/zpool/zpool_main.c:2240-2286 at OpenZFS 2.4.1).
         log.warn(
             f"{_no_record_why(rec, known)}: rpool gets every feature "
-            + f"of this live's ZFS ({live[0].strip() if live else 'unknown'}). If the restored "
+            + f"of this live's ZFS ({live}). If the restored "
             + "system runs an older OpenZFS, it may not import rpool once one of them is active."
         )
         return {}
@@ -293,8 +317,22 @@ def _pools_from_record(
                 "Nothing was erased",
             ],
         )
+    if "encryption" not in specs["rpool"].features:
+        log.fatal(
+            "Origin's rpool did not have the encryption feature at this point",
+            causes=[
+                "recover creates rpool encrypted, and zpool create refuses an encrypted "
+                + "root without that feature"
+            ],
+            solutions=["Restore a point of an encrypted rpool", "Nothing was erased"],
+        )
     for p, s in specs.items():
         log.info(pool_record.describe(rec, p))
+        for prop in pool_record.root_options(s, ROOT_PROPS[p])[1]:
+            log.info(
+                f"  {p}: {prop} left to the default, origin's pool did not have "
+                + pool_record.NEEDS_FEATURE[prop]
+            )
         if s.lacking_enabled:
             log.info(f"  {p}: not enabled, this ZFS lacks them: {', '.join(s.lacking_enabled)}")
         if s.compat_missing:
@@ -338,15 +376,15 @@ def needs_userdata(plan: RestorePlan) -> bool:
     return any(r.rel.startswith("rpool/USERDATA/") for r in [*plan.rpool_rows, *plan.empty_rows])
 
 
-def _rpool_create_cmd(mountpoint: str, key_file: str, vdev: str, features: str = "") -> str:
+def _rpool_create_cmd(
+    mountpoint: str, key_file: str, vdev: str, spec: pool_record.Create | None = None
+) -> str:
     """``zpool create`` for the encrypted rpool, root mountpoint as in origin;
-    ``features`` the record's options (M6-6), "" for every feature of this ZFS."""
+    ``spec`` the record's (M6-6), None for every feature of this ZFS."""
     return (
         "zpool create -f -o ashift=12 -o autotrim=on "
-        + (f"{features} " if features else "")
-        # The installer's root properties (subiquity manipulator.py:242-265), M6R-1.
-        + "-O acltype=posixacl -O xattr=sa -O dnodesize=auto "
-        + "-O normalization=formD -O relatime=on -O compression=lz4 -O devices=off "
+        + (f"{spec.options()} " if spec else "")
+        + f"{pool_record.root_options(spec, ROOT_PROPS['rpool'])[0]} "
         + f"-O canmount=off -O mountpoint={mountpoint} "
         + "-O encryption=aes-256-gcm -O keyformat=raw "
         + f"-O keylocation=file://{key_file} "
@@ -980,17 +1018,18 @@ def run(
     log.info(f"Pool devices: bpool {bpool_vdev}, rpool {rpool_vdev}")
 
     # bpool as origin had it (M6-6); without a record, only GRUB-safe features.
+    bpool_spec = pools_spec.get("bpool")
     features = (
-        pools_spec["bpool"].options()
-        if pools_spec
+        bpool_spec.options()
+        if bpool_spec
         else "-d " + " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
     )
     r = sh.run(
         f"zpool create -f -o ashift=12 -o autotrim=on {features} "
-        + "-O devices=off -O mountpoint=none -O canmount=off "
-        + "-O acltype=posixacl -O xattr=sa -O compression=lz4 -O normalization=formD "
-        # relatime as the installer sets it (M6R-1); on by default since 2.2, now local.
-        + "-O relatime=on "
+        + f"{pool_record.root_options(bpool_spec, ROOT_PROPS['bpool'])[0]} "
+        # The root at /boot, as the installer has it (M6X.1); canmount=off keeps
+        # zpool create from mounting it (lib/libzfs/libzfs_mount.c:241-262).
+        + "-O mountpoint=/boot -O canmount=off "
         + f"-R {RECOVER_MNT} bpool {bpool_vdev}",
         log=log,
     )
@@ -1001,9 +1040,9 @@ def run(
 
     # Set at create time: the backup pool (with its keystore zvol) is still
     # imported, so a later `zfs set mountpoint` is forbidden (chase.c:648).
-    rpool_features = pools_spec["rpool"].options() if pools_spec else ""
     r = sh.run(
-        _rpool_create_cmd(plan.rpool_mountpoint, tmp_key, rpool_vdev, rpool_features), log=log
+        _rpool_create_cmd(plan.rpool_mountpoint, tmp_key, rpool_vdev, pools_spec.get("rpool")),
+        log=log,
     )
     if not r.ok:
         log.fatal("Failed to create rpool container")

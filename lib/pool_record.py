@@ -205,11 +205,29 @@ class Create:
 
     def options(self) -> str:
         """The ``zpool create`` options: no default feature, only these."""
-        feats = " ".join(f"-o feature@{f}=enabled" for f in self.features)
+        feats = [f"-o feature@{f}=enabled" for f in self.features]
         compat = (
-            f" -o compatibility={shlex.quote(self.compatibility)}" if self.compatibility else ""
+            [f"-o compatibility={shlex.quote(self.compatibility)}"] if self.compatibility else []
         )
-        return f"-d {feats}{compat}".strip()
+        return " ".join(["-d", *feats, *compat])
+
+
+# Root properties a pool's create refuses without a feature, and the kernel
+# then destroys the new pool (module/zfs/zfs_ioctl.c:4966-4977, :5028-5043,
+# :1527-1531 at OpenZFS 2.4.1; :4630-4641, :4692-4707, :1503-1507 at 2.2.2).
+NEEDS_FEATURE = {"compression=lz4": "lz4_compress", "dnodesize=auto": "large_dnode"}
+
+
+def root_options(spec: Create | None, props: tuple[str, ...]) -> tuple[str, tuple[str, ...]]:
+    """The ``-O`` options for ``props`` on a pool created as ``spec`` (None:
+    every feature of this ZFS), and the ones left to the default because
+    ``spec`` does not enable the feature they need (M9b-9 9a)."""
+    left = tuple(
+        p
+        for p in props
+        if spec is not None and p in NEEDS_FEATURE and NEEDS_FEATURE[p] not in spec.features
+    )
+    return " ".join(f"-O {p}" for p in props if p not in left), left
 
 
 def feature_name(key: str) -> str:
@@ -241,8 +259,10 @@ def create_spec(state: PoolState, known: set[str]) -> Create:
             active.append(name)
         else:
             enabled.append(name)
-    compat = state.compatibility if state.compatibility not in ("", "off", "legacy") else ""
-    present = compat if compat and compat_installed(compat) else ""
+    compat = state.compatibility if state.compatibility not in ("", "off") else ""
+    # legacy names no file: zpool_load_compat takes it as every feature off
+    # (lib/libzfs/libzfs_pool.c:5199-5206 at OpenZFS 2.4.1, :4876-4883 at 2.2.2).
+    present = compat if compat == "legacy" or (compat and compat_installed(compat)) else ""
     return Create(
         tuple(on), present, tuple(active), tuple(enabled), compat if compat and not present else ""
     )
