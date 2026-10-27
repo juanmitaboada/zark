@@ -95,8 +95,9 @@ override_dh_clean:
 	dh_clean
 	rm -f debian/zark.1 debian/zark.1.raw
 
-# Tests need root, ZFS modules, real disks. They cannot run inside a
-# Debian build environment; they live behind `make test-real`.
+# The unit suite runs in `make fulltest`; the checks on ZFS need root and
+# its kernel module (`zark selftest`), which a Debian build environment
+# does not have.
 override_dh_auto_test:
 
 # Installation is fully described by debian/install + debian/links.

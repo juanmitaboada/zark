@@ -55,9 +55,8 @@ Specifically the bar is:
 - **ruff**: in particular the `RUF027` rule must pass - it catches the
   stripped-`f` bug that broke v1.0.4.
 
-Integration tests (`tests/test_integration.py`) require root, KVM, and
-a working OVMF setup; they are NOT run in CI and are exercised locally
-by the maintainer before each release.
+Validation on hardware is `zark selftest` and a checklist on the
+maintainer's machines for each release; neither runs in CI.
 
 ## Pull requests
 

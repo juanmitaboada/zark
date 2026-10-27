@@ -149,7 +149,7 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 - **Hardware tested:**
   - zark 2.0.0: Dell XPS 13 9333, with Ubuntu 24.04 and 26.04 installed on the installer's encrypted ZFS layout, and recovered from an Ubuntu 26.04 live; the self-test's certificates in `certificates/selftest.json` come from it.
   - zark 1.x: MINISFORUM UM890 (Ubuntu 24.04, 25.10, 26.04), Dell XPS 9315 (Ubuntu 25.10), and a disk-failure recovery on a separate Ubuntu 24.04 system.
-- **CI/test:** GitHub Actions runs the unit suite and the static analysis; validation on hardware is the self-test and a checklist on the machine above for each release. The QEMU/OVMF integration harness (`make test-real`) is 1.x's and was not run for 2.0.0.
+- **CI/test:** GitHub Actions runs the unit suite and the static analysis; validation on hardware is the self-test and a checklist on the machine above for each release. The QEMU/OVMF integration harness 1.x had (`make test-real`) was retired in 2.1.0.
 
 ## Security notes
 

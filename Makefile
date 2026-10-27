@@ -1,6 +1,5 @@
 .PHONY: help \
-        test test-real test-deps test-all \
-        test-phase1 test-phase2 test-phase3 test-cleanup \
+        test test-all \
         setup clean version \
         check mypy pylint ruff format format-check basedpyright pre-commit lint tox tox-ruff \
         manpage manpage-view manpage-lint manpage-clean \
@@ -52,32 +51,6 @@ help: ## Show this help
 test: ## Run unit tests (no root, no ZFS needed)
 	$(PYTHON) tests/test_unit.py
 
-test-deps: ## Install integration test dependencies (qemu, ovmf, genisoimage)
-	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "  test-deps installs system packages - run with sudo:"; \
-		echo "    sudo make test-deps"; \
-		exit 1; \
-	fi
-	apt install -y qemu-system-x86 ovmf genisoimage
-
-test-real: ## Run full integration test in QEMU (all 3 phases)
-	@test -n "$(ISO)" || { echo "  Usage: sudo make test-real ISO=/path/to/ubuntu.iso"; exit 1; }
-	$(PYTHON) tests/test_integration.py --iso $(ISO)
-
-test-phase1: ## Run Phase 1 only (create encrypted ZFS test system + backup)
-	@test -n "$(ISO)" || { echo "  Usage: sudo make test-phase1 ISO=/path/to/ubuntu.iso"; exit 1; }
-	$(PYTHON) tests/test_integration.py --phase 1 --iso $(ISO)
-
-test-phase2: ## Run Phase 2 only (recover from existing backup.img)
-	@test -n "$(ISO)" || { echo "  Usage: sudo make test-phase2 ISO=/path/to/ubuntu.iso"; exit 1; }
-	$(PYTHON) tests/test_integration.py --phase 2 --iso $(ISO)
-
-test-phase3: ## Run Phase 3 only (boot recovered target.img - no ISO needed)
-	$(PYTHON) tests/test_integration.py --phase 3
-
-test-cleanup: ## Remove all integration test artifacts (source/backup/target images)
-	$(PYTHON) tests/test_integration.py --cleanup
-
 test-enospc-real: ## Calibrate ENOSPC markers against real ZFS (root, opt-in, NOT in fulltest)
 	@# Empirically validates that lib/sh.is_enospc() recognises the
 	@# stderr emitted by this machine's ZFS / kernel when a `zfs send |
@@ -97,7 +70,7 @@ test-enospc-real: ## Calibrate ENOSPC markers against real ZFS (root, opt-in, NO
 	fi
 	bash tests/test_enospc_real.sh
 
-test-all: test check ## Run unit tests and syntax check (no QEMU required)
+test-all: test check ## Run unit tests and syntax check
 
 # ── Static analysis ──────────────────────────────────────────────────────
 
@@ -470,7 +443,7 @@ fulltest: check tox-ruff test manpage-lint dist-check tox deb ## Everything safe
 	@#
 	@# What fulltest does NOT cover and why:
 	@#   - dpkg -i     : would alter the local zark installation.
-	@#   - test-real   : QEMU integration tests need root and ZFS modules.
+	@#   - test-enospc-real : needs root and the ZFS kernel module.
 	@#   - pre-commit  : the ruff hooks run with --fix and rewrite files in
 	@#                   place; not "non-invasive". `tox-ruff` above
 	@#                   covers the read-only half. Run separately when
