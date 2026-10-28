@@ -284,6 +284,7 @@ from lib.restore_points import (  # pylint: disable=wrong-import-position # noqa
     legacy_complete,
     logical,
     parse_snapshots,
+    point_losses,
     point_name,
     resolve,
     restore_points,
@@ -10715,6 +10716,78 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         assert seen["mount"] == [(_BE, True)], seen
         assert seen["gaps"] == [monthly], seen
 
+    def _banner_after_a_run(self, td: str, installed: bool) -> str:
+        """A whole run whose plan recreates an excluded top with two datasets
+        below it left out; the restored root has the package when
+        ``installed``, and the cleanup unmounts it (the file is gone after
+        ``Cleanup.run``). Returns the closing banner's lines."""
+        mnt = os.path.join(td, "mnt")
+        pkg = Path(mnt + recover_mod.INSTALLED_ZARK)
+        if installed:
+            pkg.parent.mkdir(parents=True)
+            pkg.write_text("", encoding="utf-8")
+        point = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")[-1]
+        top = RestoreRow(
+            "rpool/var/lib/docker",
+            None,
+            props=MountProps("on", "/var/lib/docker", "excluded"),
+            options=["-o canmount=on"],
+            effective="/var/lib/docker",
+            empty=True,
+            flags="backups",
+            below=2,
+        )
+        plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [top], "k@k", 1, "617fca2c")
+        banners: list[str] = []
+        real_exists = Path.exists
+
+        def exists(self: Path) -> bool:  # the target disk's partitions
+            return str(self).startswith("/dev/sda") or real_exists(self)
+
+        def unmount(_self: Cleanup) -> None:
+            pkg.unlink(missing_ok=True)
+
+        def banner(_self: Log, _title: str, lines: list[str] | None = None) -> None:
+            banners.extend(lines or [])
+
+        extra: list[AbstractContextManager[object]] = [
+            patch.object(recover_mod, "RECOVER_MNT", mnt),
+            patch.object(recover_mod, "build_plan", return_value=plan),
+            patch.object(Path, "exists", exists),
+            patch.object(recover_mod, "restore_rpool_rows", return_value=[]),
+            patch.object(recover_mod, "_restore_encryption_root", return_value=[]),
+            patch.object(recover_mod, "restore_bpool", return_value=("", [])),
+            patch.object(recover_mod, "_export_verified"),
+            patch.object(recover_mod, "_refuse_imported_system_pools"),
+            patch.object(recover_mod, "_stable_vdev", return_value="/dev/x"),
+            patch.object(recover_mod, "drop_prepare_snapshot"),
+            patch.object(recover_mod, "_install_missing_tools"),
+            patch.object(recover_mod, "mount_restored_system"),
+            patch.object(recover_mod, "kernel_gaps", return_value=[]),
+            patch.object(recover_mod, "install_boot_chain", return_value=[]),
+            patch.object(recover_mod, "regenerate_initrd", return_value=[]),
+            patch.object(recover_mod.Cleanup, "run", autospec=True, side_effect=unmount),
+            patch.object(Log, "banner_ok", autospec=True, side_effect=banner),
+            patch.object(Log, "banner_error", autospec=True, side_effect=banner),
+        ]
+        _ = self._run_in(td, "YES", extra=extra, everything_succeeds=True)
+        return "\n".join(banners)
+
+    def test_the_closing_banner_reads_the_restored_root_before_the_cleanup(self):
+        """M9bR-2 (RC6, RC7, RC8): the finish line names the package when the
+        restored root has it and the stick otherwise, read before the
+        cleanup unmounts that root; the summary says what below an excluded
+        top was not created."""
+        with tempfile.TemporaryDirectory() as td:
+            pkg = self._banner_after_a_run(td, installed=True)
+        with tempfile.TemporaryDirectory() as td:
+            stick = self._banner_after_a_run(td, installed=False)
+        assert "RECOVERY" not in pkg  # the title is not among the lines
+        for text in (pkg, stick):
+            assert "rpool/var/lib/docker (2 dataset(s) below it not created)" in text, text
+        assert "sudo zark finish" in pkg and "from the stick or checkout" not in pkg, pkg
+        assert "from the stick or checkout you use" in stick, stick
+
     def test_system_key_copy_is_private_and_removed_on_a_fatal(self):
         # Review §8: the /tmp copy used to survive every failure path.
         with tempfile.TemporaryDirectory() as td:
@@ -15709,6 +15782,16 @@ class TestDependents:  # pylint: disable=missing-function-docstring
             ("rpool/x.archived-20261028", 1, True),
         ], deps
 
+    def test_a_clone_under_a_dependent_goes_with_it(self):
+        """M9bR-2 (DEP6): a dependent's child cloned from the tree too is
+        destroyed with its parent's ``zfs destroy -r``, so it is no entry
+        of its own (a second destroy would fail "does not exist")."""
+        dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/x/c")}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
+        dest["rpool/x.archived-20261028/c"] = repl.Dest("ac", clone_of="rpool/x/c@s1")
+        deps = repl.dependents(dest, "rpool/x")
+        assert [(d.rel, d.depth) for d in deps] == [("rpool/x.archived-20261028", 1)], deps
+
     def test_a_live_clone_is_not_an_archived_lineage(self):
         dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/y")}
         dest["rpool/w"] = repl.Dest("w", clone_of="rpool/x@s1")
@@ -16123,12 +16206,18 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         return fake
 
     def _run_orphan(
-        self, fake: FakeZfs, choices: list[int], typed: str = ""
+        self, fake: FakeZfs, choices: list[int], typed: str = "", asked: list[str] | None = None
     ) -> tuple["engine.Result", list[list[str]], str]:
-        """The run, the options of each question, and every WARN line."""
+        """The run, the options of each question, and every WARN line;
+        ``asked``, when given, receives every typed confirmation's prompt."""
         offered: list[list[str]] = []
         warned: list[str] = []
         real_warn = Log.warn
+
+        def ask_text(prompt: str, *_a: Any, **_k: Any) -> str:
+            if asked is not None:
+                asked.append(prompt)
+            return typed
 
         def ask(_self: Log, _q: str, opts: list[str], _d: int = 0) -> int:
             offered.append(list(opts))
@@ -16143,7 +16232,7 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
 
         with (
             patch.object(Log, "ask_choice", ask),
-            patch.object(Log, "ask_text", return_value=typed),
+            patch.object(Log, "ask_text", side_effect=ask_text),
             patch.object(Log, "warn", warn),
         ):
             res = _engine_run(fake, "backup", "111", self.P4, decide)
@@ -16172,6 +16261,32 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         with patch_sh(fake):
             snaps = drive_marks.drive_snapshots("backup", strict=True)
         assert {P1, P2, P3} <= complete_points(snaps, ""), snaps
+
+    def test_the_typed_confirmation_names_the_archived_lineages(self) -> None:
+        """M9bR-2 (BK5): the sentence DESTROY is typed for says that the
+        archived lineages cloned from the orphan go too."""
+        fake = self._orphan_with_its_archive()
+        asked: list[str] = []
+        res, _, _ = self._run_orphan(fake, [2], "DESTROY", asked)
+        assert res.ok, res
+        assert len(asked) == 1, asked
+        assert (
+            "Type DESTROY to destroy backup/rpool/var/lib/docker and everything below it, "
+            + "and 1 archived lineage(s) cloned from it"
+        ) in asked[0], asked
+
+    def test_a_count_that_cannot_be_rewritten_is_warned(self) -> None:
+        """M9bR-2 (ENG8): when the ``zfs set`` of a point's lowered count
+        fails, the point is said to read PARTLY REMOVED, not whole."""
+        fake = self._orphan_with_its_archive()
+        fake.fail_cmds.add(f"zfs set {COMPLETE_PROP}=")
+        out = StringIO()
+        with redirect_stdout(out):
+            res, _, text = self._run_orphan(fake, [2], "DESTROY")
+        assert res.ok, res
+        assert "backup/rpool/var/lib/docker" not in fake.ds
+        assert "now reads PARTLY REMOVED" in text, text
+        assert "whole without" not in out.getvalue()
 
     def test_an_orphan_with_another_clone_is_not_offered_for_destroy(self) -> None:
         """M9b-2 2a: a clone that is not an archived lineage of the orphan
@@ -21147,6 +21262,38 @@ class TestCompletePoints:
         }
         assert values == {"6"}
         assert _marked(fake) == {P1, P2}
+
+
+class TestPointLosses:  # pylint: disable=missing-function-docstring
+    """M5bV-4 (M9bR-2): what a destroy on the drive takes from each backup
+    point, counted by dataset."""
+
+    P = "zark_2026-10-01_10:00:00Z"
+
+    def _snap(self, dataset: str, mark: str, source: str = "") -> Snap:
+        return Snap(dataset, self.P, f"g-{source or dataset}", 1, 1, source, mark)
+
+    def test_a_dataset_and_its_archived_lineage_are_one_loss(self):
+        """PL2: a point held by a dataset and by its archived lineage loses
+        one dataset when both go, and its count is lowered by one."""
+        archive = "rpool/a.archived-20261028"
+        snaps = [
+            self._snap("rpool/a", "3"),
+            self._snap("rpool/a", "3", source=archive),
+            self._snap("rpool/b", "3"),
+            self._snap("rpool/c", "3"),
+        ]
+        losses = point_losses("backup", snaps, ["rpool/a", archive])
+        assert set(losses) == {self.P}, losses
+        loss = losses[self.P]
+        assert loss.lost == frozenset({"rpool/a"}) and loss.count == 2, loss
+        assert sorted(loss.targets) == [f"backup/rpool/b@{self.P}", f"backup/rpool/c@{self.P}"]
+
+    def test_a_point_left_with_nothing_is_not_rewritten(self):
+        """PL3: a point whose every snapshot was under the destroyed tree is
+        gone: no ``zfs set`` names it."""
+        snaps = [self._snap("rpool/a", "3"), self._snap("rpool/a/x", "3")]
+        assert not point_losses("backup", snaps, ["rpool/a"])
 
 
 class TestRecoverDelta:  # pylint: disable=missing-function-docstring,too-few-public-methods
