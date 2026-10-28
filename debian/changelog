@@ -1,75 +1,31 @@
-zark (2.1.0~rc4-1) UNRELEASED; urgency=medium
+zark (2.1.0-1) stable; urgency=medium
 
-  * Milestone M9b of zark 2.1 (what 2.0 left). Not for release: nothing is
-    published until the final 2.1.0.
-  * An orphan on a drive is destroyed with the archived lineages cloned
-    from it, and the points that held it stay whole.
-  * recover creates each excluded subtree's top only; its pools follow the
-    point's record for legacy compatibility and the root properties that
-    need a feature; bpool's root is at /boot.
+  * zark 2.1. Status files for other programs: /var/lib/zark/status.json
+    (the source pools, every registered drive with its last backup, run,
+    space and what it holds) and /run/zark/progress.json (a running
+    command's step, what it waits for and a backup's transfer), written by
+    zark itself, refreshed by the alerts timer, readable without root.
+    Their description and JSON Schemas are installed in
+    /usr/share/doc/zark/; /run/zark comes from tmpfiles.d.
+  * zark monitor reads the status files and runs without root.
+  * Suggests gnome-shell-extension-zark, the GNOME Shell extension that
+    reads them, a package of its own in the same PPA.
+  * An orphan with archived lineages cloned from it can be destroyed, and
+    the points that held it stay whole.
+  * recover creates only the top of an excluded subtree, and its pools
+    follow the point's record for legacy compatibility and the root
+    properties that need a feature.
   * backup and prepare refuse a system without its own bpool.
-  * purge reads the partitions after udev settled; setup splits a
-    recursive rule around a dataset whose rule differs.
-  * Self-test checks DST-05 and POOL-15; POOL-13 and SNP-07 revised.
-  * make test-real and the QEMU harness of 1.x are retired.
-  * Packaging: NOTICE is installed in /usr/share/doc/zark/, as the Apache
-    License 2.0 requires.
-  * Packaging: dh_python3 byte-compiles /usr/share/zark/ at install and
-    removes the bytecode at removal; the entry point runs /usr/bin/python3.
-    Build-Depends gains dh-python.
-  * Packaging: qemu-system-x86 and ovmf move from Recommends to Suggests;
-    Standards-Version 4.7.3; Priority and Rules-Requires-Root dropped from
-    the source paragraph, where lintian calls them redundant.
-  * Packaging: debian/watch follows the GitHub release tags;
-    debian/upstream/metadata names the repository, the issue tracker and
-    the security contact.
+  * purge reads the partitions after udev settled.
+  * The alerts timer also fires on every wall-clock hour: run
+    zark setup once after the upgrade.
+  * Packaging: NOTICE is installed in /usr/share/doc/zark/; dh_python3
+    byte-compiles /usr/share/zark/ at install and removes the bytecode at
+    removal, and the entry point runs /usr/bin/python3; qemu-system-x86
+    and ovmf are suggested, no longer recommended; Standards-Version
+    4.7.3; debian/watch and debian/upstream/metadata.
 
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 20:36:57 +0100
-
-zark (2.1.0~rc3-1) UNRELEASED; urgency=medium
-
-  * Milestone M9a of zark 2.1 (the status files' second part). Not for
-    release: nothing is published until the final 2.1.0.
-  * status.json describes what each drive holds: its datasets, its backup
-    points by month, what its retention removes next and what removing
-    its oldest points frees, measured at the end of a complete backup and
-    of zark prune from zfs list and dry runs of zfs destroy -nvp.
-  * Self-test check DST-04: a dry run frees what a destroy frees.
-  * The empty /run/zark/altroot is removed after a backup and a self-test.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 00:12:14 +0100
-
-zark (2.1.0~rc2-1) UNRELEASED; urgency=medium
-
-  * Milestone M8 of zark 2.1 (zark monitor). Not for release: nothing is
-    published until the final 2.1.0.
-  * zark monitor reads the status files instead of polling, and runs as
-    any user: the running command, its step and, for a backup, bytes,
-    rate, ETA and transfers; what it waits for; the source pools live,
-    the drives, their last runs and contents, the datasets and the
-    notices. Full screen with curses, plain frames without a terminal,
-    --once and --once --state for scripts.
-  * lib/status_reader.py, the reference reader of the status files.
-  * Self-test check RDR-01: an unprivileged user reads what the monitor
-    reads.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 26 Oct 2026 17:37:02 +0100
-
-zark (2.1.0~rc1-1) UNRELEASED; urgency=medium
-
-  * Milestone M7 of zark 2.1 (the status writer). Not for release:
-    nothing is published until the final 2.1.0.
-  * /run/zark/progress.json while a command that changes state runs: its
-    step, whether it waits for an answer, the drive and point of a
-    backup, and its transfer with the bytes sent and their rate.
-  * /var/lib/zark/status.json at the end of every such command, from
-    zark status and hourly from the alerts timer: the source pools'
-    space and datasets, every drive's last backup and last run, the
-    MOTD's lines. Schema version 1, docs/STATUS-FILES.md.
-  * /run/zark from a tmpfiles.d entry; /run/zark and /var/lib/zark 0755.
-  * The alerts timer also fires on the wall-clock hour.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Sun, 25 Oct 2026 09:40:00 +0100
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Wed, 28 Oct 2026 01:28:47 +0100
 
 zark (2.0.0-1) stable; urgency=medium
 
