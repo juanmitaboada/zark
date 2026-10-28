@@ -24,7 +24,8 @@ Depends: ${misc:Depends},
 Recommends: dosfstools,
             grub-efi-amd64-signed,
             shim-signed
-Suggests: qemu-system-x86,
+Suggests: gnome-shell-extension-zark,
+          qemu-system-x86,
           ovmf
 Description: ZFS bare-metal backup and recovery suite for Ubuntu
  zark provides full bare-metal backup and disaster recovery for Ubuntu

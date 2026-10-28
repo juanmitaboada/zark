@@ -99,5 +99,12 @@ override_dh_clean:
 # does not have.
 override_dh_auto_test:
 
+# The JSON Schemas of the status files (debian/zark.docs) stay
+# uncompressed in /usr/share/doc/zark/schema/, so a reader can open or
+# validate against them as they are; dh_compress would gzip any doc file
+# over 4 KiB (M7P.5, M10-4).
+override_dh_compress:
+	dh_compress -X.json
+
 # Installation is fully described by debian/install + debian/links.
 override_dh_auto_install:

@@ -97,6 +97,15 @@ sudo zark explore       # should run; failures here probably mean a
 sudo dpkg -P zark       # purge to clean up
 ```
 
+What the `.deb` installs: zark under `/usr/share/zark/` with
+`/usr/bin/zark`, the manpage, `/run/zark` through `tmpfiles.d`, and the
+status files' contract for other readers: `STATUS-FILES.md.gz` in
+`/usr/share/doc/zark/`, with the JSON Schemas uncompressed in
+`/usr/share/doc/zark/schema/` (`debian/zark.docs`; `debian/rules` keeps
+`dh_compress` off the `.json` files). It suggests
+`gnome-shell-extension-zark`, a source package of its own built from the
+extension's repository into the same PPA.
+
 `debuild` also runs `lintian` against the resulting `.deb`; address any
 errors before declaring the build clean. Warnings should be reviewed
 case by case; one that is legitimate is acknowledged in
