@@ -17,6 +17,9 @@ zark (2.1.0~rc4-1) UNRELEASED; urgency=medium
   * Packaging: dh_python3 byte-compiles /usr/share/zark/ at install and
     removes the bytecode at removal; the entry point runs /usr/bin/python3.
     Build-Depends gains dh-python.
+  * Packaging: qemu-system-x86 and ovmf move from Recommends to Suggests;
+    Standards-Version 4.7.3; Priority and Rules-Requires-Root dropped from
+    the source paragraph, where lintian calls them redundant.
 
  -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 20:36:57 +0100
 

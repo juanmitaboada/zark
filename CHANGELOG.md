@@ -21,6 +21,18 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   `#!/usr/bin/env python3`.
 - **Building the package needs `dh-python`** (`Build-Depends`), for
   `make deb`, `make fulltest` and the PPA builds.
+- **`qemu-system-x86` and `ovmf` are suggested, no longer recommended**:
+  only `zark simulate` uses them, and it offers to install them when they
+  are missing (Debian Policy 7.2: Recommends are for all but unusual
+  installations). A new install no longer pulls QEMU in; an upgrade keeps
+  it, since APT keeps suggested packages by default.
+- **`debian/control` follows Debian Policy 4.7.3**: `Standards-Version`
+  4.7.3 (the newest resolute's lintian knows; 4.7.4's changes do not apply
+  to zark), and the source paragraph drops `Priority: optional` (4.7.3,
+  5.6.6) and `Rules-Requires-Root: no` (dpkg's default since 1.22.13),
+  both of which lintian calls redundant. On noble's dpkg the build runs
+  under fakeroot, as `debuild` and Launchpad already do, and the package
+  is the same.
 
 #### Fixed
 

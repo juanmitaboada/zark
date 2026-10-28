@@ -1,16 +1,14 @@
 Source: zark
 Section: admin
-Priority: optional
 Maintainer: Juanmi Taboada <juanmi@juanmitaboada.com>
 Build-Depends: debhelper-compat (= 13),
                dh-python,
                pandoc,
                python3:any
-Standards-Version: 4.7.0
+Standards-Version: 4.7.3
 Homepage: https://github.com/juanmitaboada/zark
 Vcs-Git: https://github.com/juanmitaboada/zark.git
 Vcs-Browser: https://github.com/juanmitaboada/zark
-Rules-Requires-Root: no
 
 Package: zark
 Architecture: amd64
@@ -25,9 +23,9 @@ Depends: ${misc:Depends},
          dracut | initramfs-tools
 Recommends: dosfstools,
             grub-efi-amd64-signed,
-            shim-signed,
-            qemu-system-x86,
-            ovmf
+            shim-signed
+Suggests: qemu-system-x86,
+          ovmf
 Description: ZFS bare-metal backup and recovery suite for Ubuntu
  zark provides full bare-metal backup and disaster recovery for Ubuntu
  systems running on encrypted ZFS root pools (rpool/bpool with a LUKS
