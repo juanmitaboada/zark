@@ -126,13 +126,14 @@ jobs:
       - name: Install build tooling
         # debhelper, devscripts, fakeroot, lintian: standard Debian
         # packaging stack. pandoc: needed since v1.0.6 to render the
-        # zark(1) manpage from debian/zark.1.md during dh_auto_build
-        # (declared in debian/control's Build-Depends; this step is
+        # zark(1) manpage from debian/zark.1.md during dh_auto_build.
+        # dh-python: dh_python3, for the bytecode of /usr/share/zark/
+        # (both declared in debian/control's Build-Depends; this step is
         # what satisfies that declaration on the runner).
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-              build-essential devscripts debhelper fakeroot lintian pandoc
+              build-essential devscripts debhelper dh-python fakeroot lintian pandoc
 
       - name: Build unsigned .deb
         run: make deb

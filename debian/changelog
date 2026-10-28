@@ -14,6 +14,9 @@ zark (2.1.0~rc4-1) UNRELEASED; urgency=medium
   * make test-real and the QEMU harness of 1.x are retired.
   * Packaging: NOTICE is installed in /usr/share/doc/zark/, as the Apache
     License 2.0 requires.
+  * Packaging: dh_python3 byte-compiles /usr/share/zark/ at install and
+    removes the bytecode at removal; the entry point runs /usr/bin/python3.
+    Build-Depends gains dh-python.
 
  -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 20:36:57 +0100
 

@@ -13,11 +13,25 @@ Nothing is uploaded to the PPA until the final 2.1.0.
 
 ### Packaging (debian/, checked against Debian Policy 4.7.3 and lintian)
 
+#### Changed
+
+- **The installed entry point runs `/usr/bin/python3`**, not the first
+  `python3` in `PATH` (`dh_python3` rewrites the shebang; the Debian Python
+  Policy advises against `/usr/bin/env` there). The portable tree keeps
+  `#!/usr/bin/env python3`.
+- **Building the package needs `dh-python`** (`Build-Depends`), for
+  `make deb`, `make fulltest` and the PPA builds.
+
 #### Fixed
 
 - **NOTICE ships in the package**, in `/usr/share/doc/zark/`: the Apache
   License 2.0 asks that a work's NOTICE file travel with it (section 4(d)),
   and lintian reported it missing (`missing-notice-file-for-apache-license`).
+- **No bytecode left behind under `/usr/share/zark/`**: every run as root
+  wrote `__pycache__` there, owned by no package, so `apt remove` left the
+  directory behind. `dh_python3` now byte-compiles it at install
+  (`py3compile`) and removes it at removal (`py3clean`), as the Debian
+  Python Policy asks of a private module directory.
 
 ### M9b - what 2.0 left (2.1.0-rc4)
 

@@ -3,7 +3,9 @@ Section: admin
 Priority: optional
 Maintainer: Juanmi Taboada <juanmi@juanmitaboada.com>
 Build-Depends: debhelper-compat (= 13),
-               pandoc
+               dh-python,
+               pandoc,
+               python3:any
 Standards-Version: 4.7.0
 Homepage: https://github.com/juanmitaboada/zark
 Vcs-Git: https://github.com/juanmitaboada/zark.git
@@ -13,6 +15,7 @@ Rules-Requires-Root: no
 Package: zark
 Architecture: amd64
 Depends: ${misc:Depends},
+         ${python3:Depends},
          python3 (>= 3.12),
          zfsutils-linux,
          sanoid,

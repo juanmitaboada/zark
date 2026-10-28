@@ -17,14 +17,16 @@ is `-1`, `-2`, ... for packaging-only fixes.
 
 ```sh
 sudo apt install \
-    devscripts debhelper dh-make \
+    devscripts debhelper dh-make dh-python \
     lintian \
     fakeroot \
     dput-ng    # newer dput; classic dput also works
 ```
 
 `devscripts` brings `debuild`, `dch`, `debsign`. `debhelper` provides the
-`dh` sequencer. `lintian` is invoked automatically by `debuild`.
+`dh` sequencer. `dh-python` provides `dh_python3`, which byte-compiles
+`/usr/share/zark/` at install and cleans it at removal. `lintian` is
+invoked automatically by `debuild`.
 
 ### 1.2 GPG key
 
