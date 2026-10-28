@@ -11,6 +11,14 @@ zark 2.1 is being built as milestones on `main`, versioned `2.1.0-rcN`
 (`lib/config.py`) and `2.1.0~rcN-1` UNRELEASED (`debian/changelog`).
 Nothing is uploaded to the PPA until the final 2.1.0.
 
+### Packaging (debian/, checked against Debian Policy 4.7.3 and lintian)
+
+#### Fixed
+
+- **NOTICE ships in the package**, in `/usr/share/doc/zark/`: the Apache
+  License 2.0 asks that a work's NOTICE file travel with it (section 4(d)),
+  and lintian reported it missing (`missing-notice-file-for-apache-license`).
+
 ### M9b - what 2.0 left (2.1.0-rc4)
 
 #### Added

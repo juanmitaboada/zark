@@ -12,6 +12,8 @@ zark (2.1.0~rc4-1) UNRELEASED; urgency=medium
     recursive rule around a dataset whose rule differs.
   * Self-test checks DST-05 and POOL-15; POOL-13 and SNP-07 revised.
   * make test-real and the QEMU harness of 1.x are retired.
+  * Packaging: NOTICE is installed in /usr/share/doc/zark/, as the Apache
+    License 2.0 requires.
 
  -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 20:36:57 +0100
 
