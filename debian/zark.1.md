@@ -1046,7 +1046,7 @@ for the canonical end-to-end sequences.
 # WORKFLOWS
 
 The following sequences cover the normal end-to-end uses of **zark**, and
-the move from **zark** 1.x.
+the moves from **zark** 2.0 and 1.x.
 
 ## First-time setup of a new backup drive
 
@@ -1076,6 +1076,25 @@ into the recovered system and run:
 To verify a recovery without rebooting:
 
     sudo zark simulate
+
+## Upgrading from zark 2.0
+
+No format on a drive or in */etc/zark/known_drives.json* changed: every 2.0
+drive goes on with its next backup. The package upgrade replaces the code
+under */usr/share/zark*, creates */run/zark* (*/usr/lib/tmpfiles.d/zark.conf*)
+and installs the status files' description under */usr/share/doc/zark*;
+*/etc/zark*, sanoid's configuration, the guards and the alerts are left as
+they are. Then, once per system:
+
+    sudo zark setup          # the alerts timer also fires every wall-clock hour
+
+Until then the timer 2.0 installed keeps running the new code every hour of
+uptime. *status.json* is first written by the next command that changes
+state, by **sudo zark status** or by the timer; **zark monitor** reads it
+without root. The GNOME Shell extension (Ubuntu 26.04) is the package
+*gnome-shell-extension-zark* in the same PPA, suggested and not installed by
+default. **recover** creates only the top of a subtree excluded from backups;
+**backup** and **prepare** refuse a system without its own **bpool**.
 
 ## Upgrading from zark 1.x
 
@@ -1156,7 +1175,8 @@ roll its backup points back).
     point and the transfer (datasets, bytes sent, their rate). Written at
     least every 5 seconds; removed when the command ends. For other
     programs, which read it without root: the format, schema version 1,
-    is in *docs/STATUS-FILES.md* in **zark**'s source.
+    is in *docs/STATUS-FILES.md* in **zark**'s source, installed by the
+    Debian package as */usr/share/doc/zark/STATUS-FILES.md.gz*.
 
 */var/lib/zark/status.json*
 :   The state between runs: the source pools' space and datasets, every
@@ -1168,6 +1188,12 @@ roll its backup points back).
     every command that changes state, by a backup when its result is
     known, and by **status** (by hand and from the timer); never from a
     live session. Its format is in the same document as *progress.json*'s.
+
+*/usr/share/doc/zark/STATUS-FILES.md.gz*, */usr/share/doc/zark/schema/*
+:   The status files' description for other programs, and their JSON
+    Schemas (uncompressed), from the Debian package. They are documentation:
+    dpkg can be configured to leave */usr/share/doc* out (*path-exclude*),
+    so a program must not need them at run time.
 
 */run/zark/status.lock*
 :   Taken with **flock**(2) around every write of *status.json*.

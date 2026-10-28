@@ -1,6 +1,28 @@
-# Upgrading from zark 1.x
+# Upgrading zark
 
-What changes when a system and its drives move from zark 1.x to zark 2.
+What changes when a system and its drives move from zark 2.0 to 2.1, and from zark 1.x to zark 2.
+
+## Upgrading from zark 2.0
+
+zark 2.1 keeps 2.0's drives, registry and backup points as they are: no format on a drive or in `/etc/zark/known_drives.json` changed, and every 2.0 drive goes on with its next backup as before.
+
+**What the package upgrade does by itself.** `sudo apt upgrade` replaces the code under `/usr/share/zark/` and the self-test's certificates there and byte-compiles it (the bytecode is the package's, removed with it), creates `/run/zark` (from `/usr/lib/tmpfiles.d/zark.conf`, also at every boot) and installs the status files' description under `/usr/share/doc/zark/`. `/etc/zark/`, `/etc/sanoid/sanoid.conf`, the guards and the alerts are left as they are.
+
+**Then, once per system:** `sudo zark setup`. It rewrites the alerts timer, which now also fires on every wall-clock hour (`OnCalendar=hourly`), so the status is refreshed right after a laptop resumes. As in 2.0, it shows any difference between its snapshot policy and `/etc/sanoid/sanoid.conf` and asks "Apply these changes?" before writing it. Until `setup` runs, the timer installed by 2.0 keeps working: it runs the new code every hour of uptime.
+
+**What 2.1 adds:**
+
+- The status files. zark itself keeps `/var/lib/zark/status.json` (the source pools, every registered drive with its last backup, its last run, its space and what it holds) and, while a command runs, `/run/zark/progress.json` (its step, what it waits for, a backup's transfer). Both are readable without root and described for other programs in [STATUS-FILES.md](STATUS-FILES.md) (installed as `/usr/share/doc/zark/STATUS-FILES.md.gz`, the JSON Schemas in `/usr/share/doc/zark/schema/`). The first `status.json` is written by the next command that changes state, by `sudo zark status`, or by the timer within the hour; nothing is written from a live session.
+- `zark monitor` reads those files instead of polling, and runs without `sudo`.
+- The GNOME Shell extension, on Ubuntu 26.04: `sudo apt install gnome-shell-extension-zark` from the same PPA. zark suggests it and does not install it.
+
+**What behaves differently:**
+
+- `recover` creates only the top of a subtree excluded from backups at the point it restores (empty, with its properties); the datasets below it are not created.
+- `backup` and `prepare` refuse a system without a bpool of its own, naming where `/boot` is (Ubuntu 26.10 and later put it on ext4 when Secure Boot is on); 24.04 and 26.04 LTS, as their installers lay out ZFS, are the supported series.
+- For contributors: `make test-real` and 1.x's QEMU harness are gone; validation is the self-test and a checklist on real hardware.
+
+**The way back.** 2.0.0 reads everything 2.1 writes on drives and in the registry. Going back is installing 2.0.0's package with `sudo apt install --allow-downgrades ./<its .deb>`, never `apt remove zark` (it removes the guards and alerts); the status files are then left as they are and no longer updated.
 
 ## Upgrading from zark 1.x
 

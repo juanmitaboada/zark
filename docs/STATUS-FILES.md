@@ -17,7 +17,10 @@ Both are 0644, owned by root, in 0755 directories, and hold nothing secret.
 Machine-readable schemas: `docs/schema/zark-progress.schema.json` and
 `docs/schema/zark-status.schema.json` (JSON Schema 2020-12). Example files for
 every state a reader has to show, with the state expected for each:
-`tests/fixtures/status/`.
+`tests/fixtures/status/`. The Debian package installs this document as
+`/usr/share/doc/zark/STATUS-FILES.md.gz` and the schemas, uncompressed, in
+`/usr/share/doc/zark/schema/`; they are documentation, which dpkg can be told
+to leave out, so a reader must not need them at run time.
 
 ## Who keeps them current
 
