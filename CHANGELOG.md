@@ -13,6 +13,13 @@ Nothing is uploaded to the PPA until the final 2.1.0.
 
 ### Packaging (debian/, checked against Debian Policy 4.7.3 and lintian)
 
+#### Added
+
+- **`debian/watch`** follows the `vX.Y.Z` release tags on GitHub (final
+  versions only), and **`debian/upstream/metadata`** (DEP-12) names the
+  repository, the issue tracker and the security contact, for `uscan` and
+  Debian's and Ubuntu's tracking tools.
+
 #### Changed
 
 - **The installed entry point runs `/usr/bin/python3`**, not the first

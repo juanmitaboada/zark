@@ -1,0 +1,6 @@
+# Upstream releases are the signed tags vX.Y.Z on GitHub. The pattern
+# takes final versions only (digits and dots), never a pre-release tag;
+# uscan links the download as zark_X.Y.Z.orig.tar.gz.
+version=4
+https://github.com/juanmitaboada/zark/tags \
+  (?:.*?/)?v?(\d[\d.]*)\.tar\.gz debian

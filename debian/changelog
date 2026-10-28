@@ -20,6 +20,9 @@ zark (2.1.0~rc4-1) UNRELEASED; urgency=medium
   * Packaging: qemu-system-x86 and ovmf move from Recommends to Suggests;
     Standards-Version 4.7.3; Priority and Rules-Requires-Root dropped from
     the source paragraph, where lintian calls them redundant.
+  * Packaging: debian/watch follows the GitHub release tags;
+    debian/upstream/metadata names the repository, the issue tracker and
+    the security contact.
 
  -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 27 Oct 2026 20:36:57 +0100
 
