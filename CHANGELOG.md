@@ -5,56 +5,127 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.0] - 2026-10-28
 
-zark 2.1 is being built as milestones on `main`, versioned `2.1.0-rcN`
-(`lib/config.py`) and `2.1.0~rcN-1` UNRELEASED (`debian/changelog`).
-Nothing is uploaded to the PPA until the final 2.1.0.
+### For zark 2.0 users
 
-### Packaging (debian/, checked against Debian Policy 4.7.3 and lintian)
+zark 2.1 writes the state of its runs and drives to two status files,
+`/var/lib/zark/status.json` and `/run/zark/progress.json`, for `zark
+monitor`, the GNOME Shell extension (`gnome-shell-extension-zark`, a
+package of its own in the same PPA) and any other program; `zark monitor`
+reads them and runs without root. It also takes up what 2.0 left: an
+orphan with archived lineages cloned from it can be destroyed, recover
+creates only the top of an excluded subtree, and backup and prepare refuse
+a system without its own bpool. No format on a drive or in the registry
+changed. After the package upgrade, `sudo zark setup` once rewrites the
+alerts timer; see [docs/UPGRADING.md](docs/UPGRADING.md).
 
-#### Added
+### Added
 
-- **`debian/watch`** follows the `vX.Y.Z` release tags on GitHub (final
-  versions only), and **`debian/upstream/metadata`** (DEP-12) names the
-  repository, the issue tracker and the security contact, for `uscan` and
-  Debian's and Ubuntu's tracking tools.
+- **Status files for other programs** (`docs/STATUS-FILES.md`, schema
+  version 1, with JSON Schemas in `docs/schema/` and fixtures for every
+  state in `tests/fixtures/status/`). zark is not a daemon, so a GNOME
+  Shell extension, `zark monitor` or a script learns what it does from two
+  files it writes, readable without root:
+  - `/run/zark/progress.json` (`lib/progress.py`) while a command that
+    changes state runs: its numbered step, whether it waits for an answer
+    and for what, and for `backup` the drive with its space, the backup
+    point and the transfer (datasets planned, done and failed, the one
+    being sent, the estimated stream size, the bytes sent and their
+    rate). Written at once, on every event and from a heartbeat every 2 s
+    inside the zark process, at most once a second; removed when the
+    command ends, after its result is in `status.json`. A file left by a
+    killed run is an orphan the next command records as `interrupted`.
+  - `/var/lib/zark/status.json` (`lib/status_file.py`): the source pools'
+    space (`zfs` and `zpool` figures, read together) and datasets, every
+    registered drive with its retention, last backup, last run and space
+    as last measured, and the MOTD's lines as structured notices. Written
+    at the end of every command that changes state, by `backup` when its
+    result is known (before the eject prompt), and by `zark status` by
+    hand and from the alerts timer; never from a live session.
+- **Every backup ending is recorded** as the drive's `last_run`:
+  `completed`, `incomplete`, `not_verified`, `aborted` (nothing was sent)
+  or `interrupted` (a receive began), with the reason.
+- **bytes_done measured by the kernel**, outside the data path: the
+  `wchar` count of each `zfs send` (its process group, live; the exited
+  shell's, exactly, at the end). The send, its stderr and the pipe are
+  unchanged. A process anywhere on the system that ends while the meter
+  reads `/proc` is skipped; it no longer switches the counters off for the
+  rest of the run (M7R-2).
+- **`/run/zark` from the package's `tmpfiles.d` entry** at boot and on
+  install, so a reader can watch it before zark first runs.
+- **Self-test checks SND-13, PRC-05, SYS-02 and POOL-14** (level 1 has
+  55): the send's count, field 22 of `/proc/<pid>/stat`, a tmpfiles.d
+  directory's mode, and a pool's figures and dataset shares.
+- **CI on named Ubuntu series** (RELP.8): tests and lint on 24.04; the
+  `.deb` is built on 24.04 and installed on 24.04 and 26.04 on a tag and
+  when run by hand (`workflow_dispatch`).
 
-#### Changed
+- **`lib/status_reader.py`, the reference reader of the status files**
+  (M8-1 1a, M8-2 2a): reads `progress.json` and `status.json` whole,
+  `kind` then `schema_version` first, applies the orphan, stalled and
+  stale rules with the reader's own clock, gives the indicator state, and
+  computes the contract's figures (reserved by ZFS, a chart's total, a
+  dataset's own share and what the root's `used` holds beyond the shares,
+  the pool's metadata (M7F-10), the byte fraction kept below 100 % while a transfer
+  runs, the ETA only under its four conditions). Standard library only, so
+  another program may copy it; its public names keep their meaning within
+  schema version 1. Tested on every case of `tests/fixtures/status/`
+  against its `expected.json`, and on real processes for the orphan rules.
+  `docs/STATUS-FILES.md` names it under "For third-party readers".
+- **The drive contents of contract R9.1, read ahead of their writer**
+  (M8F-5, Juanmi): `status_reader.drive_contents` and `drive_margin_bytes`
+  give what the fixtures' `expected.json` names per drive (the margin,
+  points by month, what the policy removes next and frees, the space after
+  it, the datasets), and `retention_next_is_floor` says when that forecast
+  is only a lower bound. The monitor shows them under each drive, never
+  next to a `space` measured at another time (a drive in use). M9 writes
+  the fields; until then no `status.json` has them and nothing is shown.
+- **`lib/live_pools.py`** (M8-4 4a, M8-5 5a): the monitor's two read-only
+  listings, `zpool list -Hp -o name,guid,size,alloc,free,capacity,health`
+  and `zfs list -Hp -t filesystem,volume -r` over the source pools, run
+  without a shell, with a 30 s timeout, and refused for any other command
+  line. A drive's live health comes from the same `zpool` listing while
+  zark has it imported; its fill only from the files.
+- **Self-test check RDR-01** (M8-11 11a): as `nobody` (`setpriv`), both
+  listings give root's rows for the bench's pools, `boot_id` and
+  `/proc/1/stat`'s start time read as root reads them, and
+  `/dev/disk/by-id` lists.
+- **`zark monitor --once --state`** (M8-7 7a) prints only the indicator
+  state, one word from the contract's table. `--root DIR` and `--no-live`
+  (M8-8 8a) read a tree laid out as the fixtures and skip the listings.
 
-- **The installed entry point runs `/usr/bin/python3`**, not the first
-  `python3` in `PATH` (`dh_python3` rewrites the shebang; the Debian Python
-  Policy advises against `/usr/bin/env` there). The portable tree keeps
-  `#!/usr/bin/env python3`.
-- **Building the package needs `dh-python`** (`Build-Depends`), for
-  `make deb`, `make fulltest` and the PPA builds.
-- **`qemu-system-x86` and `ovmf` are suggested, no longer recommended**:
-  only `zark simulate` uses them, and it offers to install them when they
-  are missing (Debian Policy 7.2: Recommends are for all but unusual
-  installations). A new install no longer pulls QEMU in; an upgrade keeps
-  it, since APT keeps suggested packages by default.
-- **`debian/control` follows Debian Policy 4.7.3**: `Standards-Version`
-  4.7.3 (the newest resolute's lintian knows; 4.7.4's changes do not apply
-  to zark), and the source paragraph drops `Priority: optional` (4.7.3,
-  5.6.6) and `Rules-Requires-Root: no` (dpkg's default since 1.22.13),
-  both of which lintian calls redundant. On noble's dpkg the build runs
-  under fakeroot, as `debuild` and Launchpad already do, and the package
-  is the same.
-
-#### Fixed
-
-- **NOTICE ships in the package**, in `/usr/share/doc/zark/`: the Apache
-  License 2.0 asks that a work's NOTICE file travel with it (section 4(d)),
-  and lintian reported it missing (`missing-notice-file-for-apache-license`).
-- **No bytecode left behind under `/usr/share/zark/`**: every run as root
-  wrote `__pycache__` there, owned by no package, so `apt remove` left the
-  directory behind. `dh_python3` now byte-compiles it at install
-  (`py3compile`) and removes it at removal (`py3clean`), as the Debian
-  Python Policy asks of a private module directory.
-
-### M9b - what 2.0 left (2.1.0-rc4)
-
-#### Added
+- **What a backup drive holds, in `status.json`** (contract R9, R9.1 and
+  R9.2, `lib/drive_contents.py`): each drive entry gains its `datasets`,
+  its backup `points` (oldest first, with their creation, whether
+  complete and whole, how many datasets hold them and what they hold
+  alone), its `non_point_snapshots`, `retention_next` (the drive's policy
+  with the clock a week forward: the points and snapshots it removes and
+  what that frees) and `reclaim_by_age` (per month, what removing every
+  older point `zark prune` would offer frees, cumulative). Every figure
+  comes from zark's own retention and removal rules, `zfs list` and dry
+  runs of `zfs destroy -nvp`, one per dataset; a figure that is not
+  measured is null, never a guess, and nothing is destroyed. They are
+  measured while zark has the drive imported: at the end of a complete
+  backup, after its retention and before the export (M9a-2), and at the
+  end of `zark prune` on a connected drive, after every removal (M9a-4
+  4a).
+- **A time limit for the dry runs at a backup's end** (M9a-5): 60 s, the
+  next week's removal first, then the months oldest first; a figure not
+  reached is null and its entry stays. On eli a dry run costs about 0.1 s
+  whatever the number of names, so a drive like black (10 months, 23
+  datasets) needs about 25 s. `zark prune` has no limit. The pass logs its
+  time and its dry runs (M9a-6).
+- **Self-test check DST-04**: `zfs destroy -nvp` over neighbouring
+  snapshots counts the blocks they share, which each one's `used` leaves
+  out, and frees exactly what a destroy of the same names frees; the dry
+  runs change nothing.
+- **The reference reader reads `reclaim_by_age`**: `DriveContents` gains
+  `frees_if_older`, per `before` month, None where not measured, as the
+  fixtures' `expected.json` names it.
+- **The contract as amended by R9.2 in the tree**: `docs/STATUS-FILES.md`,
+  `docs/schema/zark-status.schema.json` and `tests/fixtures/status/`, now
+  20 cases with `drive-contents` and `drive-contents-partial`.
 
 - **An orphan with archived lineages cloned from it can be destroyed**
   (M5bV-3, M9b-2 2a): `zfs destroy -r` refuses a top whose snapshots are
@@ -70,7 +141,91 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   create without it and leaves no pool, and a root at a path with
   `canmount=off` is not mounted.
 
-#### Changed
+- **`debian/watch`** follows the `vX.Y.Z` release tags on GitHub (final
+  versions only), and **`debian/upstream/metadata`** (DEP-12) names the
+  repository, the issue tracker and the security contact, for `uscan` and
+  Debian's and Ubuntu's tracking tools.
+
+- **The Debian package ships the status files' contract** (M7P.5, M10-4):
+  `/usr/share/doc/zark/STATUS-FILES.md.gz`, with the JSON Schemas
+  uncompressed in `/usr/share/doc/zark/schema/`, and suggests
+  `gnome-shell-extension-zark`.
+- **`docs/UPGRADING.md` covers the move from 2.0** (M10-5): what the package
+  upgrade does by itself, `setup` once, the status files, `zark monitor`,
+  the extension and what behaves differently.
+
+### Changed
+
+- The MOTD file is refreshed at the end of every command that changes
+  state, a failed backup included; 2.0.0 refreshed it after a successful
+  backup and a prune only. The MOTD and `status.json` come from one read.
+- A source pool whose datasets cannot be listed has a MOTD line of its
+  own.
+- `/run/zark` and `/var/lib/zark` are 0755 whatever the umask, and made
+  so when an earlier zark left them narrower.
+- The alerts timer also fires on every wall-clock hour
+  (`OnCalendar=hourly` next to `OnUnitActiveSec=1h`): the monotonic timer
+  pauses while the machine sleeps, the calendar one catches up on resume. The next
+  `zark setup` or `zark alerts install` rewrites an installed unit.
+- `zark status` writes `status.json` too.
+- While `known_drives.json` cannot be read or parsed, no command writes
+  `status.json` (a warning names the cause), so every drive's last run,
+  space and point stay as they were until the registry is fixed (M7R-1).
+  An absent registry is no drive, written as before.
+- A status write that fails for any reason is a warning: it never stops a
+  backup after BACKUP COMPLETED, nor a command whose start records an
+  earlier run's orphan (M7R-3).
+
+- **`zark monitor` reads the status files instead of polling** (M8): no
+  more `pgrep`, `zpool` and `zfs` on the drive, and no percentage of the
+  drive's used bytes over rpool's. It shows the state (RUNNING with the
+  command, its step and, for a backup, bytes, rate, ETA, transfers and the
+  dataset; WAITING FOR INPUT with what is asked; ATTENTION, CHECK,
+  OVERDUE, NO STATUS, OK, each with its reason), then the source pools
+  live, the drives, the datasets grouped as home, system and other with the
+  pool's metadata apart, and the notices (M8-10, X1 to X17). Full screen with curses on a terminal
+  (`NO_COLOR` keeps the screen without colour, M8-6 6a), a plain frame per
+  change otherwise. One bell when a command starts waiting for an answer
+  (M8-9 9a). Times in local time with the zone (M8-13 13a).
+- **`zark monitor` runs as any user** (M8-3 3a): `zark` dispatches it
+  before the root check, without the lock, the signal handlers, the live
+  session's probe stop or `zark.log`. As root it behaves the same.
+- **backup's tip names `zark monitor` without sudo** (M8-12 12a), through
+  `zark_command(sudo=False)`.
+
+- **What eli's first monitored backup showed** (M8F-7 to M8F-9, Juanmi,
+  E5 of the M8 checklist): the contract's ETA, bytes left over the last
+  30 s's rate, jumped from seconds to days on a daily incremental of small
+  datasets (8 s to 6 min within one run). `lib/transfer_eta.py` times the
+  run instead: the throughput while bytes move and the fixed cost of each
+  transfer, shown as `ETA ~` once two transfers ended and 64 MiB moved,
+  smoothed, under the contract's own conditions; seconds that moved less
+  than a tenth of the best one do not count towards the throughput (a
+  repeat of E5 opened at 1h02m with about 40 s left after three tiny
+  sends, M8F-10); `--once` keeps the contract's formula, and
+  with every transfer ended the line says the step is finishing. While a
+  command waits for an answer the title gives only the step number, not
+  its label (the label was done work, "Loading encryption key..."), and
+  the question is in bold blue. Colours tell what matters: section titles
+  bold cyan, labels dim, the key figures bold, pool and drive bars and
+  capacity green, yellow or red by level, `ONLINE`, `connected` and
+  `completed` green, a dataset's own share bold and its parts dim, and the
+  transfer bar cyan.
+
+- **A drive's contents travel with its `space`** (M9a-3 3a): a run that
+  measures a new `space` but no contents (an aborted, interrupted or
+  incomplete backup) leaves the drive's previous `space` and contents in
+  `status.json` when it had contents, so the contents are never dated by
+  a `space` from another time. A drive with no contents yet gets the new
+  `space` as before.
+- **`zark prune` records the drive's `space`** with its contents at the
+  end, for the `status.json` the command writes.
+- **The empty `/run/zark/altroot` goes** after a backup (its cleanup's
+  export and its read-back's) and at the end of a self-test (M7P.7); a
+  pool still imported under it keeps it.
+- **`docs/STATUS-FILES.md` says two things M7 already does** (M9C-4): a
+  registry that cannot be read leaves `status.json` as it is; an absent
+  previous file is a first write and logs nothing.
 
 - **The points that held a destroyed orphan stay whole** (M5bV-4, M9b-3
   3a): their completion count is lowered with it, so recover offers them
@@ -124,7 +279,31 @@ Nothing is uploaded to the PPA until the final 2.1.0.
 - **The manpage** names the supported series and the refusal, and says
   the drive's retention removes points (it said "removes none").
 
-#### Fixed
+- **The installed entry point runs `/usr/bin/python3`**, not the first
+  `python3` in `PATH` (`dh_python3` rewrites the shebang; the Debian Python
+  Policy advises against `/usr/bin/env` there). The portable tree keeps
+  `#!/usr/bin/env python3`.
+- **Building the package needs `dh-python`** (`Build-Depends`), for
+  `make deb`, `make fulltest` and the PPA builds.
+- **`qemu-system-x86` and `ovmf` are suggested, no longer recommended**:
+  only `zark simulate` uses them, and it offers to install them when they
+  are missing (Debian Policy 7.2: Recommends are for all but unusual
+  installations). A new install no longer pulls QEMU in; an upgrade keeps
+  it, since APT keeps suggested packages by default.
+- **`debian/control` follows Debian Policy 4.7.3**: `Standards-Version`
+  4.7.3 (the newest resolute's lintian knows; 4.7.4's changes do not apply
+  to zark), and the source paragraph drops `Priority: optional` (4.7.3,
+  5.6.6) and `Rules-Requires-Root: no` (dpkg's default since 1.22.13),
+  both of which lintian calls redundant. On noble's dpkg the build runs
+  under fakeroot, as `debuild` and Launchpad already do, and the package
+  is the same.
+
+### Removed
+
+- `make test-real` and the QEMU harness of 1.x are retired (RELP.3, M9b-6
+  6a): validation on hardware is the self-test and the checklist.
+
+### Fixed
 
 - **A pipeline whose left side writes more than 64 KiB to stderr no
   longer hangs** (M7P.1, M9b-5 5a): `run_pipe` drains it from the start.
@@ -137,17 +316,57 @@ Nothing is uploaded to the PPA until the final 2.1.0.
 - **A kept excluded copy's mark is read where it was set** (M5bP.4, M9b-10
   10a): its children no longer read as kept.
 
-#### Tests
+- **NOTICE ships in the package**, in `/usr/share/doc/zark/`: the Apache
+  License 2.0 asks that a work's NOTICE file travel with it (section 4(d)),
+  and lintian reported it missing (`missing-notice-file-for-apache-license`).
+- **No bytecode left behind under `/usr/share/zark/`**: every run as root
+  wrote `__pycache__` there, owned by no package, so `apt remove` left the
+  directory behind. `dh_python3` now byte-compiles it at install
+  (`py3compile`) and removes it at removal (`py3clean`), as the Debian
+  Python Policy asks of a private module directory.
+
+### Tests
 
 - POOL-13 rev 2 (legacy compatibility, created and upgraded) and SNP-07
   rev 2 (the listing with `-t`) are revised; DST-05 runs on the model of
   ZFS too, which now refuses a `destroy -r` with a clone outside the tree.
 - The self-test stop harness makes no directory on the host (M9aP.3, M9b-15
   15a): it mounts an overlay over the parent inside its namespace.
-- `make test-real` and the QEMU harness of 1.x are retired (RELP.3, M9b-6
-  6a): validation on hardware is the self-test and the checklist.
+- Eight tests for gaps in the orphan's destroy and recover's closing
+  banner that the review's mutation probe found (M9bR-2, M10C-1).
 
-#### Known limitations
+### Known limitations
+
+- `wchar` also counts what `zfs send` writes to stderr (a few bytes, an
+  error message). On an architecture without large kernel stacks the
+  stream would be written from a taskq thread and not counted; zark is
+  `amd64` only, and SND-13 certifies the count on the running platform.
+- With BSD process accounting on (atop's `atopacct`, `acct`), the kernel
+  writes a 64-byte record from every process that exits, so `bytes_done`
+  counts 64 bytes more per exited process of a send (a few hundred bytes
+  a run); SND-13 measures those records and certifies the rest exactly.
+- Reading another process's `/proc/<pid>/io` needs root: zark runs as
+  root; a reader never needs it.
+- `transfer` is reported for `backup` only; `recover` moves as much data
+  without it.
+- `status.json` survives `apt purge zark`.
+
+- With `/proc` mounted `hidepid=invisible`, another user's `/proc/<pid>`
+  does not exist, so the contract's rule 4 calls a running command an
+  orphan; Ubuntu mounts `/proc` without it.
+- The live listings run at the interval, not continuously: a pool's fill
+  is as old as the label beside it says.
+- `ETA ~` charges each transfer left the mean fixed cost of those ended,
+  so when the last transfers are faster than the first ones it stays high
+  near the end of the run: up to a minute on eli's 22 datasets (M8F-11).
+  The status files give no per-dataset size to do better.
+
+- `zark monitor`'s `ETA ~` may stay high near the end of a run whose last
+  transfers are faster than its first ones, up to a minute on eli's 22
+  datasets (M8P.4, M9C-3 3a); the status files give no size per dataset.
+  Now also in the manpage.
+- `zark monitor` does not show `reclaim_by_age` (M9aP.2; the reference
+  reader gives it as `frees_if_older`).
 
 - DIVERGED's destroy and the excluded copy's destroy are still refused by
   ZFS when a kept ROLLBACK archive was cloned from the lineage (M9bP.1,
@@ -161,187 +380,21 @@ Nothing is uploaded to the PPA until the final 2.1.0.
   for M9b-1's case (M9bF-2, M9bP.4). zed rewrites the cache after the
   boot; the directories can be removed with `rmdir`.
 
-#### Rejected approaches
+### Rejected approaches
 
-- **Every dataset of an excluded subtree created empty** (M9b-1 1a): the
-  layout below the top belongs to the application.
-- **Offering DESTROY when a clone is not an archived lineage, for ZFS to
-  refuse** (M9b-2 2b): a question that cannot succeed is the defect
-  M5bV-3 describes.
-- **A FATAL before the wipe for every missing feature** (M9b-9 9b): every
-  point of a drive carries the same record, a dead end.
-- **Only the existing refusal's words** (M9b-8 8b): a system with no bpool
-  was not refused at all.
-- **Rebuilding the QEMU harness** (M9b-6 6b): a milestone of work, and
-  it would still need eli's hardware.
-
-### M9a - the status files' second part (2.1.0-rc3)
-
-#### Added
-
-- **What a backup drive holds, in `status.json`** (contract R9, R9.1 and
-  R9.2, `lib/drive_contents.py`): each drive entry gains its `datasets`,
-  its backup `points` (oldest first, with their creation, whether
-  complete and whole, how many datasets hold them and what they hold
-  alone), its `non_point_snapshots`, `retention_next` (the drive's policy
-  with the clock a week forward: the points and snapshots it removes and
-  what that frees) and `reclaim_by_age` (per month, what removing every
-  older point `zark prune` would offer frees, cumulative). Every figure
-  comes from zark's own retention and removal rules, `zfs list` and dry
-  runs of `zfs destroy -nvp`, one per dataset; a figure that is not
-  measured is null, never a guess, and nothing is destroyed. They are
-  measured while zark has the drive imported: at the end of a complete
-  backup, after its retention and before the export (M9a-2), and at the
-  end of `zark prune` on a connected drive, after every removal (M9a-4
-  4a).
-- **A time limit for the dry runs at a backup's end** (M9a-5): 60 s, the
-  next week's removal first, then the months oldest first; a figure not
-  reached is null and its entry stays. On eli a dry run costs about 0.1 s
-  whatever the number of names, so a drive like black (10 months, 23
-  datasets) needs about 25 s. `zark prune` has no limit. The pass logs its
-  time and its dry runs (M9a-6).
-- **Self-test check DST-04**: `zfs destroy -nvp` over neighbouring
-  snapshots counts the blocks they share, which each one's `used` leaves
-  out, and frees exactly what a destroy of the same names frees; the dry
-  runs change nothing.
-- **The reference reader reads `reclaim_by_age`**: `DriveContents` gains
-  `frees_if_older`, per `before` month, None where not measured, as the
-  fixtures' `expected.json` names it.
-- **The contract as amended by R9.2 in the tree**: `docs/STATUS-FILES.md`,
-  `docs/schema/zark-status.schema.json` and `tests/fixtures/status/`, now
-  20 cases with `drive-contents` and `drive-contents-partial`.
-
-#### Changed
-
-- **A drive's contents travel with its `space`** (M9a-3 3a): a run that
-  measures a new `space` but no contents (an aborted, interrupted or
-  incomplete backup) leaves the drive's previous `space` and contents in
-  `status.json` when it had contents, so the contents are never dated by
-  a `space` from another time. A drive with no contents yet gets the new
-  `space` as before.
-- **`zark prune` records the drive's `space`** with its contents at the
-  end, for the `status.json` the command writes.
-- **The empty `/run/zark/altroot` goes** after a backup (its cleanup's
-  export and its read-back's) and at the end of a self-test (M7P.7); a
-  pool still imported under it keeps it.
-- **`docs/STATUS-FILES.md` says two things M7 already does** (M9C-4): a
-  registry that cannot be read leaves `status.json` as it is; an absent
-  previous file is a first write and logs nothing.
-
-#### Known limitations
-
-- `zark monitor`'s `ETA ~` may stay high near the end of a run whose last
-  transfers are faster than its first ones, up to a minute on eli's 22
-  datasets (M8P.4, M9C-3 3a); the status files give no size per dataset.
-  Now also in the manpage.
-- `zark monitor` does not show `reclaim_by_age` (the reference reader
-  gives it as `frees_if_older`).
-
-#### Rejected approaches
-
-- **Leaving `non_point_snapshots` out** (M9a-1 1b): the contract, the
-  schema and the monitor already have it.
-- **Measuring after an incomplete backup** (M9a-2 2b): its retention did
-  not run, so the next removal and the months would describe a drive in
-  the middle of a repair.
-- **Dropping the contents whenever a new `space` is measured** (M9a-3 3b):
-  a declined question or a Ctrl-C would blank the drive's months.
-- **Reusing the screen's figures at `zark prune`** (M9a-4 4b): it ties
-  the file to the screen; the pass measures the drive as it is left.
-- **30 s for the backup's dry runs** (S5a's estimate of 2 to 11 s): eli
-  measured 25 s for a drive like black; **no limit** (M9a-5 5b).
-- **A switch to skip the pass** (M9a-6): a second code path only a
-  checklist would use.
-
-### M8 - zark monitor, a reader of the status files (2.1.0-rc2)
-
-#### Added
-
-- **`lib/status_reader.py`, the reference reader of the status files**
-  (M8-1 1a, M8-2 2a): reads `progress.json` and `status.json` whole,
-  `kind` then `schema_version` first, applies the orphan, stalled and
-  stale rules with the reader's own clock, gives the indicator state, and
-  computes the contract's figures (reserved by ZFS, a chart's total, a
-  dataset's own share and what the root's `used` holds beyond the shares,
-  the pool's metadata (M7F-10), the byte fraction kept below 100 % while a transfer
-  runs, the ETA only under its four conditions). Standard library only, so
-  another program may copy it; its public names keep their meaning within
-  schema version 1. Tested on every case of `tests/fixtures/status/`
-  against its `expected.json`, and on real processes for the orphan rules.
-  `docs/STATUS-FILES.md` names it under "For third-party readers".
-- **The drive contents of contract R9.1, read ahead of their writer**
-  (M8F-5, Juanmi): `status_reader.drive_contents` and `drive_margin_bytes`
-  give what the fixtures' `expected.json` names per drive (the margin,
-  points by month, what the policy removes next and frees, the space after
-  it, the datasets), and `retention_next_is_floor` says when that forecast
-  is only a lower bound. The monitor shows them under each drive, never
-  next to a `space` measured at another time (a drive in use). M9 writes
-  the fields; until then no `status.json` has them and nothing is shown.
-- **`lib/live_pools.py`** (M8-4 4a, M8-5 5a): the monitor's two read-only
-  listings, `zpool list -Hp -o name,guid,size,alloc,free,capacity,health`
-  and `zfs list -Hp -t filesystem,volume -r` over the source pools, run
-  without a shell, with a 30 s timeout, and refused for any other command
-  line. A drive's live health comes from the same `zpool` listing while
-  zark has it imported; its fill only from the files.
-- **Self-test check RDR-01** (M8-11 11a): as `nobody` (`setpriv`), both
-  listings give root's rows for the bench's pools, `boot_id` and
-  `/proc/1/stat`'s start time read as root reads them, and
-  `/dev/disk/by-id` lists.
-- **`zark monitor --once --state`** (M8-7 7a) prints only the indicator
-  state, one word from the contract's table. `--root DIR` and `--no-live`
-  (M8-8 8a) read a tree laid out as the fixtures and skip the listings.
-
-#### Changed
-
-- **`zark monitor` reads the status files instead of polling** (M8): no
-  more `pgrep`, `zpool` and `zfs` on the drive, and no percentage of the
-  drive's used bytes over rpool's. It shows the state (RUNNING with the
-  command, its step and, for a backup, bytes, rate, ETA, transfers and the
-  dataset; WAITING FOR INPUT with what is asked; ATTENTION, CHECK,
-  OVERDUE, NO STATUS, OK, each with its reason), then the source pools
-  live, the drives, the datasets grouped as home, system and other with the
-  pool's metadata apart, and the notices (M8-10, X1 to X17). Full screen with curses on a terminal
-  (`NO_COLOR` keeps the screen without colour, M8-6 6a), a plain frame per
-  change otherwise. One bell when a command starts waiting for an answer
-  (M8-9 9a). Times in local time with the zone (M8-13 13a).
-- **`zark monitor` runs as any user** (M8-3 3a): `zark` dispatches it
-  before the root check, without the lock, the signal handlers, the live
-  session's probe stop or `zark.log`. As root it behaves the same.
-- **backup's tip names `zark monitor` without sudo** (M8-12 12a), through
-  `zark_command(sudo=False)`.
-
-- **What eli's first monitored backup showed** (M8F-7 to M8F-9, Juanmi,
-  E5 of the M8 checklist): the contract's ETA, bytes left over the last
-  30 s's rate, jumped from seconds to days on a daily incremental of small
-  datasets (8 s to 6 min within one run). `lib/transfer_eta.py` times the
-  run instead: the throughput while bytes move and the fixed cost of each
-  transfer, shown as `ETA ~` once two transfers ended and 64 MiB moved,
-  smoothed, under the contract's own conditions; seconds that moved less
-  than a tenth of the best one do not count towards the throughput (a
-  repeat of E5 opened at 1h02m with about 40 s left after three tiny
-  sends, M8F-10); `--once` keeps the contract's formula, and
-  with every transfer ended the line says the step is finishing. While a
-  command waits for an answer the title gives only the step number, not
-  its label (the label was done work, "Loading encryption key..."), and
-  the question is in bold blue. Colours tell what matters: section titles
-  bold cyan, labels dim, the key figures bold, pool and drive bars and
-  capacity green, yellow or red by level, `ONLINE`, `connected` and
-  `completed` green, a dataset's own share bold and its parts dim, and the
-  transfer bar cyan.
-
-#### Known limitations
-
-- With `/proc` mounted `hidepid=invisible`, another user's `/proc/<pid>`
-  does not exist, so the contract's rule 4 calls a running command an
-  orphan; Ubuntu mounts `/proc` without it.
-- The live listings run at the interval, not continuously: a pool's fill
-  is as old as the label beside it says.
-- `ETA ~` charges each transfer left the mean fixed cost of those ended,
-  so when the last transfers are faster than the first ones it stays high
-  near the end of the run: up to a minute on eli's 22 datasets (M8F-11).
-  The status files give no per-dataset size to do better.
-
-#### Rejected approaches
+- `zfs send -vP` parsed from stderr for the byte count: it changes the
+  command and its log line, its counter restarts at each intermediate
+  snapshot of `-I`, and its lines would fill the stderr pipe zark reads
+  only at the end. A counting relay, `pv` or `mbuffer` between send and
+  receive: in the data path. `-V`: rounded figures.
+- A signal timer in the main thread for the heartbeat: a handler can run
+  in the middle of anything, the cleanup included. A thread waits instead.
+- A resident service, or readers running `zark status --json`: zark keeps
+  the files itself, with no resident process.
+- `jsonschema` as a test dependency: the suite stays standard library
+  only, with a validator for exactly the keywords the schemas use.
+- A 15-minute timer: four times the reads of every snapshot in the
+  source, for figures readers can read live themselves.
 
 - **The rules inside the command** (M8-1 1b): every other reader would
   reimplement the orphan rules from prose.
@@ -365,102 +418,31 @@ Nothing is uploaded to the PPA until the final 2.1.0.
 - **Leaving the README to the campaign** (M8-14 14b): the module tree's
   test needs the new modules.
 
-### M7 - the status writer (2.1.0-rc1)
+- **Leaving `non_point_snapshots` out** (M9a-1 1b): the contract, the
+  schema and the monitor already have it.
+- **Measuring after an incomplete backup** (M9a-2 2b): its retention did
+  not run, so the next removal and the months would describe a drive in
+  the middle of a repair.
+- **Dropping the contents whenever a new `space` is measured** (M9a-3 3b):
+  a declined question or a Ctrl-C would blank the drive's months.
+- **Reusing the screen's figures at `zark prune`** (M9a-4 4b): it ties
+  the file to the screen; the pass measures the drive as it is left.
+- **30 s for the backup's dry runs** (S5a's estimate of 2 to 11 s): eli
+  measured 25 s for a drive like black; **no limit** (M9a-5 5b).
+- **A switch to skip the pass** (M9a-6): a second code path only a
+  checklist would use.
 
-#### Added
-
-- **Status files for other programs** (`docs/STATUS-FILES.md`, schema
-  version 1, with JSON Schemas in `docs/schema/` and fixtures for every
-  state in `tests/fixtures/status/`). zark is not a daemon, so a GNOME
-  Shell extension, `zark monitor` or a script learns what it does from two
-  files it writes, readable without root:
-  - `/run/zark/progress.json` (`lib/progress.py`) while a command that
-    changes state runs: its numbered step, whether it waits for an answer
-    and for what, and for `backup` the drive with its space, the backup
-    point and the transfer (datasets planned, done and failed, the one
-    being sent, the estimated stream size, the bytes sent and their
-    rate). Written at once, on every event and from a heartbeat every 2 s
-    inside the zark process, at most once a second; removed when the
-    command ends, after its result is in `status.json`. A file left by a
-    killed run is an orphan the next command records as `interrupted`.
-  - `/var/lib/zark/status.json` (`lib/status_file.py`): the source pools'
-    space (`zfs` and `zpool` figures, read together) and datasets, every
-    registered drive with its retention, last backup, last run and space
-    as last measured, and the MOTD's lines as structured notices. Written
-    at the end of every command that changes state, by `backup` when its
-    result is known (before the eject prompt), and by `zark status` by
-    hand and from the alerts timer; never from a live session.
-- **Every backup ending is recorded** as the drive's `last_run`:
-  `completed`, `incomplete`, `not_verified`, `aborted` (nothing was sent)
-  or `interrupted` (a receive began), with the reason.
-- **bytes_done measured by the kernel**, outside the data path: the
-  `wchar` count of each `zfs send` (its process group, live; the exited
-  shell's, exactly, at the end). The send, its stderr and the pipe are
-  unchanged. A process anywhere on the system that ends while the meter
-  reads `/proc` is skipped; it no longer switches the counters off for the
-  rest of the run (M7R-2).
-- **`/run/zark` from the package's `tmpfiles.d` entry** at boot and on
-  install, so a reader can watch it before zark first runs.
-- **Self-test checks SND-13, PRC-05, SYS-02 and POOL-14** (level 1 has
-  55): the send's count, field 22 of `/proc/<pid>/stat`, a tmpfiles.d
-  directory's mode, and a pool's figures and dataset shares.
-- **CI on named Ubuntu series** (RELP.8): tests and lint on 24.04; the
-  `.deb` is built on 24.04 and installed on 24.04 and 26.04 on a tag and
-  when run by hand (`workflow_dispatch`).
-
-#### Changed
-
-- The MOTD file is refreshed at the end of every command that changes
-  state, a failed backup included; 2.0.0 refreshed it after a successful
-  backup and a prune only. The MOTD and `status.json` come from one read.
-- A source pool whose datasets cannot be listed has a MOTD line of its
-  own.
-- `/run/zark` and `/var/lib/zark` are 0755 whatever the umask, and made
-  so when an earlier zark left them narrower.
-- The alerts timer also fires on every wall-clock hour
-  (`OnCalendar=hourly` next to `OnUnitActiveSec=1h`): the monotonic timer
-  pauses while the machine sleeps, the calendar one catches up on resume. The next
-  `zark setup` or `zark alerts install` rewrites an installed unit.
-- `zark status` writes `status.json` too.
-- While `known_drives.json` cannot be read or parsed, no command writes
-  `status.json` (a warning names the cause), so every drive's last run,
-  space and point stay as they were until the registry is fixed (M7R-1).
-  An absent registry is no drive, written as before.
-- A status write that fails for any reason is a warning: it never stops a
-  backup after BACKUP COMPLETED, nor a command whose start records an
-  earlier run's orphan (M7R-3).
-
-#### Known limitations
-
-- `wchar` also counts what `zfs send` writes to stderr (a few bytes, an
-  error message). On an architecture without large kernel stacks the
-  stream would be written from a taskq thread and not counted; zark is
-  `amd64` only, and SND-13 certifies the count on the running platform.
-- With BSD process accounting on (atop's `atopacct`, `acct`), the kernel
-  writes a 64-byte record from every process that exits, so `bytes_done`
-  counts 64 bytes more per exited process of a send (a few hundred bytes
-  a run); SND-13 measures those records and certifies the rest exactly.
-- Reading another process's `/proc/<pid>/io` needs root: zark runs as
-  root; a reader never needs it.
-- `transfer` is reported for `backup` only; `recover` moves as much data
-  without it.
-- `status.json` survives `apt purge zark`.
-
-#### Rejected approaches
-
-- `zfs send -vP` parsed from stderr for the byte count: it changes the
-  command and its log line, its counter restarts at each intermediate
-  snapshot of `-I`, and its lines would fill the stderr pipe zark reads
-  only at the end. A counting relay, `pv` or `mbuffer` between send and
-  receive: in the data path. `-V`: rounded figures.
-- A signal timer in the main thread for the heartbeat: a handler can run
-  in the middle of anything, the cleanup included. A thread waits instead.
-- A resident service, or readers running `zark status --json`: zark keeps
-  the files itself, with no resident process.
-- `jsonschema` as a test dependency: the suite stays standard library
-  only, with a validator for exactly the keywords the schemas use.
-- A 15-minute timer: four times the reads of every snapshot in the
-  source, for figures readers can read live themselves.
+- **Every dataset of an excluded subtree created empty** (M9b-1 1a): the
+  layout below the top belongs to the application.
+- **Offering DESTROY when a clone is not an archived lineage, for ZFS to
+  refuse** (M9b-2 2b): a question that cannot succeed is the defect
+  M5bV-3 describes.
+- **A FATAL before the wipe for every missing feature** (M9b-9 9b): every
+  point of a drive carries the same record, a dead end.
+- **Only the existing refusal's words** (M9b-8 8b): a system with no bpool
+  was not refused at all.
+- **Rebuilding the QEMU harness** (M9b-6 6b): a milestone of work, and
+  it would still need eli's hardware.
 
 ## [2.0.0] - 2026-10-23
 
