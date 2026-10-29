@@ -8785,6 +8785,21 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         destroy = mock.calls.index("zpool destroy backup")
         assert mock.calls.index("rmdir /run/zark/altroot/backup") > destroy, mock.calls
 
+    def test_the_empty_altroot_base_goes_after_the_pools_directory(self):
+        """M10P.4: purge removes the empty /run/zark/altroot after its pool's
+        directory, as backup and prepare do."""
+        mock = MockShell()
+        mock.on("zpool destroy backup").succeeds()
+        _wipe_succeeds(mock)
+        order: list[str] = []
+        with patch.object(
+            purge_mod, "remove_altroot_base", side_effect=lambda: order.extend(mock.calls)
+        ) as base:
+            out, rc, _ = self._purge(mock)
+        assert rc == 0, out
+        base.assert_called_once()
+        assert order and order[-1] == "rmdir /run/zark/altroot/backup", order
+
     def test_the_anchors_of_every_entry_removed_go_too(self):
         # M2V-7 (a): an entry matched by drive ID names an older pool's GUID.
         mock = MockShell()

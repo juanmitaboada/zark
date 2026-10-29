@@ -34,7 +34,7 @@ from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
 from lib.identity import match_registry, read_pool_label
 from lib.log import Log
-from lib.zfs import ZFS, backup_altroot, remove_altroot_dir
+from lib.zfs import ZFS, backup_altroot, remove_altroot_base, remove_altroot_dir
 
 # One line of purge's report (M4aF-4): True done, False failed, None not done
 # (with the reason). The final banner lists every line, so it says what
@@ -113,8 +113,10 @@ def _destroy_labelled_pool(  # pylint: disable=too-many-return-statements
     r = sh.run(f"zpool destroy {name}", log=log)
     if r.ok:
         log.ok(done[0].upper() + done[1:])
-        # The import made it (M4aX.4); rmdir removes only an empty directory.
+        # The import made it (M4aX.4); rmdir removes only an empty directory,
+        # then the base it sits in, as backup and prepare leave it (M10P.4).
         _ = sh.run(f"rmdir {backup_altroot(name)}")
+        remove_altroot_base()
         return (True, done), None
     return (False, f"zpool destroy {name} failed: {_error(r)}"), export_first
 
