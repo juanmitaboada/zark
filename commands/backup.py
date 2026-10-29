@@ -708,18 +708,17 @@ def _held_excluded(
     )
     for p in asked:
         log.info(f"  {p.rel}")
-    pick = _ask_confirmed(
-        log,
-        "What should happen to the drive's copy?",
-        [
-            "keep it (not asked again; zark prune can destroy it later)",
-            f"destroy it on the backup (the {len(points)} point(s) that hold it stay whole, "
-            + "recorded without it)",
-        ],
-        {1: ("DESTROY", f"destroy the drive's copy of {len(asked)} excluded subtree(s)")},
-        {1: [line for p in asked for line in _on_drive(eng, p.rel)]},
-    )
-    if pick == 0:
+    # What `zfs destroy -r` refuses for (M9bP.2): an archive kept by a
+    # ROLLBACK goes first; a top any other clone depends on is named and
+    # asked about again next time (M11-4 4a).
+    deps = {p.rel: destroy_plan(eng.dest, p.rel) for p in asked}
+    for d in deps.values():
+        _warn_blockers(d, eng.pool, log)
+    going = [p for p in asked if deps[p.rel].ok]
+    pick = _ask_held(log, eng, asked, going, deps, len(points))
+    if pick == "again":
+        return [], False
+    if pick == "keep":
         stamp = datetime.now(UTC).strftime("%Y-%m-%d")
         return [partial(exclusions.keep_held, eng.pool, p.rel, stamp, log) for p in asked], False
     return [
@@ -731,9 +730,49 @@ def _held_excluded(
             eng.disk_guid,
             eng.origin,
             log,
+            deps[p.rel],
         )
-        for p in asked
+        for p in going
     ], True
+
+
+def _ask_held(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    log: Log,
+    eng: engine.Run,
+    asked: list[DatasetPlan],
+    going: list[DatasetPlan],
+    deps: dict[str, DestroyPlan],
+    points: int,
+) -> str:
+    """The question for the drive's copy of excluded subtrees: "keep",
+    "destroy" (the ``going`` ones) or, when some cannot go, "again"."""
+    opts = ["keep it (not asked again; zark prune can destroy it later)"]
+    destroy = again = -1
+    if going:
+        destroy = len(opts)
+        what = "it" if len(going) == len(asked) else f"the {len(going)} that can go"
+        opts.append(
+            f"destroy {what} on the backup (the {points} point(s) that hold it stay whole, "
+            + "recorded without it)"
+        )
+    if len(going) < len(asked):
+        again = len(opts)
+        opts.append("ask again next time")
+    archived = sum(len(deps[p.rel].order) for p in going)
+    also_all = f", and {archived} archived lineage(s) cloned from them" if archived else ""
+    pick = _ask_confirmed(
+        log,
+        "What should happen to the drive's copy?",
+        opts,
+        {
+            destroy: (
+                "DESTROY",
+                f"destroy the drive's copy of {len(going)} excluded subtree(s){also_all}",
+            )
+        },
+        {destroy: [line for p in going for line in _takes(eng, deps[p.rel])]},
+    )
+    return {destroy: "destroy", again: "again"}.get(pick, "keep")
 
 
 def _on_drive(eng: engine.Run, top: str) -> list[str]:

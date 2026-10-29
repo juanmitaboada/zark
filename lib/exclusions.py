@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from lib import sh
 from lib.backup_layout import zark_props
 from lib.config import zark_command
+from lib.dependents import DestroyPlan, destroy_dependents
 from lib.drive_marks import drive_snapshots, snapshot_marks
 from lib.log import Log
 from lib.replication import (
@@ -527,8 +528,14 @@ class _Rewrite:
     mark: str  # POINT_MARK, with what the destroy took
 
 
-def _rewrites(
-    pool: str, top: str, flags: str, snaps: list[Snap], records: dict[str, str | None]
+def _rewrites(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pool: str,
+    top: str,
+    flags: str,
+    snaps: list[Snap],
+    records: dict[str, str | None],
+    gone: list[str] | None = None,
+    values: dict[str, tuple[str, str]] | None = None,
 ) -> dict[str, _Rewrite]:
     """For every point the destroy of ``top`` takes snapshots from, its marks
     as they must read afterwards: the count lowered by the datasets it no
@@ -537,10 +544,14 @@ def _rewrites(
     values they had on the drive. A point marked before the count (rc2,
     "yes") is left as it is: :func:`drive_marks.record_complete` counts it
     again. A point whose record cannot be read raises :class:`ValueError`:
-    its rewrite would lose what it left out (M5bF-9)."""
-    values = zark_props(pool)
+    its rewrite would lose what it left out (M5bF-9). ``gone`` names what the
+    destroy took, ``top`` and the archived lineages cloned from it (an
+    archive counts as its dataset, M9bP.2); ``top`` alone by default.
+    ``values``, the drive's ``org.zark:*`` mount values, must be read before
+    the destroy takes them; read here when not given."""
+    values = zark_props(pool) if values is None else values
     out: dict[str, _Rewrite] = {}
-    for name, loss in point_losses(pool, snaps, [top]).items():
+    for name, loss in point_losses(pool, snaps, gone or [top]).items():
         held = [records[t] for t in loss.targets if t in records]
         pm = parse_point_mark(held[0]) if held and held[0] is not None else None
         if held and pm is None:
@@ -555,32 +566,54 @@ def _rewrites(
 
 
 def destroy_held(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    pool: str, top: str, flags: str, disk_guid: str, origin: dict[str, Origin], log: Log
+    pool: str,
+    top: str,
+    flags: str,
+    disk_guid: str,
+    origin: dict[str, Origin],
+    log: Log,
+    deps: DestroyPlan | None = None,
 ) -> bool:
     """Destroy a drive's copy of an excluded subtree (D11, M5b-10).
 
-    ``zfs destroy -r`` of the top, by its exact name and logged. The points
-    that held it then get their marks rewritten (10b): their completion
-    count lowered and the destroyed datasets added to what they left out,
-    so they stay whole and recover recreates those datasets empty. Last,
-    this drive's anchors on the subtree go from origin (10c), each by name:
-    nothing on the drive can use them now; another drive's are never
-    touched."""
+    The archived lineages cloned from it first, in ``deps``' order (M9bP.2:
+    ``zfs destroy -r`` refuses the top while one exists), then ``zfs destroy
+    -r`` of the top, each by its exact name and logged; a failure stops
+    there. The points that held what went then get their marks rewritten
+    (10b): their completion count lowered and the destroyed datasets added
+    to what they left out, so they stay whole and recover recreates those
+    datasets empty. Last, this drive's anchors on the subtree go from origin
+    (10c), each by name: nothing on the drive can use them now; another
+    drive's are never touched."""
+    deps = deps or DestroyPlan(top)
     try:
         snaps = drive_snapshots(pool, strict=True)
-        rewrites = _rewrites(pool, top, flags, snaps, point_records(pool, strict=True))
+        records = point_records(pool, strict=True)
+        values = zark_props(pool)
+        # Read now, for everything the destroy may take: a point whose record
+        # cannot be read stops it before anything goes (M5bF-9).
+        _ = _rewrites(pool, top, flags, snaps, records, [top, *(d.rel for d in deps.order)], values)
     except (ReadError, ValueError) as e:
         log.warn(f"{pool}/{top} not destroyed: cannot read the points that hold it: {e}")
         return False
-    r = sh.run(f"zfs destroy -r {_q(f'{pool}/{top}')}", log=log)
-    if not r.ok:
-        log.error(f"Could not destroy {pool}/{top}: {r.stderr.strip()}")
+    gone, ok = destroy_dependents(pool, deps, log)
+    if ok:
+        r = sh.run(f"zfs destroy -r {_q(f'{pool}/{top}')}", log=log)
+        ok = r.ok
+        if r.ok:
+            log.ok(f"Destroyed {pool}/{top} and everything below it on the backup")
+            gone.append(top)
+        else:
+            log.error(f"Could not destroy {pool}/{top}: {r.stderr.strip()}")
+    if not gone:
         return False
-    log.ok(f"Destroyed {pool}/{top} and everything below it on the backup")
-    # Every point is rewritten, and the anchors dropped, whatever failed before.
-    rewritten = [_rewrite(name, rw, top, log) for name, rw in rewrites.items()]
-    dropped = _drop_anchors(pool, top, disk_guid, origin, log)
-    return all(rewritten) and dropped
+    # Every point that lost something is rewritten, and the anchors dropped
+    # once the top went, whatever failed before.
+    rewritten = [
+        _rewrite(name, rw, top, log)
+        for name, rw in _rewrites(pool, top, flags, snaps, records, gone, values).items()
+    ]
+    return ok and _drop_anchors(pool, top, disk_guid, origin, log) and all(rewritten)
 
 
 def _rewrite(name: str, rw: _Rewrite, top: str, log: Log) -> bool:

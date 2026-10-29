@@ -17112,6 +17112,112 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
             # recover's list (M4c-16): the point is still complete, not PARTLY REMOVED.
             assert first in complete_points(drive_marks.drive_snapshots("backup"), "")
 
+    def _held_with_a_clone(self, name: str) -> tuple[FakeZfs, str, FSnap]:
+        """_held_excluded, plus ``backup/<name>`` cloned from the drive's
+        copy's first point snapshot (M9bP.2); returns that snapshot."""
+        fake = self._held_excluded()
+        first = fake.ds["backup"].props["org.zark:last-point"]
+        snap = next(s for s in fake.ds["backup/rpool/ROOT/be"].snaps if s.name == first)
+        fake.ds[f"backup/{name}"] = FDataset(origin=f"backup/rpool/var/lib/docker@{first}")
+        return fake, first, snap
+
+    def test_a_held_excluded_copys_destroy_takes_its_archive_first(self) -> None:
+        """M9bP.2: an archived lineage cloned from the excluded copy is
+        listed, destroyed first and by name; the points stay whole."""
+        archive = f"rpool/var/lib/docker.archived-{TODAY}"
+        fake, first, snap = self._held_with_a_clone(archive)
+        count = int(snap.props["org.zark:point-complete"])
+        # The archive holds the point too, as one kept by a ROLLBACK does:
+        # the point loses the dataset only once both went.
+        mine = next(x for x in fake.ds["backup/rpool/var/lib/docker"].snaps if x.name == first)
+        fake.ds[f"backup/{archive}"].snaps.append(
+            FSnap(first, "77", mine.txg + 1, mine.creation, props=dict(mine.props))
+        )
+        out = StringIO()
+        asked: list[str] = []
+
+        def ask_text(prompt: str, *_a: Any, **_k: Any) -> str:
+            asked.append(prompt)
+            return "DESTROY"
+
+        before = len(fake.calls)
+        _, rc = self._run(
+            fake,
+            patch("lib.log.Log.ask_choice", return_value=1),
+            patch("lib.log.Log.ask_text", side_effect=ask_text),
+            patch.object(backup_mod, "_apply_retention", return_value=(0, 0)),
+            redirect_stdout(out),
+        )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert "and what was cloned from its snapshots:" in text and f"backup/{archive}" in text
+        assert "and 1 archived lineage(s) cloned from them" in asked[0], asked
+        calls = [c for c in fake.calls[before:] if c.startswith("zfs destroy -r backup/")]
+        assert calls == [
+            f"zfs destroy -r backup/{archive}",
+            "zfs destroy -r backup/rpool/var/lib/docker",
+        ], calls
+        assert snap.props["org.zark:point-complete"] == str(count - 1)
+        with patch_sh(fake):
+            assert first in complete_points(drive_marks.drive_snapshots("backup"), "")
+
+    def test_a_held_excluded_copy_with_a_live_clone_is_asked_again(self) -> None:
+        """M11-4 4a: a copy another clone depends on is named, DESTROY is not
+        offered, and "ask again next time" leaves it unmarked."""
+        fake, _, _ = self._held_with_a_clone("rpool/other")
+        offered: list[list[str]] = []
+
+        def choice(question: str, opts: list[str], _d: int = 0) -> int:
+            offered.append(list(opts))
+            if question == "What should happen to the drive's copy?":
+                return opts.index("ask again next time")
+            return 0
+
+        out = StringIO()
+        before = len(fake.calls)
+        _, rc = self._run(
+            fake, patch("lib.log.Log.ask_choice", side_effect=choice), redirect_stdout(out)
+        )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        held = next(o for o in offered if "ask again next time" in o and o[0].startswith("keep"))
+        assert not any(o.startswith("destroy") for o in held), held
+        assert "rpool/var/lib/docker cannot be destroyed: backup/rpool/other is a clone" in text
+        assert excl.KEPT not in fake.ds["backup/rpool/var/lib/docker"].props
+        assert not any(c.startswith("zfs destroy -r backup/") for c in fake.calls[before:])
+
+    def test_prune_lists_and_destroys_the_archive_of_an_excluded_copy(self) -> None:
+        """M9bP.2: zark prune lists the archived lineage cloned from the copy
+        in what PRUNE takes, and destroys it first."""
+        archive = f"rpool/var/lib/docker.archived-{TODAY}"
+        fake, _, _ = self._held_with_a_clone(archive)
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch("lib.log.Log.ask_text", return_value="PRUNE") as typed,
+            redirect_stdout(out),
+        ):
+            prune_mod._excluded_held("backup", "111", Log())  # pylint: disable=protected-access
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert f"backup/{archive}" in text, text
+        assert "the 2 dataset(s) listed" in str(typed.call_args), typed.call_args
+        assert f"backup/{archive}" not in fake.ds and "backup/rpool/var/lib/docker" not in fake.ds
+
+    def test_prune_does_not_offer_a_copy_another_clone_depends_on(self) -> None:
+        """M9bP.2: a copy another clone depends on is named and gets no PRUNE."""
+        fake, _, _ = self._held_with_a_clone("rpool/other")
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch("lib.log.Log.ask_text", return_value="PRUNE") as typed,
+            redirect_stdout(out),
+        ):
+            prune_mod._excluded_held("backup", "111", Log())  # pylint: disable=protected-access
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert not typed.called
+        assert "rpool/var/lib/docker cannot be destroyed: backup/rpool/other is a clone" in text
+        assert "backup/rpool/var/lib/docker" in fake.ds
+
     def test_included_again_the_kept_copy_continues_and_loses_its_mark(self) -> None:
         """M5b-11 11a: an incremental from the drive's copy, and the mark
         that kept it is cleared on that run."""

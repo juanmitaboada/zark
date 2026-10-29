@@ -56,6 +56,7 @@ from lib import (
 )
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config
+from lib.dependents import destroy_plan
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
 from lib.log import Log
 from lib.origin_prune import Inventory, Item, inventory, older_than
@@ -442,11 +443,22 @@ def _excluded_held(pool: str, disk_guid: str, log: Log) -> None:
         kept = " (kept)" if dest[top].excluded_kept.startswith("kept@") else ""
         log.info(f"  {pool}/{top}  {_gib(dest[top].used)}{kept}")
     for top in held:
+        # What `zfs destroy -r` refuses for (M9bP.2): the archived lineages
+        # cloned from the copy go first; any other clone keeps the question
+        # from being asked, naming it.
+        deps = destroy_plan(dest, top)
+        if not deps.ok:
+            for b in deps.blockers:
+                log.warn(f"  {top} cannot be destroyed: {b.text(pool)}")
+            continue
         below = [rel for rel in sorted(dest) if exclusions.under(rel, top)]
+        below += [rel for d in deps.order for rel in sorted(dest) if exclusions.under(rel, d.rel)]
         for rel in below:
             log.info(f"    {pool}/{rel}  ({len(dest[rel].snaps)} snapshot(s))")
         if _typed(log, f"destroy {pool}/{top} and the {len(below)} dataset(s) listed"):
-            _ = exclusions.destroy_held(pool, top, declared.flags_of(top), disk_guid, origin, log)
+            _ = exclusions.destroy_held(
+                pool, top, declared.flags_of(top), disk_guid, origin, log, deps
+            )
 
 
 def run(args: list[str]) -> None:
