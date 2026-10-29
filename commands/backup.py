@@ -56,7 +56,7 @@ from lib import (
 )
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso, zark_command
-from lib.dependents import DestroyPlan, also, destroy_plan, takes_lines
+from lib.dependents import DestroyPlan, also, destroy_plan, rollback_blockers, takes_lines
 from lib.drives import (
     backup_device,
     drive_staleness_days,
@@ -356,16 +356,24 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
                 f"keep the {destroyed} newer snapshot(s) in archived lineages and continue "
                 + "from the common snapshot (nothing destroyed, nothing resent)"
             )
-        opts.append(f"roll back: destroy the {destroyed} newer snapshot(s) listed above")
+        # `zfs rollback -r` refuses while a snapshot it would destroy has a
+        # clone (M11-5): such a clone is named and the rollback not offered.
+        blockers = [b for p in rollbacks for b in rollback_blockers(eng.dest, p.rel, p.newer)]
+        for b in blockers:
+            log.warn(f"  {_dataset_of(b.origin)} cannot be rolled back: {b.text(pool_name)}")
+        roll = -1
+        if not blockers:
+            roll = len(opts)
+            opts.append(f"roll back: destroy the {destroyed} newer snapshot(s) listed above")
         pick = _ask_confirmed(
             log,
             "How should this backup continue?",
             opts,
-            {len(opts) - 1: ("ROLLBACK", f"destroy {destroyed} snapshot(s) on {pool_name}")},
+            {roll: ("ROLLBACK", f"destroy {destroyed} snapshot(s) on {pool_name}")},
         )
         if pick == 0:
             return False
-        if fits and pick == 1:
+        if pick != roll:
             # Parents first: each one's children are back under it before theirs go.
             actions += [partial(eng.branch, p) for p in sorted(rollbacks, key=lambda q: q.rel)]
         else:
@@ -797,6 +805,10 @@ def _takes(eng: engine.Run, deps: DestroyPlan) -> list[str]:
     lineages cloned from it that go first (M5bV-3, M9bP.1, M9bP.2)."""
     lines = _on_drive(eng, deps.top) + takes_lines(deps)
     return lines + [line for d in deps.order for line in _on_drive(eng, d.rel)]
+
+
+def _dataset_of(snapshot: str) -> str:
+    return snapshot.split("@", 1)[0]
 
 
 def _deps_used(eng: engine.Run, deps: DestroyPlan) -> int:

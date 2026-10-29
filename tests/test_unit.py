@@ -16541,6 +16541,37 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
             c.startswith(("zfs destroy backup/rpool/var", "zfs rollback")) for c in calls
         )
 
+    def test_a_clone_of_a_newer_snapshot_keeps_the_rollback_out(self) -> None:
+        """M11-5 5b: `zfs rollback -r` refuses while a snapshot it would
+        destroy has a clone: "roll back" is not offered and the clone is
+        named; keeping the newer snapshots still works."""
+        fake = self._var_tree_rolled_ahead()
+        kept = "backup/rpool/var.archived-20261001"
+        fake.ds[kept] = FDataset(origin="backup/rpool/var@autosnap_gone")
+        offered: list[list[str]] = []
+        out = StringIO()
+
+        def ask(_self: Log, _q: str, opts: list[str], _d: int = 0) -> int:
+            offered.append(list(opts))
+            return 1
+
+        def decide(plans: list[repl.DatasetPlan], eng: engine.Run) -> bool:
+            with redirect_stdout(out):
+                return _decide(plans, eng, "backup", PoolInfo("backup", avail_bytes=10**12), Log())
+
+        with patch.object(Log, "ask_choice", ask):
+            res = _engine_run(fake, "backup", "111", P3, decide)
+        assert res.ok, res
+        assert len(offered) == 1 and len(offered[0]) == 2, offered
+        assert not any(o.startswith("roll back") for o in offered[0]), offered
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert (
+            "rpool/var cannot be rolled back: backup/rpool/var.archived-20261001 is a clone of "
+            + "backup/rpool/var@autosnap_gone, a snapshot the rollback would destroy"
+        ) in text, text
+        assert not any(c.startswith("zfs rollback") for c in fake.calls)
+        assert kept in fake.ds
+
     def test_the_clone_that_takes_the_lineages_place_carries_the_marks(self) -> None:
         """M4bR-4 (M4bF-9 9a, eli F1.6): a clone has a property set of its
         own, so the live dataset would sit with canmount=on and no org.zark
