@@ -23167,7 +23167,7 @@ class TestSelftestOnTheFake:  # pylint: disable=missing-function-docstring,too-f
 
     def test_every_fake_check_passes_on_the_fake(self):
         checks = [c for c in all_selftest_checks() if c.fake]
-        assert len(checks) == 22
+        assert len(checks) == 23
         failed: list[str] = []
         foreign: list[str] = []
         accessors = 0
@@ -23230,12 +23230,13 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
 
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
-        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05, POOL-15
-        assert len([c for c in checks if c.level == 1]) == 59
+        # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05, POOL-15;
+        # M11: DST-06
+        assert len([c for c in checks if c.level == 1]) == 60
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
-        # A check whose expectations changed gets its next revision (M9b).
-        revs = {"SNP-07": 2, "POOL-13": 2}
+        # A check whose expectations changed gets its next revision (M9b, M11).
+        revs = {"SNP-07": 2, "POOL-13": 2, "DST-05": 2}
         for c in checks:
             assert re.fullmatch(r"[A-Z]{3,4}-\d\d", c.cid), c.cid
             assert c.rev == revs.get(c.cid, 1) and c.depends, c.cid

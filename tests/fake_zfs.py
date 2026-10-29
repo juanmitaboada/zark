@@ -718,6 +718,14 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err(
                 f"cannot rollback to '{args[-1]}': more recent snapshots or bookmarks exist"
             )
+        # -r still refuses a later snapshot with a clone (zfs_main.c:4325-4344).
+        cloned = sorted(n for n, d in self.ds.items() if d.origin in {f"{ds}@{x}" for x in later})
+        if cloned:
+            return _err(
+                f"cannot rollback to '{args[-1]}': clones of previous snapshots exist\n"
+                + "use '-R' to force deletion of the following clones and dependents:\n"
+                + "\n".join(cloned)
+            )
         self.ds[ds].snaps = self.ds[ds].snaps[: names.index(name) + 1]
         self.ds[ds].written = 0
         return _ok()

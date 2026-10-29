@@ -37,7 +37,9 @@ import time
 from pathlib import Path
 
 from lib import identity, pool_record, progress, sh, zfs_features
+from lib.dependents import destroy_plan, rollback_blockers
 from lib.keystore import ZVOL_ID, Keystore
+from lib.replication import Dest
 from lib.selftest import (
     VDEV_BYTES,
     Bench,
@@ -1696,39 +1698,124 @@ def dst_04(b: Bench) -> None:
 
 @check(
     "DST-05",
+    2,
     1,
-    1,
-    "destroy -r refuses a clone outside the tree and destroys nothing; one inside goes with it",
-    depends=("backup's orphan DESTROY and what it takes first (M5bV-3, dependents.destroy_plan)",),
+    "destroy -r refuses every clone outside the tree, clones of clones too; zark's order goes",
+    depends=(
+        "every typed destroy on a drive and what it takes first (M5bV-3, M9bR-1, M9bP.1, "
+        + "M9bP.2, dependents.destroy_plan)",
+    ),
     fake=True,
 )
 def dst_05(b: Bench) -> None:
-    """``zfs destroy -r <ds>`` with a clone of one of its snapshots outside
-    its tree fails before anything is destroyed; a clone inside the tree
-    does not stop it; ``origin`` names the clone's snapshot; once the
-    outside clone is gone, the same command destroys the tree, the inside
-    clone with it. OpenZFS cmd/zfs/zfs_main.c:1399-1452, :1877-1901;
-    lib/libzfs/libzfs_iter.c:528-585 (2.2.2: :1353-1406, :1831-1855,
-    :527-584)."""
+    """``zfs destroy -r <ds>`` fails before anything is destroyed while a
+    dataset outside its tree is a clone of one of its snapshots, or of a
+    snapshot of such a clone (libzfs walks the dependents recursively); a
+    clone inside the tree does not stop it; ``origin`` names the clone's
+    snapshot. A clone whose own child is a clone of another clone's
+    snapshot cannot go before that one; :func:`dependents.destroy_plan` on
+    the listing orders them so that every ``zfs destroy -r`` succeeds.
+    A dataset inside the tree cloned from an outside clone's snapshot
+    blocks both orders: the plan says ``inside``. OpenZFS
+    cmd/zfs/zfs_main.c:1399-1452, :1877-1901; lib/libzfs/libzfs_iter.c:528-585
+    (2.2.2: :1353-1406, :1831-1855, :527-584)."""
+    _dst05_order(b)
+    _dst05_inside(b)
+
+
+def _dst05_order(b: Bench) -> None:
+    """DST-05's outside clones, a clone of a clone, and zark's order."""
     x = b.fs(f"{b.a}/dst05")
     c = b.fs(f"{x}/c")
     _ = b.ok(f"zfs snapshot -r {x}@s")
-    outside = f"{b.a}/dst05.archived-t"
+    a1, a2, a3 = (f"{b.a}/dst05.archived-{n}" for n in (1, 2, 3))
     inside = f"{x}/k"
     # canmount=noauto: nothing mounts, with or without -u (2.2.2 lacks it).
-    _ = b.ok(f"zfs clone -o canmount=noauto {x}@s {outside}")
+    _ = b.ok(f"zfs clone -o canmount=noauto {x}@s {a1}")
+    _ = b.ok(f"zfs clone -o canmount=noauto {x}@s {a2}")
+    _ = b.ok(f"zfs snapshot {a1}@s")
+    _ = b.ok(f"zfs clone -o canmount=noauto {a1}@s {a2}/c")  # a2 must go before a1
+    _ = b.ok(f"zfs clone -o canmount=noauto {a1}@s {a3}")  # a clone of a clone
     _ = b.ok(f"zfs clone -o canmount=noauto {c}@s {inside}")
-    got = b.value("origin", outside)
-    expect(got == f"{x}@s", f"origin of {outside} is {x}@s", got)
-    r = b.run(f"zfs destroy -r {x}")
-    expect(not r.ok, f"zfs destroy -r {x} refused", exit_status(r), text_of(r))
-    every = (x, c, inside, outside)
+    got = b.value("origin", f"{a2}/c")
+    expect(got == f"{a1}@s", f"origin of {a2}/c is {a1}@s", got)
+    every = (x, c, inside, a1, a2, f"{a2}/c", a3)
+    for top in (x, a1):
+        r = b.run(f"zfs destroy -r {top}")
+        expect(not r.ok, f"zfs destroy -r {top} refused", exit_status(r), text_of(r))
     left = [n for n in every if b.run(f"zfs list -H -o name {n}").ok]
     expect(left == list(every), "every dataset still there", ", ".join(left))
-    _ = b.ok(f"zfs destroy -r {outside}")
+    plan = destroy_plan(_listing(b), "dst05")
+    expect(plan.ok, "the plan offers the destroy", ", ".join(x.why for x in plan.blockers))
+    for dep in plan.order:
+        _ = b.ok(f"zfs destroy -r {b.a}/{dep.rel}")
     _ = b.ok(f"zfs destroy -r {x}")
     left = [n for n in every if b.run(f"zfs list -H -o name {n}").ok]
-    expect(not left, f"{x} and the clone inside it destroyed", ", ".join(left))
+    expect(not left, "everything destroyed in the plan's order", ", ".join(left))
+
+
+def _dst05_inside(b: Bench) -> None:
+    """DST-05's inside clone of an outside clone's snapshot: no order."""
+    y = b.fs(f"{b.a}/dst05y")
+    _ = b.ok(f"zfs snapshot {y}@s")
+    ya = f"{b.a}/dst05y.archived-1"
+    _ = b.ok(f"zfs clone -o canmount=noauto {y}@s {ya}")
+    _ = b.ok(f"zfs snapshot {ya}@s")
+    _ = b.ok(f"zfs clone -o canmount=noauto {ya}@s {y}/k")
+    for top in (y, ya):
+        r = b.run(f"zfs destroy -r {top}")
+        expect(not r.ok, f"zfs destroy -r {top} refused", exit_status(r), text_of(r))
+    plan = destroy_plan(_listing(b), "dst05y")
+    whys = [(x.rel, x.why) for x in plan.blockers]
+    expect(whys == [("dst05y/k", "inside")], "the plan blocks: dst05y/k inside", repr(whys))
+    for name in (f"{y}/k", ya, y):
+        _ = b.ok(f"zfs destroy -r {name}")
+
+
+@check(
+    "DST-06",
+    1,
+    1,
+    "rollback -r refuses while a snapshot it would destroy has a clone, and destroys nothing",
+    depends=("ROLLBACK's roll back, not offered then (M11-5, dependents.rollback_blockers)",),
+    fake=True,
+)
+def dst_06(b: Bench) -> None:
+    """``zfs rollback -r <ds>@<older>`` checks every snapshot newer than
+    the target for dependents and fails before destroying anything when
+    one has a clone; once the clone is gone the same command succeeds.
+    :func:`dependents.rollback_blockers` names that clone. OpenZFS
+    cmd/zfs/zfs_main.c:4325-4344, :4377-4389, :4482-4489 (2.2.2:
+    :4016-4034, :4073-4079, :4172-4179)."""
+    x = b.fs(f"{b.a}/dst06")
+    for n in ("1", "2", "3"):
+        _ = b.ok(f"zfs snapshot {x}@{n}")
+    clone = f"{b.a}/dst06.archived-t"
+    _ = b.ok(f"zfs clone -o canmount=noauto {x}@3 {clone}")
+    _ = b.refused(f"zfs rollback -r {x}@1", "clones of previous snapshots exist")
+    names = b.ok(f"zfs list -H -o name -t snapshot -d 1 {x}").lines
+    expect(names == [f"{x}@{n}" for n in "123"], "every snapshot still there", ", ".join(names))
+    got = [(k.rel, k.why) for k in rollback_blockers(_listing(b), "dst06", ["@2", "@3"])]
+    expect(got == [("dst06.archived-t", "newer")], "zark names the clone", repr(got))
+    _ = b.ok(f"zfs destroy -r {clone}")
+    _ = b.ok(f"zfs rollback -r {x}@1")
+    names = b.ok(f"zfs list -H -o name -t snapshot -d 1 {x}").lines
+    expect(names == [f"{x}@1"], f"{x} rolled back to @1", ", ".join(names))
+    _ = b.ok(f"zfs destroy -r {x}")
+
+
+def _listing(b: Bench) -> dict[str, Dest]:
+    """Pool ``a``'s datasets as :func:`survey.read_dest` reads a drive's:
+    by name below the pool, with each clone's origin."""
+    out: dict[str, Dest] = {}
+    strip = f"{b.a}/"
+    for line in b.ok(f"zfs list -H -o name,origin -r {b.a}").lines:
+        name, _, origin = line.partition("\t")
+        if name.startswith(strip):
+            rel = name[len(strip) :]
+            of = origin[len(strip) :] if origin.startswith(strip) else ""
+            out[rel] = Dest(rel, clone_of=of)
+    return out
 
 
 @check(
