@@ -320,6 +320,7 @@ def run(
             *exclusions.banner_lines(
                 [(p.rel, p.used) for p in res.plans if p.state is State.EXCLUDED and p.declared],
                 declared,
+                width=10,
             ),
             "",
             f"Registered in: {log.W}{cfg.drives_file_path}{log.N}",

@@ -467,14 +467,15 @@ def for_run(pools: list[str], log: Log) -> tuple[Declared, str]:
     return declared, mark
 
 
-def banner_lines(left_out: list[tuple[str, int]], declared: Declared) -> list[str]:
+def banner_lines(left_out: list[tuple[str, int]], declared: Declared, width: int = 16) -> list[str]:
     """The final banner's lines for the subtrees a run left out (D12): each
     top with what a first full send would carry and its flags. Shared by
-    backup's and prepare's banners (M5bX.3)."""
+    backup's and prepare's banners (M5bX.3); ``width`` is the banner's
+    label width, so "Excluded:" lines up with its other labels (M9bP.3)."""
     if not left_out:
         return []
     return [
-        f"Excluded:       {len(left_out)} dataset subtree(s), by zark exclude:",
+        f"{'Excluded:':<{width}}{len(left_out)} dataset subtree(s), by zark exclude:",
         *(
             f"  {rel} ({sh.humanize_bytes(used)}, {declared.flags_of(rel)})"
             for rel, used in left_out

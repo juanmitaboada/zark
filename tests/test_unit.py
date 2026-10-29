@@ -9303,10 +9303,11 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
             mark = excl.read_point_mark("blue", point, snaps)
         assert mark is not None and mark.left_out == {"rpool/var/lib/docker"}
         assert set(mark.datasets) == {"rpool/var/lib/docker", "rpool/var/lib/docker/vol"}
-        # M5bX.3: DRIVE PREPARED lists it, as BACKUP COMPLETED does.
+        # M5bX.3: DRIVE PREPARED lists it, as BACKUP COMPLETED does, its label
+        # as wide as the banner's others (M9bP.3).
         text = out.getvalue()
         banner = text[text.index("DRIVE PREPARED") :]
-        assert "Excluded:       1 dataset subtree(s), by zark exclude:" in banner, banner
+        assert "Excluded: 1 dataset subtree(s), by zark exclude:" in banner, banner
         assert "  rpool/var/lib/docker (" in banner and ", backups)" in banner, banner
 
     def test_prepare_records_origins_pools_on_its_point(self):
