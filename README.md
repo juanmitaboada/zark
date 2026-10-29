@@ -173,7 +173,7 @@ This software is provided "as is", without warranty of any kind, as detailed in 
 ## Documentation
 
 - [Usage](docs/USAGE.md): the commands, a first backup, a recovery, requirements and the drive registry.
-- [Upgrading from zark 1.x](docs/UPGRADING.md).
+- [Upgrading zark](docs/UPGRADING.md) (from 2.0, and from 1.x).
 - [Design](docs/DESIGN.md): architecture, key decisions, compatibility and security notes.
 - [Drive rotation and retention](docs/RETENTION.md).
 - [Safe USB disconnect](docs/SAFE-DISCONNECT.md) and [hardware notes](docs/HARDWARE.md).

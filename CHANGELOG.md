@@ -55,8 +55,8 @@ alerts timer; see [docs/UPGRADING.md](docs/UPGRADING.md).
 - **`/run/zark` from the package's `tmpfiles.d` entry** at boot and on
   install, so a reader can watch it before zark first runs.
 - **Self-test checks SND-13, PRC-05, SYS-02 and POOL-14** (level 1 has
-  55): the send's count, field 22 of `/proc/<pid>/stat`, a tmpfiles.d
-  directory's mode, and a pool's figures and dataset shares.
+  59 in 2.1.0): the send's count, field 22 of `/proc/<pid>/stat`, a
+  tmpfiles.d directory's mode, and a pool's figures and dataset shares.
 - **CI on named Ubuntu series** (RELP.8): tests and lint on 24.04; the
   `.deb` is built on 24.04 and installed on 24.04 and 26.04 on a tag and
   when run by hand (`workflow_dispatch`).
@@ -79,8 +79,8 @@ alerts timer; see [docs/UPGRADING.md](docs/UPGRADING.md).
   points by month, what the policy removes next and frees, the space after
   it, the datasets), and `retention_next_is_floor` says when that forecast
   is only a lower bound. The monitor shows them under each drive, never
-  next to a `space` measured at another time (a drive in use). M9 writes
-  the fields; until then no `status.json` has them and nothing is shown.
+  next to a `space` measured at another time (a drive in use). M9a writes
+  the fields (below).
 - **`lib/live_pools.py`** (M8-4 4a, M8-5 5a): the monitor's two read-only
   listings, `zpool list -Hp -o name,guid,size,alloc,free,capacity,health`
   and `zfs list -Hp -t filesystem,volume -r` over the source pools, run
@@ -356,10 +356,6 @@ alerts timer; see [docs/UPGRADING.md](docs/UPGRADING.md).
   orphan; Ubuntu mounts `/proc` without it.
 - The live listings run at the interval, not continuously: a pool's fill
   is as old as the label beside it says.
-- `ETA ~` charges each transfer left the mean fixed cost of those ended,
-  so when the last transfers are faster than the first ones it stays high
-  near the end of the run: up to a minute on eli's 22 datasets (M8F-11).
-  The status files give no per-dataset size to do better.
 
 - `zark monitor`'s `ETA ~` may stay high near the end of a run whose last
   transfers are faster than its first ones, up to a minute on eli's 22
