@@ -1699,7 +1699,7 @@ def dst_04(b: Bench) -> None:
     1,
     1,
     "destroy -r refuses a clone outside the tree and destroys nothing; one inside goes with it",
-    depends=("backup's orphan DESTROY and what it takes first (M5bV-3, replication.dependents)",),
+    depends=("backup's orphan DESTROY and what it takes first (M5bV-3, dependents.destroy_plan)",),
     fake=True,
 )
 def dst_05(b: Bench) -> None:

@@ -54,6 +54,7 @@ from typing import Protocol
 from lib import sh
 from lib.anchors import POINT_FOR, anchor_point, point_owners, release_point
 from lib.cleanup import Cleanup
+from lib.dependents import DestroyPlan, destroy_dependents
 from lib.drive_marks import drive_snapshots
 from lib.log import Log
 from lib.replication import (
@@ -62,7 +63,6 @@ from lib.replication import (
     STRUCTURAL,
     TRANSFERABLE,
     DatasetPlan,
-    Dependent,
     Dest,
     Origin,
     Ref,
@@ -420,8 +420,15 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
         )
         return True
 
-    def destroy(self, p: DatasetPlan) -> bool:
-        """Destroy a destination tree (DIVERGED, ORPHAN, ROLLBACK when chosen)."""
+    def destroy(self, p: DatasetPlan, deps: DestroyPlan | None = None) -> bool:
+        """Destroy a destination tree (DIVERGED, ORPHAN), after the archived
+        lineages cloned from it that ``deps`` lists, in its order (M9bP.1):
+        ``zfs destroy -r`` refuses the tree while one exists. A failure stops
+        before the tree."""
+        if deps is not None:
+            _, ok = destroy_dependents(self.pool, deps, self.log)
+            if not ok:
+                return False
         r = sh.run(f"zfs destroy -r {_q(self._dst(p.rel))}", log=self.log)
         self._report(
             r,
@@ -430,16 +437,16 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
         )
         return r.ok
 
-    def destroy_orphan(self, p: DatasetPlan, deps: list[Dependent]) -> bool:
+    def destroy_orphan(self, p: DatasetPlan, deps: DestroyPlan) -> bool:
         """An orphan's DESTROY (M5bV-3, M5bV-4): the archived lineages cloned
-        from its snapshots first, deepest first, each by its exact name (the
-        question listed them; ``zfs destroy -r`` refuses the orphan while one
-        exists, cmd/zfs/zfs_main.c:1399-1452), then the orphan's tree. A
-        failure stops there. The points that held what went are then
-        rewritten with their completion count lowered, so they stay whole
-        (the orphan is gone from origin: nothing is recorded for recover to
-        recreate). Nothing is destroyed when the drive's snapshots cannot
-        be read first."""
+        from its snapshots first, in ``deps``' order (M9bR-1), each by its
+        exact name (the question listed them; ``zfs destroy -r`` refuses the
+        orphan while one exists, cmd/zfs/zfs_main.c:1399-1452), then the
+        orphan's tree. A failure stops there. The points that held what went
+        are then rewritten with their completion count lowered, so they stay
+        whole (the orphan is gone from origin: nothing is recorded for
+        recover to recreate). Nothing is destroyed when the drive's
+        snapshots cannot be read first."""
         try:
             snaps = drive_snapshots(self.pool, strict=True)
         except ReadError as e:
@@ -447,19 +454,7 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
                 f"{self._dst(p.rel)} not destroyed: cannot read the points that hold it: {e}"
             )
             return False
-        gone: list[str] = []
-        ok = True
-        for dep in deps:
-            r = sh.run(f"zfs destroy -r {_q(self._dst(dep.rel))}", log=self.log)
-            self._report(
-                r,
-                f"destroyed {self._dst(dep.rel)} on the backup (cloned from {dep.origin})",
-                f"destroy {self._dst(dep.rel)} on the backup",
-            )
-            if not r.ok:
-                ok = False
-                break
-            gone.append(dep.rel)
+        gone, ok = destroy_dependents(self.pool, deps, self.log)
         if ok:
             ok = self.destroy(p)
             if ok:

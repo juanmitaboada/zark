@@ -438,49 +438,6 @@ def old_anchors(names: list[str], disk_guid: str, keep: str) -> list[str]:
     return [n for n in names if anchor_disk(n) == disk_guid and n != keep]
 
 
-@dataclass(frozen=True)
-class Dependent:
-    """A dataset on the drive that ``zfs destroy -r`` of a tree refuses for:
-    a clone, outside the tree, of one of its snapshots (or of one of
-    another dependent's)."""
-
-    rel: str
-    origin: str  # the snapshot it is a clone of, ``rel@snap``
-    archived: bool  # an archived lineage of a dataset in the tree
-    depth: int  # 1: cloned from the tree; 2: from a dependent of depth 1...
-
-
-def dependents(dest: dict[str, Dest], top: str) -> list[Dependent]:
-    """What ``zfs destroy -r <pool>/<top>`` refuses for (OpenZFS
-    cmd/zfs/zfs_main.c:1399-1452, ``destroy_check_dependent``): every
-    dataset outside ``top``'s tree whose origin is a snapshot in it, and,
-    as libzfs walks them (lib/libzfs/libzfs_iter.c:528-585), every clone of
-    one of those. One entry per tree (a dependent below another goes with
-    it), deepest first: the order they can be destroyed in."""
-
-    def under(rel: str, tops: Collection[str]) -> bool:
-        return any(rel == t or rel.startswith(f"{t}/") for t in tops)
-
-    found: dict[str, Dependent] = {}
-    gone = {top}
-    depth = 0
-    while True:
-        depth += 1
-        new = {
-            rel: d.clone_of
-            for rel, d in dest.items()
-            if d.clone_of and not under(rel, gone) and under(d.clone_of.split("@")[0], gone)
-        }
-        if not new:
-            break
-        for rel, origin in new.items():
-            plain = re.sub(r"\.archived-[^/]*", "", rel)
-            found[rel] = Dependent(rel, origin, is_archived(rel) and under(plain, (top,)), depth)
-        gone |= set(new)
-    tops = [x for x in found.values() if not under(x.rel, set(found) - {x.rel})]
-    return sorted(tops, key=lambda x: (-x.depth, x.rel))
-
-
 def archive_name(rel: str, taken: set[str], now: datetime) -> str:
     """``<rel>.archived-YYYYMMDD``, with ``-N`` when that name is taken."""
     base = f"{rel}{ARCHIVE_MARK}{now.astimezone(UTC):%Y%m%d}"

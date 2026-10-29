@@ -56,6 +56,7 @@ from lib import (
 )
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso, zark_command
+from lib.dependents import DestroyPlan, also, destroy_plan, takes_lines
 from lib.drives import (
     backup_device,
     drive_staleness_days,
@@ -76,7 +77,6 @@ from lib.replication import (
     Origin,
     Ref,
     State,
-    dependents,
     is_archived,
     point_name,
 )
@@ -258,31 +258,26 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         # What `zfs destroy -r` refuses for (M5bV-3): an archived lineage kept
         # by a ROLLBACK is a clone of one of the orphan's snapshots, and goes
         # first; any other clone keeps the destroy from being offered.
-        deps = dependents(eng.dest, p.rel)
-        blocking = [d for d in deps if not d.archived]
+        deps = destroy_plan(eng.dest, p.rel)
         opts = ["ask again next time", "keep it (not asked again)"]
-        destroy = len(opts) if not blocking else -1
-        if not blocking:
+        destroy = len(opts) if deps.ok else -1
+        if deps.ok:
             opts.append(f"destroy it on the backup (frees {_gib(p.used)})")
         rename = len(opts) if p.rename_to else -1
         if p.rename_to:
             opts.append(f"follow the rename in origin: {p.rel} → {p.rename_to}")
-        for d in blocking:
-            log.warn(
-                f"  {p.rel} cannot be destroyed: {pool_name}/{d.rel} is a clone of "
-                + f"{pool_name}/{d.origin}, not an archived lineage of it"
-            )
-        taken = _on_drive(eng, p.rel)
-        if deps:
-            taken += ["    and what was cloned from its snapshots:"]
-            taken += [line for d in deps for line in _on_drive(eng, d.rel)]
-        also = f", and {len(deps)} archived lineage(s) cloned from it" if deps else ""
+        _warn_blockers(deps, pool_name, log)
         pick = _ask_confirmed(
             log,
             f"{p.rel} exists only on the backup ({_gib(p.used)}):",
             opts,
-            {destroy: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it{also}")},
-            {destroy: taken},
+            {
+                destroy: (
+                    "DESTROY",
+                    f"destroy {pool_name}/{p.rel} and everything below it{also(deps)}",
+                )
+            },
+            {destroy: _takes(eng, deps)},
         )
         if pick == 1:
             actions.append(partial(eng.keep_orphan, p, datetime.now(UTC).strftime("%Y-%m-%d")))
@@ -733,6 +728,19 @@ def _on_drive(eng: engine.Run, top: str) -> list[str]:
             mark = "  - kept, only on the backup"
         lines.append(f"    {eng.pool}/{rel}  ({len(d.snaps)} snapshot(s)){mark}")
     return lines
+
+
+def _takes(eng: engine.Run, deps: DestroyPlan) -> list[str]:
+    """What a destroy of ``deps.top`` takes: its tree, then the archived
+    lineages cloned from it that go first (M5bV-3, M9bP.1, M9bP.2)."""
+    lines = _on_drive(eng, deps.top) + takes_lines(deps)
+    return lines + [line for d in deps.order for line in _on_drive(eng, d.rel)]
+
+
+def _warn_blockers(deps: DestroyPlan, pool: str, log: Log) -> None:
+    """Why the destroy of ``deps.top`` is not offered, one line per clone."""
+    for b in deps.blockers:
+        log.warn(f"  {deps.top} cannot be destroyed: {b.text(pool)}")
 
 
 def _under(rel: str, tops: set[str]) -> bool:

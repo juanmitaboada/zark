@@ -16,6 +16,7 @@ zark/
 │   ├── certificates.py        # Self-test reports, the local record, certificates
 │   ├── cleanup.py             # Cleanup and safe teardown
 │   ├── config.py              # Version, paths and configuration
+│   ├── dependents.py          # What a destroy on a drive must take first, and in which order
 │   ├── drive_contents.py      # What a backup drive holds, for status.json (read-only)
 │   ├── drive_marks.py         # What zark records on a backup drive and reads back
 │   ├── drives.py              # Drive detection and identification

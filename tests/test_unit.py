@@ -101,6 +101,7 @@ import commands.status as status_mod  # pylint: disable=wrong-import-position # 
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.certificates as certs  # pylint: disable=wrong-import-position # noqa: E402
+import lib.dependents as deps_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.exclusions as excl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.grub_cfg as grub_cfg_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -15766,8 +15767,12 @@ class TestSetupBookmarkV2:
 
 
 class TestDependents:  # pylint: disable=missing-function-docstring
-    """M5bV-3: what `zfs destroy -r` of a tree refuses for, in the order the
-    dependents can be destroyed in."""
+    """M5bV-3, M9bR-1: what `zfs destroy -r` of a tree refuses for, in an
+    order ZFS accepts, or why no destroy can be offered."""
+
+    @staticmethod
+    def _plan(dest: dict[str, repl.Dest], top: str = "rpool/x") -> deps_mod.DestroyPlan:
+        return deps_mod.destroy_plan(dest, top)
 
     def test_a_clone_outside_the_tree_and_its_own_clone_deepest_first(self):
         dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/x/c", "rpool/y")}
@@ -15776,11 +15781,12 @@ class TestDependents:  # pylint: disable=missing-function-docstring
         dest["rpool/x.archived-20261029"] = repl.Dest("b", clone_of="rpool/x.archived-20261028@s2")
         dest["rpool/x/k"] = repl.Dest("k", clone_of="rpool/x@s1")  # inside: goes with -r
         dest["rpool/z"] = repl.Dest("z", clone_of="rpool/y@s1")  # another tree's
-        deps = repl.dependents(dest, "rpool/x")
-        assert [(d.rel, d.depth, d.archived) for d in deps] == [
+        plan = self._plan(dest)
+        assert plan.ok, plan
+        assert [(d.rel, d.depth, d.archived) for d in plan.order] == [
             ("rpool/x.archived-20261029", 2, True),
             ("rpool/x.archived-20261028", 1, True),
-        ], deps
+        ], plan
 
     def test_a_clone_under_a_dependent_goes_with_it(self):
         """M9bR-2 (DEP6): a dependent's child cloned from the tree too is
@@ -15789,17 +15795,105 @@ class TestDependents:  # pylint: disable=missing-function-docstring
         dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/x/c")}
         dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
         dest["rpool/x.archived-20261028/c"] = repl.Dest("ac", clone_of="rpool/x/c@s1")
-        deps = repl.dependents(dest, "rpool/x")
-        assert [(d.rel, d.depth) for d in deps] == [("rpool/x.archived-20261028", 1)], deps
+        plan = self._plan(dest)
+        assert [(d.rel, d.depth) for d in plan.order] == [("rpool/x.archived-20261028", 1)], plan
 
     def test_a_live_clone_is_not_an_archived_lineage(self):
         dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/y")}
         dest["rpool/w"] = repl.Dest("w", clone_of="rpool/x@s1")
         dest["rpool/y.archived-20261028"] = repl.Dest("y", clone_of="rpool/x@s1")
-        assert [(d.rel, d.archived) for d in repl.dependents(dest, "rpool/x")] == [
-            ("rpool/w", False),
-            ("rpool/y.archived-20261028", False),
+        plan = self._plan(dest)
+        assert not plan.ok
+        assert [(b.rel, b.why) for b in plan.blockers] == [
+            ("rpool/w", "live"),
+            ("rpool/y.archived-20261028", "live"),
         ]
+        assert "backup/rpool/w is a clone of backup/rpool/x@s1, not an archived lineage" in (
+            plan.blockers[0].text("backup")
+        )
+
+    def test_a_dependent_cloned_from_another_goes_before_it(self):
+        """M9bR-1, the first shape: at the same depth, the tree holding a
+        clone of the other's snapshot goes first, whatever the names."""
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
+        dest["rpool/x.archived-20261029"] = repl.Dest("b", clone_of="rpool/x@s2")
+        dest["rpool/x.archived-20261029/c"] = repl.Dest(
+            "bc", clone_of="rpool/x.archived-20261028@s3"
+        )
+        plan = self._plan(dest)
+        assert plan.ok, plan
+        assert [d.rel for d in plan.order] == [
+            "rpool/x.archived-20261029",
+            "rpool/x.archived-20261028",
+        ], plan
+
+    def test_a_clone_inside_the_tree_of_a_dependents_snapshot_blocks(self):
+        """M9bR-1, the second shape: neither can go before the other."""
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
+        dest["rpool/x/k"] = repl.Dest("k", clone_of="rpool/x.archived-20261028@s2")
+        plan = self._plan(dest)
+        assert not plan.ok
+        assert [(b.rel, b.origin, b.why) for b in plan.blockers] == [
+            ("rpool/x/k", "rpool/x.archived-20261028@s2", "inside")
+        ]
+        assert "inside it" in plan.blockers[0].text("backup")
+
+    def test_trees_cloned_from_each_other_block(self):
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
+        dest["rpool/x.archived-20261029"] = repl.Dest("b", clone_of="rpool/x@s2")
+        dest["rpool/x.archived-20261028/c"] = repl.Dest(
+            "ac", clone_of="rpool/x.archived-20261029@s3"
+        )
+        dest["rpool/x.archived-20261029/c"] = repl.Dest(
+            "bc", clone_of="rpool/x.archived-20261028@s4"
+        )
+        plan = self._plan(dest)
+        assert not plan.ok
+        assert sorted(b.rel for b in plan.blockers if b.why == "cycle") == [
+            "rpool/x.archived-20261028/c",
+            "rpool/x.archived-20261029/c",
+        ], plan
+
+    def test_nothing_depends_on_a_plain_tree(self):
+        dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/x/c", "rpool/y")}
+        plan = self._plan(dest)
+        assert plan.ok and not plan.order
+        assert not deps_mod.takes_lines(plan) and not deps_mod.also(plan)
+
+    def test_the_rollbacks_blockers_are_clones_of_the_newer_snapshots(self):
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@n2")
+        dest["rpool/y"] = repl.Dest("y", clone_of="rpool/x@common")
+        got = deps_mod.rollback_blockers(dest, "rpool/x", ["@n1", "@n2"])
+        assert [(b.rel, b.why) for b in got] == [("rpool/x.archived-20261028", "newer")]
+        assert "a snapshot the rollback would destroy" in got[0].text("backup")
+
+    def test_a_blocked_plan_runs_nothing(self):
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/w"] = repl.Dest("w", clone_of="rpool/x@s1")
+        mock = MockShell()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            gone, ok = deps_mod.destroy_dependents("backup", self._plan(dest), Log())
+        assert (gone, ok) == ([], False)
+        assert not mock.calls
+
+    def test_the_first_failure_stops_the_rest(self):
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
+        dest["rpool/x.archived-20261029"] = repl.Dest("b", clone_of="rpool/x.archived-20261028@s2")
+        mock = MockShell()
+        mock.on("zfs destroy -r backup/rpool/x.archived-20261029").returns(1, "", "busy")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            gone, ok = deps_mod.destroy_dependents("backup", self._plan(dest), Log())
+        assert (gone, ok) == ([], False)
+        assert mock.was_not_called("zfs destroy -r backup/rpool/x.archived-20261028")
+        assert "Could not destroy backup/rpool/x.archived-20261029 on the backup: busy" in (
+            out.getvalue()
+        )
 
 
 class TestBackupDecide:  # pylint: disable=too-many-public-methods
@@ -16309,6 +16403,23 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         assert res.ok, res
         assert "backup/rpool/var/lib/docker" in fake.ds
         assert not any(c == "zfs destroy -r backup/rpool/var/lib/docker" for c in fake.calls)
+
+    def test_an_orphan_with_a_clone_inside_of_its_archive_is_not_offered_for_destroy(
+        self,
+    ) -> None:
+        """M9bR-1: a dataset inside the orphan cloned from its archive's
+        snapshot: neither can go first, so no DESTROY, and the question
+        says which clone."""
+        fake = self._orphan_with_its_archive()
+        archive = f"backup/rpool/var/lib/docker.archived-{TODAY}"
+        snap = fake.names(archive)[0]
+        fake.ds["backup/rpool/var/lib/docker/k"] = FDataset(origin=f"{archive}@{snap}")
+        before = len(fake.calls)
+        res, offered, text = self._run_orphan(fake, [0])
+        assert res.ok, res
+        assert not any(o.startswith("destroy") for o in offered[0]), offered
+        assert "backup/rpool/var/lib/docker/k, inside it, is a clone of" in text, text
+        assert not any(c.startswith("zfs destroy -r backup/") for c in fake.calls[before:])
 
     def test_an_orphans_destroy_reads_the_points_first(self) -> None:
         """M5bV-4: no destroy when the drive's snapshots cannot be read."""
