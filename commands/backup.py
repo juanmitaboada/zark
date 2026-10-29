@@ -386,6 +386,12 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         )
         for p in lineages:
             log.info(f"  {p.rel}: {p.note}")
+        # What `zfs destroy -r` refuses for (M9bP.1): an archive kept by a
+        # ROLLBACK goes first; any other clone keeps the joint destroy from
+        # being offered (M11-3), and each lineage is then asked about alone.
+        each = {t: destroy_plan(eng.dest, t) for t in diverged}
+        for d in each.values():
+            _warn_blockers(d, pool_name, log)
         before = dict(sizes)
         full = sum(resend(t) for t in diverged)
         resent, sizes = sizes, before
@@ -395,12 +401,17 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             opts.append(
                 f"archive the {len(lineages)} old lineages and resend in full ({_gib(full)})"
             )
-        opts.append(
-            f"destroy the {len(lineages)} on the backup and resend in full "
-            + f"({_gib(sum(p.used for p in lineages))} destroyed)"
-        )
+        destroy = -1
+        if all(d.ok for d in each.values()):
+            destroy = len(opts)
+            freed = sum(p.used + _deps_used(eng, each[p.rel]) for p in lineages)
+            opts.append(
+                f"destroy the {len(lineages)} on the backup and resend in full "
+                + f"({_gib(freed)} destroyed)"
+            )
         opts.append("decide one by one")
-        destroy = len(opts) - 2
+        archived = sum(len(d.order) for d in each.values())
+        also_all = f", and {archived} archived lineage(s) cloned from them" if archived else ""
         pick = _ask_confirmed(
             log,
             f"{len(lineages)} datasets have diverged:",
@@ -408,10 +419,11 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             {
                 destroy: (
                     "DESTROY",
-                    f"destroy {len(lineages)} dataset(s) on {pool_name} and everything below them",
+                    f"destroy {len(lineages)} dataset(s) on {pool_name} and everything below "
+                    + f"them{also_all}",
                 )
             },
-            {destroy: [line for t in diverged for line in _on_drive(eng, t)]},
+            {destroy: [line for t in diverged for line in _takes(eng, each[t])]},
         )
         if pick == 0:
             skipped.update(diverged)
@@ -421,7 +433,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
             if fits and pick == 1:
                 actions += [partial(eng.archive, p) for p in lineages]
             else:
-                actions += [partial(eng.destroy, p) for p in lineages]
+                actions += [partial(eng.destroy, p, each[p.rel]) for p in lineages]
                 confirmed_any = True
     for p in plans:
         if p.state is not State.DIVERGED or _under(p.rel, moved | skipped):
@@ -430,22 +442,33 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         full_size = resend(p.rel)
         below = len(_subtree(plans, p.rel)) - 1
         extra = f" (and {below} dataset(s) below)" if below else ""
-        held = _on_drive(eng, p.rel)
-        on_drive = f" (and {len(held) - 1} dataset(s) below)" if len(held) > 1 else ""
+        held = len(_on_drive(eng, p.rel))
+        on_drive = f" (and {held - 1} dataset(s) below)" if held > 1 else ""
         opts = ["skip it this time (the backup will be INCOMPLETE)"]
         fits = sum(sizes.values()) <= avail
         if fits:
             opts.append(f"archive the old lineage{extra} and resend in full ({_gib(full_size)})")
-        opts.append(
-            f"destroy it{on_drive} on the backup and resend in full ({_gib(p.used)} destroyed)"
-        )
+        deps = destroy_plan(eng.dest, p.rel)
+        destroy = -1
+        if deps.ok:
+            destroy = len(opts)
+            freed = p.used + _deps_used(eng, deps)
+            opts.append(
+                f"destroy it{on_drive} on the backup and resend in full ({_gib(freed)} destroyed)"
+            )
         log.warn(f"  {p.rel}: no snapshot in common with the backup ({p.note})")
+        _warn_blockers(deps, pool_name, log)
         pick = _ask_confirmed(
             log,
             f"{p.rel} has diverged:",
             opts,
-            {len(opts) - 1: ("DESTROY", f"destroy {pool_name}/{p.rel} and everything below it")},
-            {len(opts) - 1: held},
+            {
+                destroy: (
+                    "DESTROY",
+                    f"destroy {pool_name}/{p.rel} and everything below it{also(deps)}",
+                )
+            },
+            {destroy: _takes(eng, deps)},
         )
         if pick == 0:
             sizes = before
@@ -454,7 +477,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         if fits and pick == 1:
             actions.append(partial(eng.archive, p))
         else:
-            actions.append(partial(eng.destroy, p))
+            actions.append(partial(eng.destroy, p, deps))
             confirmed_any = True
 
     needed = sum(sizes.values())
@@ -735,6 +758,11 @@ def _takes(eng: engine.Run, deps: DestroyPlan) -> list[str]:
     lineages cloned from it that go first (M5bV-3, M9bP.1, M9bP.2)."""
     lines = _on_drive(eng, deps.top) + takes_lines(deps)
     return lines + [line for d in deps.order for line in _on_drive(eng, d.rel)]
+
+
+def _deps_used(eng: engine.Run, deps: DestroyPlan) -> int:
+    """Bytes the archived lineages a destroy takes first hold on the drive."""
+    return sum(eng.dest[d.rel].used for d in deps.order if d.rel in eng.dest)
 
 
 def _warn_blockers(deps: DestroyPlan, pool: str, log: Log) -> None:

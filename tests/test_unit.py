@@ -16421,6 +16421,95 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         assert "backup/rpool/var/lib/docker/k, inside it, is a clone of" in text, text
         assert not any(c.startswith("zfs destroy -r backup/") for c in fake.calls[before:])
 
+    def _diverged_with_its_archive(self) -> FakeZfs:
+        """rpool/var/lib/docker kept after a ROLLBACK (its archive a clone of
+        its autosnap_h1), then made anew in origin: DIVERGED, with the
+        archive depending on the lineage (M9bP.1)."""
+        fake = self._var_tree_rolled_ahead()
+        assert self._run_with_answers(fake, [1]).ok
+        docker = fake.ds["rpool/var/lib/docker"]
+        docker.snaps.clear()
+        docker.bookmarks.clear()
+        fake.snap("rpool/var/lib/docker", "autosnap_recreated")
+        return fake
+
+    def test_a_diverged_lineages_destroy_takes_its_archive_first(self) -> None:
+        """M9bP.1, M11-1 1a: the question lists the archive, DESTROY takes it
+        first and then the lineage, each by name, and the lineage is sent
+        again in full."""
+        fake = self._diverged_with_its_archive()
+        archive = f"backup/rpool/var/lib/docker.archived-{TODAY}"
+        asked: list[str] = []
+        before = len(fake.calls)
+        res, offered, text = self._run_orphan(fake, [2], "DESTROY", asked)
+        assert res.ok, res
+        assert offered[0][2].startswith("destroy it on the backup"), offered
+        assert "DESTROY takes 2 dataset(s) on the backup:" in text, text
+        assert "and what was cloned from its snapshots:" in text and archive in text
+        assert "and 1 archived lineage(s) cloned from it" in asked[0], asked
+        calls = [c for c in fake.calls[before:] if c.startswith("zfs destroy -r")]
+        assert calls == [
+            f"zfs destroy -r {archive}",
+            "zfs destroy -r backup/rpool/var/lib/docker",
+        ], calls
+        assert archive not in fake.ds
+        assert repl.POINT_RE.match(fake.names("backup/rpool/var/lib/docker")[-1])
+
+    def test_the_joint_destroy_takes_each_lineages_archive_first(self) -> None:
+        """M9bP.1: several diverged lineages destroyed together: each one's
+        archived lineages go before it."""
+        fake = self._diverged_with_its_archive()
+        home = fake.ds["rpool/USERDATA/home"]
+        home.snaps.clear()
+        home.bookmarks.clear()
+        fake.snap("rpool/USERDATA/home", "autosnap_recreated")
+        archive = f"backup/rpool/var/lib/docker.archived-{TODAY}"
+        asked: list[str] = []
+        before = len(fake.calls)
+        # The joint question: skip, archive, destroy, one by one.
+        res, offered, _ = self._run_orphan(fake, [2], "DESTROY", asked)
+        assert res.ok, res
+        assert offered[0][2].startswith("destroy the 2 on the backup"), offered
+        assert "and 1 archived lineage(s) cloned from them" in asked[0], asked
+        calls = [c for c in fake.calls[before:] if c.startswith("zfs destroy -r backup/")]
+        assert calls.index(f"zfs destroy -r {archive}") < calls.index(
+            "zfs destroy -r backup/rpool/var/lib/docker"
+        ), calls
+        assert archive not in fake.ds
+
+    def test_a_diverged_lineage_with_a_live_clone_is_not_offered_for_destroy(self) -> None:
+        """M9bP.1: any other clone of the lineage keeps DESTROY out of the
+        question, which says why; archive and skip stay."""
+        fake = self._diverged_with_its_archive()
+        first = fake.names("backup/rpool/var/lib/docker")[0]
+        fake.ds["backup/rpool/other"] = FDataset(origin=f"backup/rpool/var/lib/docker@{first}")
+        _, offered, text = self._run_orphan(fake, [0, 0])  # rpool/other is an orphan
+        lineage = next(o for o in offered if o[0].startswith("skip it"))
+        assert not any(o.startswith("destroy") for o in lineage), offered
+        assert any(o.startswith("archive") for o in lineage), offered
+        assert "rpool/var/lib/docker cannot be destroyed: backup/rpool/other is a clone" in text
+
+    def test_a_blocked_lineage_keeps_the_joint_destroy_out(self) -> None:
+        """M11-3 3a: two diverged lineages, one with a live clone: the joint
+        question offers no destroy; one by one, the other's DESTROY takes
+        its archive first."""
+        fake = self._diverged_with_its_archive()
+        home = fake.ds["rpool/USERDATA/home"]
+        home.snaps.clear()
+        home.bookmarks.clear()
+        fake.snap("rpool/USERDATA/home", "autosnap_recreated")
+        first = fake.names("backup/rpool/USERDATA/home")[0]
+        fake.ds["backup/rpool/other"] = FDataset(origin=f"backup/rpool/USERDATA/home@{first}")
+        archive = f"backup/rpool/var/lib/docker.archived-{TODAY}"
+        # rpool/other (an orphan): ask again; the joint question: one by one
+        # (skip, archive, one by one); home: skip; docker: DESTROY.
+        _, offered, text = self._run_orphan(fake, [0, 2, 0, 2], "DESTROY")
+        joint = next(o for o in offered if o[0].startswith("skip them"))
+        assert not any(o.startswith("destroy") for o in joint), joint
+        assert "rpool/USERDATA/home cannot be destroyed: backup/rpool/other is a clone" in text
+        assert archive not in fake.ds
+        assert "backup/rpool/USERDATA/home" in fake.ds
+
     def test_an_orphans_destroy_reads_the_points_first(self) -> None:
         """M5bV-4: no destroy when the drive's snapshots cannot be read."""
         fake = self._orphan_with_its_archive()
