@@ -806,6 +806,47 @@ def _restore_encryption_root(log: Log) -> list[str]:
     return errors
 
 
+def filter_list_cache(root: str, log: Log) -> None:
+    """The restored root's ``/etc/zfs/zfs-list.cache/<pool>`` keeps only the
+    lines of filesystems the pools now have (M9bP.4). Origin's file names
+    every dataset it had at the point, the ones below an excluded top
+    included, and zfs-mount-generator writes a mount unit for each line
+    without checking the dataset exists (zfs-mount-generator.c:58,
+    :198-225), so systemd made their mountpoints at the first boot. A file
+    or a listing that cannot be read is left as received, with a warning:
+    zed rewrites the file at the pool's next event."""
+    for pool in ("rpool", "bpool"):
+        path = Path(root) / "etc/zfs/zfs-list.cache" / pool
+        if not path.is_file():
+            continue
+        r = sh.run(f"zfs list -H -o name -t filesystem -r {pool}", log=log)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            log.warn(f"zfs-list.cache/{pool} not read ({e}): left as restored")
+            continue
+        if not r.ok:
+            log.warn(f"zfs-list.cache/{pool}: {pool} not listed, left as restored")
+            continue
+        have = set(r.lines)
+        lines = text.splitlines(keepends=True)
+        kept = [ln for ln in lines if ln.split("\t", 1)[0].strip() in have]
+        gone = [ln.split("\t", 1)[0].strip() for ln in lines if ln not in kept]
+        if not gone:
+            continue
+        tmp = path.with_name(f".{pool}.zark")
+        try:
+            _ = tmp.write_text("".join(kept), encoding="utf-8")
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+            os.replace(tmp, path)
+        except OSError as e:
+            tmp.unlink(missing_ok=True)
+            log.warn(f"zfs-list.cache/{pool} not rewritten ({e}): left as restored")
+            continue
+        log.info(f"zfs-list.cache/{pool}: {len(gone)} line(s) of datasets not restored left out")
+        log.file(f"zfs-list.cache/{pool}: left out {', '.join(gone)}")
+
+
 def create_excluded(rows: list[RestoreRow], log: Log) -> list[str]:
     """Each dataset the point left out, parents first, as an empty dataset
     with the canmount and mountpoint origin had (the mountpoint only when
@@ -1167,6 +1208,7 @@ def run(
     mount_restored_system(ubuntu_name, bpool_received, log)
     if bpool_left_at:
         errors += kernel_gaps(RECOVER_MNT, bpool_left_at)
+    filter_list_cache(RECOVER_MNT, log)
 
     # Format EFI partition
     _ = sh.run(f"mkfs.vfat -F32 {sh.part(internal_disk, 1)}", log=log)

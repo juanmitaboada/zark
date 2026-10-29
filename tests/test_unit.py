@@ -11165,6 +11165,67 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         assert mock.was_not_called("wipefs")
 
 
+class TestRecoverListCache:  # pylint: disable=missing-function-docstring
+    """M9bP.4: the restored root's zfs-list.cache keeps only the lines of
+    the filesystems recover made, so the first boot makes no mountpoint
+    for a dataset below an excluded top."""
+
+    @staticmethod
+    def _cache(root: str, pool: str, names: list[str]) -> Path:
+        path = Path(root, "etc/zfs/zfs-list.cache", pool)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_text("".join(f"{n}\t/{n}\ton\t-\n" for n in names), encoding="utf-8")
+        path.chmod(0o644)
+        return path
+
+    def test_the_lines_of_datasets_not_made_go(self):
+        with tempfile.TemporaryDirectory() as td:
+            rpool = self._cache(td, "rpool", ["rpool", "rpool/zt-tree", "rpool/zt-tree/a"])
+            bpool = self._cache(td, "bpool", ["bpool", "bpool/BOOT"])
+            mock = MockShell()
+            mock.on("zfs list -H -o name -t filesystem -r rpool").returns(
+                0, "rpool\nrpool/zt-tree\n"
+            )
+            mock.on("zfs list -H -o name -t filesystem -r bpool").returns(0, "bpool\nbpool/BOOT\n")
+            out = StringIO()
+            with patch_sh(mock), redirect_stdout(out):
+                recover_mod.filter_list_cache(td, Log())
+            kept = [ln.split("\t")[0] for ln in rpool.read_text("utf-8").splitlines()]
+            assert kept == ["rpool", "rpool/zt-tree"], kept
+            assert rpool.stat().st_mode & 0o777 == 0o644
+            assert len(bpool.read_text("utf-8").splitlines()) == 2
+            assert sorted(os.listdir(rpool.parent)) == ["bpool", "rpool"]  # no temp file left
+        assert "zfs-list.cache/rpool: 1 line(s) of datasets not restored left out" in out.getvalue()
+
+    def test_a_pool_that_does_not_list_leaves_the_file_as_restored(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = self._cache(td, "rpool", ["rpool", "rpool/zt-tree/a"])
+            before = path.read_text("utf-8")
+            mock = MockShell()
+            mock.on("zfs list -H -o name -t filesystem -r rpool").returns(1, "", "no pool")
+            out = StringIO()
+            with patch_sh(mock), redirect_stdout(out):
+                recover_mod.filter_list_cache(td, Log())
+            assert path.read_text("utf-8") == before
+        assert "zfs-list.cache/rpool: rpool not listed, left as restored" in out.getvalue()
+
+    def test_without_a_file_nothing_is_listed(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock = MockShell()
+            with patch_sh(mock), redirect_stdout(StringIO()):
+                recover_mod.filter_list_cache(td, Log())
+        assert not mock.calls
+
+    def test_it_runs_on_the_mounted_root_before_the_boot_chain(self):
+        src = inspect.getsource(recover_mod.run)
+        mounted = src.index("mount_restored_system(ubuntu_name")
+        assert (
+            mounted
+            < src.index("filter_list_cache(RECOVER_MNT, log)")
+            < src.index("install_boot_chain(")
+        )
+
+
 class TestRecoverAltrootChecks:  # pylint: disable=missing-function-docstring
     """R2-13 and review §8: /mnt/recover is checked before the wipe, and rm stays on it."""
 
