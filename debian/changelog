@@ -1,3 +1,20 @@
+zark (2.1.1~rc1-1) UNRELEASED; urgency=medium
+
+  * Milestone M11 of zark 2.1 (2.1.0's open rows). Not for release:
+    nothing is published until the final 2.1.1.
+  * Every typed destroy on a drive (an orphan's, a diverged lineage's, an
+    excluded copy's, from backup and prune) takes first the archived
+    lineages cloned from it, in an order ZFS accepts, or is not offered,
+    naming the clone that keeps it.
+  * ROLLBACK's roll back is not offered while a newer snapshot has a clone.
+  * recover keeps in the restored root's zfs-list.cache only the datasets
+    it created.
+  * purge removes the empty /run/zark/altroot; prepare's Excluded label
+    lines up.
+  * Self-test check DST-06; DST-05 revised.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Thu, 29 Oct 2026 20:20:00 +0100
+
 zark (2.1.0-1) stable; urgency=medium
 
   * zark 2.1. Status files for other programs: /var/lib/zark/status.json

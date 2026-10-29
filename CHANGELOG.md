@@ -5,6 +5,79 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+zark 2.1.1 is being built on `main` as `2.1.1-rc1` (`lib/config.py`) and
+`2.1.1~rc1-1` UNRELEASED (`debian/changelog`). Nothing is uploaded to the
+PPA until the final 2.1.1.
+
+### Fixed
+
+- **A typed destroy on a drive no longer ends in ZFS's refusal** (M9bR-1,
+  M9bP.1, M9bP.2): `zfs destroy -r` refuses a tree while a dataset outside
+  it is a clone of one of its snapshots, and checks that before it
+  destroys anything. One reader, `lib/dependents.py`, now serves every
+  typed destroy on a drive: it finds the clones a destroy must take first
+  (clones of clones included), orders them so that each `zfs destroy -r`
+  is accepted, and says why none can be offered.
+  - The orphan's DESTROY takes its archived lineages in an order ZFS
+    accepts (2.1.0 ordered them by depth, which failed when one archive's
+    child was a clone of another's snapshot), and is not offered when a
+    dataset inside the orphan is a clone of an archive's snapshot or two
+    archives are cloned from each other; the question names the clone.
+  - DIVERGED's DESTROY, one by one or for several lineages, lists and
+    takes first the archived lineages a ROLLBACK kept from the lineage
+    (M11-1 1a); before, ZFS refused it after DESTROY was typed. Another
+    clone keeps DESTROY out, named; archive and skip stay. The joint
+    destroy is offered only when no lineage is blocked (M11-3 3a). The
+    points that held what went keep their marks, as before: the dataset
+    is live in the source, so a point without it is partial (M11-2 2a).
+  - The excluded copy's destroy, from backup's question (typed DESTROY)
+    and from `zark prune` (typed PRUNE), lists and takes first the
+    archived lineages cloned from it, and its points are rewritten over
+    all of it. A copy another clone depends on is named and not offered:
+    backup then adds "ask again next time" and destroys the others
+    (M11-4 4a); prune skips its question.
+- **ROLLBACK's "roll back" is not offered while a newer snapshot has a
+  clone** (M11-5 5b): `zfs rollback -r` refuses then, before destroying
+  anything (a ROLLBACK kept once, then a second one of the same dataset
+  to an older snapshot). The clone is named; "keep" and "abort" stay.
+- **No empty directories below an excluded top after a recover**
+  (M9bF-2, M9bP.4): recover keeps in the restored root's
+  `/etc/zfs/zfs-list.cache/<pool>` only the lines of filesystems the
+  pools now have, so the first boot makes no mountpoint for a dataset
+  recover did not create. 2.1.0's known limitation is gone.
+- `zark purge` removes the empty `/run/zark/altroot` after its pool, as
+  backup and prepare do (M10P.4).
+- DRIVE PREPARED's "Excluded:" label lines up with the banner's other
+  labels (M9bP.3).
+
+### Added
+
+- **Self-test check DST-06**: `zfs rollback -r` is refused, with every
+  snapshot left, while a snapshot it would destroy has a clone, and zark
+  names that clone. **DST-05 revised (rev 2)**: besides rev 1's cases, a
+  clone of a clone and two clones one of which depends on the other are
+  refused, zark's order then destroys everything, and a clone inside the
+  tree of an outside clone's snapshot is refused both ways and blocks the
+  plan. Level 1 has 60 checks.
+
+### Rejected approaches
+
+- **Promoting the archive** to keep it when DIVERGED's lineage is
+  destroyed (M11-1 1b): it changes which dataset holds the older points
+  and is a new data path; "archive and resend" already keeps them.
+- **Lowering the points' counts after DIVERGED's DESTROY** (M11-2 2b), as
+  the orphan's does: the dataset still exists in the source, so a point
+  without it is partial, and PARTLY REMOVED says so.
+- **Breaking a cycle of clones with `zfs promote`**: zark never makes one;
+  a blocked destroy names the clones and destroys nothing.
+- **The plan's rows as the cache filter's source** (M11-6 6b): the pools'
+  own listing is what boots, failed receives included.
+- **A self-test check of zfs-mount-generator**: its cache path is compiled
+  in, so a check would write the host's `/etc`; eli's recover and first
+  boot cover it.
+
 ## [2.1.0] - 2026-10-28
 
 ### For zark 2.0 users
