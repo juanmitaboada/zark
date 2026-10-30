@@ -47,6 +47,12 @@ PPA until the final 2.1.1.
   `/etc/zfs/zfs-list.cache/<pool>` only the lines of filesystems the
   pools now have, so the first boot makes no mountpoint for a dataset
   recover did not create. 2.1.0's known limitation is gone.
+- **recover no longer reports a false debconf error** (M11F-1): from a
+  live whose locale the restored root does not have (an English live for
+  a Spanish install), perl's locale warning on
+  `debconf-set-selections`' stderr read as "grub-efi/install_devices not
+  set" and the run ended COMPLETED WITH ERRORS, though the value was set.
+  The line now runs in the C locale; the read-back is unchanged.
 - `zark purge` removes the empty `/run/zark/altroot` after its pool, as
   backup and prepare do (M10P.4).
 - DRIVE PREPARED's "Excluded:" label lines up with the banner's other

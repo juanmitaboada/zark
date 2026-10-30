@@ -435,7 +435,12 @@ _INSTALL_DEVICES_RE = re.compile(r"^\s*\*?\s*grub-efi/install_devices:\s*(.*?)\s
 def set_install_devices(root: str, device: str, log: Log) -> bool:
     """Record ``device`` as the ESP in ``root``'s debconf and read it back."""
     line = f"grub-efi-amd64 grub-efi/install_devices multiselect {device}"
-    r = sh.run(f"chroot {root} bash -c \"echo '{line}' | debconf-set-selections\"", log=log)
+    # The C locale (M11F-1): perl warns on stderr when the caller's locale (a
+    # live's LANG) is not installed in root, and a warning reads as not set.
+    r = sh.run(
+        f"chroot {root} env LC_ALL=C bash -c \"echo '{line}' | debconf-set-selections\"",
+        log=log,
+    )
     if not r.ok or "warning" in r.stderr.lower():
         log.warn(f"debconf-set-selections did not take {line!r}: {r.stderr.strip()}")
         return False

@@ -11292,7 +11292,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
 
     def _debconf(self, stderr: str = "", shown: str = "") -> tuple[bool, MockShell]:
         mock = MockShell()
-        mock.on_prefix("chroot /r bash -c").returns(0, stderr=stderr)
+        mock.on_prefix("chroot /r env LC_ALL=C bash -c").returns(0, stderr=stderr)
         mock.on("chroot /r debconf-show grub-efi-amd64").succeeds(shown)
         with patch_sh(mock), redirect_stdout(StringIO()):
             ok = boot_chain.set_install_devices("/r", "/dev/disk/by-id/nvme-X-part1", make_log())
@@ -11306,6 +11306,13 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
     def test_a_warning_is_not_set(self):
         ok, _ = self._debconf(stderr="warning: Unknown type /dev/x, skipping line 1")
         assert not ok
+
+    def test_it_runs_in_the_c_locale(self):
+        """M11F-1: a live's LANG that root lacks made perl warn on stderr, and
+        the warning read as not set; the C locale is in every root."""
+        ok, mock = self._debconf(shown="* grub-efi/install_devices: /dev/disk/by-id/nvme-X-part1\n")
+        assert ok
+        assert mock.calls[0].startswith("chroot /r env LC_ALL=C bash -c ")
 
     def test_the_value_is_read_back(self):
         ok, _ = self._debconf(shown="  grub-efi/install_devices: /dev/sda1\n")
@@ -11350,7 +11357,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
             mock.on_prefix(f"chroot {td} debconf-show").succeeds(
                 "* grub-efi/install_devices: /dev/sda1\n",
             )
-            mock.on_prefix(f"chroot {td} bash -c").succeeds()
+            mock.on_prefix(f"chroot {td} env LC_ALL=C bash -c").succeeds()
             mock.on_prefix("find /dev/disk/by-id/").succeeds("")
             with (
                 patch_sh(mock),
@@ -11381,7 +11388,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
             mock.on_prefix(f"chroot {td} debconf-show").succeeds(
                 f"* grub-efi/install_devices: {by_id}\n"
             )
-            mock.on_prefix(f"chroot {td} bash -c").succeeds()
+            mock.on_prefix(f"chroot {td} env LC_ALL=C bash -c").succeeds()
             mock.on_prefix("find /dev/disk/by-id/ -lname '*/nvme0n1p1'").succeeds(by_id + "\n")
             with (
                 patch_sh(mock),
