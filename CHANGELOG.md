@@ -5,11 +5,16 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.1] - 2026-10-30
 
-zark 2.1.1 is being built on `main` as `2.1.1-rc1` (`lib/config.py`) and
-`2.1.1~rc1-1` UNRELEASED (`debian/changelog`). Nothing is uploaded to the
-PPA until the final 2.1.1.
+### For zark 2.1.0 users
+
+zark 2.1.1 takes up what 2.1.0 left as known limitations: a typed destroy
+on a drive takes first the archived lineages cloned from what it destroys,
+or names the clone that keeps it and is not offered, and a recover no
+longer leaves empty directories below an excluded top. No format on a
+drive or in the registry changed, and no `zark setup` run is needed after
+the package upgrade.
 
 ### Fixed
 
