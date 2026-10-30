@@ -11204,13 +11204,28 @@ class TestRecoverListCache:  # pylint: disable=missing-function-docstring
             )
             mock.on("zfs list -H -o name -t filesystem -r bpool").returns(0, "bpool\nbpool/BOOT\n")
             out = StringIO()
-            with patch_sh(mock), redirect_stdout(out):
+            moved: list[Path] = []
+            real_replace = os.replace
+
+            def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+                moved.append(Path(src))
+                real_replace(src, dst)
+
+            with (
+                patch_sh(mock),
+                patch.object(recover_mod.os, "replace", replace),
+                redirect_stdout(out),
+            ):
                 recover_mod.filter_list_cache(td, Log())
             kept = [ln.split("\t")[0] for ln in rpool.read_text("utf-8").splitlines()]
             assert kept == ["rpool", "rpool/zt-tree"], kept
             assert rpool.stat().st_mode & 0o777 == 0o644
             assert len(bpool.read_text("utf-8").splitlines()) == 2
             assert sorted(os.listdir(rpool.parent)) == ["bpool", "rpool"]  # no temp file left
+            # M11R-1: the generator reads every file in zfs-list.cache/, so the
+            # temporary file is written one directory up, and none is left there.
+            assert [m.parent for m in moved] == [rpool.parent.parent], moved
+            assert sorted(os.listdir(rpool.parent.parent)) == ["zfs-list.cache"]
         assert "zfs-list.cache/rpool: 1 line(s) of datasets not restored left out" in out.getvalue()
 
     def test_a_pool_that_does_not_list_leaves_the_file_as_restored(self):
@@ -15941,6 +15956,19 @@ class TestDependents:  # pylint: disable=missing-function-docstring
             "rpool/x.archived-20261029/c",
         ], plan
 
+    def test_a_clone_within_one_dependent_goes_with_it(self):
+        """M11R-2: an archive's child cloned from the archive's own snapshot
+        is inside that tree, so its ``zfs destroy -r`` takes it: one entry,
+        no blocker, not a loop."""
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/x.archived-20261028"] = repl.Dest("a", clone_of="rpool/x@s1")
+        dest["rpool/x.archived-20261028/c"] = repl.Dest(
+            "ac", clone_of="rpool/x.archived-20261028@s2"
+        )
+        plan = self._plan(dest)
+        assert plan.ok, plan
+        assert [d.rel for d in plan.order] == ["rpool/x.archived-20261028"], plan
+
     def test_nothing_depends_on_a_plain_tree(self):
         dest = {r: repl.Dest(r) for r in ("rpool/x", "rpool/x/c", "rpool/y")}
         plan = self._plan(dest)
@@ -15954,6 +15982,14 @@ class TestDependents:  # pylint: disable=missing-function-docstring
         got = deps_mod.rollback_blockers(dest, "rpool/x", ["@n1", "@n2"])
         assert [(b.rel, b.why) for b in got] == [("rpool/x.archived-20261028", "newer")]
         assert "a snapshot the rollback would destroy" in got[0].text("backup")
+
+    def test_a_clone_inside_the_dataset_of_a_newer_snapshot_blocks_the_rollback(self):
+        """M11R-2: ``zfs rollback -r`` refuses for every clone of a snapshot
+        it would destroy, one inside the dataset's own tree too."""
+        dest = {r: repl.Dest(r) for r in ("rpool/x",)}
+        dest["rpool/x/k"] = repl.Dest("k", clone_of="rpool/x@n1")
+        got = deps_mod.rollback_blockers(dest, "rpool/x", ["@n1"])
+        assert [(b.rel, b.origin, b.why) for b in got] == [("rpool/x/k", "rpool/x@n1", "newer")]
 
     def test_a_blocked_plan_runs_nothing(self):
         dest = {r: repl.Dest(r) for r in ("rpool/x",)}
@@ -16538,6 +16574,18 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         ], calls
         assert archive not in fake.ds
         assert repl.POINT_RE.match(fake.names("backup/rpool/var/lib/docker")[-1])
+
+    def test_a_failed_archive_destroy_keeps_the_diverged_lineage(self) -> None:
+        """M11R-2: the first failure stops before the lineage, which stays
+        on the drive with its archive."""
+        fake = self._diverged_with_its_archive()
+        archive = f"backup/rpool/var/lib/docker.archived-{TODAY}"
+        fake.fail_cmds.add(f"zfs destroy -r {archive}")
+        before = len(fake.calls)
+        _ = self._run_orphan(fake, [2], "DESTROY")
+        calls = [c for c in fake.calls[before:] if c.startswith("zfs destroy -r backup/")]
+        assert calls == [f"zfs destroy -r {archive}"], calls
+        assert archive in fake.ds and "backup/rpool/var/lib/docker" in fake.ds
 
     def test_the_joint_destroy_takes_each_lineages_archive_first(self) -> None:
         """M9bP.1: several diverged lineages destroyed together: each one's
@@ -17300,6 +17348,134 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert "rpool/var/lib/docker cannot be destroyed: backup/rpool/other is a clone" in text
         assert excl.KEPT not in fake.ds["backup/rpool/var/lib/docker"].props
         assert not any(c.startswith("zfs destroy -r backup/") for c in fake.calls[before:])
+
+    @staticmethod
+    def _top_destroy_fails(fake: FakeZfs) -> None:
+        """``zfs destroy -r`` of the drive's docker copy fails, and only it
+        (``fail_cmds`` matches substrings, so its archive's would fail too)."""
+        real = fake.mock_run
+        top = "zfs destroy -r backup/rpool/var/lib/docker"
+
+        def failing(cmd: str | list[str], *a: Any, **k: Any) -> RunResult:
+            if (" ".join(cmd) if isinstance(cmd, list) else cmd) == top:
+                return RunResult(returncode=1, stdout="", stderr="fake: busy\n", command=top)
+            return real(cmd, *a, **k)
+
+        fake.mock_run = failing  # type: ignore[method-assign]
+
+    def test_a_held_excluded_copy_whose_top_fails_keeps_it_and_its_anchors(self) -> None:
+        """M11R-2 (the review's E3, S1): the archive goes, the top's destroy
+        fails: the top and this drive's anchors stay, the point the top
+        still holds keeps its count, and nothing is marked kept."""
+        archive = f"rpool/var/lib/docker.archived-{TODAY}"
+        fake, first, snap = self._held_with_a_clone(archive)
+        count = snap.props["org.zark:point-complete"]
+        mine = next(x for x in fake.ds["backup/rpool/var/lib/docker"].snaps if x.name == first)
+        fake.ds[f"backup/{archive}"].snaps.append(
+            FSnap(first, "77", mine.txg + 1, mine.creation, props=dict(mine.props))
+        )
+        self._top_destroy_fails(fake)
+        out = StringIO()
+        _, rc = self._run(
+            fake,
+            patch("lib.log.Log.ask_choice", return_value=1),
+            patch("lib.log.Log.ask_text", return_value="DESTROY"),
+            patch.object(backup_mod, "_apply_retention", return_value=(0, 0)),
+            redirect_stdout(out),
+        )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert f"backup/{archive}" not in fake.ds
+        assert "backup/rpool/var/lib/docker" in fake.ds
+        assert "Could not destroy backup/rpool/var/lib/docker: fake: busy" in text, text
+        assert any(repl.anchor_disk(n) == "111" for n in fake.bookmarks("rpool/var/lib/docker"))
+        assert snap.props["org.zark:point-complete"] == count
+        assert excl.KEPT not in fake.ds["backup/rpool/var/lib/docker"].props
+
+    def test_a_point_only_the_archive_held_is_rewritten_when_the_top_fails(self) -> None:
+        """M11R-2: a later point only the archive holds (a ROLLBACK's keep)
+        loses the dataset with it, so it is rewritten whole without it,
+        though the top's destroy then fails; the anchors stay."""
+        archive = f"rpool/var/lib/docker.archived-{TODAY}"
+        fake, first, _ = self._held_with_a_clone(archive)
+        stamp = datetime.strptime(first, "zark_%Y-%m-%d_%H:%M:%SZ") + timedelta(minutes=1)
+        later = stamp.strftime("zark_%Y-%m-%d_%H:%M:%SZ")
+        held: list[FSnap] = []
+        for name, ds in list(fake.ds.items()):
+            if not name.startswith("backup/") or name == "backup/rpool/var/lib/docker":
+                continue
+            src = next((x for x in ds.snaps if x.name == first), None)
+            if src is not None and "org.zark:point-complete" in src.props:
+                ds.snaps.append(
+                    FSnap(later, "78", src.txg + 1, src.creation + 60, props=dict(src.props))
+                )
+                held.append(ds.snaps[-1])
+        docker = next(x for x in fake.ds["backup/rpool/var/lib/docker"].snaps if x.name == first)
+        fake.ds[f"backup/{archive}"].snaps.append(
+            FSnap(later, "79", docker.txg + 2, docker.creation + 60, props=dict(docker.props))
+        )
+        count = int(held[0].props["org.zark:point-complete"])
+        self._top_destroy_fails(fake)
+        out = StringIO()
+        with (
+            patch_sh(fake),
+            patch("lib.log.Log.ask_text", return_value="PRUNE"),
+            redirect_stdout(out),
+        ):
+            prune_mod._excluded_held("backup", "111", Log())  # pylint: disable=protected-access
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert f"backup/{archive}" not in fake.ds and "backup/rpool/var/lib/docker" in fake.ds
+        assert all(x.props["org.zark:point-complete"] == str(count - 1) for x in held), text
+        assert f"{later}: whole without rpool/var/lib/docker" in text, text
+        assert any(repl.anchor_disk(n) == "111" for n in fake.bookmarks("rpool/var/lib/docker"))
+
+    def test_destroy_typed_takes_only_the_tops_that_can_go(self) -> None:
+        """M11R-2 (the review's E3, S2): two excluded copies, one with a live
+        clone: DESTROY takes the other and its archive; the blocked one stays,
+        unmarked and named."""
+        archive = f"rpool/var/lib/docker.archived-{TODAY}"
+        fake, first, _ = self._held_with_a_clone(archive)
+        fake.ds["rpool/USERDATA/home"].props["org.zark:replicate"] = "no"
+        fake.ds["backup/rpool/other"] = FDataset(origin=f"backup/rpool/USERDATA/home@{first}")
+        offered: list[list[str]] = []
+        asked: list[str] = []
+
+        def choice(question: str, opts: list[str], _d: int = 0) -> int:
+            if question == "What should happen to the drive's copy?":
+                offered.append(list(opts))
+                return next(i for i, o in enumerate(opts) if o.startswith("destroy"))
+            return 0
+
+        def ask_text(prompt: str, *_a: Any, **_k: Any) -> str:
+            asked.append(prompt)
+            return "DESTROY"
+
+        out = StringIO()
+        before = len(fake.calls)
+        _, rc = self._run(
+            fake,
+            patch("lib.log.Log.ask_choice", side_effect=choice),
+            patch("lib.log.Log.ask_text", side_effect=ask_text),
+            patch.object(backup_mod, "_apply_retention", return_value=(0, 0)),
+            redirect_stdout(out),
+        )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 0, text
+        assert offered and offered[0][1].startswith("destroy the 1 that can go"), offered
+        assert "ask again next time" in offered[0], offered
+        assert any(
+            "destroy the drive's copy of 1 excluded subtree(s), and 1 archived lineage(s)" in a
+            for a in asked
+        ), asked
+        calls = [c for c in fake.calls[before:] if c.startswith("zfs destroy -r backup/")]
+        assert calls == [
+            f"zfs destroy -r backup/{archive}",
+            "zfs destroy -r backup/rpool/var/lib/docker",
+        ], calls
+        assert "backup/rpool/USERDATA/home" in fake.ds
+        assert excl.KEPT not in fake.ds["backup/rpool/USERDATA/home"].props
+        assert "rpool/USERDATA/home cannot be destroyed: backup/rpool/other is a clone" in text
+        assert "Could not destroy" not in text, text  # the blocked one is not even tried
 
     def test_prune_lists_and_destroys_the_archive_of_an_excluded_copy(self) -> None:
         """M9bP.2: zark prune lists the archived lineage cloned from the copy

@@ -834,7 +834,10 @@ def filter_list_cache(root: str, log: Log) -> None:
         gone = [ln.split("\t", 1)[0].strip() for ln in lines if ln not in kept]
         if not gone:
             continue
-        tmp = path.with_name(f".{pool}.zark")
+        # One directory up (M11R-1): the generator reads every file in
+        # zfs-list.cache/, so a crash before the rename must not leave one
+        # there; etc/zfs/ is the same filesystem, so os.replace stays atomic.
+        tmp = path.parent.parent / f".zfs-list.cache.{pool}.zark"
         try:
             _ = tmp.write_text("".join(kept), encoding="utf-8")
             os.chmod(tmp, path.stat().st_mode & 0o7777)
