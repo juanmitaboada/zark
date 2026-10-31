@@ -154,7 +154,7 @@ zark does one job: getting an Ubuntu system on encrypted ZFS back onto a new dis
 
 - **Tested on hardware for every 2.x release**: setup, the self-test, prepare, backups, exclusions, prune, and a recover from an Ubuntu live USB followed by finish and a boot, on a Dell XPS 13 9333 installed with Ubuntu 24.04 and with 26.04 on the installer's encrypted ZFS layout.
 - **In daily use**: the maintainer has backed up his own laptop with zark since May 2026, and with 2.0 since its release.
-- **Self-test certificates**: each release ships the results of `zark selftest` on the maintainer's test machine in [`certificates/`](certificates/); `zark selftest status` tells whether they cover your kernel and OpenZFS, and `zark selftest report` prints a link to share yours.
+- **Self-test certificates**: each release ships the results of `zark selftest` on the maintainer's test machine in [`certificates/`](certificates/), shown by Ubuntu series, kernel and OpenZFS on the [certificates matrix](https://juanmitaboada.github.io/zark/); `zark selftest status` tells whether they cover your kernel and OpenZFS, and `zark selftest report` prints a link to share yours.
 - **Tests**: the unit suite covers every command and module on a model of ZFS and runs on Python 3.12, 3.13 and 3.14 with ruff, pylint, mypy and basedpyright: [docs/TESTING.md](docs/TESTING.md).
 - **History**: every change, and the alternatives that were rejected, in [CHANGELOG.md](CHANGELOG.md).
 
