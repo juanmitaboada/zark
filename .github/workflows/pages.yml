@@ -1,0 +1,71 @@
+# zark - the certificates matrix on GitHub Pages.
+#
+# Builds the page from certificates/selftest.json and pages/community/ with
+# pages/matrix.py (standard library only) on every change to them, on pull
+# requests (a bad report file fails here, before it merges) and by hand.
+#
+# Nothing is published until the repository variable PAGES_ENABLED is
+# "true" and Settings > Pages > Source is "GitHub Actions". Until then the
+# build job still runs and validates, and the deploy job is skipped.
+
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "certificates/**"
+      - "pages/**"
+      - "docs/images/brand/**"
+      - "lib/config.py"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "certificates/**"
+      - "pages/**"
+      - "docs/images/brand/**"
+      - "lib/config.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# A deploy that has started is never cancelled halfway by the next push.
+concurrency:
+  group: pages-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the page
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate every certificate file
+        run: python3 pages/matrix.py check
+
+      - name: Build
+        run: python3 pages/matrix.py build --out _site
+
+      - name: Upload the page
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    name: Publish to GitHub Pages
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.PAGES_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write      # publish the artifact
+      id-token: write   # prove to Pages that the deploy comes from this workflow
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
