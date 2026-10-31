@@ -35,3 +35,36 @@ make fulltest       # everything safe to run before a commit, with the pinned to
 ```
 
 These targets run the tools in `PATH`; `make fulltest` and `make tox` run the versions pinned in `pyproject.toml` and `tox.ini`. Tool configuration lives in `pyproject.toml` (ruff, mypy, pyright for basedpyright, pylint). Pre-commit hooks are wired in `.pre-commit-config.yaml`.
+
+### The certificates matrix
+
+The page of platforms where zark's self-test has passed is generated from
+`certificates/selftest.json` (the maintainer's test machine) and from
+`pages/community/<issue>.json` (community reports) by `pages/matrix.py`,
+standard library only:
+
+```
+python3 pages/matrix.py check
+python3 pages/matrix.py build --out _site
+```
+
+`check` fails on a partial or stopped run, a malformed entry, or a file in
+`pages/community/` that is not named `<issue number>.json`. `build` writes
+`index.html`, `certificates.json` and the preview image. Only versions,
+dates, results and the Ubuntu live image line are published; `bridge`, any
+exact version that does not match its expected form and any other field are
+dropped. The workflow `.github/workflows/pages.yml` builds it on every change
+and on pull requests, and publishes it when the repository variable
+`PAGES_ENABLED` is `true`.
+
+#### Publishing a community report
+
+1. Read the report in the issue (the form's JSON) and save it as `report.json`.
+2. Turn it into entries: `zark selftest certificate report.json > pages/community/<N>.json`
+   (`<N>` is the issue number). A partial or stopped run is refused by zark.
+3. Run `python3 pages/matrix.py check` and read the file once more.
+4. Commit it. The workflow validates and republishes the page.
+
+To make a platform count for zark's own coverage warning, merge its entry into
+`certificates/selftest.json` instead, with
+`zark selftest certificate --into certificates/selftest.json report.json`.
