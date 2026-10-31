@@ -22692,6 +22692,67 @@ def _frame_text(case: str, width: int = 80, **opts: Any) -> str:
     return "\n".join(mview.line_text(li) for li in lines)
 
 
+class TestMonitorOlderPoints:  # pylint: disable=missing-function-docstring
+    """M9aP.2, M14-5: reclaim_by_age in the monitor; M14-4: the hidepid line."""
+
+    def _contents(self, by_age: object) -> sreader.DriveContents:
+        drive: dict[str, Any] = {"space": {"available_bytes": 1}, "points": []}
+        if by_age is not None:
+            drive["reclaim_by_age"] = by_age
+        got = sreader.drive_contents(drive)
+        assert got is not None
+        return got
+
+    def _line(self, by_age: object) -> str:
+        lines = mview._older_line(self._contents(by_age), "  ")  # pylint: disable=protected-access
+        return "".join(mview.line_text(li) for li in lines)
+
+    def test_the_fixtures(self) -> None:
+        full = _frame_text("drive-contents", width=120)
+        assert (
+            "older points: the oldest 1 (before 2025-12) frees 33.4 GiB; "
+            + "all 10 (before 2026-09) 519.4 GiB"
+        ) in full
+        partial = _frame_text("drive-contents-partial")
+        assert "all 10 (before 2026-09) not measured" in partial
+        assert "older points" not in _frame_text("idle")  # no reclaim_by_age
+
+    def test_one_entry_none_and_null(self) -> None:
+        one = [{"before": "2026-01", "points": 1, "last_point": "p", "reclaim_bytes": 1024}]
+        assert self._line(one) == "  older points: the oldest 1 (before 2026-01) frees 1.0 KiB"
+        null = [{**one[0], "reclaim_bytes": None}]
+        assert self._line(null).endswith("frees not measured")
+        assert self._line([]) == "  older points: none to remove by age"
+        assert self._line(None) == ""
+
+    def test_the_hidepid_line_only_on_a_stalled_run(self) -> None:
+        case = _STATUS_FIXTURES / "hidepid-stalled"
+        e = _expected(case)
+        now = sreader.parse_timestamp(e["now"]) or datetime.now(UTC)
+        for hidden, want in ((True, True), (False, False)):
+            session = monitor_mod.Session(
+                monitor_mod.Options(once=True, root=case, live=False),
+                clock=functools.partial(lambda when: when, now),
+                alive=_alive_for(case, e),
+                hides_root=functools.partial(bool, hidden),
+            )
+            inp = session.inputs(session.poll())
+            assert inp.proc_hidden is want
+            text = "\n".join(mview.line_text(li) for li in mview.frame(inp, mview.ViewOptions()))
+            assert ("/proc hides root's processes" in text) is want, text
+        running = _STATUS_FIXTURES / "hidepid-running"
+        e = _expected(running)
+        session = monitor_mod.Session(
+            monitor_mod.Options(once=True, root=running, live=False),
+            clock=functools.partial(
+                lambda when: when, sreader.parse_timestamp(e["now"]) or datetime.now(UTC)
+            ),
+            alive=_alive_for(running, e),
+            hides_root=lambda: True,
+        )
+        assert not session.inputs(session.poll()).proc_hidden  # fresh heartbeat: no doubt
+
+
 class TestMonitorView:  # pylint: disable=missing-function-docstring
     """M8-10: what each state shows (X1 to X17)."""
 

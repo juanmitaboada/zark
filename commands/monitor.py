@@ -129,12 +129,14 @@ class Session:  # pylint: disable=too-many-instance-attributes
         alive: Callable[[Mapping[str, Any]], bool] = sr.process_alive,
         eta_model: bool = True,
         ticks: Callable[[], float] = time.monotonic,
+        hides_root: Callable[[], bool] = sr.proc_hides_root,
     ):
         self.opts = opts
         self.interval = opts.interval
         self.runner = runner
         self.clock = clock
         self.alive = alive
+        self.hides_root = hides_root
         self.ticks = ticks
         self.progress_path, self.status_path = sr.paths(opts.root)
         self.progress = sr.FileRead("absent")
@@ -188,6 +190,7 @@ class Session:  # pylint: disable=too-many-instance-attributes
             last_good_status=self.last_good,
             eta_model=self.eta_model,
             eta=self.eta.seconds(),
+            proc_hidden=reading.progress_class == "stalled" and self.hides_root(),
         )
 
     def live_now(self) -> None:

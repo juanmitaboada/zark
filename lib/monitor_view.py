@@ -191,6 +191,8 @@ class Inputs:
     # without it (``--once``) the contract's formula is used.
     eta_model: bool = False
     eta: float | None = None
+    # /proc hides root's processes from this reader: a stalled run may be gone (M8P.1).
+    proc_hidden: bool = False
 
 
 def _status_doc(inp: Inputs) -> tuple[Mapping[str, Any] | None, bool]:
@@ -361,6 +363,10 @@ def _active_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     if r.progress_class == "stalled" and updated is not None:
         silent = fmt_duration((r.now - updated).total_seconds())
         lines.append([(f"  no heartbeat for {silent}: the figures below are not current", "warn")])
+        if inp.proc_hidden:
+            lines.append(
+                [("  /proc hides root's processes: cannot tell whether the run still lives", "dim")]
+            )
     transfer = pdoc.get("transfer")
     if isinstance(transfer, dict):
         return lines + _transfer_lines(inp, transfer, opt, style)
@@ -674,6 +680,27 @@ def _largest_line(drive: Mapping[str, Any], pad: str) -> list[Line]:
     return [[(f"{pad}largest: ", "dim"), (names, "")]]
 
 
+def _older_line(c: sr.DriveContents, pad: str) -> list[Line]:
+    """What removing the oldest points frees (``reclaim_by_age``, M9aP.2): the
+    oldest entry and the last one, which removes every candidate (M14-5)."""
+    frees = c.frees_if_older
+    if frees is None:
+        return []
+    label = f"{pad}older points: "
+    if not frees:
+        return [[(label, "dim"), ("none to remove by age", "")]]
+
+    def figure(n: int | None) -> str:
+        return "not measured" if n is None else fmt_bytes(n)
+
+    months = list(frees)  # oldest first, as the drive entry lists them
+    first = f"the oldest 1 (before {months[0]}) frees {figure(frees[months[0]])}"
+    if len(months) == 1:
+        return [[(label, "dim"), (first, "")]]
+    last = f"all {len(months)} (before {months[-1]}) {figure(frees[months[-1]])}"
+    return [[(label, "dim"), (f"{first}; {last}", "")]]
+
+
 def _contents_lines(drive: Mapping[str, Any], pad: str, now: datetime) -> list[Line]:
     """The drive contents (optional fields, "Drive contents"; M8F-5)."""
     c = sr.drive_contents(drive)
@@ -682,6 +709,7 @@ def _contents_lines(drive: Mapping[str, Any], pad: str, now: datetime) -> list[L
     return (
         _points_line(c, pad)
         + _next_line(drive, c, pad, now)
+        + _older_line(c, pad)
         + _others_line(drive, pad)
         + _largest_line(drive, pad)
     )

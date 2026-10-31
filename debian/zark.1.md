@@ -104,14 +104,19 @@ for the canonical end-to-end sequences.
     (the terminal bell rings once); **ATTENTION** when a drive's last backup
     run ended **incomplete**, **not_verified** or **interrupted**, or a
     notice is critical; **CHECK** when a run was killed (its process is
-    gone), or *status.json* is old, unreadable or from a newer **zark**;
+    gone), or *status.json* is old, unreadable or from a newer **zark**.
+    When */proc* hides root's processes from the user (**hidepid**), a run
+    whose heartbeat stopped stays **RUNNING** with its figures marked not
+    current, and a line says it cannot tell whether the run still lives;
     **OVERDUE**, **NO STATUS** or **OK**. Below it, the source pools (used,
     free, reserved by ZFS, capacity, health), each registered drive
     (connected or not, last backup, last run, fill and when it was
     measured, the margin a backup tries to leave free, and the drive's
-    points by month, what its retention policy removes next and the
-    largest datasets on it, as **backup** and **prune** last measured
-    them), the datasets of each
+    points by month, what its retention policy removes next, what
+    removing its oldest points would free (the oldest one alone, and all
+    of them that **prune** would offer; "not measured" where it was not)
+    and the largest datasets on it, as **backup** and **prune** last
+    measured them), the datasets of each
     source pool with the pool's metadata apart, and the notices. Live
     figures say so; figures from the files carry their date.
 
