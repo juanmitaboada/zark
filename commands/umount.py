@@ -23,14 +23,15 @@ import shlex
 from collections.abc import Collection
 from pathlib import Path
 
-from lib import sh
+from lib import cli_spec, sh
 from lib.cleanup import BUSY_HINT, flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.keystore import Keystore
 from lib.log import Log
 
 MNT_BASE = "/mnt/zark"
-SYSTEM_TARGETS = ("local", "system", "rpool")
+SPEC = cli_spec.command("umount")
+SYSTEM_TARGETS = (SPEC.word("local"), SPEC.word("system"), SPEC.word("rpool"))
 # The live's reboot leaves rpool/bpool marked as its own (seen on eli).
 SYSTEM_REBOOT_HINT = [
     "The installed system may then stop at an emergency",

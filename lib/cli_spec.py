@@ -14,13 +14,19 @@
 """
 zark's command line, declared once: every command, its group and its
 one-line description, as ``zark --help`` prints them and the manpage's
-COMMANDS section orders them.
+COMMANDS section orders them; and every word each command's parser
+compares its arguments with, with the kind of value each option and
+positional argument takes, as the shell completion offers them.
+
+Each parser takes its words from here (``SPEC.word("--rw")``), and a test
+checks both ways that a parser uses every word its command declares and
+declares every word it uses (M14-9), so the two cannot drift.
 
 Standard library only and no zark import, so the shell completion can read
 it without loading the rest of zark.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -71,3 +77,155 @@ DESCRIPTIONS: dict[str, str] = {
 def command_names() -> list[str]:
     """Every command, in the help's order."""
     return [name for group in GROUPS for name in group.commands]
+
+
+# ── the words each command's parser reads (M14-9) ────────────────────────
+
+# Kinds of value, as the completion lists them: a whole disk, a registered
+# drive, a filesystem of rpool, one carrying an exclusion, a file, a
+# directory, one of fixed words, or free text (nothing offered).
+KINDS = ("device", "drive", "dataset", "excluded", "file", "dir", "words", "text")
+
+
+@dataclass(frozen=True)
+class Arg:
+    """A value: an option's or a positional argument's."""
+
+    kind: str
+    words: tuple[str, ...] = ()
+    repeat: bool = False
+
+
+@dataclass(frozen=True)
+class Opt:
+    """An option and the value it takes, if any."""
+
+    name: str
+    value: Arg | None = None
+
+
+@dataclass(frozen=True)
+class Spec:
+    """A command or a subcommand: its options, positional arguments and
+    subcommands (the first one is the default when none is typed)."""
+
+    name: str
+    options: tuple[Opt, ...] = ()
+    args: tuple[Arg, ...] = ()
+    subcommands: tuple["Spec", ...] = ()
+    default_sub: str = field(default="")
+
+    def words(self) -> set[str]:
+        """Every word this spec and its subcommands declare for the parser:
+        option names, fixed positional words and subcommand names. An
+        option's value words are only offered (monitor's intervals), not
+        compared with: the parser checks the value itself."""
+        out = {o.name for o in self.options}
+        out |= {w for a in self.args for w in a.words}
+        for sub in self.subcommands:
+            out |= {sub.name} | sub.words()
+        return out
+
+    def word(self, text: str) -> str:
+        """``text``, which must be one of :meth:`words`: a parser compares its
+        arguments only with words its command declares."""
+        if text not in self.words():
+            raise KeyError(f"{self.name}: {text!r} is not a declared word")
+        return text
+
+    def sub(self, name: str) -> "Spec":
+        """The subcommand ``name``."""
+        return next(s for s in self.subcommands if s.name == name)
+
+
+_DEVICE = Arg("device")
+_DRIVE = Arg("drive")
+_FILE = Arg("file")
+_SYSTEM = Arg("words", ("local", "system", "rpool"))
+_WHAT = Arg("words", ("backups", "snapshots", "both"))
+
+# What zark itself reads before the command: the help, the version, and
+# --debug after any command (zark's entry point).
+HELP_WORDS = ("--help", "-h", "help")
+VERSION_WORDS = ("--version", "-v")
+DEBUG = "--debug"
+GLOBAL_OPTIONS = (Opt(DEBUG),)
+
+SPECS: dict[str, Spec] = {
+    s.name: s
+    for s in (
+        Spec("alerts", subcommands=(Spec("install"), Spec("remove"))),
+        Spec("backup", options=(Opt("--no-snapshot"),)),
+        Spec("chroot", args=(_DEVICE,)),
+        Spec("clean"),
+        Spec(
+            "exclude",
+            subcommands=(
+                Spec("list"),
+                Spec("add", args=(Arg("dataset"), _WHAT)),
+                Spec("remove", args=(Arg("excluded"), _WHAT)),
+            ),
+            default_sub="list",
+        ),
+        Spec("explore"),
+        Spec("finish"),
+        Spec("fix-rpool-mountpoint"),
+        Spec("health", args=(_DEVICE,)),
+        Spec(
+            "monitor",
+            options=(
+                Opt("--once"),
+                Opt("--state"),
+                Opt("--interval", Arg("words", ("15", "30", "60", "120", "300", "600"))),
+                Opt("--root", Arg("dir")),
+                Opt("--no-live"),
+                Opt("--help"),
+                Opt("-h"),
+            ),
+        ),
+        Spec("mount", args=(_SYSTEM,)),
+        Spec("prepare", args=(_DEVICE,)),
+        Spec("prune"),
+        Spec("purge", args=(_DEVICE,)),
+        Spec("recover"),
+        Spec(
+            "registry",
+            subcommands=(
+                Spec("list"),
+                Spec("forget", args=(_DRIVE,)),
+                Spec("fix", args=(_DRIVE,)),
+                Spec(
+                    "retention",
+                    args=(_DRIVE, Arg("words", ("window", "max_age", "margin"), repeat=True)),
+                ),
+            ),
+            default_sub="list",
+        ),
+        Spec("repair-boot"),
+        Spec(
+            "selftest",
+            subcommands=(
+                Spec(
+                    "run",
+                    options=(Opt("--stick", _DEVICE), Opt("--only", Arg("text")), Opt("--debug")),
+                ),
+                Spec("status"),
+                Spec("report", args=(_FILE,)),
+                Spec(
+                    "certificate", options=(Opt("--into", _FILE),), args=(Arg("file", repeat=True),)
+                ),
+                Spec("warnings", args=(Arg("words", ("on", "off")),)),
+            ),
+            default_sub="run",
+        ),
+        Spec("setup", options=(Opt("--remove"),)),
+        Spec("simulate", options=(Opt("--rw"), Opt("--display", Arg("text"))), args=(_DEVICE,)),
+        Spec("status", options=(Opt("--refresh"), Opt("--notify"))),
+        Spec("umount", args=(_SYSTEM,)),
+    )
+}
+
+
+def command(name: str) -> Spec:
+    """The spec of command ``name``."""
+    return SPECS[name]

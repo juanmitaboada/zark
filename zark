@@ -91,11 +91,11 @@ def main():
     # Short-circuit informational flags BEFORE the root check. These
     # produce static output that depends on neither system state nor
     # privileges; refusing to print them without sudo is just rude.
-    if not args or args[0] in ("--help", "-h", "help"):
+    if not args or args[0] in cli_spec.HELP_WORDS:
         print_help()
         sys.exit(0)
 
-    if args[0] in ("--version", "-v"):
+    if args[0] in cli_spec.VERSION_WORDS:
         print(f"zark v{VERSION}")
         sys.exit(0)
 
@@ -161,7 +161,7 @@ def main():
     except Exception as e:  # pylint: disable=broad-exception-caught
         progress.note_error(str(e))  # a backup's last_run says why (M7-6 6a)
         print(f"\n\033[0;31m[FATAL]\033[0m {e}")
-        if "--debug" in cmd_args:
+        if cli_spec.DEBUG in cmd_args:
             import traceback  # pylint: disable=import-outside-toplevel
 
             traceback.print_exc()

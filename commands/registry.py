@@ -39,7 +39,7 @@ All writes go through lib.registry (validated, atomic).
 import shlex
 from pathlib import Path
 
-from lib import anchors, registry, sh, survey
+from lib import anchors, cli_spec, registry, sh, survey
 from lib.config import Config, zark_command
 from lib.drives import drive_staleness_days, get_drive_id, scan_connected_drives
 from lib.identity import BY_ID_DIR, read_pool_label
@@ -50,7 +50,12 @@ USAGE = (
     + " | retention <name> [window=N] [max_age=N|off] [margin=N]"
 )
 # Command-line names of the retention settings (lib.registry.RETENTION_LIMITS).
-_RETENTION_ARGS = {"window": "window_days", "max_age": "max_age_days", "margin": "margin_pct"}
+SPEC = cli_spec.command("registry")
+_RETENTION_ARGS = {
+    SPEC.word("window"): "window_days",
+    SPEC.word("max_age"): "max_age_days",
+    SPEC.word("margin"): "margin_pct",
+}
 
 
 def _connected_by_id_for_guid(guid: str, cfg: Config, log: Log) -> str:
@@ -117,7 +122,13 @@ def _retention(cfg: Config, log: Log, name: str, settings: list[str]) -> None:
             key, _, raw = item.partition("=")
             if key not in _RETENTION_ARGS or not raw:
                 log.fatal(f"Unknown retention setting: {item}", solutions=[USAGE])
-            n = 0 if key == "max_age" and raw == "off" else int(raw) if raw.isdigit() else -1
+            n = (
+                0
+                if key == SPEC.word("max_age") and raw == "off"
+                else int(raw)
+                if raw.isdigit()
+                else -1
+            )
             values[_RETENTION_ARGS[key]] = n
         try:
             registry.check_retention(values, f"entry '{name}'")
@@ -280,17 +291,17 @@ def run(args: list[str]) -> None:
     """Main entry point for 'zark registry'."""
     log = Log()
     cfg = Config.load()
-    sub = args[0] if args else "list"
-    cfg.check_registry(log, fatal=sub != "list")
+    sub = args[0] if args else SPEC.word("list")
+    cfg.check_registry(log, fatal=sub != SPEC.word("list"))
 
     log.banner("DRIVE REGISTRY", "known_drives.json")
-    if sub == "list":
+    if sub == SPEC.word("list"):
         _list(cfg, log)
-    elif sub == "forget" and len(args) == 2:
+    elif sub == SPEC.word("forget") and len(args) == 2:
         _forget(cfg, log, args[1])
-    elif sub == "fix" and len(args) <= 2:
+    elif sub == SPEC.word("fix") and len(args) <= 2:
         _fix(cfg, log, args[1] if len(args) == 2 else None)
-    elif sub == "retention" and len(args) >= 2:
+    elif sub == SPEC.word("retention") and len(args) >= 2:
         _retention(cfg, log, args[1], args[2:])
     else:
         log.fatal(f"Unknown registry command: {' '.join(args)}", solutions=[USAGE])

@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import drive_marks, exclusions, sh, zfs_features
+from lib import cli_spec, drive_marks, exclusions, sh, zfs_features
 from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
 from lib.cleanup import Cleanup
 from lib.config import Config, zark_command
@@ -52,7 +52,8 @@ from lib.zfs import ZFS
 MNT_BASE = "/mnt/zark"
 PROBE_DIR = "/run/zark/probe"
 SYSTEM_MNT = "/mnt/zark/system"
-SYSTEM_TARGETS = ("local", "system", "rpool")
+SPEC = cli_spec.command("mount")
+SYSTEM_TARGETS = (SPEC.word("local"), SPEC.word("system"), SPEC.word("rpool"))
 
 
 @dataclass(frozen=True)

@@ -33,7 +33,7 @@ import os
 import time
 from typing import NoReturn
 
-from lib import statusdirs
+from lib import cli_spec, statusdirs
 from lib.log import Log
 
 LOCK_PATH = "/run/zark/zark.lock"
@@ -49,7 +49,11 @@ class LockHeld(Exception):
 
 def selftest_subcommand(args: list[str]) -> str:
     """The subcommand ``zark selftest`` runs for ``args``: ``run`` when none is named."""
-    return args[0] if args and not args[0].startswith("-") else "run"
+    return (
+        args[0]
+        if args and not args[0].startswith("-")
+        else cli_spec.command("selftest").default_sub
+    )
 
 
 def needs_lock(command: str, args: list[str]) -> bool:
@@ -57,13 +61,15 @@ def needs_lock(command: str, args: list[str]) -> bool:
     if command in _READ_ONLY:
         return False
     if command in ("registry", "exclude"):
-        return bool(args) and args[0] != "list"
-    if command == "setup" and args == ["--remove"]:
+        return bool(args) and args[0] != cli_spec.command(command).word("list")
+    if command == "setup" and args == [cli_spec.command("setup").word("--remove")]:
         # It touches no pool, and the package's prerm runs it (M3P.2): a
         # backup holding the lock must not leave the guards behind.
         return False
     if command == "selftest":
-        return selftest_subcommand(args) not in ("status", "report", "certificate")
+        spec = cli_spec.command("selftest")
+        reads = (spec.word("status"), spec.word("report"), spec.word("certificate"))
+        return selftest_subcommand(args) not in reads
     return True
 
 

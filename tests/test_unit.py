@@ -23419,6 +23419,87 @@ class TestHelpOrder:  # pylint: disable=missing-function-docstring
         assert got == want, got
 
 
+def _word_literals(path: Path) -> list[str]:
+    """The string literals a module passes to a spec's ``word()``."""
+    tree = ast.parse(path.read_text("utf-8"))
+    return [
+        n.args[0].value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "word"
+        and n.args
+        and isinstance(n.args[0], ast.Constant)
+        and isinstance(n.args[0].value, str)
+    ]
+
+
+class TestCliSpec:  # pylint: disable=missing-function-docstring
+    """M14-9 9a: each parser and lib/cli_spec.py name the same words."""
+
+    # A literal that looks like one of zark's options but is another program's.
+    _FOREIGN = {"chroot": {"--login"}}  # bash's, for the chroot's shell
+
+    def _module(self, name: str) -> Path:
+        return _REPO_ROOT / "commands" / f"{name.replace('-', '_')}.py"
+
+    def test_every_word_a_parser_uses_is_declared_and_every_declared_one_used(self) -> None:
+        for name, spec in cli_spec_mod.SPECS.items():
+            used = set(_word_literals(self._module(name)))
+            assert used <= spec.words(), (name, sorted(used - spec.words()))
+            declared = set(spec.words())
+            if name == "exclude":
+                # Its last word is lib.exclusions' own table, which the parser reads.
+                assert set(exclude_mod._PROPS) == {"backups", "snapshots", "both"}  # pylint: disable=protected-access
+                declared -= set(exclude_mod._PROPS)  # pylint: disable=protected-access
+            if name == "selftest":
+                declared.discard("run")  # the default subcommand, from lib.lock
+            assert declared <= used, (name, sorted(declared - used))
+
+    def test_no_parser_compares_with_an_option_the_spec_does_not_give(self) -> None:
+        for name in cli_spec_mod.SPECS:
+            tree = ast.parse(self._module(name).read_text("utf-8"))
+            words = set(_word_literals(self._module(name)))
+            loose = {
+                n.value
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and re.fullmatch(r"--[a-z][a-z-]*", n.value)
+            }
+            assert loose - words <= self._FOREIGN.get(name, set()), (name, sorted(loose - words))
+
+    def test_lock_and_the_entry_point_read_the_spec(self) -> None:
+        every = set().union(*(s.words() for s in cli_spec_mod.SPECS.values()))
+        lock_words = set(_word_literals(_REPO_ROOT / "lib" / "lock.py"))
+        assert lock_words and lock_words <= every, sorted(lock_words - every)
+        assert lock_mod.selftest_subcommand([]) == cli_spec_mod.command("selftest").default_sub
+        entry = (_REPO_ROOT / "zark").read_text("utf-8")
+        for name in ("HELP_WORDS", "VERSION_WORDS", "DEBUG"):
+            assert f"cli_spec.{name}" in entry, name
+
+    def test_word_refuses_an_undeclared_word(self) -> None:
+        spec = cli_spec_mod.command("backup")
+        assert spec.word("--no-snapshot") == "--no-snapshot"
+        try:
+            _ = spec.word("--snapshot")
+        except KeyError:
+            return
+        raise AssertionError("word() accepted an undeclared word")
+
+    def test_the_spec_is_standard_library_only(self) -> None:
+        assert _stdlib_only("lib/cli_spec.py")
+        kinds = {a.kind for s in cli_spec_mod.SPECS.values() for a in _all_args(s)}
+        assert kinds <= set(cli_spec_mod.KINDS), kinds
+
+
+def _all_args(spec: Any) -> list[Any]:
+    args = list(spec.args) + [o.value for o in spec.options if o.value]
+    for sub in spec.subcommands:
+        args += _all_args(sub)
+    return args
+
+
 class TestSelftestRdr01:  # pylint: disable=missing-function-docstring
     """M8-11: RDR-01, a user without privileges reads what the monitor reads."""
 

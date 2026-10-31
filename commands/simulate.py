@@ -64,7 +64,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from lib import sh, signals
+from lib import cli_spec, sh, signals
 from lib.config import zark_command
 from lib.log import Log
 
@@ -367,13 +367,13 @@ def _parse_args(args: list[str]) -> SimulateArgs:
     rigidly.
     """
     parsed = SimulateArgs()
-    parsed.rw = "--rw" in args
+    parsed.rw = cli_spec.command("simulate").word("--rw") in args
     parsed.disk = next((a for a in args if a.startswith("/dev/")), None)
 
     # --display WxH (two-token form). We avoid argparse to stay
     # consistent with the project's lightweight CLI style.
     for i, a in enumerate(args):
-        if a == "--display" and i + 1 < len(args):
+        if a == cli_spec.command("simulate").word("--display") and i + 1 < len(args):
             try:
                 parsed.display_w, parsed.display_h = _parse_display(args[i + 1])
             except ValueError as e:

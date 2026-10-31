@@ -39,6 +39,7 @@ from commands.setup import sanoid_conf_gap
 from lib import (
     anchors,
     certificates,
+    cli_spec,
     drive_contents,
     drive_marks,
     engine,
@@ -179,7 +180,7 @@ class BackupArgs:
 def _parse_args(args: list[str]) -> BackupArgs:
     """Parse backup's command-line arguments (unknown flags are ignored)."""
     parsed = BackupArgs()
-    if "--no-snapshot" in args:
+    if cli_spec.command("backup").word("--no-snapshot") in args:
         parsed.take_snapshots = False
     return parsed
 

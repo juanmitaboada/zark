@@ -35,13 +35,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lib import live_pools, monitor_view as view, status_reader as sr
+from lib import cli_spec, live_pools, monitor_view as view, status_reader as sr
 from lib.config import VERSION, zark_command
 from lib.transfer_eta import TransferEta
 
 INTERVALS = (15, 30, 60, 120, 300, 600)
 MIN_INTERVAL, MAX_INTERVAL = 5, 3600
 EX_USAGE = 2
+SPEC = cli_spec.command("monitor")
 USAGE = """\
 Usage: zark monitor [--once [--state]] [--interval N] [--root DIR] [--no-live]
 
@@ -81,7 +82,7 @@ class Options:
 
 
 def _value(arg: str, value: str, opts: Options) -> Options | str:
-    if arg == "--root":
+    if arg == SPEC.word("--root"):
         if not Path(value).is_dir():
             return f"--root: not a directory: {value}"
         return replace(opts, root=Path(value))
@@ -96,13 +97,13 @@ def parse_args(args: list[str]) -> Options | str:
     rest = list(args)
     while rest and isinstance(opts, Options):
         arg = rest.pop(0)
-        if arg == "--once":
+        if arg == SPEC.word("--once"):
             opts = replace(opts, once=True)
-        elif arg == "--state":
+        elif arg == SPEC.word("--state"):
             opts = replace(opts, state=True)
-        elif arg == "--no-live":
+        elif arg == SPEC.word("--no-live"):
             opts = replace(opts, live=False)
-        elif arg in ("--interval", "--root"):
+        elif arg in (SPEC.word("--interval"), SPEC.word("--root")):
             opts = _value(arg, rest.pop(0), opts) if rest else f"{arg} needs a value"
         else:
             opts = f"unknown option: {arg}"
@@ -473,7 +474,7 @@ def _run_session(session: Session) -> int:
 
 def run(args: list[str]) -> int:
     """Run the monitor; the exit status."""
-    if args and args[0] in ("-h", "--help"):
+    if args and args[0] in (SPEC.word("-h"), SPEC.word("--help")):
         print(USAGE, end="")
         return 0
     opts = parse_args(args)

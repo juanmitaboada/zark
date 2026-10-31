@@ -43,7 +43,7 @@ future is automatically covered the next time setup runs.
 from pathlib import Path
 from typing import TypedDict
 
-from lib import alerts, apt_guard, certificates, exclusions, grub_guard, sh, survey
+from lib import alerts, apt_guard, certificates, cli_spec, exclusions, grub_guard, sh, survey
 from lib.config import zark_command
 
 # from lib.config import Config
@@ -968,9 +968,10 @@ def run(
     """Run the setup process to install dependencies and configure sanoid;
     ``--remove`` removes the guards and alerts instead."""
     log = Log()
-    if args == ["--remove"]:
+    remove = cli_spec.command("setup").word("--remove")
+    if args == [remove]:
         raise SystemExit(remove_installed(log))
-    if "--remove" in args:
+    if remove in args:
         # Not the full setup after being asked to remove things (M4dR-4).
         log.error("--remove takes no other argument")
         log.info("Usage: zark setup [--remove]")

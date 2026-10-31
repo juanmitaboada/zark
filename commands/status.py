@@ -30,7 +30,7 @@ import os
 from datetime import UTC, datetime
 
 from commands.setup import sanoid_conf_gap
-from lib import exclusions, notify, status, status_file, statusdirs, survey
+from lib import cli_spec, exclusions, notify, status, status_file, statusdirs, survey
 from lib.config import Config, zark_command
 from lib.log import Log
 from lib.zfs import ZFS
@@ -105,11 +105,12 @@ def _notify(st: status.Status) -> None:
 def run(args: list[str]) -> None:
     """Main entry point for 'zark status'."""
     cfg = Config.load()
-    if "--refresh" in args:
+    spec = cli_spec.command("status")
+    if spec.word("--refresh") in args:
         # Hourly from the timer: nothing goes to zark.log.
         log = Log(os.devnull)
         st = status_file.refresh(cfg, log, "timer")
-        if "--notify" in args:
+        if spec.word("--notify") in args:
             _notify(st)
         return
     log = Log()

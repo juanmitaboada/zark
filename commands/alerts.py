@@ -19,19 +19,20 @@ zark alerts - install or remove the space and backup-age alerts.
   zark alerts remove    disable the timer and remove both
 """
 
-from lib import alerts
+from lib import alerts, cli_spec
 from lib.config import zark_command
 from lib.log import Log
 
 USAGE = f"Usage: {zark_command()} alerts install | remove"
+SPEC = cli_spec.command("alerts")
 
 
 def run(args: list[str]) -> None:
     """Main entry point for 'zark alerts'."""
     log = Log()
-    if args == ["install"]:
+    if args == [SPEC.word("install")]:
         alerts.install(log)
-    elif args == ["remove"]:
+    elif args == [SPEC.word("remove")]:
         alerts.remove(log)
     else:
         log.fatal(f"Unknown alerts command: {' '.join(args)}", solutions=[USAGE])

@@ -30,7 +30,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from lib import certificates, lock, platform_facts, sh
+from lib import certificates, cli_spec, lock, platform_facts, sh
 from lib.certificates import RunInfo
 from lib.cleanup import Cleanup
 from lib.config import Config, zark_command
@@ -40,6 +40,7 @@ from lib.log import Log
 from lib.selftest import Bench, Check, Result, RunState, SetupError, all_checks, run_checks
 from lib.selftest_l2 import StickBench
 
+SPEC = cli_spec.command("selftest")
 USAGE = (
     "Usage: zark selftest [run] [--stick <device>] [--only <ID>[,<ID>...]] | status | "
     + "report [<file>] | certificate [--into <file>] <file>... | warnings on|off"
@@ -52,11 +53,11 @@ def run(args: list[str]) -> None:
     sub = lock.selftest_subcommand(args)
     rest = args[1:] if args and not args[0].startswith("-") else args
     handlers = {
-        "run": _run,
-        "status": _status,
-        "report": _report,
-        "certificate": _certificate,
-        "warnings": _warnings,
+        SPEC.word("run"): _run,
+        SPEC.word("status"): _status,
+        SPEC.word("report"): _report,
+        SPEC.word("certificate"): _certificate,
+        SPEC.word("warnings"): _warnings,
     }
     handler = handlers.get(sub)
     if handler is None:
@@ -73,16 +74,16 @@ def _parse_run(args: list[str], log: Log) -> tuple[str, list[str]]:
     stick, only = "", []
     i = 0
     while i < len(args):
-        if args[i] == "--stick" and i + 1 < len(args):
+        if args[i] == SPEC.word("--stick") and i + 1 < len(args):
             stick, i = args[i + 1].strip(), i + 2
             if not stick:
                 # An unset variable in `--stick "$DEV"` would run level 1 only (M4dF-2).
                 log.error("--stick needs a device")
                 log.info(USAGE)
                 raise SystemExit(2)
-        elif args[i] == "--only" and i + 1 < len(args):
+        elif args[i] == SPEC.word("--only") and i + 1 < len(args):
             only, i = [x.strip().upper() for x in args[i + 1].split(",") if x.strip()], i + 2
-        elif args[i] == "--debug":
+        elif args[i] == SPEC.word("--debug"):
             i += 1
         else:
             log.error(f"Unknown option '{args[i]}'")
@@ -310,7 +311,7 @@ def _load(path: Path, log: Log) -> dict[str, Any]:
 
 def _certificate(args: list[str], log: Log) -> None:
     into = ""
-    if args[:1] == ["--into"] and len(args) > 1:
+    if args[:1] == [SPEC.word("--into")] and len(args) > 1:
         into, args = args[1], args[2:]
     if not args:
         log.error("Usage: zark selftest certificate [--into <file>] <report file>...")
@@ -341,8 +342,8 @@ def _cert_key(e: dict[str, Any]) -> str:
 
 
 def _warnings(args: list[str], log: Log) -> None:
-    if args not in (["on"], ["off"]):
+    if args not in ([SPEC.word("on")], [SPEC.word("off")]):
         log.error("Usage: zark selftest warnings on|off")
         raise SystemExit(2)
-    path = certificates.set_subscribed(args[0] == "on")
+    path = certificates.set_subscribed(args[0] == SPEC.word("on"))
     log.ok(f"Self-test warnings {args[0]} ({path})")

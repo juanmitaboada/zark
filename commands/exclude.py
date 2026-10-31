@@ -37,13 +37,14 @@ import shlex
 from typing import NoReturn
 
 from commands.setup import configure_sanoid
-from lib import exclusions, sh, survey
+from lib import cli_spec, exclusions, sh, survey
 from lib.config import Config, zark_command
 from lib.exclusions import BACKUPS, BOTH, REPLICATE, SNAPSHOT, SNAPSHOTS
 from lib.log import Log
 from lib.replication import Origin, anchor_disk
 from lib.zfs import ZFS
 
+SPEC = cli_spec.command("exclude")
 USAGE = (
     f"Usage: {zark_command()} exclude list"
     + " | add <dataset> backups|snapshots|both"
@@ -207,11 +208,12 @@ def _sanoid(log: Log) -> None:
 def run(args: list[str]) -> None:
     """``zark exclude list|add|remove``."""
     log = Log()
-    if args in ([], ["list"]):
+    if args in ([], [SPEC.word("list")]):
         _list(log)
         return
-    if len(args) == 3 and args[0] in ("add", "remove") and args[2] in _PROPS:
-        (_add if args[0] == "add" else _remove)(args[1].strip("/"), args[2], log)
+    add, remove = SPEC.word("add"), SPEC.word("remove")
+    if len(args) == 3 and args[0] in (add, remove) and args[2] in _PROPS:
+        (_add if args[0] == add else _remove)(args[1].strip("/"), args[2], log)
         return
     log.error(USAGE)
     raise SystemExit(2)
