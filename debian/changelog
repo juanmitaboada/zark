@@ -1,3 +1,18 @@
+zark (2.2.0~rc1-1) UNRELEASED; urgency=medium
+
+  * Milestone M14 of zark 2.2 (the status readers' rows and the CLI). Not
+    for release: nothing is published until the final 2.2.0.
+  * Status files: orphan rule 4 is skipped when /proc hides root's
+    processes from the reader (hidepid), told by /proc/1; the reference
+    reader and zark monitor follow it. New self-test check RDR-02.
+  * zark monitor shows what removing a drive's oldest points frees.
+  * Self-test reports keep iso and the exact versions only in the shapes
+    Ubuntu writes.
+  * zark's help in four groups, sorted inside each; the manpage the same.
+  * bash completion for every command, its options and arguments.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Sat, 31 Oct 2026 18:30:00 +0100
+
 zark (2.1.1-1) stable; urgency=medium
 
   * zark 2.1.1, what 2.1.0 left. Every typed destroy on a drive (an

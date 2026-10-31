@@ -16,6 +16,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each row comes from. `.github/workflows/pages.yml` builds it and publishes it to GitHub
   Pages once `PAGES_ENABLED` is set. Nothing that could name a machine is published.
 
+### M14 - the status readers' rows and the CLI
+
+zark 2.2 is being built on `main` as `2.2.0-rc1` (`lib/config.py`) and
+`2.2.0~rc1-1` UNRELEASED (`debian/changelog`). Nothing is uploaded to the
+PPA until the final 2.2.0.
+
+#### Added
+
+- **Shell completion** (M14-8, M14-10 to M14-12): `completion/zark`, a
+  bash function installed as `/usr/share/bash-completion/completions/zark`
+  and usable from a portable tree with `source completion/zark`, completes
+  the commands, their subcommands and options, and their arguments: whole
+  disks under `/dev/disk/by-id`, registered drives, rpool's datasets for
+  `exclude`, files and directories. Its engine, `lib/completion.py`, runs
+  as the user who presses TAB, imports nothing of zark but the spec,
+  never imports a pool and writes nothing; a listing that fails or takes
+  over 2 s offers nothing. zsh can load it through `bashcompinit`.
+- **`zark monitor` shows what removing a drive's oldest points frees**
+  (M9aP.2, M14-5): one line per drive from its `reclaim_by_age`, the
+  oldest point alone and every candidate, "not measured" where the figure
+  is null, nothing when the field is absent. It was 2.1's known limitation.
+- **Self-test check RDR-02** (M14-6): as nobody, on a proc instance of its
+  own in a private mount namespace, `hidepid=invisible` and `ptraceable`
+  hide `/proc/1` and the run's own pid, `noaccess` closes their files and
+  `off` shows everything; nothing reaches the host's mounts. Level 1 now
+  has 61 checks.
+
+#### Changed
+
+- **Status files, orphan rule 4 with `hidepid`** (M8P.1, M14-1 to M14-3):
+  a pid the reader cannot see is no evidence that a run ended. When
+  `/proc/1` does not exist for the reader either, `/proc` hides root's
+  processes from it, rule 4 is skipped and the heartbeat decides; a killed
+  run then stays stalled until the next zark command. Five new fixture
+  cases carry their own proc tree (`progress_process` `proc`). The
+  reference reader gains `proc_hides_root`; `zark monitor` says, on a
+  stalled run, that it cannot tell whether the run still lives (M14-4).
+  Schema version 1 and every field unchanged.
+- **The help in four groups** (M14-7): Backup, Recovery (live USB),
+  Inspection, and Setup and upkeep, each sorted by name; the manpage's
+  COMMANDS section the same (it counted fourteen commands). The commands
+  and their words are declared once in `lib/cli_spec.py`, which every
+  parser reads (M14-9); a test checks both ways that neither has a word
+  the other lacks. What each command accepts did not change.
+- **Self-test reports keep `iso` and the exact versions only in Ubuntu's
+  shapes** (S8P.1, M14-15): any other value, which a remastered image or a
+  custom kernel could fill with a name, becomes `other`, in a new report
+  and in a certificate made from an older one. The shipped certificates
+  are unchanged. `certificate_entry`'s description now says what it
+  refuses; FAIL and SKIP stay in an entry, which certifies only what
+  passed (S8P.2, M14-16).
+
+#### Rejected
+
+- Telling `hidepid` by `/proc/self/mountinfo` (the reader's groups and
+  capabilities decide what it sees, not the mount alone) or by
+  `kill(pid, 0)` (not a read of `/proc`, and the extension cannot call it).
+- One line per month for `reclaim_by_age` in the monitor, or a toggled
+  table: the extension keeps the month table.
+- A flat alphabetical help; a native zsh or fish completion; a hidden
+  `zark __complete` (every TAB would pay the entry point's imports); drive
+  names from `status.json` (absent on a live).
+- `sanitize` on `iso` and the exact versions: its long-number rule turns
+  an official image's date into `<n>`; refusing a FAIL in a certificate.
+
 ## [2.1.1] - 2026-10-30
 
 ### For zark 2.1.0 users
