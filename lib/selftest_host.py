@@ -543,6 +543,82 @@ def rdr_01(b: Bench) -> None:
         expect(r.ok, "/dev/disk/by-id listable as nobody", exit_status(r), text_of(r))
 
 
+# What nobody sees of root's processes on a proc instance mounted with each
+# hidepid mode: the self-test's pid, /proc/1, /proc/self, boot_id, 1's stat.
+_HIDEPID_SEEN = {
+    "invisible": ("no", "no", "yes", "yes", "no"),
+    "ptraceable": ("no", "no", "yes", "yes", "no"),
+    "noaccess": ("yes", "yes", "yes", "yes", "no"),
+    "off": ("yes", "yes", "yes", "yes", "yes"),
+}
+_HIDEPID_PROBE = (
+    "for p in 1 $0 self sys/kernel/random/boot_id; do"
+    " if test -e /proc/$p; then echo yes; else echo no; fi; done;"
+    " if cat /proc/1/stat >/dev/null 2>&1; then echo yes; else echo no; fi"
+)
+
+
+def hidepid_argv(mode: str, pid: int) -> list[str]:
+    """``unshare`` running, in a private mount namespace with proc mounted
+    over /proc with ``hidepid=<mode>``, the probe as nobody: one yes or no
+    per path of :data:`_HIDEPID_SEEN`. Nothing reaches the host's mounts."""
+    probe = f"{_NOBODY} sh -c '{_HIDEPID_PROBE}' {pid}"
+    inner = f"mount -t proc -o hidepid={mode} proc /proc && exec {probe}"
+    return ["unshare", "--mount", "--propagation", "private", "sh", "-c", inner]
+
+
+def _own_status() -> str:
+    return Path("/proc/self/status").read_text(encoding="ascii", errors="replace")
+
+
+def _ids(status: str) -> list[str]:
+    """The Uid and Gid lines' values of a /proc/<pid>/status text."""
+    return [
+        v
+        for li in status.splitlines()
+        if li.split(":")[0] in ("Uid", "Gid")
+        for v in li.split()[1:]
+    ]
+
+
+@check(
+    "RDR-02",
+    1,
+    1,
+    "a proc mount with hidepid hides root's processes from nobody, and /proc/1 tells",
+    depends=(
+        "orphan rule 4 skipped when /proc hides root's processes (docs/STATUS-FILES.md, M8P.1)",
+        "lib.status_reader.proc_hides_root",
+    ),
+)
+def rdr_02(b: Bench) -> None:
+    """As nobody, on a proc instance of its own in a private mount namespace
+    (each proc mount is its own superblock, Linux 7.0 fs/proc/root.c:310-313,
+    options at :226-242): with ``invisible`` and ``ptraceable`` neither
+    ``/proc/1`` nor this run's pid (both root's) exists, ``/proc/self`` and
+    ``boot_id`` do (fs/proc/base.c:745-762, :2018-2041, :3527-3530;
+    kernel/ptrace.c:298-299, :317-325); with ``noaccess`` both exist and
+    ``/proc/1/stat`` is closed (fs/proc/base.c:757-758, :789); with ``off``
+    all of it reads. And this run, as zark under sudo, has every id 0."""
+    for tool in ("setpriv", "unshare"):
+        if not shutil.which(tool):
+            raise Skip(f"{tool} (util-linux) is not installed")
+    ids = _ids(_own_status())
+    expect(set(ids) == {"0"}, "this run's uid and gid all 0 (root)", " ".join(ids))
+    for mode, want in _HIDEPID_SEEN.items():
+        r = b.run(shlex.join(hidepid_argv(mode, os.getpid())))
+        expect(r.ok, f"the probe to run with hidepid={mode}", exit_status(r), text_of(r))
+        got = tuple(r.stdout.split())
+        # Only the probe's own words reach the report, never other output.
+        came = " ".join(t if t in ("yes", "no") else "?" for t in got)
+        expect(
+            got == want,
+            f"with hidepid={mode}: 1 {want[0]}, the run {want[1]}, self {want[2]}, "
+            + f"boot_id {want[3]}, 1/stat {want[4]}",
+            came or "nothing",
+        )
+
+
 # ── systemd, sanoid ──────────────────────────────────────────────────────
 
 

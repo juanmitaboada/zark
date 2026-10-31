@@ -119,6 +119,7 @@ import lib.progress as progress_mod  # pylint: disable=wrong-import-position # n
 import lib.replication as repl  # pylint: disable=wrong-import-position # noqa: E402
 import lib.retention as ret  # pylint: disable=wrong-import-position # noqa: E402
 import lib.selftest as stest  # pylint: disable=wrong-import-position # noqa: E402
+import lib.selftest_host as shost  # pylint: disable=wrong-import-position # noqa: E402
 import lib.selftest_l1 as selftest_l1_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.selftest_l2 as st_l2  # pylint: disable=wrong-import-position # noqa: E402
 import lib.sh as _sh  # pylint: disable=wrong-import-position # noqa: E402
@@ -23372,6 +23373,67 @@ class TestSelftestRdr01:  # pylint: disable=missing-function-docstring
         )
 
 
+class TestSelftestRdr02:  # pylint: disable=missing-function-docstring
+    """M14-6: RDR-02, what nobody sees of root's processes under hidepid."""
+
+    def _run(self, shell: MockShell, status: str = "Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"):
+        check_ = next(c for c in all_selftest_checks() if c.cid == "RDR-02")
+        with tempfile.TemporaryDirectory() as td, patch_sh(shell):
+            log = make_log()
+            bench = stest.Bench(log, Cleanup(log), root=td)
+            with (
+                patch("lib.selftest_host.shutil.which", return_value="/usr/bin/x"),
+                patch("lib.selftest_host._own_status", return_value=status),
+            ):
+                return stest.run_one(check_, bench)
+
+    def _shell(self, **override: str) -> MockShell:
+        shell = MockShell()
+        for mode, seen in shost._HIDEPID_SEEN.items():  # pylint: disable=protected-access
+            cmd = shlex.join(shost.hidepid_argv(mode, os.getpid()))
+            shell.on(cmd).succeeds(override.get(mode, "\n".join(seen) + "\n"))
+        return shell
+
+    def test_pass_when_each_mode_hides_what_the_kernel_says(self) -> None:
+        res = self._run(self._shell())
+        assert res.result == "PASS", (res.expected, res.came)
+
+    def test_fail_when_invisible_shows_pid_1(self) -> None:
+        res = self._run(self._shell(invisible="yes\nno\nyes\nyes\nno\n"))
+        assert (res.result, res.came) == ("FAIL", "yes no yes yes no"), res.expected
+        assert res.expected.startswith("with hidepid=invisible: 1 no")
+
+    def test_fail_when_not_root(self) -> None:
+        res = self._run(self._shell(), status="Uid:\t1000\t1000\t1000\t1000\nGid:\t0\t0\t0\t0\n")
+        assert (res.result, res.expected) == ("FAIL", "this run's uid and gid all 0 (root)")
+
+    def test_skip_without_unshare(self) -> None:
+        check_ = next(c for c in all_selftest_checks() if c.cid == "RDR-02")
+        with tempfile.TemporaryDirectory() as td:
+            log = make_log()
+            bench = stest.Bench(log, Cleanup(log), root=td)
+            with patch(
+                "lib.selftest_host.shutil.which",
+                side_effect=lambda t: None if t == "unshare" else t,
+            ):
+                res = stest.run_one(check_, bench)
+        assert (res.result, res.reason) == ("SKIP", "unshare (util-linux) is not installed")
+
+    def test_the_probe_on_this_kernel(self) -> None:
+        # The argv RDR-02 runs, on the suite's own kernel, as root.
+        if os.geteuid() != 0:
+            raise SkipTest("needs root (a proc mount in a private namespace)")
+        for tool in ("unshare", "setpriv"):
+            if not shutil.which(tool):
+                raise SkipTest(f"{tool} (util-linux) is not installed")
+        for mode, seen in shost._HIDEPID_SEEN.items():  # pylint: disable=protected-access
+            argv = shost.hidepid_argv(mode, os.getpid())
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+            if r.returncode != 0:
+                raise SkipTest(f"a proc mount is refused here: {r.stderr.strip()}")
+            assert tuple(r.stdout.split()) == seen, (mode, r.stdout)
+
+
 class TestRunner:
     """The suite's own runner (M1P.26)."""
 
@@ -23610,8 +23672,8 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
         # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05, POOL-15;
-        # M11: DST-06
-        assert len([c for c in checks if c.level == 1]) == 60
+        # M11: DST-06; M14: RDR-02
+        assert len([c for c in checks if c.level == 1]) == 61
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         # A check whose expectations changed gets its next revision (M9b, M11).
