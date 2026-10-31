@@ -61,6 +61,29 @@ _LONG_HEX = re.compile(r"\b(?:0x)?[0-9a-fA-F]{12,}\b")
 _BY_ID = re.compile(r"/dev/disk/by-id/[^\s'\"]+")
 _NOT_ALNUM_BEFORE, _NOT_ALNUM_AFTER = r"(?<![A-Za-z0-9])", r"(?![A-Za-z0-9])"
 
+# What a report keeps of iso and exact.*: only the shapes Ubuntu and its
+# packages write; anything else (a remastered image's line, a custom kernel's
+# local version) may carry a name and becomes OTHER (S8P.1, M14-15). The same
+# patterns as pages/matrix.py's RE_ISO and EXACT_RE, which a test pins equal.
+OTHER = "other"
+# pylint: disable=duplicate-code
+_VERSION_TAIL = r"[0-9A-Za-z.+~:-]+"
+ISO_SHAPE = re.compile(
+    r'Ubuntu \d\d\.\d\d(?:\.\d+)?(?: LTS)? "[A-Za-z ]{1,40}" - '
+    + r"(?:Release|Daily|Beta|Alpha) amd64 \(\d{8}(?:\.\d+)?\)"
+)
+EXACT_SHAPES: dict[str, re.Pattern[str]] = {
+    "ubuntu": re.compile(r"\d\d\.\d\d(?:\.\d+)?(?: LTS)? \([A-Za-z ]{1,40}\)"),
+    "kernel": re.compile(r"\d+\.\d+\.\d+-\d+-[a-z0-9]{1,20}"),
+    "zfs": re.compile(rf"zfs-\d+\.\d+(?:\.\d+)?-{_VERSION_TAIL}"),
+    "zfs_kmod": re.compile(rf"zfs-kmod-\d+\.\d+(?:\.\d+)?-{_VERSION_TAIL}"),
+    "util_linux": re.compile(r"\d+\.\d+(?:\.\d+)?"),
+    "systemd": re.compile(rf"\d+ \(\d+(?:\.\d+)*-{_VERSION_TAIL}\)"),
+    "python": re.compile(r"\d+\.\d+\.\d+"),
+    "sgdisk": re.compile(r"\d+\.\d+\.\d+"),
+}
+# pylint: enable=duplicate-code
+
 
 def certificates_file() -> Path:
     """The certificates shipped with zark: next to lib/ in a portable copy,
@@ -90,6 +113,25 @@ def sanitize(text: str, masks: dict[str, str]) -> str:
         text = re.sub(rf"{_NOT_ALNUM_BEFORE}{re.escape(host)}{_NOT_ALNUM_AFTER}", "<host>", text)
     text = _LONG_HEX.sub(lambda m: m.group(0) if m.group(0).isdigit() else "<hex>", text)
     return _LONG_NUMBER.sub("<n>", text)
+
+
+def platform_shapes(cert: dict[str, Any]) -> dict[str, Any]:
+    """``cert`` with ``iso`` and each ``exact`` value kept only in its shape
+    (:data:`ISO_SHAPE`, :data:`EXACT_SHAPES`), else :data:`OTHER`; a null or
+    absent ``iso`` stays as it is. Nothing else changes."""
+    out = dict(cert)
+    iso = out.get("iso")
+    if iso is not None:
+        out["iso"] = iso if isinstance(iso, str) and ISO_SHAPE.fullmatch(iso) else OTHER
+    exact = out.get("exact")
+    if isinstance(exact, dict):
+        out["exact"] = {
+            k: v
+            if isinstance(v, str) and k in EXACT_SHAPES and EXACT_SHAPES[k].fullmatch(v)
+            else OTHER
+            for k, v in exact.items()
+        }
+    return out
 
 
 @dataclass
@@ -127,7 +169,7 @@ def build_report(
             if k in row:
                 row[k] = sanitize(str(row[k]), masks)
         clean.append(row)
-    return {"format": FORMAT, "certificate": cert, "results": clean}
+    return {"format": FORMAT, "certificate": platform_shapes(cert), "results": clean}
 
 
 def write_report(report: dict[str, Any], record_dir: str = RECORD_DIR) -> Path:
@@ -223,7 +265,11 @@ def read_certificates(path: Path | None = None) -> list[dict[str, Any]]:
 
 def certificate_entry(report: dict[str, Any]) -> dict[str, Any]:
     """The certificates-file entry of a report, or ValueError saying why it
-    cannot be one (partial, wrong format, a check failed or missing)."""
+    cannot be one: not a report of this format, no certificate, a partial or
+    stopped run, or no ``zark``, ``where``, ``level`` or ``series``. The
+    entry keeps every check's result, FAIL and SKIP included; it certifies
+    only what passed, since coverage reads only PASS (S8P.2, M14-16).
+    ``iso`` and ``exact`` keep only their shapes (:func:`platform_shapes`)."""
     if not isinstance(report, dict) or report.get("format") != FORMAT:
         raise ValueError("not a zark self-test report (format 1)")
     cert = report.get("certificate")
@@ -234,7 +280,7 @@ def certificate_entry(report: dict[str, Any]) -> dict[str, Any]:
     for key in ("zark", "where", "level", "series"):
         if key not in cert:
             raise ValueError(f"the certificate has no {key}")
-    return {k: v for k, v in cert.items() if k != "failed"}
+    return platform_shapes({k: v for k, v in cert.items() if k != "failed"})
 
 
 # ── coverage ─────────────────────────────────────────────────────────────

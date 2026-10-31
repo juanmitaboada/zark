@@ -24305,6 +24305,84 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
             raise AssertionError(f"accepted {bad}")
 
 
+_OFFICIAL_ISO = 'Ubuntu 26.04 "Resolute Raccoon" - Release amd64 (20260423.1)'
+_EXACT_OK = {
+    "ubuntu": "26.04.1 LTS (Resolute Raccoon)",
+    "kernel": "7.0.0-38-generic",
+    "zfs": "zfs-2.4.1-1ubuntu5.1",
+    "zfs_kmod": "zfs-kmod-2.4.1-1ubuntu5.1",
+    "util_linux": "2.41.3",
+    "systemd": "259 (259.5-0ubuntu3.4)",
+    "python": "3.14.4",
+    "sgdisk": "1.0.10",
+}
+
+
+class TestCertificateShapes:  # pylint: disable=missing-function-docstring
+    """S8P.1, S8P.2 (M14-15 15a, M14-16 16a): iso and exact by shape; what an
+    entry keeps and refuses."""
+
+    def test_a_report_keeps_the_shapes_and_nothing_else(self) -> None:
+        rep = _report([], _facts(where="live", iso=_OFFICIAL_ISO, exact=_EXACT_OK))
+        assert rep["certificate"]["iso"] == _OFFICIAL_ISO
+        assert rep["certificate"]["exact"] == _EXACT_OK
+        odd = {k: f"{v} juanmi" for k, v in _EXACT_OK.items()}
+        rep = _report([], _facts(where="live", iso="Juanmi's ZarkLive 1.0", exact=odd))
+        assert rep["certificate"]["iso"] == certs.OTHER
+        assert rep["certificate"]["exact"] == dict.fromkeys(_EXACT_OK, certs.OTHER)
+        assert _report([], _facts(iso=None))["certificate"]["iso"] is None
+
+    def test_an_entry_reshapes_a_report_it_did_not_build(self) -> None:
+        rep = _report([stest.Result("POOL-01.1", "PASS")])
+        rep["certificate"]["iso"] = "Ubuntu 26.04 custom by juanmi"
+        rep["certificate"]["exact"] = {"kernel": "7.0.0-38-juanmi-laptop", "unknown": "x"}
+        entry = certs.certificate_entry(rep)
+        assert entry["iso"] == certs.OTHER
+        assert entry["exact"] == {"kernel": certs.OTHER, "unknown": certs.OTHER}
+        assert entry["series"] == rep["certificate"]["series"]  # coverage matches on it
+
+    def test_the_shipped_entries_are_unchanged(self) -> None:
+        entries = certs.read_certificates(_REPO_ROOT / "certificates" / "selftest.json")
+        assert len(entries) >= 28
+        assert [certs.platform_shapes(e) for e in entries] == entries
+
+    def test_the_shapes_are_the_pages(self) -> None:
+        # pages/matrix.py publishes by the same patterns; neither changes alone.
+        spec = importlib.util.spec_from_file_location("matrix", _REPO_ROOT / "pages/matrix.py")
+        assert spec is not None and spec.loader is not None
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        assert certs.ISO_SHAPE.pattern == gen.RE_ISO.pattern
+        assert {k: p.pattern for k, p in certs.EXACT_SHAPES.items()} == {
+            k: p.pattern for k, p in gen.EXACT_RE.items()
+        }
+
+    def test_an_entry_keeps_fail_and_skip_and_refuses_what_its_docstring_says(self) -> None:
+        results = [
+            stest.Result("POOL-01.1", "PASS"),
+            stest.Result("POOL-02.1", "FAIL", reason="r"),
+            stest.Result("POOL-03.1", "SKIP", reason="s"),
+        ]
+        entry = certs.certificate_entry(_report(results))
+        assert entry["checks"] == {"POOL-01.1": "PASS", "POOL-02.1": "FAIL", "POOL-03.1": "SKIP"}
+        good = _report(results)
+        bad: list[Any] = [
+            [],
+            {"format": 9, "certificate": good["certificate"]},
+            {"format": 1},
+            _report(results, partial=True),
+        ]
+        for key in ("zark", "where", "level", "series"):
+            cert = {k: v for k, v in good["certificate"].items() if k != key}
+            bad.append({**good, "certificate": cert})
+        for rep in bad:
+            try:
+                _ = certs.certificate_entry(rep)
+            except ValueError:
+                continue
+            raise AssertionError(f"accepted {rep}")
+
+
 class TestPlatformFacts:  # pylint: disable=missing-function-docstring
     """M4s-8, M4s-14: exact versions, series, where."""
 
