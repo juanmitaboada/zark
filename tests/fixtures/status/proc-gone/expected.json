@@ -1,0 +1,8 @@
+{
+  "now": "2026-10-24T09:19:44Z",
+  "progress_process": "proc",
+  "progress": "orphan",
+  "status": "ok",
+  "indicator": "edge",
+  "what": "/proc shows root's processes (/proc/1 exists) and pid 48213 does not exist: rule 4, an orphan."
+}

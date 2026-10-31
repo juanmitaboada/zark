@@ -233,7 +233,13 @@ removes it, since `/run` is tmpfs. A reader classifies it, first match wins:
 2. Not parseable, not an object, `kind` other than `zark-progress`, or
    `schema_version` higher than supported: `unknown`.
 3. `boot_id` differs from `/proc/sys/kernel/random/boot_id`: `orphan`.
-4. `/proc/<pid>` does not exist: `orphan`.
+4. `/proc/<pid>` does not exist: `orphan`, unless `/proc` hides root's
+   processes from the reader. The reader tells by `/proc/1`: pid 1 always
+   exists and, like the zark that wrote the file, runs as root, so when
+   `/proc/1` does not exist for the reader either, `/proc` is mounted with
+   `hidepid=invisible` or `hidepid=ptraceable` and the reader may not see
+   root's processes. A pid the reader cannot see is then no evidence that
+   the run ended: this rule is skipped, and the heartbeat decides (rule 6).
 5. `/proc/<pid>/stat` is readable and its field 22 differs from
    `pid_start_ticks`: `orphan` (the pid was reused). Fields are counted after
    the last `)` of the line, since the process name may contain spaces or
@@ -245,7 +251,19 @@ removes it, since `/run` is tmpfs. A reader classifies it, first match wins:
    orphan.
 7. Otherwise: `running`.
 
-On a default Ubuntu every one of these reads works unprivileged.
+When `/proc` hides root's processes, a run whose process ended without
+removing the file (a SIGKILL, a crash) is `stalled` 30 s after its last
+heartbeat and stays so until the next zark command finds the orphan or a
+reboot clears `/run`. A reader may say that it cannot tell whether such a
+run still lives. A reader that runs as root, or in the group the mount's
+`gid=` option names, sees every process: `/proc/1` exists for it and rule
+4 applies as written. With `hidepid=noaccess` every `/proc/<pid>` still
+exists for every reader; only its files are closed, so rule 4 applies and
+rule 5 is skipped, as it says.
+
+On a default Ubuntu `/proc` hides nothing and every one of these reads
+works unprivileged. With `hidepid`, the reads of rules 4 and 5 may fail;
+the rules say what a reader does then.
 
 A command that takes the lock knows any `progress.json` it finds is an
 orphan, since the lock admits one run. Before replacing it, if the orphan's
@@ -654,7 +672,9 @@ What any program may rely on, and how to read the files safely.
   be gone from the next file.
 - Both files are replaced atomically: a reader never sees a partial file.
 - Nothing in them is secret, and nothing needs root: files 0644, directories
-  0755, and every read the orphan rules need works unprivileged.
+  0755, and every read the orphan rules need works unprivileged on a
+  `/proc` mounted without `hidepid`; with it, rules 4 and 5 say what a
+  reader skips.
 - The JSON Schemas in `docs/schema/` describe exactly what a schema 1 writer
   writes. Fixtures for every state, with the state expected for each, are in
   `tests/fixtures/status/`.

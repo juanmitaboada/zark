@@ -1,0 +1,8 @@
+{
+  "now": "2026-10-24T09:19:44Z",
+  "progress_process": "proc",
+  "progress": "running",
+  "status": "ok",
+  "indicator": "running",
+  "what": "Backup to black, step 7; /proc hides root's processes (no /proc/1): rule 4 skipped, the heartbeat is fresh."
+}

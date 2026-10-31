@@ -198,10 +198,11 @@ class TestStatusFixtures:  # pylint: disable=missing-function-docstring
     _STATUS = ("ok", "stale", "newer", "unreadable", "absent")
     _INDICATOR = ("waiting", "running", "attention", "edge", "overdue", "none", "ok")
 
-    def test_the_twenty_cases_are_there(self):
-        # R9.2 (M9a): drive-contents and drive-contents-partial join the 18.
+    def test_the_twenty_five_cases_are_there(self):
+        # R9.2 (M9a): drive-contents and drive-contents-partial join the 18;
+        # M8P.1 (M14): the five `proc` cases join the 20.
         names = [p.name for p in _cases()]
-        assert len(names) == 20, names
+        assert len(names) == 25, names
         readme = (FIXTURES / "README.md").read_text("utf-8")
         for name in names:
             assert f"| `{name}` |" in readme, name
@@ -226,7 +227,7 @@ class TestStatusFixtures:  # pylint: disable=missing-function-docstring
                     continue
                 assert not got, (case.name, kind, got)
                 checked += 1
-        assert checked == 25, checked  # 18 status.json and 7 progress.json
+        assert checked == 35, checked  # 23 status.json and 12 progress.json
 
     def test_every_case_says_what_a_reader_concludes(self):
         for case in _cases():
@@ -251,7 +252,10 @@ class TestStatusFixtures:  # pylint: disable=missing-function-docstring
             else:
                 assert exp["progress_process"] is not None, case.name
             assert (exp["progress"] == "idle") == (not has_progress), case.name
-            assert exp["progress_process"] in (None, "alive", "dead"), case.name
+            assert exp["progress_process"] in (None, "alive", "dead", "proc"), case.name
+            # A `proc` case carries the tree its real checks read (M8P.1).
+            has_proc = (case / "proc/sys/kernel/random/boot_id").is_file()
+            assert (exp["progress_process"] == "proc") == has_proc, case.name
             assert (exp["status"] == "absent") == (not (case / STATUS_REL).exists()), case.name
             assert not schema_check.errors(exp["now"], {"pattern": "^\\d{4}-\\d{2}-\\d{2}T"})
 

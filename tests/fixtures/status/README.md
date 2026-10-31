@@ -7,6 +7,7 @@ paths, so a reader under test can point its root at it:
     <case>/run/zark/progress.json      (only while a command runs)
     <case>/var/lib/zark/status.json
     <case>/expected.json               (what a reader must conclude)
+    <case>/proc/                       (only in the `proc` cases, below)
 
 Every `status.json` and `progress.json` validates against `docs/schema/`,
 except where the case says otherwise (`newer-schema`, `progress-unreadable`).
@@ -35,7 +36,7 @@ no `reclaim_bytes` is a ZFS figure.
 | Field | Meaning |
 |---|---|
 | `now` | the reader's clock for this case: every orphan, stalled and stale rule is judged at this time |
-| `progress_process` | `alive`: the reader under test treats the process `progress.json` names as alive (boot id, pid and start ticks match); `dead`: the real check applies and finds it gone; null: no `progress.json` |
+| `progress_process` | `alive`: the reader under test treats the process `progress.json` names as alive (boot id, pid and start ticks match); `dead`: the real check applies and finds it gone; `proc`: the real check applies to the case's own proc tree (see Liveness); null: no `progress.json` |
 | `progress` | `idle`, `running`, `stalled`, `orphan` or `unknown` (Orphan detection) |
 | `status` | `ok`, `stale`, `newer`, `unreadable` or `absent` |
 | `indicator` | the state of "Reading the files", Indicator state |
@@ -66,15 +67,31 @@ no `reclaim_bytes` is a ZFS figure.
 | `no-status` | absent | absent | `none` |
 | `drive-contents` | absent | as `idle`, black with `datasets`, `points`, `non_point_snapshots`, `retention_next` and `reclaim_by_age`; blue without them | `ok` |
 | `drive-contents-partial` | absent | as `idle`, black with `points`, `retention_next` (`reclaim_bytes` null) and `reclaim_by_age` measured for its 6 oldest entries only, no `datasets` | `ok` |
+| `hidepid-running` | `running`'s file; the case's `/proc` has no `1/` and no pid (`hidepid`) | as `idle` | `running` |
+| `hidepid-stalled` | as `hidepid-running`, heartbeat 95 s old | as `idle` | `running` |
+| `hidepid-other-boot` | as `hidepid-running`, the case's `boot_id` another boot's | as `idle` | `edge` |
+| `proc-gone` | `running`'s file; the case's `/proc` has `1/` but not the pid | as `idle` | `edge` |
+| `proc-reused` | `running`'s file; the case's `/proc` has `1/` and the pid with other start ticks | as `idle` | `edge` |
 
 ## Liveness
 
 A fixture cannot name a live process or the current boot, so with the real
-checks every `progress.json` here is an orphan. A reader under test injects
+checks every `progress.json` here, but those of the `proc` cases, is an
+orphan. A reader under test injects
 its clock (`now`) and, for `alive` cases, its liveness check. The `orphan`
 case uses pid 4194304, which no Linux process can have (`PID_MAX_LIMIT` on
 64-bit; pids are allocated below `pid_max`, whose maximum is that value), so
 the real check finds it gone on any machine.
+
+The `proc` cases carry what the real checks read under `<case>/proc/`:
+`sys/kernel/random/boot_id` always, `1/stat` when root's processes are
+visible (no `1/` stands for a `/proc` mounted with `hidepid=invisible` or
+`ptraceable`, orphan rule 4), and `48213/stat` when the pid exists. A
+reader under test points its `/proc` at `<case>/proc` and its boot id at
+`<case>/proc/sys/kernel/random/boot_id`, and applies rules 3 to 5 as it
+would on the real files. `proc-reused`'s `48213/stat` names a process
+whose name holds a space and a `)`, so that its start ticks are counted
+after the last `)`.
 
 To see the running state against the real kernel, copy a case and point it
 at a live process of your own:
