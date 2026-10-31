@@ -736,6 +736,8 @@ figures of "Space object", "Source pool entry" (with what the root's
 - It also reads a drive's optional contents, when a writer records them
   (`drive_contents`, `drive_margin_bytes`, `retention_next_is_floor`); a
   file without them gives None.
+- `proc_hides_root(proc)` is orphan rule 4's probe: true when `/proc/1` does
+  not exist for the reader, so `/proc` hides root's processes from it.
 - It never writes, takes no lock and runs no command. The fixtures in
   `tests/fixtures/status/` with their `expected.json` are its tests, and the
   tests of any other reader.

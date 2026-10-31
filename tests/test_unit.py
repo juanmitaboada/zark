@@ -22084,11 +22084,6 @@ def _expected(case: Path) -> dict[str, Any]:
     return json.loads((case / "expected.json").read_text("utf-8"))
 
 
-# The amended orphan rule 4 (M8P.1) reaches the reference reader in M14's next
-# commit; until then these two cases are left out of the classification tests.
-_RULE4_PENDING = ("hidepid-running", "hidepid-stalled")
-
-
 def _alive_for(case: Path, expected: dict[str, Any]) -> Any:
     """The fixtures' README: ``alive`` cases inject liveness, ``dead`` ones
     use the real check (pid 4194304 exists nowhere), ``proc`` ones the real
@@ -22163,9 +22158,10 @@ class TestStatusReaderFixtures:  # pylint: disable=missing-function-docstring
     def test_every_case_classifies_as_expected(self) -> None:
         wrong: list[str] = []
         for case in _fixture_cases():
-            if case.name in _RULE4_PENDING:
-                continue
             e = _expected(case)
+            if e["progress_process"] == "dead" and sreader.proc_hides_root():
+                # The amended rule 4 (M8P.1) rightly calls no hidden pid an orphan.
+                continue
             r = _reading_of(case)
             got = (r.progress_class, r.status_class, r.indicator)
             want = (e["progress"], e["status"], e["indicator"])
@@ -22238,6 +22234,106 @@ class TestStatusReaderProcesses:  # pylint: disable=missing-function-docstring
             assert sreader.process_alive(
                 {**doc, "boot_id": "x"}, proc=proc, boot_id_path=Path(td, "none")
             )
+
+
+class TestStatusReaderHidepid:  # pylint: disable=missing-function-docstring
+    """M8P.1: orphan rule 4 skipped when /proc hides root's processes."""
+
+    def _tree(self, td: str, *, one: bool, pid: int | None, ticks: int = 5) -> Path:
+        proc = Path(td, "proc")
+        (proc / "sys/kernel/random").mkdir(parents=True)
+        (proc / "sys/kernel/random/boot_id").write_text("b\n", "ascii")
+        if one:
+            (proc / "1").mkdir()
+        if pid is not None:
+            (proc / str(pid)).mkdir()
+            stat = f"{pid} (x) S" + " 0" * 18 + f" {ticks} 0 0\n"
+            (proc / str(pid) / "stat").write_text(stat, "ascii")
+        return proc
+
+    def _alive(self, proc: Path, **doc: Any) -> bool:
+        full = {"pid": 77, "pid_start_ticks": 5, "boot_id": "b", **doc}
+        boot = proc / "sys/kernel/random/boot_id"
+        return sreader.process_alive(full, proc=proc, boot_id_path=boot)
+
+    def test_the_probe_is_proc_1(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            assert sreader.proc_hides_root(self._tree(td, one=False, pid=None))
+        with tempfile.TemporaryDirectory() as td:
+            assert not sreader.proc_hides_root(self._tree(td, one=True, pid=None))
+
+    def test_a_hidden_pid_is_not_an_orphan_a_missing_one_is(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            proc = self._tree(td, one=False, pid=None)
+            assert self._alive(proc)  # rule 4 skipped
+            assert not self._alive(proc, boot_id="other")  # rule 3 still applies
+        with tempfile.TemporaryDirectory() as td:
+            assert not self._alive(self._tree(td, one=True, pid=None))  # rule 4
+
+    def test_rule_5_applies_under_hiding_to_a_visible_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            proc = self._tree(td, one=False, pid=77, ticks=9)
+            assert not self._alive(proc)
+        with tempfile.TemporaryDirectory() as td:
+            assert self._alive(self._tree(td, one=False, pid=77, ticks=5))
+
+    def test_a_real_proc_instance_with_hidepid(self) -> None:
+        # As nobody, on a private proc mount: what a hidepid host shows a user.
+        if os.geteuid() != 0:
+            raise SkipTest("needs root (a proc mount in a private namespace)")
+        for tool in ("unshare", "setpriv", "mount"):
+            if not shutil.which(tool):
+                raise SkipTest(f"{tool} (util-linux) is not installed")
+        child = subprocess.Popen(["sleep", "60"])  # pylint: disable=consider-using-with
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                os.chmod(td, 0o755)
+                now = datetime.now(UTC).replace(microsecond=0)
+                root = _live_root(Path(td, "root"), child.pid, updated=now)
+                for d in (Path(td, "root"), root / "run", root / "run/zark"):
+                    os.chmod(d, 0o755)
+                os.chmod(root / "run/zark/progress.json", 0o644)
+                mnt = Path(td, "proc")
+                mnt.mkdir(mode=0o755)
+                probe = (
+                    "import json, sys; sys.path.insert(0, sys.argv[1]);"
+                    " from pathlib import Path; from lib import status_reader as r;"
+                    " p = Path(sys.argv[2]); d = json.loads(Path(sys.argv[3]).read_text());"
+                    " print(r.proc_hides_root(p), r.process_alive(d, proc=p))"
+                )
+                script = (
+                    f"mount -t proc -o hidepid=$1 proc {shlex.quote(str(mnt))} && "
+                    "setpriv --reuid=65534 --regid=65534 --clear-groups -- "
+                    f"{shlex.quote(sys.executable)} -I -c {shlex.quote(probe)} "
+                    f"{shlex.quote(str(_REPO_ROOT))} {shlex.quote(str(mnt))} "
+                    f"{shlex.quote(str(root / 'run/zark/progress.json'))}"
+                )
+                ns = ["unshare", "--mount", "--propagation", "private", "sh", "-c", script, "sh"]
+
+                def run_as_nobody(mode: str) -> list[str]:
+                    r = subprocess.run(
+                        [*ns, mode], capture_output=True, text=True, timeout=30, check=False
+                    )
+                    why = r.stderr.strip()
+                    if r.returncode != 0 and "mount" in why:
+                        raise SkipTest(f"a proc mount is refused here: {why}")
+                    if r.returncode != 0:
+                        raise SkipTest(
+                            f"nobody cannot run this Python or read this checkout: {why}"
+                        )
+                    return r.stdout.split()
+
+                assert run_as_nobody("invisible") == ["True", "True"]
+                assert run_as_nobody("off") == ["False", "True"]
+                child.kill()
+                _ = child.wait()
+                # Gone: hidden, it cannot be told (rule 4 skipped); visible, an orphan.
+                assert run_as_nobody("invisible") == ["True", "True"]
+                assert run_as_nobody("off") == ["False", "False"]
+        finally:
+            if child.poll() is None:
+                child.kill()
+                _ = child.wait()
 
 
 class TestStatusReaderEdges:  # pylint: disable=missing-function-docstring
@@ -22982,9 +23078,9 @@ class TestMonitorOptions:  # pylint: disable=missing-function-docstring
 
     def test_once_and_state(self) -> None:
         for case in _fixture_cases():
-            if case.name in _RULE4_PENDING:
-                continue
             e = _expected(case)
+            if e["progress_process"] == "dead" and sreader.proc_hides_root():
+                continue  # as in TestStatusReaderFixtures (M8P.1)
             now = sreader.parse_timestamp(e["now"]) or datetime.now(UTC)
             session = monitor_mod.Session(
                 monitor_mod.Options(once=True, state=True, root=case, live=False),

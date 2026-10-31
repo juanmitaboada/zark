@@ -69,6 +69,7 @@ __all__ = [
     "pool_metadata_bytes",
     "paths",
     "process_alive",
+    "proc_hides_root",
     "retention_next_is_floor",
     "read_all",
     "read_progress",
@@ -232,6 +233,14 @@ def _start_ticks(stat_line: str) -> int | None:
     return int(fields[19])
 
 
+def proc_hides_root(proc: Path = PROC) -> bool:
+    """Whether ``proc`` hides root's processes from this reader (orphan rule
+    4): pid 1 always exists and, like zark, runs as root, so it is hidden
+    exactly when zark's own pid would be (``hidepid=invisible`` or
+    ``ptraceable``, a reader neither root nor in the mount's ``gid=``)."""
+    return not (proc / "1").exists()
+
+
 def process_alive(
     doc: Mapping[str, Any],
     *,
@@ -240,7 +249,8 @@ def process_alive(
 ) -> bool:
     """Whether the process a ``progress.json`` names still runs (orphan rules
     3 to 5). A check whose file cannot be read is skipped, as rule 5 says for
-    ``hidepid``: an unreadable check never makes a live run an orphan."""
+    ``hidepid``, and a pid ``proc`` may be hiding is no evidence (rule 4): an
+    unreadable or hidden check never makes a live run an orphan."""
     try:
         boot_id = boot_id_path.read_text(encoding="ascii").strip()
     except (OSError, UnicodeDecodeError):
@@ -251,7 +261,8 @@ def process_alive(
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     if not (proc / str(pid)).exists():
-        return False
+        # Rule 4 is skipped when root's processes are hidden; the heartbeat decides.
+        return proc_hides_root(proc)
     try:
         line = (proc / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
     except OSError:
