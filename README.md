@@ -135,7 +135,7 @@ It needs Ubuntu 26.04 LTS (GNOME Shell 50) and zark 2.1.0 or later:
 sudo apt install gnome-shell-extension-zark   # from the same PPA; brings zark along
 ```
 
-It is also on [extensions.gnome.org](https://extensions.gnome.org/extension/11491/zark-backup-status/).
+It has been submitted to [extensions.gnome.org](https://extensions.gnome.org/extension/11491/zark-backup-status/) and is awaiting review there; until it is approved, the PPA is the way to install it.
 
 ## How it compares
 
