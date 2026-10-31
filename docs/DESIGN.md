@@ -15,6 +15,7 @@ zark/
 │   ├── boot_chain.py          # A restored system's boot chain: mounts, GRUB, initrd scripts
 │   ├── certificates.py        # Self-test reports, the local record, certificates
 │   ├── cleanup.py             # Cleanup and safe teardown
+│   ├── cli_spec.py            # The command line declared once: groups, help, words
 │   ├── config.py              # Version, paths and configuration
 │   ├── dependents.py          # What a destroy on a drive must take first, and in which order
 │   ├── drive_contents.py      # What a backup drive holds, for status.json (read-only)

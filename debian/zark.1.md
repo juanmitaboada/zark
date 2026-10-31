@@ -69,240 +69,11 @@ equivalent: passing **--backup** is treated as **backup**.
 
 # COMMANDS
 
-The fourteen commands are grouped here by purpose. Within each group the
-commands appear in the order they are typically used. See **WORKFLOWS** below
-for the canonical end-to-end sequences.
+The commands, grouped by purpose and sorted by name within each group, as
+**zark --help** lists them. See **WORKFLOWS** below for the canonical
+end-to-end sequences.
 
-## Inspection
-
-**explore**
-:   Non-destructively scan all connected block devices for ZFS pools and
-    classify each one against the registry in **known_drives.json**:
-
-    - *known* - name and pool GUID match a registered drive;
-    - *GUID changed* - pool name matches but the GUID differs (typically
-      after a re-prepare);
-    - *renamed* - the GUID matches but the pool has been renamed;
-    - *unknown* - the drive is not registered.
-
-    For drives in the last three categories, **explore** prints the exact
-    JSON snippet that should be added to **known_drives.json** to register
-    them.
-
-**monitor** \[**--once** \[**--state**\]\] \[**--interval** *N*\] \[**--root** *DIR*\] \[**--no-live**\]
-:   A live view of what **zark** is doing and how the backups stand, for a
-    second terminal. Any user can run it: it needs no root, takes no lock,
-    writes nothing and never imports, exports or changes a pool. It reads
-    the status files (*/run/zark/progress.json* every second,
-    */var/lib/zark/status.json* when it changes; *docs/STATUS-FILES.md* in
-    the source tree) and lists the source pools with **zfs list** and
-    **zpool list** every *N* seconds (default 60, from 5 to 3600).
-
-    The state comes first: **RUNNING** with the command, its step, and for
-    a backup the bytes sent, the rate, the time left, the transfers and the
-    dataset being sent; **WAITING FOR INPUT** with what the command asks
-    (the terminal bell rings once); **ATTENTION** when a drive's last backup
-    run ended **incomplete**, **not_verified** or **interrupted**, or a
-    notice is critical; **CHECK** when a run was killed (its process is
-    gone), or *status.json* is old, unreadable or from a newer **zark**.
-    When */proc* hides root's processes from the user (**hidepid**), a run
-    whose heartbeat stopped stays **RUNNING** with its figures marked not
-    current, and a line says it cannot tell whether the run still lives;
-    **OVERDUE**, **NO STATUS** or **OK**. Below it, the source pools (used,
-    free, reserved by ZFS, capacity, health), each registered drive
-    (connected or not, last backup, last run, fill and when it was
-    measured, the margin a backup tries to leave free, and the drive's
-    points by month, what its retention policy removes next, what
-    removing its oldest points would free (the oldest one alone, and all
-    of them that **prune** would offer; "not measured" where it was not)
-    and the largest datasets on it, as **backup** and **prune** last
-    measured them), the datasets of each
-    source pool with the pool's metadata apart, and the notices. Live
-    figures say so; figures from the files carry their date.
-
-    With a terminal it runs full screen. Keys: **q** quit, **d** datasets on
-    or off, **s** sort them (own size, snapshots, name), **-** and **+** the
-    interval (15, 30, 60, 120, 300, 600 s), **r** list the pools now, **b**
-    the bell on or off, **h** the key line. **NO_COLOR** turns colour off.
-    Without a terminal it prints a frame when something changes. While it
-    follows a backup the time left (**ETA ~**) comes from the run's own
-    pace, bytes and the fixed cost of each transfer, and shows once two
-    transfers have ended and 64 MiB have moved. It charges each transfer
-    left the mean fixed cost of those ended, so when the last transfers are
-    faster than the first it stays high near the end of the run (up to a
-    minute with 22 datasets); the status files give no size per dataset to
-    do better.
-    **--once** prints one frame and exits, with the time left from the
-    current rate; with **--state** it prints only
-    the state: **waiting**, **running**, **attention**, **edge**,
-    **overdue**, **none** or **ok**. **--root** *DIR* reads
-    *DIR/run/zark/progress.json* and *DIR/var/lib/zark/status.json*, and
-    **--no-live** runs neither **zfs** nor **zpool**: both are for testing
-    and for looking at the example files in *tests/fixtures/status/*. A
-    usage error exits 2.
-
-**health** \[*device*\]
-:   Interactive drive analysis and debugging tool. With a *device* it checks
-    that device; without one it scans connected non-system drives and lets
-    you pick. It first asks whether to run a *read-only* check (default) or a
-    *destructive* write-and-verify test, gathers any further choices up front,
-    then runs unattended except for a single pause.
-
-    The read-only check inspects kernel/sysfs state: whether the USB-SATA
-    bridge reports DPO/FUA support and whether it runs the UAS transport
-    (both shown as information: most USB bridges report no FUA, and UAS is
-    the normal driver), and the bridge's USB VID:PID against a
-    known-problematic list, the one risk it warns about. It also reports the
-    health of any pool on the drive without importing it: an imported pool
-    from its error counters, an exported one from the state **zpool import
-    -d** reports, with the commands that read its counters. It writes
-    nothing and flags *risk* only; it cannot prove a bridge honest, which
-    shows solely under load.
-
-    The destructive test (after explicit confirmation, on a blank drive)
-    creates a throwaway pool on the drive's by-id name, never written to
-    */etc/zfs/zpool.cache*, and writes with transaction churn (*fast*,
-    ~2 GB; *medium*, ~15 GB; or *surface*, whole disk, capped), then
-    re-imports to confirm the writes persisted. An optional *cold* pass
-    powers the device down, waits for you to physically reconnect it, and
-    re-imports, so the read-back comes strictly from NAND rather than the
-    bridge's cache. Time estimates are shown from a measured write speed. The
-    throwaway pool lives under */run/zark/altroot*, so **clean** releases
-    one a killed run left imported. Afterwards it is destroyed read-write
-    (a read-only import is exported and imported read-write first: a
-    read-only pool's destroy writes nothing to its labels), and a pool that
-    could not be destroyed is reported as an error, with the command that
-    lists what may remain, and in the diagnostic report. Then only the disk
-    its by-id name resolves to is wiped, and only when its label is the
-    test pool's or there is none. A cold pass needs a by-id name and fails
-    before writing without one; after the reconnect it waits for udev and
-    up to 10 seconds for the disk's by-id links, and a partition link that
-    never appears is its own failure. Kernel transport errors logged
-    between the eject and the reconnect are listed as at the unplug and
-    not counted: the pool was exported and synced before the eject. The
-    export before the eject is checked: a pool that did not leave stops the
-    test as failed. A reconnect pause that gets end of input (a closed
-    standard input) is not a confirmation: the cold pass fails, and the
-    test pool is cleaned when the drive can still be reached, else purge
-    removes it before the next test. Transport lines are matched by the whole disk name (not a name
-    that merely starts like it), by the USB device of its bridge for the
-    kernel's reset lines, and after the reconnect by the name the disk came
-    back with. A failed test, or a test pool that could not be destroyed, ends with exit
-    status 1; a pass, also with transport errors, and the read-only
-    check's risks end with 0.
-
-    Whenever a risk (a warning) or test failure is found, a self-contained diagnostic
-    report is written to */tmp* (environment, drive, bridge VID:PID, findings,
-    dmesg tail) with instructions for filing a GitHub issue; you may choose to
-    obfuscate serials/GUIDs. See the enclosure notes in **docs/HARDWARE.md**.
-    The read-only check also runs at the start of **prepare**.
-
-**selftest** \[**run**\] \[**--stick** *device*\] \[**--only** *ID*\[,*ID*...\]\] | **status** | **report** \[*file*\] | **certificate** \[**--into** *file*\] *file*... | **warnings** **on**|**off**
-:   Check that this machine's ZFS, util-linux, systemd, kernel and Python
-    behave as **zark** relies on. **run** (the default) runs the level-1
-    checks on pools backed by sparse files in */dev/shm*, with random names
-    no other pool has, imported under */run/zark/altroot* and never written
-    to */etc/zfs/zpool.cache*; no disk is touched and no system pool is
-    imported, changed or exported. It needs 1 GiB free in */dev/shm* and
-    1.5 GiB of available memory. With **--stick**, it then runs the level-2
-    checks on that whole disk, which it erases: the disk must be external,
-    unregistered, blank (**purge** wipes one) and named under
-    */dev/disk/by-id*, and its kernel name must be typed to go on; it is
-    left blank as **purge** leaves a drive, both ends overwritten. **--only**
-    repeats some checks; such a run certifies nothing, but a check it passes
-    no longer shows as failed on this machine. Each check has an ID and a
-    revision (*POOL-01.1*); a FAIL says what was expected, what came and
-    what in **zark** depends on it, with the commands' output in zark.log
-    and never in the report. A signal stops the run like any command, its
-    pools destroyed and its directory removed, and the run is recorded as
-    stopped. A run killed with SIGKILL leaves its directory; the next run
-    removes every such directory that no imported pool uses and with
-    nothing mounted below it, and **clean** exports its pools and closes
-    its keystore mapper. Exit status 0 when no check failed (a check that cannot run
-    here, a missing tool, is a SKIP), 1 otherwise.
-
-    Every run writes a JSON report (*/var/lib/zark/selftest/*): the
-    platform's versions and the result of each check, with no host, pool,
-    disk, serial or GUID in it. **report** prints a link that opens a GitHub
-    issue form with the report filled in; **zark** sends nothing itself.
-    **status** shows how much of the current checklist is covered on this
-    platform (same Ubuntu, kernel, ZFS, util-linux and systemd series, and
-    the same installed or live session) by the certificates shipped with
-    **zark** and by this machine's own runs. **warnings on** adds one line at
-    the start of **setup**, **backup** and **recover**, and to the MOTD,
-    when no certificate covers this platform, when a check failed here, or
-    when the loaded ZFS module is not the one installed for the running
-    kernel (a reboot is due);
-    **warnings off** (the default) removes them. The setting is per
-    installation or checkout: it is kept in *settings.json*, next to the
-    *known_drives.json* that copy of **zark** uses. **certificate** turns
-    reports into entries of the certificates file (for the maintainer).
-
-## Backup workflow
-
-**setup**
-:   One-time installation of the runtime dependencies and configuration of
-    **sanoid**(8) snapshot policies. Installs the packages listed in the
-    **DEPENDENCIES** section, drops a **sanoid** template tuned for
-    Ubuntu-on-ZFS into */etc/sanoid/*, and registers the **sanoid** systemd
-    timer so snapshots are taken automatically. Also installs the apt guard
-    and the update-grub guard (see **NOTES**; a copy that differs is
-    replaced, a current one left alone) on the running system, so a background kernel or GRUB
-    upgrade cannot half-apply while a backup drive is connected, and the
-    space and backup-age alerts (see **alerts**).
-
-    **setup** checks that **rpool** has **feature\@bookmark_v2** enabled:
-    **backup** anchors each drive on a bookmark, and a raw incremental send
-    from a bookmark needs it. When it is disabled, **setup** explains that
-    enabling it cannot be undone (GRUB never reads **rpool**) and asks; a
-    pool whose *compatibility* property does not list the feature is left
-    as it is. **backup** and **prepare** refuse to run without it.
-
-    **setup --remove** removes what **setup** installed besides **sanoid**'s
-    configuration and timer: the status alerts, the apt guard (its hook,
-    its APT config and its MOTD reminder) and the update-grub guard. A file
-    is removed only when it is **zark**'s (this **zark**'s content, or an
-    older **zark**'s copy with its "Installed by zark" line), and the APT
-    config before the hook it names; anything else is left, named, and the
-    command exits 1. It takes no lock. Removing the Debian package runs it.
-    With any other argument it is a usage error (exit 2) and removes
-    nothing.
-
-**prepare** \[*device*\]
-:   Initialise a brand-new external drive as a **zark** backup target. The
-    drive may be specified as a positional argument (for example
-    */dev/disk/by-id/usb-Vendor_Model_Serial-0:0*); if omitted, **zark**
-    presents an interactive list of unprepared drives.
-
-    Every question (risk factors, stale registry entries, pool name,
-    auto-eject, the drive's retention window and maximum age; see
-    **Retention** under **backup**) is asked before anything is written. **prepare** then
-    creates an unencrypted ZFS pool on the drive (encryption is provided by
-    the raw send from the encrypted source pool - adding a second layer
-    here would just hide the failure of the inner one) on its by-id name
-    with an alternate root, so it is never written to
-    */etc/zfs/zpool.cache*, sends one backup point of **rpool** and
-    **bpool** (the point only, not the source's snapshot history) the way
-    **backup** does, copies over the **rpool/keystore** zvol, and records
-    the drive's metadata (see **backup**). A drive without a by-id name is
-    refused rather than registered as *\<unknown\>*; registry entries left
-    for the same drive are offered for replacement.
-
-    The pool is created with **compatibility=openzfs-2.2**, so that a live
-    session with OpenZFS 2.2 (Ubuntu 24.04) or later can read the drive and
-    no feature newer than that ever activates on it; without that feature
-    set installed, or when the source pools use **longname** or
-    **large_microzap** (which zark's streams would carry), it is created
-    with every feature, and **prepare** says so.
-
-    Before doing any work, **prepare** runs the same non-destructive risk
-    check as **health** and, when the bridge is on the known-problematic
-    list, warns and asks for confirmation. After the transfer it performs a read-back verification
-    (identical to **backup**'s): because the initial raw send is a full
-    write-under-load, a successful re-import here proves the bridge survives
-    real load. The drive is registered, with *last_backup_at* set, only
-    when every dataset and the keystore landed and the read-back is
-    **ONLINE**; otherwise it is **not** registered and **prepare** exits 1.
+## Backup
 
 **backup** \[**--no-snapshot**\]
 :   Back up this system to the connected, registered backup drive.
@@ -568,6 +339,118 @@ for the canonical end-to-end sequences.
     is not the system the user means to back up, and confusing the two
     would destroy good data on the backup drive.
 
+**exclude** \[**list** | **add** *dataset* **backups**|**snapshots**|**both** | **remove** *dataset* **backups**|**snapshots**|**both**\]
+:   Leave datasets out of the backups, out of **sanoid**'s snapshots, or
+    both. An exclusion covers the dataset and everything below it, and is
+    a ZFS user property on the dataset itself in the source
+    (**org.zark:replicate=no**, **org.zark:snapshot=no**): it moves with
+    the dataset, and **zark** reads only values set there (**zfs get -s
+    local**). **list** (the default; takes no lock) shows each exclusion
+    with its flags and its subtree's size, and every value **zark**
+    ignores, with the reason. **add** checks the dataset (never a boot
+    environment, the boot pool, the keystore, a structural container such
+    as **rpool/USERDATA**, or a dataset whose subtree holds one; zvols and
+    archived lineages are left out already), lists the datasets it takes
+    and asks before setting it. **backups**: left out from the next
+    backup on (see **backup** for a drive that already holds a copy).
+    **snapshots**: */etc/sanoid/sanoid.conf* is rewritten as **setup**
+    writes it, with the subtree in sections of its own that take no
+    snapshots and let **sanoid** remove the ones it took at its next prune
+    (a recursive rule would apply to it otherwise); **add** says how many
+    that removes, and names a registered drive with no **zark** 2 anchor
+    there, whose base may be one of them. **remove** clears the property
+    (only on the dataset where it was set: a child cannot be included
+    alone) and says, for each registered drive, whether its next backup
+    is an incremental from the copy it kept or a full send. A user
+    property mounts nothing, so **exclude** runs on the installed system.
+
+    A directory cannot be excluded; it has to become a dataset first, by
+    hand (**zark** does not move data on a running system). Outside the
+    boot environment, with every parent present (created with
+    **canmount=off** when missing) so the new dataset inherits the
+    directory's path from **rpool**'s */*: stop what uses the directory,
+    rename it aside (**mv** */var/lib/docker* */var/lib/docker.old*),
+    **zfs create rpool/var/lib/docker**, copy with **cp -a --preserve=all**
+    */var/lib/docker.old/.* */var/lib/docker/*, check the copy, remove the
+    old directory, then **zark exclude add rpool/var/lib/docker backups**.
+    No mount property is set with **zfs set**.
+
+**prepare** \[*device*\]
+:   Initialise a brand-new external drive as a **zark** backup target. The
+    drive may be specified as a positional argument (for example
+    */dev/disk/by-id/usb-Vendor_Model_Serial-0:0*); if omitted, **zark**
+    presents an interactive list of unprepared drives.
+
+    Every question (risk factors, stale registry entries, pool name,
+    auto-eject, the drive's retention window and maximum age; see
+    **Retention** under **backup**) is asked before anything is written. **prepare** then
+    creates an unencrypted ZFS pool on the drive (encryption is provided by
+    the raw send from the encrypted source pool - adding a second layer
+    here would just hide the failure of the inner one) on its by-id name
+    with an alternate root, so it is never written to
+    */etc/zfs/zpool.cache*, sends one backup point of **rpool** and
+    **bpool** (the point only, not the source's snapshot history) the way
+    **backup** does, copies over the **rpool/keystore** zvol, and records
+    the drive's metadata (see **backup**). A drive without a by-id name is
+    refused rather than registered as *\<unknown\>*; registry entries left
+    for the same drive are offered for replacement.
+
+    The pool is created with **compatibility=openzfs-2.2**, so that a live
+    session with OpenZFS 2.2 (Ubuntu 24.04) or later can read the drive and
+    no feature newer than that ever activates on it; without that feature
+    set installed, or when the source pools use **longname** or
+    **large_microzap** (which zark's streams would carry), it is created
+    with every feature, and **prepare** says so.
+
+    Before doing any work, **prepare** runs the same non-destructive risk
+    check as **health** and, when the bridge is on the known-problematic
+    list, warns and asks for confirmation. After the transfer it performs a read-back verification
+    (identical to **backup**'s): because the initial raw send is a full
+    write-under-load, a successful re-import here proves the bridge survives
+    real load. The drive is registered, with *last_backup_at* set, only
+    when every dataset and the keystore landed and the read-back is
+    **ONLINE**; otherwise it is **not** registered and **prepare** exits 1.
+
+**prune**
+:   Reclaim space, interactively, in the source or on a connected registered
+    drive. Nothing goes without a confirmation; every snapshot is destroyed
+    by its exact name and logged, and what each choice frees is measured
+    first. Before an age cut that touches a dataset where a registered
+    drive has no **zark** 2 anchor, it names the drive and up to three of
+    the datasets. In the source: each pool's fill level (after a removal, once
+    the pool has freed it, up to about a minute, or a line that it is still
+    freeing in the background) and, per kind of
+    snapshot, how many there are, the oldest and what removing them frees;
+    then **sanoid**'s snapshots older than a number of days (typed
+    **PRUNE**; */etc/sanoid/sanoid.conf* is not changed), the legacy
+    residues (**syncoid_\*** snapshots left by **zark** 1.x on datasets
+    where every registered drive has an anchor, and the keystore's
+    **prepare_\*** snapshots; yes/no), the backup points left in the source
+    by interrupted runs or by a run whose anchor failed (typed **PRUNE**;
+    a point names its drive, **org.zark:point-for**, and is anchored for
+    that drive before it goes, so the drive keeps its base; a point that
+    names no drive (one a **recover** restored, or one an early 2.0.0
+    development build left) is removed without an anchor, and a drive that received
+    part of it rolls those datasets back at its next backup, after asking;
+    either way a drive
+    whose transfer was interrupted sends it again) and a drive's **bpool** anchors
+    (typed **PRUNE**; that drive's next backup then asks to roll those
+    datasets back to a shared **sanoid** snapshot, which removes its newest
+    backup point on them, or to archive them and resend them in full).
+    Backups impose no floor: the drives' anchors on **rpool** are
+    bookmarks, which no snapshot removal touches. A registered drive with
+    no anchor on a dataset the age cut touches (no backup by **zark** 2 to
+    it yet) has a **sanoid** snapshot there as its base: the cut names it
+    before the count, with the advice to back up to it first. On a drive (no passphrase
+    needed): what its retention removes now (yes/no), then the oldest
+    monthly backup points that still have something to remove and the
+    history from before its first **zark** 2 backup point (typed **PRUNE**),
+    then the drive's copy of every subtree excluded from backups, kept or
+    not, with its size, each destroyed on a typed **PRUNE** as **backup**
+    destroys it (its points stay complete; that drive's anchors on it go).
+    Last, what the drive holds is measured for *status.json*, as at the end
+    of a **backup** but with no time limit.
+
 **purge** \[*device*\]
 :   Securely retire a managed backup drive. Destroys the ZFS pool,
     overwrites the start and end of the device with random data to defeat
@@ -618,43 +501,83 @@ for the canonical end-to-end sequences.
     Every write is validated and atomic; a malformed file is
     reported with its line and column and never overwritten.
 
-**exclude** \[**list** | **add** *dataset* **backups**|**snapshots**|**both** | **remove** *dataset* **backups**|**snapshots**|**both**\]
-:   Leave datasets out of the backups, out of **sanoid**'s snapshots, or
-    both. An exclusion covers the dataset and everything below it, and is
-    a ZFS user property on the dataset itself in the source
-    (**org.zark:replicate=no**, **org.zark:snapshot=no**): it moves with
-    the dataset, and **zark** reads only values set there (**zfs get -s
-    local**). **list** (the default; takes no lock) shows each exclusion
-    with its flags and its subtree's size, and every value **zark**
-    ignores, with the reason. **add** checks the dataset (never a boot
-    environment, the boot pool, the keystore, a structural container such
-    as **rpool/USERDATA**, or a dataset whose subtree holds one; zvols and
-    archived lineages are left out already), lists the datasets it takes
-    and asks before setting it. **backups**: left out from the next
-    backup on (see **backup** for a drive that already holds a copy).
-    **snapshots**: */etc/sanoid/sanoid.conf* is rewritten as **setup**
-    writes it, with the subtree in sections of its own that take no
-    snapshots and let **sanoid** remove the ones it took at its next prune
-    (a recursive rule would apply to it otherwise); **add** says how many
-    that removes, and names a registered drive with no **zark** 2 anchor
-    there, whose base may be one of them. **remove** clears the property
-    (only on the dataset where it was set: a child cannot be included
-    alone) and says, for each registered drive, whether its next backup
-    is an incremental from the copy it kept or a full send. A user
-    property mounts nothing, so **exclude** runs on the installed system.
+## Recovery (live USB)
 
-    A directory cannot be excluded; it has to become a dataset first, by
-    hand (**zark** does not move data on a running system). Outside the
-    boot environment, with every parent present (created with
-    **canmount=off** when missing) so the new dataset inherits the
-    directory's path from **rpool**'s */*: stop what uses the directory,
-    rename it aside (**mv** */var/lib/docker* */var/lib/docker.old*),
-    **zfs create rpool/var/lib/docker**, copy with **cp -a --preserve=all**
-    */var/lib/docker.old/.* */var/lib/docker/*, check the copy, remove the
-    old directory, then **zark exclude add rpool/var/lib/docker backups**.
-    No mount property is set with **zfs set**.
+**chroot** \[*device*\]
+:   Open an interactive **chroot**(1) into the installed ZFS system from a
+    live USB. Imports **rpool** and **bpool** under an alternate root,
+    unlocks the keystore, mounts the boot environment (with several, a menu
+    lists each with its newest snapshot's time; the same choice applies to
+    **mount local** and **repair-boot**), sets up the
+    **/proc**, **/sys**, **/dev**, **/dev/pts**, **/run**, **efivars** and
+    ESP bind mounts a chroot needs, and starts a login shell inside the
+    system. Inside, ordinary tools (**apt**(8), **update-grub**(8),
+    **dpkg-reconfigure**(8)) behave as on a booted system. On exit the
+    command unmounts everything and exports both pools cleanly, so the next
+    real boot imports them without **-f**; a pool it cannot export (a
+    process started inside keeps it busy) ends **CHROOT NOT CLOSED** with
+    exit status 1.
 
-## Recovery workflow
+    **rpool** and **bpool** are looked for in */dev/disk/by-id* first; the
+    optional *device* (for example */dev/nvme0n1*) is a hint tried next,
+    and a full scan comes last. An import that did not go through
+    */dev/disk/by-id* is named in a warning, since the pool then records
+    those names.
+    **chroot** refuses to run when **rpool** is already imported - if that
+    is the running system you are already inside it, and if it is a
+    leftover from a previous run, **clean** releases it first.
+
+**finish**
+:   Post-recovery finalisation, intended to be run *from inside the
+    recovered system* on its first boot, without the backup drive present.
+    It never exports or re-imports a pool. In order: it enables the ZFS
+    systemd services; writes */etc/zfs/zpool.cache* for **rpool** and
+    **bpool**; reads, without changing anything, the hostid in each pool's
+    label (**zdb -l**) against */etc/hostid* (a difference is rewritten by
+    the next boot's import); installs the guards without overwriting them;
+    rebuilds the initrd of every installed kernel (**dracut**(8) with its
+    output path, or **update-initramfs**(8) per kernel); runs
+    **update-grub**(8); fixes the ESP's UUID in */etc/fstab* from the ESP
+    of the disk that holds **rpool**; checks that */boot/efi* is that ESP
+    and holds *shimx64.efi* and *grubx64.efi*, running the signed packages'
+    reconfigure when one is missing; and mounts, once, every
+    **canmount=on** dataset that is not mounted.
+
+    **grub.cfg** counts as regenerated only when **update-grub** succeeded
+    and it has an entry for every installed kernel; otherwise the previous
+    one is kept. A failed initrd, a kernel without an entry, an ESP that is
+    not mounted or not rpool's disk's, EFI binaries still missing after the
+    reconfigure or a pool not ONLINE make the banner FINISH INCOMPLETE and
+    the exit status 1, with the advice for each: **repair-boot** from the
+    live USB for a kernel without an initrd or an entry, disconnecting the
+    drives when the grub guard refused. A dataset left unmounted is a
+    warning. When something that **setup** guarantees is missing
+    (**sanoid.timer** enabled and active, its policy in
+    */etc/sanoid/sanoid.conf*, **feature@bookmark_v2** on **rpool**, the
+    alerts timer, the guards and alerts files of this **zark**), the banner
+    names each with "setup would:"; otherwise it does not mention
+    **setup**.
+
+**fix-rpool-mountpoint**
+:   Give a restored **rpool** back the Ubuntu installer's
+    *mountpoint=/* (with *canmount=off*). **recover** up to 1.0.12
+    created **rpool** with *mountpoint=none*: datasets created later
+    directly under **rpool** then never mount, and drives prepared
+    from that system cannot be browsed with **mount**. **backup**,
+    **prepare** and **finish** warn when they detect it.
+
+    Runs from a live USB only. It sets the **zvol_inhibit_dev** module
+    parameter before importing **rpool** (**-N**, under an altroot, no
+    key loaded), so no zvol device exists while the mountpoint is
+    changed, and refuses to start while another pool's zvol devices
+    exist; lists the datasets that inherit their mountpoint from
+    **rpool** with their *canmount*, and for each one that is not
+    *off* or *noauto*, which starts mounting at the next boot, asks
+    whether to keep it (typing its name), set *canmount=off* or
+    abort; asks for *YES*. It exports **rpool** and restores the
+    parameter on a normal end, an error, Ctrl-C, SIGTERM or SIGHUP
+    (also several at once), and when its output goes to a closed
+    terminal or a dead pipe; not on SIGKILL.
 
 **recover**
 :   Full bare-metal restoration of an encrypted Ubuntu-on-ZFS system from
@@ -778,124 +701,6 @@ for the canonical end-to-end sequences.
     carry kernel names after the import, **repair-boot** ends **BOOT REPAIR
     INCOMPLETE** naming them, since the *zpool.cache* it writes records them.
 
-**chroot** \[*device*\]
-:   Open an interactive **chroot**(1) into the installed ZFS system from a
-    live USB. Imports **rpool** and **bpool** under an alternate root,
-    unlocks the keystore, mounts the boot environment (with several, a menu
-    lists each with its newest snapshot's time; the same choice applies to
-    **mount local** and **repair-boot**), sets up the
-    **/proc**, **/sys**, **/dev**, **/dev/pts**, **/run**, **efivars** and
-    ESP bind mounts a chroot needs, and starts a login shell inside the
-    system. Inside, ordinary tools (**apt**(8), **update-grub**(8),
-    **dpkg-reconfigure**(8)) behave as on a booted system. On exit the
-    command unmounts everything and exports both pools cleanly, so the next
-    real boot imports them without **-f**; a pool it cannot export (a
-    process started inside keeps it busy) ends **CHROOT NOT CLOSED** with
-    exit status 1.
-
-    **rpool** and **bpool** are looked for in */dev/disk/by-id* first; the
-    optional *device* (for example */dev/nvme0n1*) is a hint tried next,
-    and a full scan comes last. An import that did not go through
-    */dev/disk/by-id* is named in a warning, since the pool then records
-    those names.
-    **chroot** refuses to run when **rpool** is already imported - if that
-    is the running system you are already inside it, and if it is a
-    leftover from a previous run, **clean** releases it first.
-
-**prune**
-:   Reclaim space, interactively, in the source or on a connected registered
-    drive. Nothing goes without a confirmation; every snapshot is destroyed
-    by its exact name and logged, and what each choice frees is measured
-    first. Before an age cut that touches a dataset where a registered
-    drive has no **zark** 2 anchor, it names the drive and up to three of
-    the datasets. In the source: each pool's fill level (after a removal, once
-    the pool has freed it, up to about a minute, or a line that it is still
-    freeing in the background) and, per kind of
-    snapshot, how many there are, the oldest and what removing them frees;
-    then **sanoid**'s snapshots older than a number of days (typed
-    **PRUNE**; */etc/sanoid/sanoid.conf* is not changed), the legacy
-    residues (**syncoid_\*** snapshots left by **zark** 1.x on datasets
-    where every registered drive has an anchor, and the keystore's
-    **prepare_\*** snapshots; yes/no), the backup points left in the source
-    by interrupted runs or by a run whose anchor failed (typed **PRUNE**;
-    a point names its drive, **org.zark:point-for**, and is anchored for
-    that drive before it goes, so the drive keeps its base; a point that
-    names no drive (one a **recover** restored, or one an early 2.0.0
-    development build left) is removed without an anchor, and a drive that received
-    part of it rolls those datasets back at its next backup, after asking;
-    either way a drive
-    whose transfer was interrupted sends it again) and a drive's **bpool** anchors
-    (typed **PRUNE**; that drive's next backup then asks to roll those
-    datasets back to a shared **sanoid** snapshot, which removes its newest
-    backup point on them, or to archive them and resend them in full).
-    Backups impose no floor: the drives' anchors on **rpool** are
-    bookmarks, which no snapshot removal touches. A registered drive with
-    no anchor on a dataset the age cut touches (no backup by **zark** 2 to
-    it yet) has a **sanoid** snapshot there as its base: the cut names it
-    before the count, with the advice to back up to it first. On a drive (no passphrase
-    needed): what its retention removes now (yes/no), then the oldest
-    monthly backup points that still have something to remove and the
-    history from before its first **zark** 2 backup point (typed **PRUNE**),
-    then the drive's copy of every subtree excluded from backups, kept or
-    not, with its size, each destroyed on a typed **PRUNE** as **backup**
-    destroys it (its points stay complete; that drive's anchors on it go).
-    Last, what the drive holds is measured for *status.json*, as at the end
-    of a **backup** but with no time limit.
-
-**status**
-:   How full **rpool** and **bpool** are (a warning from 80 %, critical
-    from 90 %), the days since every registered drive's last backup, what
-    a drive with no anchor in the source still shares with it (see
-    **backup**), the legacy residues **prune** can remove and how many
-    datasets are excluded from backups (with a line when
-    */etc/sanoid/sanoid.conf* does not keep the snapshot exclusions, and
-    each exclusion **zark** ignores). **status --refresh** writes
-    */run/zark/status.motd*; with **--notify** it also sends a desktop
-    notification for a pool at a warning or critical level, at most once a
-    day per pool and level. Both forms also write
-    */var/lib/zark/status.json* from the same read (see **FILES**).
-    Read-only for zark's state.
-
-**alerts** **install**|**remove**
-:   Install or remove the status alerts: */etc/update-motd.d/97-zark-status*,
-    which prints */run/zark/status.motd* at login (nothing is computed
-    then), and **zark-status.timer**, which runs **status --refresh
-    --notify** every hour, on every wall-clock hour (so a refresh follows
-    soon after a resume) and two minutes after boot, with the **zark**
-    that installed it. **setup** installs them; **setup --remove** and
-    removing the Debian package remove them.
-
-**finish**
-:   Post-recovery finalisation, intended to be run *from inside the
-    recovered system* on its first boot, without the backup drive present.
-    It never exports or re-imports a pool. In order: it enables the ZFS
-    systemd services; writes */etc/zfs/zpool.cache* for **rpool** and
-    **bpool**; reads, without changing anything, the hostid in each pool's
-    label (**zdb -l**) against */etc/hostid* (a difference is rewritten by
-    the next boot's import); installs the guards without overwriting them;
-    rebuilds the initrd of every installed kernel (**dracut**(8) with its
-    output path, or **update-initramfs**(8) per kernel); runs
-    **update-grub**(8); fixes the ESP's UUID in */etc/fstab* from the ESP
-    of the disk that holds **rpool**; checks that */boot/efi* is that ESP
-    and holds *shimx64.efi* and *grubx64.efi*, running the signed packages'
-    reconfigure when one is missing; and mounts, once, every
-    **canmount=on** dataset that is not mounted.
-
-    **grub.cfg** counts as regenerated only when **update-grub** succeeded
-    and it has an entry for every installed kernel; otherwise the previous
-    one is kept. A failed initrd, a kernel without an entry, an ESP that is
-    not mounted or not rpool's disk's, EFI binaries still missing after the
-    reconfigure or a pool not ONLINE make the banner FINISH INCOMPLETE and
-    the exit status 1, with the advice for each: **repair-boot** from the
-    live USB for a kernel without an initrd or an entry, disconnecting the
-    drives when the grub guard refused. A dataset left unmounted is a
-    warning. When something that **setup** guarantees is missing
-    (**sanoid.timer** enabled and active, its policy in
-    */etc/sanoid/sanoid.conf*, **feature@bookmark_v2** on **rpool**, the
-    alerts timer, the guards and alerts files of this **zark**), the banner
-    names each with "setup would:"; otherwise it does not mention
-    **setup**.
-
 **simulate** \[*device*\] \[**--rw**\] \[**--display** *WxH*\]
 :   Boot a recovered (or live) disk in **qemu-system-x86_64**(1) under
     OVMF UEFI firmware to verify the boot chain without rebooting the
@@ -934,28 +739,129 @@ for the canonical end-to-end sequences.
     to install on first use. On a closed standard input it installs
     nothing and goes no further than the question it cannot ask.
 
-**fix-rpool-mountpoint**
-:   Give a restored **rpool** back the Ubuntu installer's
-    *mountpoint=/* (with *canmount=off*). **recover** up to 1.0.12
-    created **rpool** with *mountpoint=none*: datasets created later
-    directly under **rpool** then never mount, and drives prepared
-    from that system cannot be browsed with **mount**. **backup**,
-    **prepare** and **finish** warn when they detect it.
+## Inspection
 
-    Runs from a live USB only. It sets the **zvol_inhibit_dev** module
-    parameter before importing **rpool** (**-N**, under an altroot, no
-    key loaded), so no zvol device exists while the mountpoint is
-    changed, and refuses to start while another pool's zvol devices
-    exist; lists the datasets that inherit their mountpoint from
-    **rpool** with their *canmount*, and for each one that is not
-    *off* or *noauto*, which starts mounting at the next boot, asks
-    whether to keep it (typing its name), set *canmount=off* or
-    abort; asks for *YES*. It exports **rpool** and restores the
-    parameter on a normal end, an error, Ctrl-C, SIGTERM or SIGHUP
-    (also several at once), and when its output goes to a closed
-    terminal or a dead pipe; not on SIGKILL.
+**explore**
+:   Non-destructively scan all connected block devices for ZFS pools and
+    classify each one against the registry in **known_drives.json**:
 
-## Maintenance
+    - *known* - name and pool GUID match a registered drive;
+    - *GUID changed* - pool name matches but the GUID differs (typically
+      after a re-prepare);
+    - *renamed* - the GUID matches but the pool has been renamed;
+    - *unknown* - the drive is not registered.
+
+    For drives in the last three categories, **explore** prints the exact
+    JSON snippet that should be added to **known_drives.json** to register
+    them.
+
+**health** \[*device*\]
+:   Interactive drive analysis and debugging tool. With a *device* it checks
+    that device; without one it scans connected non-system drives and lets
+    you pick. It first asks whether to run a *read-only* check (default) or a
+    *destructive* write-and-verify test, gathers any further choices up front,
+    then runs unattended except for a single pause.
+
+    The read-only check inspects kernel/sysfs state: whether the USB-SATA
+    bridge reports DPO/FUA support and whether it runs the UAS transport
+    (both shown as information: most USB bridges report no FUA, and UAS is
+    the normal driver), and the bridge's USB VID:PID against a
+    known-problematic list, the one risk it warns about. It also reports the
+    health of any pool on the drive without importing it: an imported pool
+    from its error counters, an exported one from the state **zpool import
+    -d** reports, with the commands that read its counters. It writes
+    nothing and flags *risk* only; it cannot prove a bridge honest, which
+    shows solely under load.
+
+    The destructive test (after explicit confirmation, on a blank drive)
+    creates a throwaway pool on the drive's by-id name, never written to
+    */etc/zfs/zpool.cache*, and writes with transaction churn (*fast*,
+    ~2 GB; *medium*, ~15 GB; or *surface*, whole disk, capped), then
+    re-imports to confirm the writes persisted. An optional *cold* pass
+    powers the device down, waits for you to physically reconnect it, and
+    re-imports, so the read-back comes strictly from NAND rather than the
+    bridge's cache. Time estimates are shown from a measured write speed. The
+    throwaway pool lives under */run/zark/altroot*, so **clean** releases
+    one a killed run left imported. Afterwards it is destroyed read-write
+    (a read-only import is exported and imported read-write first: a
+    read-only pool's destroy writes nothing to its labels), and a pool that
+    could not be destroyed is reported as an error, with the command that
+    lists what may remain, and in the diagnostic report. Then only the disk
+    its by-id name resolves to is wiped, and only when its label is the
+    test pool's or there is none. A cold pass needs a by-id name and fails
+    before writing without one; after the reconnect it waits for udev and
+    up to 10 seconds for the disk's by-id links, and a partition link that
+    never appears is its own failure. Kernel transport errors logged
+    between the eject and the reconnect are listed as at the unplug and
+    not counted: the pool was exported and synced before the eject. The
+    export before the eject is checked: a pool that did not leave stops the
+    test as failed. A reconnect pause that gets end of input (a closed
+    standard input) is not a confirmation: the cold pass fails, and the
+    test pool is cleaned when the drive can still be reached, else purge
+    removes it before the next test. Transport lines are matched by the whole disk name (not a name
+    that merely starts like it), by the USB device of its bridge for the
+    kernel's reset lines, and after the reconnect by the name the disk came
+    back with. A failed test, or a test pool that could not be destroyed, ends with exit
+    status 1; a pass, also with transport errors, and the read-only
+    check's risks end with 0.
+
+    Whenever a risk (a warning) or test failure is found, a self-contained diagnostic
+    report is written to */tmp* (environment, drive, bridge VID:PID, findings,
+    dmesg tail) with instructions for filing a GitHub issue; you may choose to
+    obfuscate serials/GUIDs. See the enclosure notes in **docs/HARDWARE.md**.
+    The read-only check also runs at the start of **prepare**.
+
+**monitor** \[**--once** \[**--state**\]\] \[**--interval** *N*\] \[**--root** *DIR*\] \[**--no-live**\]
+:   A live view of what **zark** is doing and how the backups stand, for a
+    second terminal. Any user can run it: it needs no root, takes no lock,
+    writes nothing and never imports, exports or changes a pool. It reads
+    the status files (*/run/zark/progress.json* every second,
+    */var/lib/zark/status.json* when it changes; *docs/STATUS-FILES.md* in
+    the source tree) and lists the source pools with **zfs list** and
+    **zpool list** every *N* seconds (default 60, from 5 to 3600).
+
+    The state comes first: **RUNNING** with the command, its step, and for
+    a backup the bytes sent, the rate, the time left, the transfers and the
+    dataset being sent; **WAITING FOR INPUT** with what the command asks
+    (the terminal bell rings once); **ATTENTION** when a drive's last backup
+    run ended **incomplete**, **not_verified** or **interrupted**, or a
+    notice is critical; **CHECK** when a run was killed (its process is
+    gone), or *status.json* is old, unreadable or from a newer **zark**.
+    When */proc* hides root's processes from the user (**hidepid**), a run
+    whose heartbeat stopped stays **RUNNING** with its figures marked not
+    current, and a line says it cannot tell whether the run still lives;
+    **OVERDUE**, **NO STATUS** or **OK**. Below it, the source pools (used,
+    free, reserved by ZFS, capacity, health), each registered drive
+    (connected or not, last backup, last run, fill and when it was
+    measured, the margin a backup tries to leave free, and the drive's
+    points by month, what its retention policy removes next, what
+    removing its oldest points would free (the oldest one alone, and all
+    of them that **prune** would offer; "not measured" where it was not)
+    and the largest datasets on it, as **backup** and **prune** last
+    measured them), the datasets of each
+    source pool with the pool's metadata apart, and the notices. Live
+    figures say so; figures from the files carry their date.
+
+    With a terminal it runs full screen. Keys: **q** quit, **d** datasets on
+    or off, **s** sort them (own size, snapshots, name), **-** and **+** the
+    interval (15, 30, 60, 120, 300, 600 s), **r** list the pools now, **b**
+    the bell on or off, **h** the key line. **NO_COLOR** turns colour off.
+    Without a terminal it prints a frame when something changes. While it
+    follows a backup the time left (**ETA ~**) comes from the run's own
+    pace, bytes and the fixed cost of each transfer, and shows once two
+    transfers have ended and 64 MiB have moved. It charges each transfer
+    left the mean fixed cost of those ended, so when the last transfers are
+    faster than the first it stays high near the end of the run (up to a
+    minute with 22 datasets); the status files give no size per dataset to
+    do better.
+    **--once** prints one frame and exits, with the time left from the
+    current rate; with **--state** it prints only
+    the state: **waiting**, **running**, **attention**, **edge**,
+    **overdue**, **none** or **ok**. **--root** *DIR* reads
+    *DIR/run/zark/progress.json* and *DIR/var/lib/zark/status.json*, and
+    **--no-live** runs neither **zfs** nor **zpool**: both are for testing
+    and for looking at the example files in *tests/fixtures/status/*. A
+    usage error exits 2.
 
 **mount** \[*target*\]
 :   Mount a backup pool for inspection, **chroot**(1) entry or manual
@@ -1006,6 +912,20 @@ for the canonical end-to-end sequences.
 
     The complementary command is **umount**.
 
+**status**
+:   How full **rpool** and **bpool** are (a warning from 80 %, critical
+    from 90 %), the days since every registered drive's last backup, what
+    a drive with no anchor in the source still shares with it (see
+    **backup**), the legacy residues **prune** can remove and how many
+    datasets are excluded from backups (with a line when
+    */etc/sanoid/sanoid.conf* does not keep the snapshot exclusions, and
+    each exclusion **zark** ignores). **status --refresh** writes
+    */run/zark/status.motd*; with **--notify** it also sends a desktop
+    notification for a pool at a warning or critical level, at most once a
+    day per pool and level. Both forms also write
+    */var/lib/zark/status.json* from the same read (see **FILES**).
+    Read-only for zark's state.
+
 **umount** \[*target*\]
 :   Unmount a previously **mount**-ed backup pool. Unmounts only the tree
     under */mnt/zark/<poolname>/*, closes the LUKS keystore and exports the
@@ -1023,6 +943,17 @@ for the canonical end-to-end sequences.
     measure it refuses to export any pool whose alternate root is not
     under */mnt/zark/* - that is the guard against exporting the running
     system's own **rpool**.
+
+## Setup and upkeep
+
+**alerts** **install**|**remove**
+:   Install or remove the status alerts: */etc/update-motd.d/97-zark-status*,
+    which prints */run/zark/status.motd* at login (nothing is computed
+    then), and **zark-status.timer**, which runs **status --refresh
+    --notify** every hour, on every wall-clock hour (so a refresh follows
+    soon after a resume) and two minutes after boot, with the **zark**
+    that installed it. **setup** installs them; **setup --remove** and
+    removing the Debian package remove them.
 
 **clean**
 :   Release what an interrupted **zark** run left mounted or imported, and
@@ -1047,6 +978,75 @@ for the canonical end-to-end sequences.
     not export, the copies other mount namespaces keep below the trees it
     unmounted are unmounted there and the export is tried again. The same rules apply on an installed system and on a live
     session.
+
+**selftest** \[**run**\] \[**--stick** *device*\] \[**--only** *ID*\[,*ID*...\]\] | **status** | **report** \[*file*\] | **certificate** \[**--into** *file*\] *file*... | **warnings** **on**|**off**
+:   Check that this machine's ZFS, util-linux, systemd, kernel and Python
+    behave as **zark** relies on. **run** (the default) runs the level-1
+    checks on pools backed by sparse files in */dev/shm*, with random names
+    no other pool has, imported under */run/zark/altroot* and never written
+    to */etc/zfs/zpool.cache*; no disk is touched and no system pool is
+    imported, changed or exported. It needs 1 GiB free in */dev/shm* and
+    1.5 GiB of available memory. With **--stick**, it then runs the level-2
+    checks on that whole disk, which it erases: the disk must be external,
+    unregistered, blank (**purge** wipes one) and named under
+    */dev/disk/by-id*, and its kernel name must be typed to go on; it is
+    left blank as **purge** leaves a drive, both ends overwritten. **--only**
+    repeats some checks; such a run certifies nothing, but a check it passes
+    no longer shows as failed on this machine. Each check has an ID and a
+    revision (*POOL-01.1*); a FAIL says what was expected, what came and
+    what in **zark** depends on it, with the commands' output in zark.log
+    and never in the report. A signal stops the run like any command, its
+    pools destroyed and its directory removed, and the run is recorded as
+    stopped. A run killed with SIGKILL leaves its directory; the next run
+    removes every such directory that no imported pool uses and with
+    nothing mounted below it, and **clean** exports its pools and closes
+    its keystore mapper. Exit status 0 when no check failed (a check that cannot run
+    here, a missing tool, is a SKIP), 1 otherwise.
+
+    Every run writes a JSON report (*/var/lib/zark/selftest/*): the
+    platform's versions and the result of each check, with no host, pool,
+    disk, serial or GUID in it. **report** prints a link that opens a GitHub
+    issue form with the report filled in; **zark** sends nothing itself.
+    **status** shows how much of the current checklist is covered on this
+    platform (same Ubuntu, kernel, ZFS, util-linux and systemd series, and
+    the same installed or live session) by the certificates shipped with
+    **zark** and by this machine's own runs. **warnings on** adds one line at
+    the start of **setup**, **backup** and **recover**, and to the MOTD,
+    when no certificate covers this platform, when a check failed here, or
+    when the loaded ZFS module is not the one installed for the running
+    kernel (a reboot is due);
+    **warnings off** (the default) removes them. The setting is per
+    installation or checkout: it is kept in *settings.json*, next to the
+    *known_drives.json* that copy of **zark** uses. **certificate** turns
+    reports into entries of the certificates file (for the maintainer).
+
+**setup**
+:   One-time installation of the runtime dependencies and configuration of
+    **sanoid**(8) snapshot policies. Installs the packages listed in the
+    **DEPENDENCIES** section, drops a **sanoid** template tuned for
+    Ubuntu-on-ZFS into */etc/sanoid/*, and registers the **sanoid** systemd
+    timer so snapshots are taken automatically. Also installs the apt guard
+    and the update-grub guard (see **NOTES**; a copy that differs is
+    replaced, a current one left alone) on the running system, so a background kernel or GRUB
+    upgrade cannot half-apply while a backup drive is connected, and the
+    space and backup-age alerts (see **alerts**).
+
+    **setup** checks that **rpool** has **feature\@bookmark_v2** enabled:
+    **backup** anchors each drive on a bookmark, and a raw incremental send
+    from a bookmark needs it. When it is disabled, **setup** explains that
+    enabling it cannot be undone (GRUB never reads **rpool**) and asks; a
+    pool whose *compatibility* property does not list the feature is left
+    as it is. **backup** and **prepare** refuse to run without it.
+
+    **setup --remove** removes what **setup** installed besides **sanoid**'s
+    configuration and timer: the status alerts, the apt guard (its hook,
+    its APT config and its MOTD reminder) and the update-grub guard. A file
+    is removed only when it is **zark**'s (this **zark**'s content, or an
+    older **zark**'s copy with its "Installed by zark" line), and the APT
+    config before the hook it names; anything else is left, named, and the
+    command exits 1. It takes no lock. Removing the Debian package runs it.
+    With any other argument it is a usage error (exit 2) and removes
+    nothing.
 
 # WORKFLOWS
 

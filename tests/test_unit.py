@@ -101,6 +101,7 @@ import commands.status as status_mod  # pylint: disable=wrong-import-position # 
 import commands.umount as umount_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.certificates as certs  # pylint: disable=wrong-import-position # noqa: E402
+import lib.cli_spec as cli_spec_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.dependents as deps_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.exclusions as excl  # pylint: disable=wrong-import-position # noqa: E402
@@ -23370,6 +23371,52 @@ class TestMonitorDispatch:  # pylint: disable=missing-function-docstring
     def test_it_is_dispatched_before_the_root_check(self) -> None:
         source = (_REPO_ROOT / "zark").read_text("utf-8")
         assert source.index('("monitor", "--monitor")') < source.index("os.geteuid() != 0:")
+
+
+class TestHelpOrder:  # pylint: disable=missing-function-docstring
+    """M14-7 7a: the help in four groups, each sorted; the manpage the same."""
+
+    def test_every_command_once_and_sorted_in_its_group(self) -> None:
+        names = cli_spec_mod.command_names()
+        assert sorted(names) == sorted(cli_spec_mod.DESCRIPTIONS)
+        assert len(names) == len(set(names)) == 22
+        for group in cli_spec_mod.GROUPS:
+            assert list(group.commands) == sorted(group.commands), group.title
+        commands = sorted(p.stem.replace("_", "-") for p in (_REPO_ROOT / "commands").glob("*.py"))
+        assert sorted(names) == [c for c in commands if c != "--init--"]
+
+    def test_the_help_prints_the_groups_in_order(self) -> None:
+        # In this process: the help writes zark.log, which the suite redirects.
+        path = str(_REPO_ROOT / "zark")
+        loader = importlib.machinery.SourceFileLoader("zark_entry", path)
+        spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
+        assert spec is not None
+        entry = importlib.util.module_from_spec(spec)
+        loader.exec_module(entry)
+        out = StringIO()
+        with redirect_stdout(out):
+            entry.print_help()
+        text = re.sub(r"\x1b\[[0-9;]*m", "", out.getvalue())
+        seen = [ln.strip() for ln in text.splitlines() if ln.startswith("  ") and ln.strip()]
+        want: list[str] = []
+        for group in cli_spec_mod.GROUPS:
+            want.append(group.title)
+            want += [f"{n:<20} {cli_spec_mod.DESCRIPTIONS[n]}".strip() for n in group.commands]
+        got = [ln for ln in seen if ln in want]
+        assert got == want, got
+
+    def test_the_manpage_lists_them_the_same_way(self) -> None:
+        page = (_REPO_ROOT / "debian/zark.1.md").read_text("utf-8")
+        section = page.split("\n# COMMANDS\n", 1)[1].split("\n# WORKFLOWS\n", 1)[0]
+        got = []
+        for line in section.splitlines():
+            if line.startswith("## "):
+                got.append(line[3:])
+            m = re.match(r"\*\*([a-z-]+)\*\*", line)
+            if m and m.group(1) in cli_spec_mod.DESCRIPTIONS:
+                got.append(m.group(1))
+        want = [x for g in cli_spec_mod.GROUPS for x in (g.title, *g.commands)]
+        assert got == want, got
 
 
 class TestSelftestRdr01:  # pylint: disable=missing-function-docstring

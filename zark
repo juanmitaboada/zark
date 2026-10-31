@@ -23,7 +23,7 @@ Usage:    sudo ./zark <command> [options]
 import os
 import sys
 
-from lib import live, lock, progress, signals
+from lib import cli_spec, live, lock, progress, signals
 from lib.config import VERSION, Config
 from lib.log import Log
 
@@ -31,30 +31,8 @@ from lib.log import Log
 ZARK_ROOT = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, ZARK_ROOT)
 
-COMMANDS = {
-    "backup": "Run incremental backup to connected drive",
-    "recover": "Full bare-metal recovery from backup drive",
-    "repair-boot": "Fix boot issues from live USB (grub.cfg, initrd)",
-    "simulate": "Boot recovered system in QEMU/KVM (test without rebooting)",
-    "prepare": "Prepare a new blank drive for backup",
-    "purge": "Securely wipe a managed backup drive",
-    "setup": "Install dependencies, configure sanoid snapshots (--remove: undo the guards, alerts)",
-    "finish": "Post-recovery finalization (run from recovered system)",
-    "mount": "Mount a backup pool for inspection / chroot / recovery",
-    "umount": "Unmount a previously mounted backup pool",
-    "chroot": "Open an interactive chroot into the installed ZFS system (live USB)",
-    "explore": "Scan for ZFS pools, show known/unknown status",
-    "monitor": "Live view of a running command and the backups' state (no root)",
-    "clean": "Release what an interrupted zark run left mounted or imported",
-    "health": "Non-destructive risk checks on a backup drive",
-    "registry": "List, forget or fix entries in known_drives.json, or set a drive's retention",
-    "prune": "Reclaim space in origin or on a backup drive (interactive)",
-    "exclude": "Leave datasets out of backups or of local snapshots (list/add/remove)",
-    "status": "Source pools' fill level and each drive's backup age",
-    "alerts": "Install or remove the MOTD and timer for status alerts",
-    "fix-rpool-mountpoint": "Give a restored rpool back mountpoint=/ (live USB)",
-    "selftest": "Check that this platform behaves as zark relies on",
-}
+# The commands, their groups and descriptions: lib/cli_spec.py (M14-7).
+COMMANDS = {name: cli_spec.DESCRIPTIONS[name] for name in cli_spec.command_names()}
 
 
 def _invocation_hint() -> tuple[str, str]:
@@ -85,8 +63,10 @@ def print_help():
     print()
     log.info("Commands:")
     width = max(len(name) for name in COMMANDS)
-    for name, desc in COMMANDS.items():
-        print(f"    {log.W}{name:<{width}}{log.N} {desc}")
+    for group in cli_spec.GROUPS:
+        print(f"  {group.title}")
+        for name in group.commands:
+            print(f"    {log.W}{name:<{width}}{log.N} {COMMANDS[name]}")
     print()
     log.info(f"Config: {Config.default_config_dir()}/known_drives.json")
     log.info("Log:    /var/log/zark.log")
