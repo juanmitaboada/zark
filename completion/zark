@@ -1,0 +1,58 @@
+# bash completion for zark.
+#
+# Installed as /usr/share/bash-completion/completions/zark, bash-completion
+# loads it the first time zark is completed. From a portable tree:
+#     source <tree>/completion/zark
+# zsh can load it after: autoload -U bashcompinit && bashcompinit
+#
+# The candidates come from <zark root>/lib/completion.py, run as the user
+# who presses TAB; this function only finds that file and fills COMPREPLY.
+
+_zark_root() {
+    local cmd=$1 path
+    if [[ $cmd == */* ]]; then
+        path=$cmd
+    else
+        path=$(type -P -- "$cmd") || return 1
+    fi
+    path=$(readlink -f -- "$path") || return 1
+    [[ -f ${path%/*}/lib/completion.py ]] || return 1
+    printf '%s\n' "${path%/*}"
+}
+
+_zark() {
+    local root line word pre how c
+    local -a out
+    root=$(_zark_root "${COMP_WORDS[0]}") || return 0
+    line=${COMP_LINE:0:COMP_POINT}
+    mapfile -t out < <(python3 -I "$root/lib/completion.py" "$line" 2>/dev/null)
+    ((${#out[@]})) || return 0
+    how=${out[0]}
+    out=("${out[@]:1}")
+    word=${COMP_WORDS[COMP_CWORD]}
+    case $how in
+        files)
+            compopt -o filenames 2>/dev/null
+            mapfile -t COMPREPLY < <(compgen -f -- "$word")
+            return 0
+            ;;
+        dirs)
+            compopt -o filenames 2>/dev/null
+            mapfile -t COMPREPLY < <(compgen -d -- "$word")
+            return 0
+            ;;
+    esac
+    # bash splits the word being completed at ':' and '=' (COMP_WORDBREAKS):
+    # each candidate replaces only the part after the last one.
+    [[ $line =~ [^[:space:]]*$ ]] && pre=${BASH_REMATCH[0]%"$word"}
+    COMPREPLY=()
+    for c in "${out[@]}"; do
+        COMPREPLY+=("${c#"$pre"}")
+    done
+    if ((${#COMPREPLY[@]} == 1)) && [[ ${COMPREPLY[0]} == *= ]]; then
+        compopt -o nospace 2>/dev/null
+    fi
+    return 0
+}
+
+complete -F _zark zark ./zark

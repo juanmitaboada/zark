@@ -102,6 +102,7 @@ import commands.umount as umount_mod  # pylint: disable=wrong-import-position # 
 import lib.alerts as alerts_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.certificates as certs  # pylint: disable=wrong-import-position # noqa: E402
 import lib.cli_spec as cli_spec_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.completion as completion_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.dependents as deps_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.drives as drives_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.exclusions as excl  # pylint: disable=wrong-import-position # noqa: E402
@@ -23498,6 +23499,147 @@ def _all_args(spec: Any) -> list[Any]:
     for sub in spec.subcommands:
         args += _all_args(sub)
     return args
+
+
+class TestCompletion:  # pylint: disable=missing-function-docstring
+    """M14-8, M14-10, M14-11: the completion engine and its bash shim."""
+
+    def _complete(self, line: str, root: Path | None = None) -> tuple[str, list[str]]:
+        return completion_mod.complete(line, root or _REPO_ROOT)
+
+    def test_commands_options_and_subcommands(self) -> None:
+        how, got = self._complete("zark ")
+        assert how == "words" and got[:22] == cli_spec_mod.command_names()
+        assert self._complete("sudo ./zark reg") == ("words", ["registry"])
+        assert self._complete("zark backup --") == ("words", ["--debug", "--no-snapshot"])
+        assert self._complete("zark selftest ")[1] == [
+            "run", "status", "report", "certificate", "warnings"
+        ]  # fmt: skip
+        assert self._complete("zark selftest --st") == ("words", ["--stick"])
+        assert self._complete("zark selftest warnings ") == ("words", ["on", "off"])
+        assert self._complete("zark mount l") == ("words", ["local"])
+        assert self._complete("zark monitor --interval 1")[1] == ["15", "120"]
+        assert self._complete("zark monitor --once --")[1] == [
+            "--debug", "--help", "--interval", "--no-live", "--root", "--state"
+        ]  # fmt: skip
+        assert self._complete("zark exclude add rpool/x ")[1] == ["backups", "snapshots", "both"]
+        assert self._complete("zark recover ") == ("words", [])
+        assert self._complete("zark nonsense ") == ("words", [])
+
+    def test_files_and_dirs_are_the_shells(self) -> None:
+        assert self._complete("zark selftest certificate ")[0] == "files"
+        assert self._complete("zark selftest certificate a.json ")[0] == "files"
+        assert self._complete("zark selftest certificate --into ")[0] == "files"
+        assert self._complete("zark monitor --root ")[0] == "dirs"
+
+    def test_devices_are_whole_disks_by_id(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            for name in ("usb-K_1-0:0", "usb-K_1-0:0-part1", "ata-S_2"):
+                Path(td, name).touch()
+            with patch.object(completion_mod, "BY_ID", Path(td)):
+                how, got = self._complete("zark prepare ")
+        assert how == "words" and got == [f"{td}/ata-S_2", f"{td}/usb-K_1-0:0"]
+
+    def test_drives_from_the_registry_the_command_would_read(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "etc").mkdir()
+            (root / "etc/known_drives.json").write_text('{"black": {}, "blue": {}}', "utf-8")
+            with patch.dict(os.environ, {"ZARK_CONFIG_DIR": ""}):
+                assert self._complete("zark registry forget ", root)[1] == ["black", "blue"]
+                assert self._complete("zark registry retention b", root)[1] == ["black", "blue"]
+                got = self._complete("zark registry retention black ", root)[1]
+                assert got == ["window=", "max_age=", "margin="]
+                (root / "etc/known_drives.json").write_text("{broken", "utf-8")
+                assert self._complete("zark registry fix ", root)[1] == []
+
+    def test_the_registry_rule_is_configs(self) -> None:
+        # Both read the same file, or both find none (Config's fallback for a
+        # first run names a file that does not exist yet).
+        def read(p: Path) -> Path | None:
+            return p if p.exists() else None
+
+        with tempfile.TemporaryDirectory() as td:
+            root, env = Path(td, "tree"), Path(td, "env")
+            (root / "etc").mkdir(parents=True)
+            env.mkdir()
+            with patch.object(Config, "zark_root", return_value=root):
+                for setup in ("none", "portable", "env"):
+                    if setup == "portable":
+                        (root / "etc/known_drives.json").touch()
+                    if setup == "env":
+                        (env / "known_drives.json").touch()
+                    var = str(env) if setup == "env" else ""
+                    with patch.dict(os.environ, {"ZARK_CONFIG_DIR": var}):
+                        want = read(Config.default_config_dir() / "known_drives.json")
+                        assert read(completion_mod.registry_path(root)) == want, setup
+
+    def test_datasets_from_zfs_with_a_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fake = Path(td, "zfs")
+            fake.write_text("#!/bin/sh\nprintf 'rpool/ROOT\\nrpool/USERDATA\\n'\n", "ascii")
+            fake.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": f"{td}:{os.environ.get('PATH', '')}"}):
+                assert self._complete("zark exclude add rpool/U")[1] == ["rpool/USERDATA"]
+                fake.write_text("#!/bin/sh\nsleep 5\n", "ascii")
+                started = time.monotonic()
+                assert self._complete("zark exclude remove ")[1] == []
+                assert time.monotonic() - started < completion_mod.ZFS_TIMEOUT_S + 1.5
+                fake.write_text("#!/bin/sh\nexit 1\n", "ascii")
+                assert self._complete("zark exclude add ")[1] == []
+
+    def test_the_engine_imports_the_spec_and_the_standard_library_only(self) -> None:
+        assert _stdlib_only("lib/cli_spec.py")
+        tree = ast.parse((_REPO_ROOT / "lib/completion.py").read_text("utf-8"))
+        mods = [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+        froms = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+        assert all(m in sys.stdlib_module_names for m in mods), mods
+        assert froms == ["pathlib", "lib"], froms
+        names = [a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names]
+        assert "cli_spec" in names
+
+    def test_the_script_as_nobody(self) -> None:
+        # The way the shim runs it: as a script, isolated, as a user.
+        cmd = [sys.executable, "-I", str(_REPO_ROOT / "lib/completion.py"), "zark sel"]
+        if os.geteuid() == 0:
+            if not shutil.which("setpriv"):
+                raise SkipTest("setpriv (util-linux) is not installed")
+            cmd = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--", *cmd]
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30, check=False
+        )
+        if r.returncode != 0 and os.geteuid() == 0:
+            raise SkipTest(f"nobody cannot run this Python or read this checkout: {r.stderr}")
+        assert (r.returncode, r.stdout) == (0, "words\nselftest\n"), r.stderr
+
+    def test_the_bash_shim(self) -> None:
+        bash = shutil.which("bash")
+        if not bash:
+            raise SkipTest("bash is not installed")
+        script = (
+            f"source {shlex.quote(str(_REPO_ROOT / 'completion/zark'))}\n"
+            't() { COMP_LINE=$1; COMP_POINT=${#1}; read -ra COMP_WORDS <<<"$1"\n'
+            ' [[ $1 == *" " ]] && COMP_WORDS+=("")\n'
+            " COMP_CWORD=$((${#COMP_WORDS[@]}-1)); _zark\n"
+            " local IFS='|'; echo \"${COMPREPLY[*]}\"; }\n"
+            f"t {shlex.quote(str(_REPO_ROOT / 'zark') + ' reg')}\n"
+            f"t {shlex.quote(str(_REPO_ROOT / 'zark') + ' mount ')}\n"
+            "complete -p zark ./zark\n"
+        )
+        r = subprocess.run(
+            [bash, "--norc", "--noprofile", "-c", script],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30, check=False,
+        )  # fmt: skip
+        assert r.returncode == 0, r.stderr
+        lines = r.stdout.splitlines()
+        assert lines[:2] == ["registry", "local|system|rpool"], r.stdout
+        assert "complete -F _zark zark" in r.stdout and "complete -F _zark ./zark" in r.stdout
+
+    def test_the_package_installs_the_shim(self) -> None:
+        install = (_REPO_ROOT / "debian/install").read_text("utf-8").split()
+        assert install[install.index("completion/zark") + 1] == (
+            "usr/share/bash-completion/completions/"
+        )
 
 
 class TestSelftestRdr01:  # pylint: disable=missing-function-docstring

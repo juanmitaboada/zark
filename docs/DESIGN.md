@@ -16,6 +16,7 @@ zark/
 │   ├── certificates.py        # Self-test reports, the local record, certificates
 │   ├── cleanup.py             # Cleanup and safe teardown
 │   ├── cli_spec.py            # The command line declared once: groups, help, words
+│   ├── completion.py          # The shell completion's engine, from cli_spec (any user)
 │   ├── config.py              # Version, paths and configuration
 │   ├── dependents.py          # What a destroy on a drive must take first, and in which order
 │   ├── drive_contents.py      # What a backup drive holds, for status.json (read-only)
@@ -88,6 +89,8 @@ zark/
 │   └── umount.py              # Backup pool unmounting (+ `umount local`)
 ├── certificates/
 │   └── selftest.json          # Platforms the self-test has certified
+├── completion/
+│   └── zark                   # bash completion (installed for bash-completion)
 └── etc/
     └── known_drives.json.example  # The registry's format (the real one is local)
 ```

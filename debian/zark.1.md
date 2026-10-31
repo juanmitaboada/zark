@@ -47,6 +47,12 @@ recovered system continues to receive normal **apt**(8) upgrades.
 pendrive. Both invocation styles use exactly the same code; the only
 difference is the default location of the configuration file and log.
 
+**bash** completes **zark**'s commands, their options and arguments (whole
+disks under */dev/disk/by-id*, registered drives, rpool's datasets) once
+the package is installed; from a portable tree, **source**
+*completion/zark* in the shell first. It runs as the user who presses TAB
+and never needs root.
+
 # GLOBAL OPTIONS
 
 **-h**, **--help**, **help**
@@ -1145,6 +1151,14 @@ roll its backup points back).
 */usr/share/zark/*
 :   Installation directory used by the Debian package. The
     */usr/bin/zark* symlink points at */usr/share/zark/zark*.
+
+*/usr/share/bash-completion/completions/zark*
+:   The **bash** completion (*completion/zark* in a portable tree). Its
+    candidates come from */usr/share/zark/lib/completion.py*, which reads
+    only what any user may: the command line's own words, */dev/disk/by-id*,
+    the drive registry, and **zfs list** and **zfs get**; it never imports a
+    pool or writes anything. **zsh** can load it after
+    **autoload -U bashcompinit && bashcompinit**.
 
 */etc/zark/known_drives.json*
 :   Registry of known backup drives, used by every command that needs

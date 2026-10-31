@@ -3,3 +3,4 @@ lib                           usr/share/zark/
 commands                      usr/share/zark/
 certificates                  usr/share/zark/
 etc/known_drives.json.example etc/zark/
+completion/zark               usr/share/bash-completion/completions/
