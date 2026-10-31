@@ -3,7 +3,7 @@
         setup clean version \
         check mypy pylint ruff format format-check basedpyright pre-commit lint tox tox-ruff \
         manpage manpage-view manpage-lint manpage-clean \
-        dist dist-check fulltest fulltest-clean deb deb-source release-guard deb-ppa deb-ppa-test deb-ppa-resume
+        dist dist-check fulltest fulltest-clean deb deb-source release-guard deb-ppa deb-ppa-test deb-ppa-resume pages-check pages
 
 SHELL  := /bin/bash
 ZARK   := ./zark
@@ -79,10 +79,16 @@ check: ## Syntax-check all Python files (fast, no dependencies)
 	@# and predictable. Use a single Python process via xargs (-exec ... +)
 	@# instead of one process per file. The entry-point script `zark` has
 	@# no .py extension and is checked separately.
-	find lib commands tests -name '*.py' -print0 \
+	find lib commands tests pages -name '*.py' -print0 \
 		| xargs -0 $(PYTHON) -m py_compile
 	$(PYTHON) -m py_compile zark
 	@echo "  All files OK"
+
+pages-check: ## Validate the certificates and the community reports behind the Pages matrix
+	$(PYTHON) pages/matrix.py check
+
+pages: ## Build the certificates matrix into _site (open _site/index.html)
+	$(PYTHON) pages/matrix.py build --out _site
 
 mypy: ## Type-check with the mypy in PATH (strict); fulltest uses the pinned one (tox -e lint)
 	@command -v mypy >/dev/null || { \
@@ -96,7 +102,7 @@ pylint: ## Run the pylint in PATH; fulltest uses the pinned one (tox -e lint)
 		echo "  pylint not installed. Install with: pip install pylint --break-system-packages"; \
 		exit 1; \
 	}
-	pylint lib commands tests zark
+	pylint lib commands tests zark pages
 
 ruff: ## Run the ruff in PATH (full ruleset); fulltest uses the pinned one (tox -e ruff)
 	@command -v ruff >/dev/null || { \
@@ -110,7 +116,7 @@ format-check: ## Check formatting with the ruff in PATH; fulltest uses the pinne
 		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
 	}
-	ruff format --check lib commands tests zark
+	ruff format --check lib commands tests zark pages
 
 format: ## Reformat and auto-fix the whole project with ruff (rewrites files)
 	@# Replaces the former black + isort + pyupgrade + add-trailing-comma
@@ -121,8 +127,8 @@ format: ## Reformat and auto-fix the whole project with ruff (rewrites files)
 		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
 	}
-	ruff check --fix lib commands tests zark
-	ruff format lib commands tests zark
+	ruff check --fix lib commands tests zark pages
+	ruff format lib commands tests zark pages
 
 basedpyright: ## Run the basedpyright in PATH (strict); fulltest uses the pinned one (tox -e types)
 	@# Configured in pyproject.toml under [tool.pyright]: basedpyright's

@@ -243,3 +243,6 @@ zark_*.tar.gz
 
 # Internal working notes (local only, never shipped)
 /PROJECT-NOTES.md
+
+# The certificates matrix (make pages)
+_site/

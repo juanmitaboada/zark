@@ -110,7 +110,7 @@ line-ending           = "auto"
 # Explicit on purpose: mypy does NOT read [project].requires-python.
 # Keep in sync with it.
 python_version = "3.12"
-files          = ["lib", "commands", "tests", "zark"]
+files          = ["lib", "commands", "tests", "zark", "pages"]
 
 # Without this, mypy skips the BODY of every unannotated function. Every
 # test here is a bare `def test_x(self):`, so the whole 346-test suite was
@@ -133,7 +133,7 @@ check_untyped_defs = true
 # absent, and plain pyright (what an editor's LSP usually runs) tolerates
 # the basedpyright-only keys below. One section therefore serves both.
 [tool.pyright]
-include          = ["lib", "commands", "tests"]
+include          = ["lib", "commands", "tests", "pages"]
 extraPaths       = ["."]
 # Pyright's "pythonVersion" is the minimum supported version, not the
 # target version. Keep in sync with [project].requires-python.
