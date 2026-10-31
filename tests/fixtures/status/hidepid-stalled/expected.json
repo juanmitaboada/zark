@@ -1,0 +1,8 @@
+{
+  "now": "2026-10-24T09:21:16Z",
+  "progress_process": "proc",
+  "progress": "stalled",
+  "status": "ok",
+  "indicator": "running",
+  "what": "As hidepid-running, heartbeat 95 s old: rule 4 skipped, so stalled, not orphan; the reader cannot tell whether it lives."
+}

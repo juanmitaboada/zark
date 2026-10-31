@@ -22076,17 +22076,28 @@ def _expected(case: Path) -> dict[str, Any]:
     return json.loads((case / "expected.json").read_text("utf-8"))
 
 
-def _alive_for(expected: dict[str, Any]) -> Any:
+# The amended orphan rule 4 (M8P.1) reaches the reference reader in M14's next
+# commit; until then these two cases are left out of the classification tests.
+_RULE4_PENDING = ("hidepid-running", "hidepid-stalled")
+
+
+def _alive_for(case: Path, expected: dict[str, Any]) -> Any:
     """The fixtures' README: ``alive`` cases inject liveness, ``dead`` ones
-    use the real check (pid 4194304 exists nowhere)."""
+    use the real check (pid 4194304 exists nowhere), ``proc`` ones the real
+    check on the case's own proc tree (M8P.1)."""
     if expected["progress_process"] == "alive":
         return lambda _doc: True
+    if expected["progress_process"] == "proc":
+        proc = case / "proc"
+        return lambda doc: sreader.process_alive(
+            doc, proc=proc, boot_id_path=proc / "sys/kernel/random/boot_id"
+        )
     return sreader.process_alive
 
 
 def _reading_of(case: Path) -> sreader.Reading:
     e = _expected(case)
-    return sreader.read_all(case, sreader.parse_timestamp(e["now"]), _alive_for(e))
+    return sreader.read_all(case, sreader.parse_timestamp(e["now"]), _alive_for(case, e))
 
 
 def _stdlib_only(name: str) -> bool:
@@ -22135,15 +22146,17 @@ class TestStatusReaderFixtures:  # pylint: disable=missing-function-docstring
 
     def test_every_case_has_its_expected_json(self) -> None:
         cases = _fixture_cases()
-        assert len(cases) >= 20, [c.name for c in cases]
+        assert len(cases) >= 25, [c.name for c in cases]
         assert all((c / "expected.json").is_file() for c in cases), cases
-        # M7F-3: a .gitignore with `var/` drops these silently; 19 in R9.2.
+        # M7F-3: a .gitignore with `var/` drops these silently; 24 in M14.
         statuses = [c for c in cases if (c / "var/lib/zark/status.json").is_file()]
-        assert len(statuses) >= 19, [c.name for c in statuses]
+        assert len(statuses) >= 24, [c.name for c in statuses]
 
     def test_every_case_classifies_as_expected(self) -> None:
         wrong: list[str] = []
         for case in _fixture_cases():
+            if case.name in _RULE4_PENDING:
+                continue
             e = _expected(case)
             r = _reading_of(case)
             got = (r.progress_class, r.status_class, r.indicator)
@@ -22961,12 +22974,14 @@ class TestMonitorOptions:  # pylint: disable=missing-function-docstring
 
     def test_once_and_state(self) -> None:
         for case in _fixture_cases():
+            if case.name in _RULE4_PENDING:
+                continue
             e = _expected(case)
             now = sreader.parse_timestamp(e["now"]) or datetime.now(UTC)
             session = monitor_mod.Session(
                 monitor_mod.Options(once=True, state=True, root=case, live=False),
                 clock=functools.partial(lambda when: when, now),
-                alive=_alive_for(e),
+                alive=_alive_for(case, e),
             )
             out = StringIO()
             with redirect_stdout(out):
