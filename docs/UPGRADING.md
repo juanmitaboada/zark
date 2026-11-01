@@ -1,6 +1,6 @@
 # Upgrading zark
 
-What changes when a system and its drives move from zark 2.0 to 2.1, and from zark 1.x to zark 2.
+What changes when a system and its drives move from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
 
 ## Upgrading from zark 2.0
 
@@ -46,3 +46,25 @@ Until a drive has had its first zark 2 backup, do not use `zark prune`'s "remove
 **1.x precautions that no longer apply:** stopping `apt-daily-upgrade.timer` around a backup (backup pools are imported with nothing mounted, and the APT guard refuses a boot-critical upgrade while a backup pool is attached); avoiding `zark clean`, `prepare` and `purge` (each touches only what is zark's, after a question); keeping 1.x's `syncoid_*` snapshots (each drive has its own bookmarks); checking `known_drives.json` by hand after an edit (`zark registry list|forget|fix`). **Still true:** never destroy snapshots by `%` range or by hand on a backup drive, and after a crash during a backup, unplug the drive before booting.
 
 **The way back.** Until a drive's first zark 2 backup, 1.0.12 can still back up to it (keep a copy of its `.deb` and of `/etc/zark/known_drives.json`). A drive zark 2 has written must not be used with 1.x again: syncoid would roll back zark 2's backup points.
+
+## Upgrading Ubuntu from 24.04 to 26.04
+
+zark itself goes on working after the release upgrade: on the test machine, `zark status` and the self-test passed on the upgraded system. Two things in the upgrade need you, on a system installed with the installer's encrypted ZFS layout.
+
+**Before it.** Back up with `sudo zark backup`, then unplug the drive before you start: zark's apt guard aborts any change to boot-critical packages (kernel, GRUB, shim, ZFS) while a backup drive is connected, and a release upgrade changes all of them.
+
+**If the upgrade stops halfway.** On the test machine the graphical upgrade from 24.04 to 26.04 stopped twice at the same point: while configuring packages, systemd unmounted part of rpool's datasets, the desktop session closed and the upgrader and dpkg stopped with it. The cause is in Ubuntu's ZFS packages, not in zark (the mount units of OpenZFS 2.2 and 2.4 depend on differently named key-loading units), so it can affect any 24.04 system with an encrypted ZFS root; it has not been fixed at the time of writing. If it happens to you:
+
+1. Switch to a text console with Ctrl+Alt+F3 and log in. The network may be down until the reboot.
+2. Finish the interrupted upgrade with `sudo dpkg --configure -a`. If `sudo` is not found (it was missing on the test machine at that point), run `/usr/lib/cargo/bin/sudo dpkg --configure -a`.
+3. Reboot. On the test machine the system then started as Ubuntu 26.04 with every dataset mounted.
+
+**After it: zark's PPA.** The release upgrader disables third-party sources: it marks zark's PPA `Enabled: no` and keeps zark at its 24.04 build, which then gets no updates. To enable the PPA for 26.04 and move zark to its 26.04 build:
+
+```bash
+sudo sed -i -e 's/^Suites: .*/Suites: resolute/' -e '/^Enabled: no$/d' /etc/apt/sources.list.d/juanmitaboada-ubuntu-zark-*.sources
+sudo apt update
+sudo apt install zark
+```
+
+On 26.04 the GNOME Shell extension is also available from the same PPA: `sudo apt install gnome-shell-extension-zark`. On the test machine zark's guards and the snapshot timer were still in place after the upgrade, so the next step is another backup.
