@@ -19,7 +19,7 @@ zark 2.1 keeps 2.0's drives, registry and backup points as they are: no format o
 **What behaves differently:**
 
 - `recover` creates only the top of a subtree excluded from backups at the point it restores (empty, with its properties); the datasets below it are not created.
-- `backup` and `prepare` refuse a system without a bpool of its own, naming where `/boot` is (Ubuntu 26.10 and later put it on ext4 when Secure Boot is on); 24.04 and 26.04 LTS, as their installers lay out ZFS, are the supported series.
+- `backup` and `prepare` refuse a system without a bpool of its own, naming where `/boot` is (Ubuntu 26.10 and later put it on ext4 on UEFI machines, Secure Boot on or off; support is planned for 2.2, [#5](https://github.com/juanmitaboada/zark/issues/5)); 24.04 and 26.04 LTS, as their installers lay out ZFS, are the supported series.
 - For contributors: `make test-real` and 1.x's QEMU harness are gone; validation is the self-test and a checklist on real hardware.
 
 **The way back.** 2.0.0 reads everything 2.1 writes on drives and in the registry. Going back is installing 2.0.0's package with `sudo apt install --allow-downgrades ./<its .deb>`, never `apt remove zark` (it removes the guards and alerts); the status files are then left as they are and no longer updated.

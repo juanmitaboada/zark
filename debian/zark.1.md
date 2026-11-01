@@ -33,8 +33,8 @@ bookmark per drive.
 **zark** supports Ubuntu 24.04 LTS and 26.04 LTS as their installers lay out
 ZFS (**rpool**, **bpool** and the keystore), with Secure Boot on. **backup**
 and **prepare** refuse a system without a **bpool** of its own, naming where
-*/boot* is: Ubuntu 26.10 and later put */boot* on ext4 when Secure Boot is
-on.
+*/boot* is: Ubuntu 26.10 and later put */boot* on ext4 on UEFI machines,
+with Secure Boot on or off.
 
 A full restore - partitioning, **rpool** + **bpool** recreation, LUKS keystore
 reconstruction, GRUB and initramfs regeneration - runs from an Ubuntu Live USB
