@@ -54,6 +54,16 @@ class BootMount:
     uuid: str
 
 
+def running_be() -> str:
+    """The boot environment mounted at ``/`` (``ubuntu_<id>``), "" when
+    ``/`` is not a dataset of ``rpool/ROOT``."""
+    r = sh.run("findmnt -n -o SOURCE /")
+    source = r.output.strip() if r.ok else ""
+    if source.startswith("rpool/ROOT/") and source.count("/") == 2:
+        return source.removeprefix("rpool/ROOT/")
+    return ""
+
+
 def boot_mount() -> BootMount | None:
     """``/boot``'s mount, or None when it is a directory of the root."""
     r = sh.run("findmnt -n -o FSTYPE,SOURCE,UUID /boot")

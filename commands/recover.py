@@ -274,6 +274,49 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
 # ── Restore plan ─────────────────────────────────────────────────────────
 
 
+def refuse_unrecoverable(rec: pool_record.PoolRecord | None, log: Log) -> None:
+    """Refuse, before anything is erased, a point this zark must not
+    recover: one whose ``min_recover`` it does not meet or cannot read
+    (M12-8), and one whose ``/boot`` is on ext4, which this build does not
+    lay out (M13F-3)."""
+    if rec is None:
+        return
+    if not pool_record.recovers(rec.min_recover):
+        title = (
+            f"This point needs zark {rec.min_recover} or later to recover"
+            if pool_record.zark_version_tuple(rec.min_recover) is not None
+            else "This point's record names an oldest zark this one cannot read: " + rec.min_recover
+        )
+        log.fatal(
+            title,
+            causes=[
+                f"It was written by zark {rec.written_by or '(not recorded)'}; "
+                + f"this is zark {VERSION}"
+            ],
+            solutions=[
+                "Run recover from a live session with a newer zark",
+                "Nothing was erased",
+            ],
+        )
+    if pool_record.layout_of(rec) == "ext4":
+        log.fatal(
+            "This point's /boot is on ext4, which this zark does not recover",
+            causes=[
+                f"Written by zark {rec.written_by or '(not recorded)'} for a system with /boot "
+                + "on an ext4 partition and no bpool",
+                *(
+                    [f"Its /boot record is unreadable: {rec.boot_problem}"]
+                    if rec.boot_problem
+                    else []
+                ),
+            ],
+            solutions=[
+                "Run recover with a zark that recovers the ext4 layout",
+                "Nothing was erased",
+            ],
+        )
+
+
 def _pools_from_record(
     pool: str, point: str, snaps: list[Snap], log: Log
 ) -> dict[str, pool_record.Create]:
@@ -292,6 +335,7 @@ def _pools_from_record(
     except ValueError as e:
         log.warn(str(e))
         rec = None
+    refuse_unrecoverable(rec, log)
     known = set(zfs_features.parse_upgrade_v(sh.run("zpool upgrade -v").stdout))
     if rec is None or not known or not all(p in rec.pools for p in ("rpool", "bpool")):
         live = ", ".join(ln.strip() for ln in sh.run("zfs version").lines) or "unknown"

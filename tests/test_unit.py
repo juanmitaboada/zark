@@ -325,6 +325,9 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestBootLayoutCallers,
     TestBootLayoutKernels,
     TestBootLayoutOrigin,
+    TestPoolRecordBoot,
+    TestPoolRecordCapture,
+    TestRecoverRefusesBeforeErasing,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -347,7 +350,14 @@ from tests.test_status_files import (  # pylint: disable=wrong-import-position #
 SITE_SUITES = (TestSiteCertificates, TestSitePage, TestSitePrivacy)
 
 # The boot layouts' tests live in their own module (M13), named here for the same reason.
-BOOT_LAYOUT_SUITES = (TestBootLayoutCallers, TestBootLayoutKernels, TestBootLayoutOrigin)
+BOOT_LAYOUT_SUITES = (
+    TestBootLayoutCallers,
+    TestBootLayoutKernels,
+    TestBootLayoutOrigin,
+    TestPoolRecordBoot,
+    TestPoolRecordCapture,
+    TestRecoverRefusesBeforeErasing,
+)
 
 # The status files' tests live in their own module (M7-15); main() runs the
 # Test* classes of this module's globals, so they are named here.

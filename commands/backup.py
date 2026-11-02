@@ -1125,8 +1125,12 @@ def run(
     warn_rpool_mountpoint_lost(log)
     warn_kernel_named_vdevs(log)
     survey.require_bookmark_v2(log)
-    if survey.require_boot_layout(log) == "ext4":
+    layout = survey.require_boot_layout(log)
+    if layout == "ext4":
         survey.refuse_without_bpool(log)
+    # How origin's pools are, for recover (M6-5); before anything is written (M13C-5).
+    pools_mark = pool_record.capture(log, layout)
+    pool_record.require(pools_mark, layout, log)
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")
@@ -1267,7 +1271,6 @@ def run(
     if not opts.take_snapshots:
         log.info("--no-snapshot has no effect: the backup point is taken by zark itself")
     declared, excluded_mark = exclusions.for_run(survey.source_pools(), log)
-    pools_mark = pool_record.capture(log)  # how origin's pools are, for recover (M6-5)
     if declared.no_snapshot and (gap := sanoid_conf_gap(zfs)):
         # sanoid.conf must keep the excluded subtrees out of its recursive rules (M5b-6).
         log.warn(f"sanoid.conf is not setup's policy here ({gap}): run {zark_command()} setup")

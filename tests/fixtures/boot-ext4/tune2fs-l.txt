@@ -1,0 +1,12 @@
+Filesystem volume name:   <none>
+Filesystem UUID:          0b0e7e57-0000-4000-8000-000000000001
+Filesystem features:      has_journal ext_attr resize_inode dir_index orphan_file filetype needs_recovery extent 64bit flex_bg metadata_csum_seed sparse_super large_file huge_file dir_nlink extra_isize metadata_csum orphan_present
+Default mount options:    user_xattr acl
+Filesystem state:         clean
+Block count:              524288
+Reserved block count:     26214
+Free blocks:              459780
+Block size:               4096
+Filesystem created:       Sun Nov  1 15:00:44 2026
+Reserved blocks uid:      0 (user root)
+Reserved blocks gid:      0 (group root)

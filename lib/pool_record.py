@@ -18,6 +18,16 @@ and module that ran it, recorded on every snapshot of the point on the
 drive as ``org.zark:pools``, so that recover creates the new pools as
 origin had them instead of with every feature of the live's ZFS.
 
+On a system whose ``/boot`` is an ext4 partition (Ubuntu 26.10 and later
+on UEFI, M12-1 1a) the record names rpool alone and carries a ``boot``
+entry: the file system, its partition, the ESP and the swap as origin had
+them, so that recover lays the disk out the same way (M12 plan 5.3). Every
+point also records ``written_by``, the zark that wrote it, and an ext4
+point ``min_recover``, the oldest zark that recovers it, which recover
+checks before erasing anything (M12-8). Both are optional keys of format 1:
+zark 2.1.1 reads only ``format``, ``pools``, ``ubuntu``, ``zfs`` and
+``kmod``, so a record it reads is the same with or without them.
+
 The states are what ``zpool get`` prints: ``enabled`` or ``active`` for a
 feature the tools know, ``inactive`` or ``readonly`` for one they do not,
 named ``unsupported@<guid>`` (lib/libzfs/libzfs_pool.c:963-990, :1139-1144
@@ -28,11 +38,15 @@ pools.
 """
 
 import json
+import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from lib import platform_facts, sh, zfs_features
+from lib.boot_layout import Layout, boot_copy, boot_mount, running_be
+from lib.config import VERSION
 from lib.drive_marks import snapshot_marks
 from lib.log import Log
 from lib.restore_points import Snap
@@ -41,6 +55,38 @@ from lib.zfs import COMPAT_DIRS
 POOLS_PROP = "org.zark:pools"
 FORMAT = 1
 ORIGIN_POOLS = ("rpool", "bpool")
+
+# The oldest zark that recovers an ext4 point (M12-8).
+MIN_RECOVER_EXT4 = "2.2.0"
+
+# The persistent features of the 26.10 installer's /boot (eli's c1-2610
+# storage.txt:157 without the transient needs_recovery and orphan_present),
+# which are mke2fs.conf's defaults for ext4 in e2fsprogs 1.47.4
+# (misc/mke2fs.conf.in:2, :14): recover makes the new /boot with these.
+EXT4_FEATURES = (
+    "64bit",
+    "dir_index",
+    "dir_nlink",
+    "ext_attr",
+    "extent",
+    "extra_isize",
+    "filetype",
+    "flex_bg",
+    "has_journal",
+    "huge_file",
+    "large_file",
+    "metadata_csum",
+    "metadata_csum_seed",
+    "orphan_file",
+    "resize_inode",
+    "sparse_super",
+)
+
+
+def pools_for(layout: Layout) -> tuple[str, ...]:
+    """The pools a system of ``layout`` has."""
+    return ORIGIN_POOLS if layout == "bpool" else ("rpool",)
+
 
 _ON = ("enabled", "active")
 # A feature the tools do not know: refcount 0 prints "inactive", else "readonly".
@@ -57,13 +103,65 @@ class PoolState:
 
 
 @dataclass(frozen=True)
-class PoolRecord:
+class Partition:
+    """A partition as recorded: its size and GPT type."""
+
+    size_bytes: int
+    type_guid: str
+
+
+@dataclass(frozen=True)
+class Esp:
+    """The ESP as recorded."""
+
+    size_bytes: int
+    uuid: str
+
+
+@dataclass(frozen=True)
+class Swap:
+    """The swap partition as recorded, with origin's crypttab line for it."""
+
+    size_bytes: int
+    crypttab: str
+
+
+@dataclass(frozen=True)
+class BootRecord:  # pylint: disable=too-many-instance-attributes
+    """An ext4 ``/boot`` as origin had it (M12 plan 5.3)."""
+
+    dataset: str  # the copy of /boot in origin's rpool (M12-2 2e)
+    fstype: str
+    uuid: str
+    label: str
+    size_bytes: int
+    features: tuple[str, ...]
+    mount_options: str
+    partition: Partition
+    esp: Esp | None
+    swap: Swap | None
+
+
+@dataclass(frozen=True)
+class PoolRecord:  # pylint: disable=too-many-instance-attributes
     """Origin's pools at a point, and what ran them."""
 
     ubuntu: str
     zfs: str
     kmod: str
     pools: dict[str, PoolState]
+    boot: BootRecord | None = None
+    written_by: str = ""
+    min_recover: str = ""
+    # A ``boot`` entry that is there but unreadable: the point's layout is
+    # not known, so recover refuses it rather than take it for a bpool point.
+    boot_problem: str = ""
+
+
+def layout_of(rec: PoolRecord | None) -> Layout:
+    """The boot layout of the point ``rec`` describes: ``bpool`` without a
+    record or without a ``boot`` entry (every point written by 2.1)."""
+    return "ext4" if rec is not None and (rec.boot is not None or rec.boot_problem) else "bpool"
 
 
 def parse_get(text: str) -> PoolState:
@@ -82,33 +180,57 @@ def parse_get(text: str) -> PoolState:
     return PoolState(compat, features)
 
 
+def _boot_json(b: BootRecord) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "layout": "ext4",
+        "dataset": b.dataset,
+        "fstype": b.fstype,
+        "uuid": b.uuid,
+        "label": b.label,
+        "size_bytes": b.size_bytes,
+        "features": list(b.features),
+        "mount_options": b.mount_options,
+        "partition": {"size_bytes": b.partition.size_bytes, "type_guid": b.partition.type_guid},
+    }
+    if b.esp is not None:
+        out["esp"] = {"size_bytes": b.esp.size_bytes, "uuid": b.esp.uuid}
+    if b.swap is not None:
+        out["swap"] = {"size_bytes": b.swap.size_bytes, "crypttab": b.swap.crypttab}
+    return out
+
+
 def dump(rec: PoolRecord) -> str:
     """The record's JSON (ASCII, sorted, compact)."""
-    return json.dumps(
-        {
-            "format": FORMAT,
-            "ubuntu": rec.ubuntu,
-            "zfs": rec.zfs,
-            "kmod": rec.kmod,
-            "pools": {
-                name: {
-                    "compatibility": p.compatibility,
-                    "features": dict(sorted(p.features.items())),
-                }
-                for name, p in sorted(rec.pools.items())
-            },
+    data: dict[str, Any] = {
+        "format": FORMAT,
+        "ubuntu": rec.ubuntu,
+        "zfs": rec.zfs,
+        "kmod": rec.kmod,
+        "pools": {
+            name: {
+                "compatibility": p.compatibility,
+                "features": dict(sorted(p.features.items())),
+            }
+            for name, p in sorted(rec.pools.items())
         },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    }
+    if rec.boot is not None:
+        data["boot"] = _boot_json(rec.boot)
+    if rec.written_by:
+        data["written_by"] = rec.written_by
+    if rec.min_recover:
+        data["min_recover"] = rec.min_recover
+    return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
-def capture(log: Log, pools: tuple[str, ...] = ORIGIN_POOLS) -> str:
+def capture(log: Log, layout: Layout = "bpool") -> str:
     """Origin's record for the point a run is about to take, or "" when a
-    pool cannot be read (a warning; the point is then written without one,
-    as a drive written before 2.0.0-rc11 is: M6-9)."""
+    pool or, on an ext4 system, ``/boot`` cannot be read (a warning naming
+    it). A bpool point is then written without one, as a drive written
+    before 2.0.0-rc11 is (M6-9); an ext4 point is refused by its caller
+    (M13C-5)."""
     states: dict[str, PoolState] = {}
-    for pool in pools:
+    for pool in pools_for(layout):
         r = sh.run(f"zpool get -H -p -o property,value all {shlex.quote(pool)}")
         if not r.ok:
             log.warn(
@@ -118,15 +240,149 @@ def capture(log: Log, pools: tuple[str, ...] = ORIGIN_POOLS) -> str:
             )
             return ""
         states[pool] = parse_get(r.stdout)
+    boot: BootRecord | None = None
+    if layout == "ext4":
+        boot, why = capture_boot()
+        if boot is None:
+            log.warn(f"Cannot record /boot: {why}")
+            return ""
     zv = sh.run("zfs version")
     lines = [ln.strip() for ln in zv.lines] if zv.ok else []
     tools = next((ln for ln in lines if not ln.startswith("zfs-kmod-")), "")
     kmod = next((ln for ln in lines if ln.startswith("zfs-kmod-")), "")
-    return dump(PoolRecord(platform_facts.ubuntu_release(), tools, kmod, states))
+    return dump(
+        PoolRecord(
+            platform_facts.ubuntu_release(),
+            tools,
+            kmod,
+            states,
+            boot=boot,
+            written_by=VERSION,
+            min_recover=MIN_RECOVER_EXT4 if boot is not None else "",
+        )
+    )
+
+
+def require(mark: str, layout: Layout, log: Log) -> None:
+    """Refuse an ext4 system's run when :func:`capture` gave no record
+    (M13C-5): such a point would read as a bpool point, and recover would
+    lay out the wrong disk."""
+    if layout != "ext4" or mark:
+        return
+    log.fatal(
+        "Cannot record how this system's pools and /boot are",
+        causes=[
+            "The warning above names what could not be read",
+            "A point without that record would read as a bpool point, and recover "
+            + "would lay out the wrong disk",
+        ],
+        solutions=["Nothing was written: fix what the warning names and run again"],
+    )
+
+
+def _lsblk(device: str) -> tuple[int, str, str] | None:
+    """(size in bytes, partition type GUID, PARTUUID) of one block device."""
+    r = sh.run(f"lsblk -b -n -d -o SIZE,PARTTYPE,PARTUUID {shlex.quote(device)}")
+    fields = r.output.split() if r.ok else []
+    if len(fields) < 2 or not fields[0].isdigit():
+        return None
+    return int(fields[0]), fields[1].lower(), fields[2].lower() if len(fields) > 2 else ""
+
+
+def _tune2fs(text: str) -> tuple[list[str], int]:
+    """(features, size in bytes) from ``tune2fs -l``."""
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if sep:
+            fields[key.strip()] = value.strip()
+    count, size = fields.get("Block count", ""), fields.get("Block size", "")
+    total = int(count) * int(size) if count.isdigit() and size.isdigit() else 0
+    return fields.get("Filesystem features", "").split(), total
+
+
+def _fstab_options(text: str, mountpoint: str) -> str:
+    """The options field of ``mountpoint``'s line in an fstab, "" without one."""
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) >= 4 and not f[0].startswith("#") and f[1] == mountpoint:
+            return f[3]
+    return ""
+
+
+def _swap_line(text: str) -> tuple[str, str]:
+    """(line, PARTUUID) of the crypttab line of a swap on a partition."""
+    for line in text.splitlines():
+        f = line.split()
+        if len(f) >= 4 and not f[0].startswith("#") and "swap" in f[3].split(","):
+            if f[1].startswith("PARTUUID="):
+                return line.strip(), f[1].removeprefix("PARTUUID=").lower()
+    return "", ""
+
+
+def _read(path: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def capture_boot(root: str = "") -> tuple[BootRecord | None, str]:
+    """The running system's ext4 ``/boot`` as a :class:`BootRecord`, or None
+    and what could not be read. ``root`` prefixes ``/etc`` (tests)."""
+    mount = boot_mount()
+    if mount is None or mount.fstype != "ext4" or not mount.uuid:
+        return None, "it is not an ext4 mount with a UUID (findmnt /boot)"
+    be = running_be()
+    if not be:
+        return None, "the running boot environment is not one of rpool/ROOT (findmnt /)"
+    src = shlex.quote(mount.source)
+    t = sh.run(f"tune2fs -l {src}")
+    if not t.ok:
+        return None, f"tune2fs -l {mount.source}: {t.stderr.strip() or 'failed'}"
+    features, size = _tune2fs(t.stdout)
+    part = _lsblk(mount.source)
+    if part is None or not size:
+        return None, f"the size of {mount.source} (lsblk, tune2fs)"
+    label = sh.run(f"blkid -p -s LABEL -o value {src}")
+    return (
+        BootRecord(
+            dataset=boot_copy(be),
+            fstype="ext4",
+            uuid=mount.uuid,
+            label=label.output.strip() if label.ok else "",
+            size_bytes=size,
+            features=tuple(f for f in EXT4_FEATURES if f in features),
+            mount_options=_fstab_options(_read(f"{root}/etc/fstab"), "/boot") or "defaults",
+            partition=Partition(part[0], part[1]),
+            esp=_esp(),
+            swap=_swap(root),
+        ),
+        "",
+    )
+
+
+def _esp() -> Esp | None:
+    """The ESP mounted at ``/boot/efi``, None when it is not mounted."""
+    efi = sh.run("findmnt -n -o SOURCE,UUID /boot/efi")
+    fields = efi.output.split() if efi.ok else []
+    part = _lsblk(fields[0]) if len(fields) >= 2 else None
+    return Esp(part[0], fields[1]) if part is not None else None
+
+
+def _swap(root: str) -> Swap | None:
+    """The swap partition crypttab names, None without one."""
+    line, partuuid = _swap_line(_read(f"{root}/etc/crypttab"))
+    part = _lsblk(f"/dev/disk/by-partuuid/{partuuid}") if partuuid else None
+    return Swap(part[0], line) if part is not None else None
 
 
 def parse(value: str) -> PoolRecord | None:
-    """A record read back, or None when it is not one this zark reads."""
+    """A record read back, or None when it is not one this zark reads.
+
+    ``written_by`` and ``min_recover`` are kept as written, so that one
+    that is not a version is refused by :func:`recovers`; a ``boot`` entry
+    that cannot be read sets ``boot_problem``."""
     try:
         data = json.loads(value)
         if not isinstance(data, dict) or data.get("format") != FORMAT:
@@ -140,7 +396,100 @@ def parse(value: str) -> PoolRecord | None:
             raise ValueError("a version is not text")
     except (TypeError, ValueError):
         return None
-    return PoolRecord(fields[0], fields[1], fields[2], pools)
+    boot: BootRecord | None = None
+    problem = ""
+    if "boot" in data:
+        try:
+            boot = _boot(data["boot"])
+        except (TypeError, ValueError) as e:
+            problem = str(e) or "malformed"
+    return PoolRecord(
+        fields[0],
+        fields[1],
+        fields[2],
+        pools,
+        boot=boot,
+        written_by=_text(data.get("written_by", "")),
+        min_recover=_text(data.get("min_recover", "")),
+        boot_problem=problem,
+    )
+
+
+def _text(v: object) -> str:
+    """A recorded version as text; anything else as its JSON, which is
+    then no version (refused where one is needed)."""
+    return v if isinstance(v, str) else json.dumps(v)
+
+
+def _int(v: object) -> int:
+    if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+        raise ValueError("a size is not a positive integer")
+    return v
+
+
+def _str(v: object) -> str:
+    if not isinstance(v, str):
+        raise ValueError("a field is not text")
+    return v
+
+
+def _obj(v: object) -> dict[str, Any]:
+    if not isinstance(v, dict):
+        raise ValueError("an entry is not an object")
+    return v
+
+
+def _boot(raw: object) -> BootRecord | None:
+    """The ``boot`` entry read back: None for ``{"layout": "bpool"}``;
+    :class:`ValueError` when it is not one this zark reads."""
+    b = _obj(raw)
+    layout = b.get("layout")
+    if layout == "bpool":
+        return None
+    if layout != "ext4" or b.get("fstype") != "ext4":
+        raise ValueError(f"layout {layout!r} is not one this zark recovers")
+    feats = b.get("features")
+    if not isinstance(feats, list) or not all(isinstance(f, str) for f in feats):
+        raise ValueError("features is not a list of names")
+    part = _obj(b.get("partition"))
+    esp = _obj(b["esp"]) if "esp" in b else None
+    swap = _obj(b["swap"]) if "swap" in b else None
+    return BootRecord(
+        dataset=_str(b.get("dataset")),
+        fstype="ext4",
+        uuid=_str(b.get("uuid")),
+        label=_str(b.get("label", "")),
+        size_bytes=_int(b.get("size_bytes")),
+        features=tuple(feats),
+        mount_options=_str(b.get("mount_options", "defaults")),
+        partition=Partition(_int(part.get("size_bytes")), _str(part.get("type_guid"))),
+        esp=Esp(_int(esp.get("size_bytes")), _str(esp.get("uuid"))) if esp is not None else None,
+        swap=(
+            Swap(_int(swap.get("size_bytes")), _str(swap.get("crypttab")))
+            if swap is not None
+            else None
+        ),
+    )
+
+
+_ZARK_VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-rc\d+)?$")
+
+
+def zark_version_tuple(text: str) -> tuple[int, int, int] | None:
+    """``X.Y.Z`` of a zark version, an ``-rcN`` suffix ignored (an rc of X
+    recovers what X does: M12-8); None for anything else."""
+    m = _ZARK_VERSION.match(text.strip())
+    return (int(m[1]), int(m[2]), int(m[3])) if m else None
+
+
+def recovers(min_recover: str, version: str = VERSION) -> bool:
+    """True when zark ``version`` may recover a point recorded with
+    ``min_recover``: an empty one (every bpool point, every 2.1 point)
+    always, an unparsable one or an unparsable ``version`` never."""
+    if not min_recover:
+        return True
+    need, have = zark_version_tuple(min_recover), zark_version_tuple(version)
+    return need is not None and have is not None and have >= need
 
 
 def _pool_state(p: object) -> PoolState:

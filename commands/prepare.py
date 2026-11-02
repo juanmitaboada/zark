@@ -54,8 +54,12 @@ def run(
     log.banner("PREPARE NEW BACKUP DRIVE")
     warn_rpool_mountpoint_lost(log)
     survey.require_bookmark_v2(log)
-    if survey.require_boot_layout(log) == "ext4":
+    layout = survey.require_boot_layout(log)
+    if layout == "ext4":
         survey.refuse_without_bpool(log)
+    # How origin's pools are, for recover (M6-5); before anything is written (M13C-5).
+    pools_mark = pool_record.capture(log, layout)
+    pool_record.require(pools_mark, layout, log)
 
     # ── Verify rpool keystore accessible ─────────────────────────────────
     if not Path("/run/keystore/rpool/system.key").exists():
@@ -188,7 +192,6 @@ def run(
     log.info(f"~{rpool_used} to transfer")
     new_guid = zfs.pool_guid(new_pool)
     declared, excluded_mark = exclusions.for_run(survey.source_pools(), log)
-    pools_mark = pool_record.capture(log)  # how origin's pools are, for recover (M6-5)
     eng = engine.Run(
         new_pool,
         new_guid,
