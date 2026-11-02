@@ -387,7 +387,8 @@ def _grub_boots(root: str, rows: list[tuple[str, str, str]]) -> list[str]:
 # debian/patches/ubuntu-zfs-enhance-support.patch, lines 91, 191, 219, 248
 # and 262 of the file): a host script without one of them selects root or
 # /boot datasets otherwise, and BOOT-09's encoding no longer says what GRUB
-# does. Matched with ``in``, byte for byte.
+# does. Matched with ``in``, byte for byte; the suite holds the five lines
+# verbatim (tests/fixtures/boot-ext4/10_linux_zfs-selections, M13R-13).
 GRUB_ZFS_SCRIPT = Path("/etc/grub.d/10_linux_zfs")
 GRUB_ZFS_SELECTIONS = (
     (

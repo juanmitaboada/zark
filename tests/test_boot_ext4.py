@@ -258,6 +258,8 @@ class TestBootLayoutCallers:  # pylint: disable=missing-function-docstring
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "boot-ext4"
 # The mountpoint the bench lists for a dataset at / of its pool "c".
 _ALTROOT_C = f"{BACKUP_ALTROOT_BASE}/c"
+# Five lines of grub2 2.14-2ubuntu2.1's 10_linux_zfs.in (the README).
+_GRUB_SELECTIONS = (_FIXTURES / "10_linux_zfs-selections").read_text(encoding="utf-8")
 _UUID = "0b0e7e57-0000-4000-8000-000000000001"
 _SWAP_PARTUUID = "00000000-0000-4000-8000-0000000000a3"
 _LINUX_FS = "0fc63daf-8483-4772-8e79-3d69d8477de4"
@@ -2126,10 +2128,18 @@ class TestSelftestBoot:  # pylint: disable=missing-function-docstring
                     return "SKIP", bench
         return "PASS", bench
 
+    def test_boot_09s_selections_are_grub2s_lines(self):
+        """M13R-13: each string BOOT-09 seeks is in the five lines copied
+        from grub2's 10_linux_zfs.in, the one each, as the fixture's README
+        names them."""
+        lines = _GRUB_SELECTIONS.splitlines()
+        assert len(lines) == len(selftest_boot.GRUB_ZFS_SELECTIONS)
+        for (name, pattern), line in zip(selftest_boot.GRUB_ZFS_SELECTIONS, lines, strict=True):
+            assert pattern in line, name
+
     def test_boot_09_gives_the_be_its_properties_at_creation(self):
         """M13R-7: the installer's BE properties at zfs create, no zfs set."""
-        script = "\n".join(s for _, s in selftest_boot.GRUB_ZFS_SELECTIONS) + "\n"
-        got, bench = self._boot_09(script)
+        got, bench = self._boot_09(_GRUB_SELECTIONS)
         assert got == "PASS", got
         bench.fs.assert_any_call("c/be", "mountpoint=/", "canmount=noauto")
         assert not any("zfs set" in str(c.args[0]) for c in bench.ok.call_args_list)
@@ -2137,8 +2147,9 @@ class TestSelftestBoot:  # pylint: disable=missing-function-docstring
     def test_boot_09_fails_when_grub_changed_a_selection(self):
         """M13R-10: each of the five strings missing is a FAIL naming it."""
         sels = selftest_boot.GRUB_ZFS_SELECTIONS
+        lines = _GRUB_SELECTIONS.splitlines()
         for name, pattern in sels:
-            script = "\n".join(s for _, s in sels if s != pattern) + "\n"
+            script = "\n".join(ln for ln in lines if pattern not in ln) + "\n"
             got, _ = self._boot_09(script)
             assert got.startswith("FAIL: grub2 changed") and got.endswith(f"missing {name}"), got
 

@@ -1,0 +1,5 @@
+        zfs list -H -o name,canmount,mountpoint -t filesystem | grep -E '^'"${p}"'(\s|/[[:print:]]*\s)(on|noauto)\s'"${rel_pool_root}"'$' | awk '{print $1}'
+    candidate_path=$(validate_system_dataset "${base_dataset_path}/${directory}" "${directory}" "${mntdir}" "${snapshot_name}")
+    all_same_base_dataset_name="$(zfs list -H -t filesystem -o name,canmount | awk '/^[^ ]+\/'"${base_dataset_name}"'[ \t](on|noauto)/ {print $1}') "
+        candidate_dataset=$(zfs get -H mountpoint ${d} | grep -E "mountpoint\s${rel_pool_root}/${directory}\s" | awk '{print $1}')
+    all_mountable_datasets="$(zfs list -t filesystem -o name,canmount | awk  '/^[^ ]+[ \t]+on/ {print $1}')"
