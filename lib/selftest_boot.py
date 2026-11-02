@@ -204,14 +204,17 @@ def boot_02(b: Bench) -> None:
 
 
 def _copy_tree(b: Bench) -> tuple[str, str, str]:
-    """An encrypted pool with a boot environment and its ``zark-boot`` as
-    setup creates it (lib/setup: one zfs create); (pool, be, copy)."""
+    """An encrypted pool with a boot environment made as the installer makes
+    it (``mountpoint=/``, ``canmount=noauto``) and its ``zark-boot`` as setup
+    creates it (lib/setup: one zfs create); (pool, be, copy)."""
     c = b.make_pool(
         "c",
         f"-O encryption=aes-256-gcm -O keyformat=raw -O keylocation=file://{b.key} "
         + "-O acltype=posixacl",
     )
-    be = b.fs(f"{c}/be")
+    # The installer's BE properties at creation, never by zfs set (the
+    # chase.c:648 rule): noauto mounts nothing, and the altroot holds it.
+    be = b.fs(f"{c}/be", "mountpoint=/", "canmount=noauto")
     copy = f"{be}/{BOOT_COPY}"
     _ = b.ok(f"zfs create -o canmount=noauto -o mountpoint=legacy {copy}")
     return c, be, copy
@@ -360,12 +363,59 @@ def _grub_boots(root: str, rows: list[tuple[str, str, str]]) -> list[str]:
     ]
 
 
+# 10_linux_zfs's selections BOOT-09 encodes, as util/grub.d/10_linux_zfs.in
+# of grub2 2.14-2ubuntu2.1 writes them (created by
+# debian/patches/ubuntu-zfs-enhance-support.patch, lines 91, 191, 219, 248
+# and 262 of the file): a host script without one of them selects root or
+# /boot datasets otherwise, and BOOT-09's encoding no longer says what GRUB
+# does. Matched with ``in``, byte for byte.
+GRUB_ZFS_SCRIPT = Path("/etc/grub.d/10_linux_zfs")
+GRUB_ZFS_SELECTIONS = (
+    (
+        "root candidates",
+        r"""grep -E '^'"${p}"'(\s|/[[:print:]]*\s)""" + r"""(on|noauto)\s'"${rel_pool_root}"'$'""",
+    ),
+    ("2.a, the child named boot", r'validate_system_dataset "${base_dataset_path}/${directory}"'),
+    (
+        "2.c, a dataset named as the root",
+        r"""awk '/^[^ ]+\/'"${base_dataset_name}"'[ \t](on|noauto)/ {print $1}'""",
+    ),
+    ("2.c, mounted at /boot", r'grep -E "mountpoint\s${rel_pool_root}/${directory}\s"'),
+    # Two spaces after awk, as the script has them.
+    ("2.d, canmount on", r"""awk  '/^[^ ]+[ \t]+on/ {print $1}'"""),
+)
+
+
+def _grub_script_unchanged() -> None:
+    """BOOT-09's drift part: each of :data:`GRUB_ZFS_SELECTIONS` in the
+    host's 10_linux_zfs; Skip on a host without the script (a live)."""
+    try:
+        text = GRUB_ZFS_SCRIPT.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        raise Skip(
+            f"the selections hold on the bench; no {GRUB_ZFS_SCRIPT} here (a live), "
+            + "so its drift part did not run"
+        ) from None
+    missing = [(name, s) for name, s in GRUB_ZFS_SELECTIONS if s not in text]
+    expect(
+        not missing,
+        "10_linux_zfs selecting root and /boot datasets as BOOT-09 encodes it",
+        "grub2 changed its selection of root or /boot datasets, re-read 10_linux_zfs: "
+        + "missing "
+        + "; ".join(name for name, _ in missing),
+        "\n".join(s for _, s in missing),
+    )
+
+
 @check(
     "BOOT-09",
     1,
     1,
     "GRUB's ZFS script never takes zark-boot for a root or a /boot",
-    depends=("the name and properties of zark-boot (M12-2 2e, lib/mount_props.py:108)",),
+    depends=(
+        "the name and properties of zark-boot (M12-2 2e, lib/mount_props.py:108)",
+        "/etc/grub.d/10_linux_zfs of grub2 2.14-2ubuntu2.1",
+    ),
 )
 def boot_09(b: Bench) -> None:
     """On the bench's ``zfs list -H -o name,canmount,mountpoint`` of a boot
@@ -375,10 +425,11 @@ def boot_09(b: Bench) -> None:
     ``/``; ``/boot``: the child named ``<root>/boot``, a dataset named as
     the root mounted at ``/boot``, a canmount=on one at ``/boot``) never
     give ``zark-boot``; recover's inferred mount properties agree
-    (lib/mount_props.py:108-112)."""
+    (lib/mount_props.py:108-112). Then the host's 10_linux_zfs must still
+    hold those selections (:data:`GRUB_ZFS_SELECTIONS`), read only; without
+    the script that part skips."""
     c, be, copy = _copy_tree(b)
     try:
-        _ = b.ok(f"zfs set mountpoint=/ canmount=noauto {be}")
         r = b.ok(f"zfs list -H -o name,canmount,mountpoint -r {c}")
         rows = [tuple(ln.split("\t")) for ln in r.lines if ln.count("\t") == 2]
         roots = _grub_roots(rows)  # type: ignore[arg-type]
@@ -393,6 +444,7 @@ def boot_09(b: Bench) -> None:
         expect(copy not in boots, "the copy not a /boot", f"{len(boots)} /boot(s)", " ".join(boots))
     finally:
         b.drop_pool(c)
+    _grub_script_unchanged()
 
 
 @check(

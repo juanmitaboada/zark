@@ -69,7 +69,9 @@ zark 2.2 is built on `main` as `2.2.0-rc2` (`lib/config.py`) and
 - **Self-test checks BOOT-01 to BOOT-10 and UPG-01**: what zark reads of
   an ext4 `/boot`, the file system recover makes, `zark-boot`'s
   properties and round trip, GRUB's selections, the rewrites, and the
-  24.04 upgrade's units.
+  24.04 upgrade's units. BOOT-09 also fails when the host's
+  `/etc/grub.d/10_linux_zfs` no longer holds the selections it encodes
+  (M13R-10), so a later grub2 that widens them is caught.
 
 #### Changed
 

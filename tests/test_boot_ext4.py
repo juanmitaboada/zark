@@ -22,7 +22,9 @@ finds them; run that file, not this one.
 # pylint: disable=too-many-lines
 # Rationale: the boot layouts' suite, one module by design, as tests/test_unit.py.
 
+import ast
 import json
+import re
 import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
@@ -53,6 +55,7 @@ from lib import (
     retention,
     selftest,
     selftest_boot,
+    sh,
     status,
     status_file,
     survey,
@@ -2040,6 +2043,83 @@ class TestSelftestBoot:  # pylint: disable=missing-function-docstring
         assert roots == [be]
         assert boots == [f"{be}/boot", "c/BOOT/be"]
         assert f"{be}/zark-boot" not in roots + boots
+
+    @staticmethod
+    def _boot_09(script: str | None) -> tuple[str, MagicMock]:
+        """BOOT-09 on a bench whose zfs list gives an installer's BE and its
+        copy, with ``script`` as the host's 10_linux_zfs (None: absent);
+        (PASS, FAIL: <came> or SKIP, the bench)."""
+        rows = "c\ton\tnone\nc/be\tnoauto\t/\nc/be/zark-boot\tnoauto\tlegacy\n"
+        bench = MagicMock()
+        bench.make_pool.return_value = "c"
+        bench.fs.side_effect = lambda name, *_props: name
+        bench.ok.side_effect = lambda cmd: sh.RunResult(
+            0, rows if "zfs list" in cmd else "", "", cmd
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "10_linux_zfs"
+            if script is not None:
+                _ = path.write_text(script, encoding="utf-8")
+            with patch.object(selftest_boot, "GRUB_ZFS_SCRIPT", path):
+                try:
+                    selftest_boot.boot_09(bench)
+                except selftest.Fail as e:
+                    return f"FAIL: {e.came}", bench
+                except selftest.Skip:
+                    return "SKIP", bench
+        return "PASS", bench
+
+    def test_boot_09_gives_the_be_its_properties_at_creation(self):
+        """M13R-7: the installer's BE properties at zfs create, no zfs set."""
+        script = "\n".join(s for _, s in selftest_boot.GRUB_ZFS_SELECTIONS) + "\n"
+        got, bench = self._boot_09(script)
+        assert got == "PASS", got
+        bench.fs.assert_any_call("c/be", "mountpoint=/", "canmount=noauto")
+        assert not any("zfs set" in str(c.args[0]) for c in bench.ok.call_args_list)
+
+    def test_boot_09_fails_when_grub_changed_a_selection(self):
+        """M13R-10: each of the five strings missing is a FAIL naming it."""
+        sels = selftest_boot.GRUB_ZFS_SELECTIONS
+        for name, pattern in sels:
+            script = "\n".join(s for _, s in sels if s != pattern) + "\n"
+            got, _ = self._boot_09(script)
+            assert got.startswith("FAIL: grub2 changed") and got.endswith(f"missing {name}"), got
+
+    def test_boot_09_skips_its_drift_part_without_the_script(self):
+        assert self._boot_09(None)[0] == "SKIP"
+
+    def test_no_check_sets_a_mount_property(self):
+        """M13R-7, lib/selftest.py's rule: no string a selftest module runs
+        holds a zfs set of mountpoint or canmount (docstrings left out, they
+        name the rule)."""
+        bad = re.compile(r"zfs\s+set\b.*\b(?:mountpoint|canmount)\b")
+        found: list[str] = []
+        lib_dir = Path(selftest_boot.__file__).resolve().parent
+        for path in sorted(lib_dir.glob("selftest*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docs = {
+                id(n.body[0].value)
+                for n in ast.walk(tree)
+                if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef))
+                and n.body
+                and isinstance(n.body[0], ast.Expr)
+                and isinstance(n.body[0].value, ast.Constant)
+            }
+            for node in ast.walk(tree):
+                if isinstance(node, ast.JoinedStr):
+                    text = "".join(
+                        str(v.value) if isinstance(v, ast.Constant) else "{}" for v in node.values
+                    )
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if id(node) in docs:
+                        continue
+                    text = node.value
+                else:
+                    continue
+                if bad.search(text):
+                    found.append(f"{path.name}:{node.lineno}")
+        found = sorted(set(found))
+        assert not found, found
 
 
 def _exposed(**over: object) -> str:
