@@ -19,6 +19,7 @@ Wraps zfs/zpool commands with structured output and error handling.
 
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -114,6 +115,8 @@ def read_space(pool: str) -> Space | None:
 
 
 DATASET_USAGE = "name,type,used,usedbydataset,usedbysnapshots,usedbychildren,usedbyrefreservation"
+# Exports the read-back tries, each after udevadm settle, before -f (eli A5).
+READBACK_EXPORT_TRIES = 3
 
 
 @dataclass(frozen=True)
@@ -511,7 +514,13 @@ class ZFS:
              altroot (I-G).
           3. Read its health; when it is not ONLINE, keep ``zpool status -v``.
           4. Re-export, checked and logged: a pool left imported is a failed
-             verification too (I12).
+             verification too (I12). Each try waits for udev first: the
+             import makes the drive's keystore zvol appear, and udev's and
+             udisks' probes of its LUKS header hold it open for a moment,
+             so an export right after the import is refused "pool is busy"
+             (eli, 26.10, 6 of 10 tries; every one cleared by ``udevadm
+             settle``). Up to :data:`READBACK_EXPORT_TRIES` tries a second
+             apart, then ``-f``.
 
         The caller MUST treat a result that is not ``ok`` as "the backup is
         not trustworthy - do not tell the operator it is safe to disconnect".
@@ -550,13 +559,7 @@ class ZFS:
             # While it is still imported: zpool status -v needs the pool.
             _ = forensics.capture(name, f"read-back health {health}", self.log)
 
-        reexported = (
-            run(f"zpool export {name}", log=self.log).ok
-            or run(
-                f"zpool export -f {name}",
-                log=self.log,
-            ).ok
-        )
+        reexported = self._export_after_udev(name)
         run("sync")
         if reexported and cleanup is not None:
             cleanup.untrack_pool(name)
@@ -568,6 +571,18 @@ class ZFS:
         else:
             self.log.error(f"Read-back of {name}: could NOT export it again - still imported")
         return Readback(imported=True, health=health, status=status, reexported=reexported)
+
+    def _export_after_udev(self, name: str) -> bool:
+        """``zpool export`` of the read-back's pool, each try after ``udevadm
+        settle`` (the zvol probes, step 4 above), then ``-f``."""
+        for attempt in range(1, READBACK_EXPORT_TRIES + 1):
+            run("udevadm settle --timeout=30", log=self.log)
+            if run(f"zpool export {name}", log=self.log).ok:
+                return True
+            self.log.info(f"Read-back of {name}: export try {attempt} refused (busy?)")
+            if attempt < READBACK_EXPORT_TRIES:
+                time.sleep(1)
+        return run(f"zpool export -f {name}", log=self.log).ok
 
     def pool_guid(self, name: str) -> str:
         """Get pool GUID (decimal string)."""

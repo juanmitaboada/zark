@@ -5210,6 +5210,33 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
         assert not rb.ok and not rb.reexported
         assert mock.was_called("zpool export -f black")
 
+    def test_the_export_waits_for_udev_and_tries_again_when_busy(self):
+        """eli A5 (26.10): udev's probe of the drive's keystore zvol holds it
+        right after the import; each export try comes after udevadm settle,
+        and a busy one is tried again before -f."""
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on(self.IMPORT).succeeds()
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("udevadm settle --timeout=30").succeeds()
+        seen: list[str] = []
+
+        def run_(cmd: str, **kw: object) -> RunResult:
+            seen.append(cmd)
+            if cmd == "zpool export black":  # busy once, then exported
+                ok = seen.count(cmd) == 2
+                return RunResult(0 if ok else 1, "", "" if ok else "pool is busy", cmd)
+            return mock.mock_run(cmd, **kw)  # type: ignore[arg-type]
+
+        with patch_sh(mock), patch("lib.zfs.run", run_), patch("lib.zfs.time.sleep") as slept:
+            rb = ZFS(make_log()).verify_exported_pool_readback("black", device=self.DEV)
+        assert rb.ok and rb.reexported
+        tail = [c for c in seen if c.startswith(("udevadm", "zpool export"))]
+        settle, export = "udevadm settle --timeout=30", "zpool export black"
+        assert tail == [settle, export, settle, export], tail
+        assert slept.call_count == 1
+
     def test_the_altroot_it_made_goes_after_the_export(self):
         """M7P.7: the read-back's import comes after Cleanup removed the
         altroot; its export removes the drive's directory and the parent

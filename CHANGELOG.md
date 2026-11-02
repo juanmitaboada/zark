@@ -108,6 +108,12 @@ zark 2.2 is built on `main` as `2.2.0-rc2` (`lib/config.py`) and
   scanned or touched** (M13C-5); on an ext4 system a record that cannot
   be read stops the run with nothing written.
 - **Packaging**: `rsync` and `e2fsprogs` join `Depends` (M12R-10).
+- **The drive's read-back waits for udev before its export** (found on
+  eli's 26.10): the read-only import that checks a drive at the end of
+  `prepare` and `backup` makes the drive's keystore zvol appear, and
+  udev's and udisks' probes of it held the pool "busy" for the export
+  right after, so `prepare` refused to register a good drive. Each export
+  now follows `udevadm settle`, tried up to three times before `-f`.
 
 #### Known limitations
 
