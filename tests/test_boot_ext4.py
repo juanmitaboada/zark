@@ -19,6 +19,9 @@ refusals for the ones zark does not back up.
 finds them; run that file, not this one.
 """
 
+# pylint: disable=too-many-lines
+# Rationale: the boot layouts' suite, one module by design, as tests/test_unit.py.
+
 import json
 import tempfile
 from collections.abc import Callable
@@ -33,7 +36,9 @@ import commands.prepare as prepare_mod
 import commands.recover as recover_mod
 import commands.setup as setup_mod
 from lib import (
+    boot_chain,
     boot_layout,
+    boot_rewrite,
     engine,
     exclusions,
     mount_props,
@@ -1365,3 +1370,188 @@ class TestRecoverExt4Layout:  # pylint: disable=missing-function-docstring
                 raise AssertionError("expected a refusal")
         assert "This live's ZFS lacks features origin's pools had active" in out.getvalue()
         assert "Nothing was erased" in out.getvalue()
+
+
+_NEW_UUID = "11111111-2222-4333-8444-555555555555"
+_NEW_PARTUUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+def _changed_lines(before: str, after: str) -> list[tuple[str, str]]:
+    return [
+        (a, b)
+        for a, b in zip(before.splitlines(True), after.splitlines(True), strict=True)
+        if a != b
+    ]
+
+
+class TestBootRewrite:  # pylint: disable=missing-function-docstring
+    """M12-3 3a, BOOT-EXT4-8: fstab and crypttab moved to the new /boot and swap."""
+
+    def test_fstab_changes_only_the_boot_line(self):
+        text = (_FIXTURES / "fstab").read_text(encoding="ascii")
+        new, n = boot_rewrite.rewrite_fstab(text, _UUID, _NEW_UUID)
+        assert n == 1 and len(new.splitlines()) == len(text.splitlines())
+        assert _changed_lines(text, new) == [
+            (
+                f"/dev/disk/by-uuid/{_UUID} /boot ext4 defaults 0 1\n",
+                f"/dev/disk/by-uuid/{_NEW_UUID} /boot ext4 defaults 0 1\n",
+            )
+        ]
+
+    def test_fstab_uuid_form_and_case(self):
+        text = f"UUID={_UUID.upper()}\t/boot\text4\tdefaults\t0\t1\n"
+        new, n = boot_rewrite.rewrite_fstab(text, _UUID, _NEW_UUID)
+        assert (n, new) == (1, f"UUID={_NEW_UUID}\t/boot\text4\tdefaults\t0\t1\n")
+
+    def test_fstab_without_the_old_uuid_changes_nothing(self):
+        text = (_FIXTURES / "fstab").read_text(encoding="ascii")
+        assert boot_rewrite.rewrite_fstab(text, _NEW_UUID, _UUID) == (text, 0)
+
+    def test_crypttab_changes_only_the_swap_partuuid(self):
+        text = (_FIXTURES / "crypttab").read_text(encoding="ascii") + "# a comment\n"
+        new, n = boot_rewrite.rewrite_crypttab(text, _NEW_PARTUUID)
+        assert n == 1
+        assert new == text.replace(_SWAP_PARTUUID, _NEW_PARTUUID)
+
+    def test_crypttab_without_a_swap_changes_nothing(self):
+        text = "keystore-rpool /dev/zvol/rpool/keystore none luks\n"
+        assert boot_rewrite.rewrite_crypttab(text, _NEW_PARTUUID) == (text, 0)
+
+
+def _copy_shell(rsync_rc: int = 0, mount_ok: bool = True) -> MockShell:
+    mock = MockShell()
+    if mount_ok:
+        mock.on_prefix(f"mount -t zfs -o ro {_COPY} /").succeeds("")
+    else:
+        mock.on_prefix(f"mount -t zfs -o ro {_COPY} /").returns(1, "", "no key")
+    mock.on_prefix("rsync -aHAX --numeric-ids").returns(
+        rsync_rc, "", "vanished" if rsync_rc else ""
+    )
+    mock.on_prefix("umount /").succeeds("")
+    return mock
+
+
+class TestRecoverBootCopyBack:  # pylint: disable=missing-function-docstring
+    """M12R-6, M12R-12: step 13 for an ext4 point."""
+
+    def test_the_copy_is_mounted_read_only_and_rsynced_into_the_new_boot(self):
+        mock = _copy_shell()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not boot_chain.restore_boot_copy(_COPY, _log())
+        calls = [c for c in mock._calls if c.startswith(("mount", "rsync", "umount"))]  # pylint: disable=protected-access
+        tmp = calls[0].split()[-1]
+        assert calls == [
+            f"mount -t zfs -o ro {_COPY} {tmp}",
+            f"rsync -aHAX --numeric-ids {tmp}/ {boot_chain.RECOVER_MNT}/boot/",
+            f"umount {tmp}",
+        ]
+        assert not Path(tmp).exists()
+
+    def test_a_failed_copy_is_an_error_of_the_recover(self):
+        mock = _copy_shell(rsync_rc=23)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            errors = boot_chain.restore_boot_copy(_COPY, _log())
+        assert errors == [f"/boot: copying {_COPY} failed (rsync status 23): vanished"]
+        assert mock.was_called("umount /")
+
+    def test_a_copy_that_cannot_be_mounted_is_an_error(self):
+        mock = _copy_shell(mount_ok=False)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            errors = boot_chain.restore_boot_copy(_COPY, _log())
+        assert errors and "cannot mount" in errors[0] and mock.was_not_called("rsync")
+
+    def test_the_new_boot_is_mounted_after_the_root_and_before_the_rest(self):
+        mock = MockShell()
+        mock.on_prefix("zfs mount").succeeds("")
+        mock.on_prefix("mount -t ext4").succeeds("")
+        mock.on_prefix("mkdir -p").succeeds("")
+        with (
+            patch_sh(mock),
+            patch.object(Path, "exists", return_value=True),
+            redirect_stdout(StringIO()),
+        ):
+            boot_chain.mount_restored_system("ubuntu_abc123", False, _log(), "/dev/sda2")
+        calls = [c for c in mock._calls if "mount" in c and not c.startswith("zfs mount |")]  # pylint: disable=protected-access
+        assert calls[:3] == [
+            "zfs mount rpool/ROOT/ubuntu_abc123",
+            f"mount -t ext4 /dev/sda2 {boot_chain.RECOVER_MNT}/boot",
+            "zfs mount -a",
+        ]
+
+    def test_kernel_gaps_name_the_copy_and_its_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "boot").mkdir()
+            mods = Path(root, "lib", "modules", "7.3.0-11-generic")
+            mods.mkdir(parents=True)
+            (mods / "modules.dep").write_text("", encoding="ascii")
+            gaps = recover_mod.kernel_gaps(root, "zark_2026-11-01_10:00:00Z", "zark-boot")
+        assert gaps[0].startswith(
+            "kernel 7.3.0-11-generic: in the restored root but not in /boot "
+            + "(zark-boot at @zark_2026-11-01_10:00:00Z)"
+        )
+
+    def test_fstab_and_crypttab_of_the_restored_system(self):
+        with _etc() as root:
+            etc = Path(root, "etc")
+            mock = MockShell()
+            mock.on("blkid -s PARTUUID -o value /dev/sda3").succeeds(_NEW_PARTUUID + "\n")
+            with patch_sh(mock), redirect_stdout(StringIO()):
+                assert not recover_ext4.ext4_fstab(etc / "fstab", _UUID, _NEW_UUID, _log())  # pylint: disable=protected-access
+                assert not recover_ext4.ext4_crypttab(
+                    etc / "crypttab", _boot_record(), "/dev/sda", _log()
+                )  # pylint: disable=protected-access
+            assert f"/dev/disk/by-uuid/{_NEW_UUID} /boot" in (etc / "fstab").read_text(
+                encoding="ascii"
+            )
+            assert f"PARTUUID={_NEW_PARTUUID} " in (etc / "crypttab").read_text(encoding="ascii")
+
+    def test_no_swap_recorded_leaves_crypttab_alone(self):
+        with _etc() as root:
+            path = Path(root, "etc", "crypttab")
+            before = path.read_text(encoding="ascii")
+            with patch_sh(MockShell()):
+                assert not recover_ext4.ext4_crypttab(
+                    path, _boot_record(swap=None), "/dev/sda", _log()
+                )  # pylint: disable=protected-access
+            assert path.read_text(encoding="ascii") == before
+
+    def test_an_fstab_without_the_old_uuid_is_an_error(self):
+        with _etc() as root:
+            fstab = Path(root, "etc", "fstab")
+            with redirect_stdout(StringIO()):
+                errors = recover_ext4.ext4_fstab(fstab, _NEW_UUID, _UUID, _log())  # pylint: disable=protected-access
+        assert errors and "no /boot line names" in errors[0]
+
+
+class TestRecoverEsp:  # pylint: disable=missing-function-docstring
+    """N4: the ESP's mount point is made, and checked, before the mount."""
+
+    @staticmethod
+    def _esp(mkdir_ok: bool = True, mount_ok: bool = True) -> tuple[MockShell, str, bool]:
+        mock = MockShell()
+        mock.on("mkfs.vfat -F32 /dev/sda1").succeeds("")
+        mkdir = mock.on(f"mkdir -p {recover_mod.RECOVER_MNT}/boot/efi")
+        _ = mkdir.succeeds("") if mkdir_ok else mkdir.fails("read-only")
+        mount = mock.on(f"mount /dev/sda1 {recover_mod.RECOVER_MNT}/boot/efi")
+        _ = mount.succeeds("") if mount_ok else mount.fails("busy")
+        out = StringIO()
+        cleanup = MagicMock()
+        with patch_sh(mock), redirect_stdout(out), patch("builtins.input", return_value=""):
+            try:
+                recover_mod._mount_esp("/dev/sda", cleanup, _log())  # pylint: disable=protected-access
+            except SystemExit:
+                return mock, out.getvalue(), False
+        return mock, out.getvalue(), cleanup.track_mount.called
+
+    def test_the_directory_comes_before_the_mount(self):
+        mock, _, tracked = self._esp()
+        calls = mock.calls
+        mkdir = calls.index(f"mkdir -p {recover_mod.RECOVER_MNT}/boot/efi")
+        assert mkdir < calls.index(f"mount /dev/sda1 {recover_mod.RECOVER_MNT}/boot/efi")
+        assert tracked
+
+    def test_a_failed_mkdir_or_mount_stops_the_recover(self):
+        mock, out, _ = self._esp(mkdir_ok=False)
+        assert "Cannot create" in out and mock.was_not_called("mount /dev/sda1")
+        _, out, _ = self._esp(mount_ok=False)
+        assert "Cannot mount the new ESP" in out

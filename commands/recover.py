@@ -71,7 +71,12 @@ from lib import (
     zfs_features,
 )
 from lib.backup_layout import find_be as _find_be
-from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
+from lib.boot_chain import (
+    RECOVER_MNT,
+    install_boot_chain,
+    mount_restored_system,
+    restore_boot_copy,
+)
 from lib.boot_layout import BOOT_COPY, Layout
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, zark_command
@@ -84,6 +89,8 @@ from lib.recover_checks import refuse_unreadable, refuse_unrecoverable
 from lib.recover_ext4 import (
     EXT4_RECOVER_TOOLS,
     before_rpool_bytes,
+    ext4_crypttab,
+    ext4_fstab,
     ext4_partitions,
     mkfs_boot_command,
     sgdisk_commands,
@@ -470,6 +477,26 @@ def _create_bpool(
     log.ok("bpool created")
 
 
+def _mount_esp(disk: str, cleanup: Cleanup, log: Log) -> None:
+    """The new ESP, formatted and mounted at ``RECOVER_MNT/boot/efi``. The
+    directory is made first and checked: an ext4 point's ``/boot`` comes
+    from a copy that leaves ``efi`` out (N4), and a failed mount would
+    leave grub-install writing into ``/boot`` instead of the ESP."""
+    esp = sh.part(disk, 1)
+    _ = sh.run(f"mkfs.vfat -F32 {esp}", log=log)
+    if not sh.run(f"mkdir -p {RECOVER_MNT}/boot/efi", log=log).ok:
+        log.fatal(
+            f"Cannot create {RECOVER_MNT}/boot/efi",
+            solutions=[f"Boot the live USB again and run: {zark_command()} repair-boot"],
+        )
+    if not sh.run(f"mount {esp} {RECOVER_MNT}/boot/efi", log=log).ok:
+        log.fatal(
+            f"Cannot mount the new ESP ({esp}) at {RECOVER_MNT}/boot/efi",
+            solutions=[f"Boot the live USB again and run: {zark_command()} repair-boot"],
+        )
+    cleanup.track_mount(f"{RECOVER_MNT}/boot/efi")
+
+
 def _stable_vdev(disk: str, n: int, log: Log) -> str:
     """Partition ``n`` of ``disk`` by its /dev/disk/by-id name, for the pool vdev.
 
@@ -764,11 +791,12 @@ def restore_bpool(
     return (got.row.snap.name if got.error else ""), errors
 
 
-def kernel_gaps(root: str, monthly: str) -> list[str]:
-    """With /boot at bpool's monthly and the root at the point: each kernel
-    the root has and /boot lacks, and whether any kernel is in both."""
+def kernel_gaps(root: str, monthly: str, source: str = "bpool") -> list[str]:
+    """With /boot at an earlier snapshot than the root (bpool's monthly, or
+    an ext4 point's ``zark-boot``: ``source``): each kernel the root has and
+    /boot lacks, and whether any kernel is in both."""
     errors = [
-        f"kernel {v}: in the restored root but not in /boot (bpool at @{monthly}): "
+        f"kernel {v}: in the restored root but not in /boot ({source} at @{monthly}): "
         + f"reinstall it from zark chroot: apt install --reinstall linux-image-{v}"
         for v in kernels_without_vmlinuz(root)
     ]
@@ -1266,10 +1294,12 @@ def run(
     cleanup.track_pool(pool_name)
 
     # ── 12a. bpool (no zvol on rpool yet; properties set at receive)
-    bpool_left_at, bpool_errors = restore_bpool(
-        pool_name, plan.row(f"bpool/BOOT/{ubuntu_name}"), drive.guid, log
-    )
-    errors += bpool_errors
+    bpool_left_at: str | None = None
+    if boot is None:
+        bpool_left_at, bpool_errors = restore_bpool(
+            pool_name, plan.row(f"bpool/BOOT/{ubuntu_name}"), drive.guid, log
+        )
+        errors += bpool_errors
     bpool_received = bpool_left_at is not None
 
     # ── 12b. Keystore zvol (LAST zfs op - adds zvol to rpool)
@@ -1302,16 +1332,21 @@ def run(
 
     # ── 13. Mount system ─────────────────────────────────────────────────
     log.step(13, TOTAL_STEPS, "Mounting system...")
-    mount_restored_system(ubuntu_name, bpool_received, log)
+    boot_dev = sh.part(internal_disk, 2) if boot is not None else ""
+    mount_restored_system(ubuntu_name, bpool_received, log, boot_dev)
+    if boot_dev:
+        cleanup.track_mount(f"{RECOVER_MNT}/boot")
+        copy = f"rpool/ROOT/{ubuntu_name}/{BOOT_COPY}"
+        errors += restore_boot_copy(copy, log)
+        copy_row = plan.row(copy)
+        if copy_row is not None and copy_row.snap is not None:
+            if copy_row.snap.name != point_name(point):
+                errors += kernel_gaps(RECOVER_MNT, copy_row.snap.name, BOOT_COPY)
     if bpool_left_at:
         errors += kernel_gaps(RECOVER_MNT, bpool_left_at)
     filter_list_cache(RECOVER_MNT, log)
 
-    # Format EFI partition
-    _ = sh.run(f"mkfs.vfat -F32 {sh.part(internal_disk, 1)}", log=log)
-    _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot/efi")
-    _ = sh.run(f"mount {sh.part(internal_disk, 1)} {RECOVER_MNT}/boot/efi")
-    cleanup.track_mount(f"{RECOVER_MNT}/boot/efi")
+    _mount_esp(internal_disk, cleanup, log)
 
     # crypttab - preserve existing lines, update swap only.
     # NOTE: keystore-rpool is NOT in crypttab - it's handled by the dracut
@@ -1319,7 +1354,13 @@ def run(
     # A crypttab entry would fail because the zvol doesn't exist yet when
     # systemd-cryptsetup runs (before ZFS import).
     crypttab_path = Path(f"{RECOVER_MNT}/etc/crypttab")
-    swap_uuid = sh.run(f"blkid -s PARTUUID -o value {sh.part(internal_disk, 3)}").output
+    if boot is not None:
+        errors += ext4_crypttab(crypttab_path, boot, internal_disk, log)
+    swap_uuid = (
+        ""
+        if boot is not None
+        else sh.run(f"blkid -s PARTUUID -o value {sh.part(internal_disk, 3)}").output
+    )
     if swap_uuid:
         swap_line = (
             f"dm_crypt-0 PARTUUID={swap_uuid} /dev/urandom "
@@ -1361,6 +1402,8 @@ def run(
         )
         _ = fstab.write_text(content, encoding="utf-8")
         log.ok(f"fstab EFI UUID updated: {efi_uuid}")
+    if boot is not None:
+        errors += ext4_fstab(fstab, boot.uuid, new_boot_uuid, log)
 
     # ── 14. Restore hostid to target ─────────────────────────────────────
     log.step(14, TOTAL_STEPS, "Restoring hostid to target...")

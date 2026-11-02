@@ -329,10 +329,13 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestBootLayoutKernels,
     TestBootLayoutOrigin,
     TestBootRefresh,
+    TestBootRewrite,
     TestEngineBeforePoint,
     TestEngineLayoutChange,
     TestPoolRecordBoot,
     TestPoolRecordCapture,
+    TestRecoverBootCopyBack,
+    TestRecoverEsp,
     TestRecoverExt4Layout,
     TestRecoverPointLayout,
     TestRecoverRefusesBeforeErasing,
@@ -376,6 +379,9 @@ BOOT_LAYOUT_SUITES = (
     TestBootCopyDiverged,
     TestBootCopyRetention,
     TestRecoverExt4Layout,
+    TestBootRewrite,
+    TestRecoverBootCopyBack,
+    TestRecoverEsp,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the

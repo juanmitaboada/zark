@@ -19,8 +19,11 @@ live needs for it.
 """
 
 import shlex
+from pathlib import Path
 from typing import NamedTuple
 
+from lib import boot_rewrite, sh
+from lib.log import Log
 from lib.pool_record import BootRecord
 
 _MIB = 1024**2
@@ -96,3 +99,42 @@ EXT4_RECOVER_TOOLS = {
     "tune2fs": "e2fsprogs",
     "blkid": "util-linux",
 }
+
+
+def ext4_fstab(fstab: Path, old_uuid: str, new_uuid: str, log: Log) -> list[str]:
+    """The restored fstab's ``/boot`` line moved to the new file system
+    (M12-3 3a); the error lines."""
+    try:
+        text = fstab.read_text(encoding="utf-8")
+    except OSError as e:
+        return [f"fstab: not read ({e}): its /boot line still names {old_uuid}"]
+    new, changed = boot_rewrite.rewrite_fstab(text, old_uuid, new_uuid)
+    if not changed:
+        return [f"fstab: no /boot line names {old_uuid}: /boot may not mount at boot"]
+    _ = fstab.write_text(new, encoding="utf-8")
+    log.ok(f"fstab /boot UUID updated: {new_uuid}")
+    return []
+
+
+def ext4_crypttab(crypttab: Path, boot: BootRecord, disk: str, log: Log) -> list[str]:
+    """The restored crypttab's swap line pointed at the new swap partition,
+    every other line as origin had it (M12 plan 5.4); nothing when origin
+    had no swap. The error lines."""
+    if boot.swap is None:
+        return []
+    swap_n = next(p.number for p in ext4_partitions(boot) if p.role == "swap")
+    partuuid = sh.run(f"blkid -s PARTUUID -o value {sh.part(disk, swap_n)}").output.strip()
+    if not partuuid:
+        return [
+            f"crypttab: the new swap partition's PARTUUID cannot be read ({sh.part(disk, swap_n)})"
+        ]
+    try:
+        text = crypttab.read_text(encoding="utf-8")
+    except OSError as e:
+        return [f"crypttab: not read ({e}): the swap will not be opened at boot"]
+    new, changed = boot_rewrite.rewrite_crypttab(text, partuuid)
+    if not changed:
+        return ["crypttab: no swap line with a PARTUUID: the swap will not be opened at boot"]
+    _ = crypttab.write_text(new, encoding="utf-8")
+    log.ok(f"crypttab swap PARTUUID updated: {partuuid}")
+    return []

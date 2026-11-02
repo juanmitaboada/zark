@@ -18,7 +18,9 @@ shim on the ESP, the keystore hook of dracut (initramfs-tools opens the
 keystore itself), and the guards.
 """
 
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from lib import apt_guard, grub_guard, sh
@@ -187,13 +189,16 @@ fi
     log.ok("dracut keystore module installed (89keystore)")
 
 
-def mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> None:
+def mount_restored_system(
+    ubuntu_name: str, bpool_received: bool, log: Log, boot_dev: str = ""
+) -> None:
     """Mount the restored system under RECOVER_MNT, root first.
 
     Receives were ``-u``, so nothing is mounted yet. The root is mounted
     explicitly (``zfs mount -a`` skips a ``canmount=noauto`` boot
-    environment), then bpool on its ``/boot``, then everything else. A
-    bpool mounted before the root would be shadowed by it.
+    environment), then ``/boot`` (bpool, or the new ext4 file system on
+    ``boot_dev`` for an ext4 point), then everything else. A ``/boot``
+    mounted before the root would be shadowed by it.
     """
     root_ok = sh.run(f"zfs mount rpool/ROOT/{ubuntu_name}", log=log).ok
     if not root_ok or not Path(f"{RECOVER_MNT}/usr/bin/bash").exists():
@@ -201,6 +206,14 @@ def mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> N
             f"Cannot mount the restored root at {RECOVER_MNT}",
             solutions=[f"Boot the live USB again and run: {zark_command()} repair-boot"],
         )
+    if boot_dev:
+        _ = sh.run(f"mkdir -p {RECOVER_MNT}/boot")
+        if not sh.run(f"mount -t ext4 {boot_dev} {RECOVER_MNT}/boot", log=log).ok:
+            log.fatal(
+                f"Cannot mount the new /boot ({boot_dev}) at {RECOVER_MNT}/boot",
+                solutions=[f"Boot the live USB again and run: {zark_command()} repair-boot"],
+            )
+        log.ok(f"/boot ({boot_dev}, ext4) mounted at {RECOVER_MNT}/boot ✓")
     if bpool_received:
         boot_ok = sh.run(f"zfs mount bpool/BOOT/{ubuntu_name}", log=log).ok
         if not boot_ok or not sh.run(f"findmnt -n {RECOVER_MNT}/boot").ok:
@@ -219,6 +232,41 @@ def mount_restored_system(ubuntu_name: str, bpool_received: bool, log: Log) -> N
     _ = sh.run("zfs mount -a")
     mounted = sh.run(f"zfs mount | grep -c {RECOVER_MNT}").output
     log.ok(f"System mounted at {RECOVER_MNT} ({mounted} datasets)")
+
+
+def restore_boot_copy(copy: str, log: Log) -> list[str]:
+    """Step 13 for an ext4 point (M12R-6): the restored ``zark-boot`` (its
+    key loaded with rpool's at step 10) mounted read-only at a temporary
+    directory and copied into the new ``/boot``; the error lines. Any rsync
+    status but 0 is an error of the recover."""
+    tmp = tempfile.mkdtemp(prefix="zark-boot-")
+    errors: list[str] = []
+    try:
+        if not sh.run(f"mount -t zfs -o ro {copy} {tmp}", log=log).ok:
+            return [f"/boot: cannot mount {copy}: /boot is empty, the system will not boot"]
+        try:
+            r = sh.run(f"rsync -aHAX --numeric-ids {tmp}/ {RECOVER_MNT}/boot/", log=log)
+        finally:
+            if not sh.run(f"umount {tmp}", log=log).ok:
+                log.warn(f"Cannot unmount {copy} from {tmp}")
+        if not r.ok:
+            errors.append(
+                f"/boot: copying {copy} failed (rsync status {r.returncode}): "
+                + (r.stderr.strip() or "no message")
+            )
+    finally:
+        try:
+            os.rmdir(tmp)
+        except OSError:
+            pass
+    if not errors:
+        kernels = sum(
+            1
+            for k in Path(f"{RECOVER_MNT}/boot").glob("vmlinuz-*")
+            if k.is_file() and not k.is_symlink()
+        )
+        log.ok(f"/boot copied from {copy} ✓  ({kernels} kernel(s))")
+    return errors
 
 
 def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches,too-many-locals,too-many-arguments,too-many-positional-arguments
