@@ -7931,7 +7931,7 @@ class TestOnlyThePackagesZarkUses:  # pylint: disable=missing-function-docstring
     """M2P.2, M2P.3 (M4d-30): no syncoid-era packages in setup or recover."""
 
     def test_setup_checks_only_what_zark_runs(self):
-        assert set(setup_mod.DEPS) == {"zfs", "zpool", "sgdisk", "sanoid"}
+        assert set(setup_mod.DEPS) == {"zfs", "zpool", "sgdisk", "sanoid", "rsync"}
         assert not {"syncoid", "bc", "pv", "mbuffer", "lzop"} & set(setup_mod.DEPS)
 
     def test_recover_installs_the_packages_of_the_missing_tools_only(self):

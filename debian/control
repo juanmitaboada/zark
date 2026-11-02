@@ -20,7 +20,9 @@ Depends: ${misc:Depends},
          cryptsetup-bin,
          gdisk,
          grub2-common,
-         dracut | initramfs-tools
+         dracut | initramfs-tools,
+         rsync,
+         e2fsprogs
 Recommends: dosfstools,
             grub-efi-amd64-signed,
             shim-signed

@@ -75,6 +75,8 @@ DEPS = {
     "zpool": "zfsutils-linux",
     "sgdisk": "gdisk",
     "sanoid": "sanoid",
+    # backup and prepare copy an ext4 /boot into zark-boot with it (M12R-10).
+    "rsync": "rsync",
 }
 
 
