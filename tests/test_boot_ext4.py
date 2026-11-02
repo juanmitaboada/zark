@@ -42,9 +42,11 @@ from lib import (
     replication as repl,
     retention,
     survey,
+    zfs,
     zfs_features,
 )
 from lib.log import Log
+from lib.restore_points import Snap
 from lib.zfs import DatasetInfo
 from tests.mock_sh import MockShell, patch_sh
 
@@ -486,11 +488,15 @@ class TestPoolRecordCapture:  # pylint: disable=missing-function-docstring
         assert order == ["capture", "scan"]
 
 
-def _refusal(rec: pool_record.PoolRecord | None) -> str:
+def _refusal(rec: pool_record.PoolRecord | None, layout: str = "") -> str:
     out = StringIO()
     with redirect_stdout(out), patch("builtins.input", return_value=""):
         try:
-            recover_mod.refuse_unrecoverable(rec, _log())
+            recover_mod.refuse_unrecoverable(
+                rec,
+                layout or pool_record.layout_of(rec),  # type: ignore[arg-type]
+                _log(),
+            )
         except SystemExit:
             return out.getvalue()
     return ""
@@ -524,6 +530,141 @@ class TestRecoverRefusesBeforeErasing:  # pylint: disable=missing-function-docst
         assert not _refusal(_record(written_by="2.2.0-rc2"))
         assert not _refusal(_record())
         assert not _refusal(None)
+
+    def test_an_ext4_point_without_a_record_is_refused(self):
+        out = _refusal(None, "ext4")
+        assert "This point's /boot is on ext4, and it has no record of origin's disk" in out
+        assert "Nothing was erased" in out
+
+
+_BE = "ubuntu_abc123"
+_POINT = "zark_20261102T100000Z"
+
+
+def _snap(dataset: str, name: str = _POINT) -> Snap:
+    return Snap(dataset, name, "1", 10, 1)
+
+
+_SNAPS = [_snap(f"rpool/ROOT/{_BE}"), _snap("rpool/USERDATA/home_x")]
+
+
+def _from_record(
+    read: object, snaps: list[Snap] | None = None, meta: dict[str, str] | None = None
+) -> tuple[str, MockShell, dict[str, object] | None]:
+    """recover's _pools_from_record with ``pool_record.read`` patched
+    (a value, or an exception to raise): its output, the shell, and what
+    it returned (None when it refused)."""
+    mock = MockShell()
+    mock.on("zpool upgrade -v").succeeds("")
+    mock.on("zfs version").succeeds("zfs-2.4.4-1ubuntu4\n")
+    out = StringIO()
+    got: dict[str, object] | None = None
+    reader = (
+        MagicMock(side_effect=read) if isinstance(read, Exception) else MagicMock(return_value=read)
+    )
+    with (
+        patch.object(pool_record, "read", reader),
+        patch_sh(mock),
+        redirect_stdout(out),
+        patch("builtins.input", return_value=""),
+    ):
+        try:
+            got = dict(
+                recover_mod._pools_from_record(  # pylint: disable=protected-access
+                    "backup", _POINT, _SNAPS if snaps is None else snaps, _BE, meta or {}, _log()
+                )
+            )
+        except SystemExit:
+            got = None
+    return out.getvalue(), mock, got
+
+
+class TestRecoverPointLayout:  # pylint: disable=missing-function-docstring
+    """M13R-1, M13R-2, M13F-6 6a: a point's layout from its record, else
+    from the drive; a record that cannot be read is a refusal."""
+
+    def test_the_record_decides_when_there_is_one(self):
+        meta = {"origin-layout": "ext4"}
+        snaps = [*_SNAPS, _snap(f"rpool/ROOT/{_BE}/zark-boot")]
+        assert pool_record.point_layout(_record(), snaps, _BE, meta) == "bpool"
+        rec = _record(boot=_boot_record())
+        assert pool_record.point_layout(rec, _SNAPS, _BE, {}) == "ext4"
+
+    def test_without_a_record_the_drive_decides(self):
+        copy = _snap(f"rpool/ROOT/{_BE}/zark-boot", "autosnap_2026-11-01_00:00:00_daily")
+        assert pool_record.point_layout(None, [*_SNAPS, copy], _BE, {}) == "ext4"
+        assert pool_record.point_layout(None, _SNAPS, _BE, {"origin-layout": "ext4"}) == "ext4"
+        assert pool_record.point_layout(None, _SNAPS, _BE, {}) == "bpool"
+        other = _snap("rpool/ROOT/ubuntu_other/zark-boot")
+        assert pool_record.point_layout(None, [*_SNAPS, other], _BE, {}) == "bpool"
+
+    def test_only_an_ext4_system_marks_the_drive(self):
+        assert pool_record.origin_layout_fields("ext4") == {"origin-layout": "ext4"}
+        assert not pool_record.origin_layout_fields("bpool")
+
+    def test_a_record_less_point_with_a_copy_is_refused_before_anything(self):
+        out, mock, got = _from_record(None, [*_SNAPS, _snap(f"rpool/ROOT/{_BE}/zark-boot")])
+        assert got is None and "has no record of origin's disk" in out
+        assert "Nothing was erased" in out and mock.was_not_called("zpool upgrade -v")
+
+    def test_a_record_less_point_of_a_marked_drive_is_refused(self):
+        out, _, got = _from_record(None, meta={"origin-layout": "ext4"})
+        assert got is None and "has no record of origin's disk" in out
+
+    def test_a_record_less_point_of_a_2_1_drive_goes_on_with_the_warning(self):
+        out, mock, got = _from_record(None)
+        assert got == {} and mock.was_called("zpool upgrade -v")
+        assert "does not record origin's pool features" in out
+
+    def test_a_later_format_naming_its_zark_is_refused_by_name(self):
+        value = json.dumps({"format": 2, "written_by": "3.0.0", "min_recover": "3.0.0"})
+        assert pool_record.parse(value) is None
+        assert pool_record.versions(value) == ("3.0.0", "3.0.0")
+        e = pool_record.RecordError("unreadable", *pool_record.versions(value))
+        out, mock, got = _from_record(e)
+        assert got is None and "This point needs zark 3.0.0 or later to recover" in out
+        assert "Nothing was erased" in out and mock.was_not_called("zpool upgrade -v")
+
+    def test_an_unreadable_record_is_refused(self):
+        out, _, got = _from_record(pool_record.RecordError("they disagree", "2.2.0", ""))
+        assert got is None and "cannot be read: they" in out and "disagree" in out
+        assert "Nothing was erased" in out
+
+    def test_read_names_the_version_that_blocks(self):
+        good = pool_record.dump(_record(written_by="2.2.0"))
+        later = json.dumps({"format": 2, "written_by": "3.1.0", "min_recover": "3.0.0"})
+        snaps = [_snap(f"rpool/ROOT/{_BE}"), _snap("rpool/USERDATA/home_x")]
+        marks = {
+            f"backup/rpool/ROOT/{_BE}@{_POINT}": good,
+            f"backup/rpool/USERDATA/home_x@{_POINT}": later,
+        }
+        with patch.object(pool_record, "snapshot_marks", return_value=marks):
+            try:
+                pool_record.read("backup", _POINT, snaps)
+            except pool_record.RecordError as e:
+                assert (e.written_by, e.min_recover) == ("3.1.0", "3.0.0")
+            else:
+                raise AssertionError("no RecordError")
+
+    def test_the_drive_is_marked_at_create(self):
+        cmd = zfs.create_command("b", "/d", "/r", "", {"origin-layout": "ext4"})
+        assert "-O org.zark:origin-layout=ext4 -m none" in cmd
+        assert "org.zark" not in zfs.create_command("b", "/d", "/r", "")
+
+    def test_a_drive_that_will_not_take_the_mark_is_refused(self):
+        mock = MockShell()
+        mock.on("zfs set org.zark:origin-layout=ext4 blue").fails("read-only")
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out), patch("builtins.input", return_value=""):
+            try:
+                pool_record.mark_origin_layout("blue", "ext4", _log())
+            except SystemExit:
+                pass
+        assert "Cannot record on blue that this system has /boot on ext4" in out.getvalue()
+        quiet = MockShell()
+        with patch_sh(quiet):
+            pool_record.mark_origin_layout("blue", "bpool", _log())
+        assert not quiet.calls
 
 
 _COPY = "rpool/ROOT/ubuntu_abc123/zark-boot"

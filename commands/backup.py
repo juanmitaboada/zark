@@ -1237,6 +1237,7 @@ def run(
     drive_marks.check_drive_owner(pool_name, log)
     _heal_drive_id(cfg, pool_name, device, log)
     drive_marks.record_first_point(pool_name, log)
+    pool_record.mark_origin_layout(pool_name, layout, log)
 
     # ── Check health ─────────────────────────────────────────────────────
     log.step(3, TOTAL_STEPS, "Checking pool health...")

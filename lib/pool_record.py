@@ -26,7 +26,17 @@ point also records ``written_by``, the zark that wrote it, and an ext4
 point ``min_recover``, the oldest zark that recovers it, which recover
 checks before erasing anything (M12-8). Both are optional keys of format 1:
 zark 2.1.1 reads only ``format``, ``pools``, ``ubuntu``, ``zfs`` and
-``kmod``, so a record it reads is the same with or without them.
+``kmod``, so a record it reads is the same with or without them. A later
+format must keep ``written_by`` and ``min_recover`` as they are here, top
+level keys with a version as text: this zark reads both before it checks
+``format``, so that it refuses such a point by the zark it names
+(M13R-2).
+
+A point without a record (an interrupted run, a carried sanoid snapshot)
+is an ext4 point when the drive holds its boot environment's copy of
+``/boot`` or carries ``org.zark:origin-layout=ext4``, which prepare sets
+at ``zpool create`` and backup before any transfer (M13F-6 6a); recover
+refuses it, since only a record says how to lay the disk out.
 
 The states are what ``zpool get`` prints: ``enabled`` or ``active`` for a
 feature the tools know, ``inactive`` or ``readonly`` for one they do not,
@@ -47,7 +57,7 @@ from typing import Any
 from lib import platform_facts, sh, zfs_features
 from lib.boot_layout import Layout, boot_copy, boot_mount, running_be
 from lib.config import VERSION
-from lib.drive_marks import snapshot_marks
+from lib.drive_marks import snapshot_marks, write_metadata
 from lib.log import Log
 from lib.restore_points import Snap
 from lib.zfs import COMPAT_DIRS
@@ -58,6 +68,11 @@ ORIGIN_POOLS = ("rpool", "bpool")
 
 # The oldest zark that recovers an ext4 point (M12-8).
 MIN_RECOVER_EXT4 = "2.2.0"
+
+# The drive's metadata key (``org.zark:origin-layout``) that says an ext4
+# system writes to it (M13F-6 6a). Only "ext4" is ever written, so a later
+# run of a bpool system cannot clear it (a drive serves one system).
+ORIGIN_LAYOUT = "origin-layout"
 
 # The persistent features of the 26.10 installer's /boot (eli's c1-2610
 # storage.txt:157 without the transient needs_recovery and orphan_present),
@@ -162,6 +177,42 @@ def layout_of(rec: PoolRecord | None) -> Layout:
     """The boot layout of the point ``rec`` describes: ``bpool`` without a
     record or without a ``boot`` entry (every point written by 2.1)."""
     return "ext4" if rec is not None and (rec.boot is not None or rec.boot_problem) else "bpool"
+
+
+def origin_layout_fields(layout: Layout) -> dict[str, str]:
+    """The drive metadata an ext4 system writes before any transfer; none
+    for a bpool system (M13F-6 6a)."""
+    return {ORIGIN_LAYOUT: "ext4"} if layout == "ext4" else {}
+
+
+def mark_origin_layout(pool: str, layout: Layout, log: Log) -> None:
+    """On an ext4 system, ``org.zark:origin-layout=ext4`` on the drive
+    ``pool`` before any transfer (backup; prepare sets it at ``zpool
+    create``), so that recover knows a point of the drive without a record
+    for an ext4 one (M13F-6 6a). A FATAL when the drive does not take it:
+    a point it then held without a record would read as a bpool point."""
+    fields = origin_layout_fields(layout)
+    if fields and not write_metadata(pool, fields, log):
+        log.fatal(
+            f"Cannot record on {pool} that this system has /boot on ext4",
+            causes=["The drive did not take a zfs set; nothing was sent"],
+            solutions=[f"Check the drive: zpool status {pool}", "Run the backup again"],
+        )
+
+
+def point_layout(
+    rec: PoolRecord | None, snaps: list[Snap], be: str, meta: dict[str, str]
+) -> Layout:
+    """The layout of a point on the drive (M13F-6 6a): its record's when it
+    has one; else ext4 when the drive holds ``be``'s copy of ``/boot`` or
+    its metadata says ext4 (``meta`` is :func:`lib.drive_marks.read_metadata`);
+    else bpool, as every point written by 2.1."""
+    if rec is not None:
+        return layout_of(rec)
+    copy = boot_copy(be)
+    if meta.get(ORIGIN_LAYOUT) == "ext4" or any(s.dataset == copy for s in snaps):
+        return "ext4"
+    return "bpool"
 
 
 def parse_get(text: str) -> PoolState:
@@ -377,12 +428,37 @@ def _swap(root: str) -> Swap | None:
     return Swap(part[0], line) if part is not None else None
 
 
+class RecordError(ValueError):
+    """A record that is there but cannot be read (another format, a
+    malformed value, snapshots that disagree), with the versions it names
+    when it names them (M13R-2)."""
+
+    def __init__(self, message: str, written_by: str = "", min_recover: str = "") -> None:
+        super().__init__(message)
+        self.written_by = written_by
+        self.min_recover = min_recover
+
+
+def versions(value: str) -> tuple[str, str]:
+    """``written_by`` and ``min_recover`` of a record of any format, as
+    :func:`parse` keeps them; ("", "") when the value is no JSON object."""
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    return _text(data.get("written_by", "")), _text(data.get("min_recover", ""))
+
+
 def parse(value: str) -> PoolRecord | None:
     """A record read back, or None when it is not one this zark reads.
 
-    ``written_by`` and ``min_recover`` are kept as written, so that one
-    that is not a version is refused by :func:`recovers`; a ``boot`` entry
-    that cannot be read sets ``boot_problem``."""
+    ``written_by`` and ``min_recover`` are read first, before ``format``
+    (:func:`versions`), and kept as written, so that one that is not a
+    version is refused by :func:`recovers`; a ``boot`` entry that cannot
+    be read sets ``boot_problem``."""
+    written_by, min_recover = versions(value)
     try:
         data = json.loads(value)
         if not isinstance(data, dict) or data.get("format") != FORMAT:
@@ -409,8 +485,8 @@ def parse(value: str) -> PoolRecord | None:
         fields[2],
         pools,
         boot=boot,
-        written_by=_text(data.get("written_by", "")),
-        min_recover=_text(data.get("min_recover", "")),
+        written_by=written_by,
+        min_recover=min_recover,
         boot_problem=problem,
     )
 
@@ -508,8 +584,9 @@ def read(pool: str, point: str, snaps: list[Snap]) -> PoolRecord | None:
     """Origin's pools at ``point``, from its snapshots on the drive, read
     strictly (raises :class:`lib.survey.ReadError`), as recover reads the
     point's exclusion record. None for a point without one (written before
-    2.0.0-rc11); :class:`ValueError` when the snapshots disagree or the
-    value is not a record."""
+    2.0.0-rc11); :class:`RecordError` when the snapshots disagree or the
+    value is not a record, naming the first ``min_recover`` among the
+    values that this zark does not meet (M13R-2)."""
     marks = snapshot_marks(f"{pool}/rpool", strict=True, prop=POOLS_PROP)
     values = {
         marks[n]
@@ -518,10 +595,15 @@ def read(pool: str, point: str, snaps: list[Snap]) -> PoolRecord | None:
     }
     if not values:
         return None
-    rec = parse(values.pop()) if len(values) == 1 else None
+    rec = parse(next(iter(values))) if len(values) == 1 else None
     if rec is None:
-        raise ValueError(
-            f"the snapshots of {point} disagree on origin's pools, or their record is unreadable"
+        named = [versions(v) for v in sorted(values)]
+        blocking = [v for v in named if not recovers(v[1])]
+        written_by, min_recover = (blocking or named)[0]
+        raise RecordError(
+            f"the snapshots of {point} disagree on origin's pools, or their record is unreadable",
+            written_by,
+            min_recover,
         )
     return rec
 

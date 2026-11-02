@@ -72,6 +72,7 @@ from lib import (
 )
 from lib.backup_layout import find_be as _find_be
 from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
+from lib.boot_layout import Layout
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, zark_command
 from lib.drives import backup_device, scan_connected_drives, select_drive
@@ -274,31 +275,50 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
 # ── Restore plan ─────────────────────────────────────────────────────────
 
 
-def refuse_unrecoverable(rec: pool_record.PoolRecord | None, log: Log) -> None:
+def _refuse_min_recover(min_recover: str, written_by: str, log: Log) -> None:
+    """FATAL when this zark does not meet ``min_recover`` or cannot read it
+    (M12-8); nothing when it does."""
+    if pool_record.recovers(min_recover):
+        return
+    title = (
+        f"This point needs zark {min_recover} or later to recover"
+        if pool_record.zark_version_tuple(min_recover) is not None
+        else "This point's record names an oldest zark this one cannot read: " + min_recover
+    )
+    log.fatal(
+        title,
+        causes=[f"It was written by zark {written_by or '(not recorded)'}; this is zark {VERSION}"],
+        solutions=[
+            "Run recover from a live session with a newer zark",
+            "Nothing was erased",
+        ],
+    )
+
+
+def refuse_unrecoverable(rec: pool_record.PoolRecord | None, layout: Layout, log: Log) -> None:
     """Refuse, before anything is erased, a point this zark must not
     recover: one whose ``min_recover`` it does not meet or cannot read
-    (M12-8), and one whose ``/boot`` is on ext4, which this build does not
-    lay out (M13F-3)."""
+    (M12-8), one whose ``/boot`` is on ext4 but which has no record to lay
+    the disk out from (M13R-1), and any ext4 point, which this build does
+    not lay out (M13F-3). ``layout`` is :func:`lib.pool_record.point_layout`'s."""
     if rec is None:
+        if layout == "ext4":
+            log.fatal(
+                "This point's /boot is on ext4, and it has no record of origin's disk",
+                causes=[
+                    "The drive holds a copy of /boot or says its system has /boot on ext4, "
+                    + "but this point does not record origin's pools and partitions",
+                    "An interrupted run and a carried sanoid snapshot have no record; "
+                    + "without one recover cannot lay the disk out",
+                ],
+                solutions=[
+                    "Choose a point of a complete backup run",
+                    "Nothing was erased",
+                ],
+            )
         return
-    if not pool_record.recovers(rec.min_recover):
-        title = (
-            f"This point needs zark {rec.min_recover} or later to recover"
-            if pool_record.zark_version_tuple(rec.min_recover) is not None
-            else "This point's record names an oldest zark this one cannot read: " + rec.min_recover
-        )
-        log.fatal(
-            title,
-            causes=[
-                f"It was written by zark {rec.written_by or '(not recorded)'}; "
-                + f"this is zark {VERSION}"
-            ],
-            solutions=[
-                "Run recover from a live session with a newer zark",
-                "Nothing was erased",
-            ],
-        )
-    if pool_record.layout_of(rec) == "ext4":
+    _refuse_min_recover(rec.min_recover, rec.written_by, log)
+    if layout == "ext4":
         log.fatal(
             "This point's /boot is on ext4, which this zark does not recover",
             causes=[
@@ -317,13 +337,35 @@ def refuse_unrecoverable(rec: pool_record.PoolRecord | None, log: Log) -> None:
         )
 
 
-def _pools_from_record(
-    pool: str, point: str, snaps: list[Snap], log: Log
+def _refuse_unreadable(point: str, e: pool_record.RecordError, log: Log) -> NoReturn:
+    """FATAL for a record that is there but cannot be read (M13R-2): by the
+    zark it names when it names one this zark does not meet, else as
+    unreadable. Never a pass: the record decides how the disk is laid out."""
+    _refuse_min_recover(e.min_recover, e.written_by, log)
+    log.fatal(
+        f"The record of origin's pools at {point} cannot be read: {e}",
+        causes=[
+            f"It was written by zark {e.written_by or '(not recorded)'}; this is zark {VERSION}",
+            "recover lays the disk out from this record; without it the point's layout "
+            + "is not known",
+        ],
+        solutions=[
+            "Choose another point",
+            "Run recover from a live session with a newer zark",
+            "Nothing was erased",
+        ],
+    )
+
+
+def _pools_from_record(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    pool: str, point: str, snaps: list[Snap], be: str, meta: dict[str, str], log: Log
 ) -> dict[str, pool_record.Create]:
     """How rpool and bpool are created from the point's record of origin's
     pools (M6-6), decided before anything is erased: a feature origin had
-    active that this ZFS lacks is a FATAL here. Empty without a usable
-    record: the pools are created as before 2.0.0-rc11, with a WARN (M6-7)."""
+    active that this ZFS lacks is a FATAL here, and so is a record that
+    cannot be read (M13R-2). Empty without a record: the pools are created
+    as before 2.0.0-rc11, with a WARN (M6-7), unless the point is an ext4
+    one by the drive's other marks (M13R-1)."""
     try:
         rec = pool_record.read(pool, point, snaps)
     except survey.ReadError as e:
@@ -332,10 +374,9 @@ def _pools_from_record(
             causes=["The drive did not answer a zfs get; nothing was written"],
             solutions=[f"Check the drive: zpool status {pool}", "Run recover again"],
         )
-    except ValueError as e:
-        log.warn(str(e))
-        rec = None
-    refuse_unrecoverable(rec, log)
+    except pool_record.RecordError as e:
+        _refuse_unreadable(point, e, log)
+    refuse_unrecoverable(rec, pool_record.point_layout(rec, snaps, be, meta), log)
     known = set(zfs_features.parse_upgrade_v(sh.run("zpool upgrade -v").stdout))
     if rec is None or not known or not all(p in rec.pools for p in ("rpool", "bpool")):
         live = ", ".join(ln.strip() for ln in sh.run("zfs version").lines) or "unknown"
@@ -1049,7 +1090,7 @@ def run(
         excluded = None
     plan = build_plan(pool_name, device, ubuntu_name, point, snaps, log, complete, excluded)
     show_plan(plan, log, {i.guid: n for n, i in cfg.known_drives.items()})
-    pools_spec = _pools_from_record(pool_name, point_name(point), snaps, log)
+    pools_spec = _pools_from_record(pool_name, point_name(point), snaps, ubuntu_name, meta, log)
     if plan.hostid:
         _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
         log.ok(f"Hostid set to: {sh.run('hostid').output}")

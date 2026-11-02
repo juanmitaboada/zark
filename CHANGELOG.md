@@ -16,6 +16,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each row comes from. `.github/workflows/pages.yml` builds it and publishes it to GitHub
   Pages once `PAGES_ENABLED` is set. Nothing that could name a machine is published.
 
+### M13 - /boot on ext4
+
+#### Changed
+
+- **recover refuses a point whose record of origin's pools is there but
+  cannot be read** (M13R-2): another format, a malformed value, or
+  snapshots of one point that disagree. It used to warn and recover the
+  point as one without a record; this is a change for a bpool point with
+  a damaged record too. A record of a later format that names the zark it
+  needs (`min_recover`) is refused by that version. Nothing is erased in
+  either case. A point without any record (written before 2.0.0-rc11)
+  keeps the warning.
+- **A point without a record is an ext4 point when the drive says so**
+  (M13R-1, M13F-6 6a): when the drive holds the boot environment's copy
+  of `/boot` (`rpool/ROOT/<be>/zark-boot`) or carries
+  `org.zark:origin-layout=ext4`, which `prepare` sets at `zpool create`
+  and `backup` before any transfer on a system with `/boot` on ext4.
+  recover refuses such a point (an interrupted run, a carried sanoid
+  snapshot) before anything is erased, instead of laying the disk out
+  with a bpool.
+
 ### M14 - the status readers' rows and the CLI
 
 zark 2.2 is being built on `main` as `2.2.0-rc1` (`lib/config.py`) and

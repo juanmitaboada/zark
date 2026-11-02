@@ -181,7 +181,8 @@ def run(
     altroot = backup_altroot(new_pool)
     _ = sh.run(f"mkdir -p {altroot}")
     compat = drive_compatibility(pool_record.pools_for(layout), log)
-    r = sh.run(create_command(new_pool, ident.by_id_path, altroot, compat), log=log)
+    marks = pool_record.origin_layout_fields(layout)
+    r = sh.run(create_command(new_pool, ident.by_id_path, altroot, compat, marks), log=log)
     if not r.ok:
         log.fatal(f"Failed to create pool: {r.stderr.strip()}")
     cleanup.track_pool(new_pool)

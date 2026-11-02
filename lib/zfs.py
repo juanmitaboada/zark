@@ -835,18 +835,23 @@ COMPAT_DIRS = ("/etc/zfs/compatibility.d", "/usr/share/zfs/compatibility.d")
 DRIVE_COMPATIBILITY = "openzfs-2.2"
 
 
-def create_command(pool: str, device: str, altroot: str, compatibility: str) -> str:
+def create_command(
+    pool: str, device: str, altroot: str, compatibility: str, marks: dict[str, str] | None = None
+) -> str:
     """``zpool create`` of a backup drive (prepare; the self-test's level 2).
 
     -R: the pool never enters zpool.cache and nothing it will hold can mount
     over the running system (I-G). The vdev is named by its by-id so later
     imports never depend on /dev/sdX (I16). ``compatibility`` keeps the
     drive readable by older lives (M4s-10); "" leaves every feature on.
+    ``marks`` are ``org.zark:<key>=<value>`` set on the root dataset by the
+    create itself, so the pool never exists without them (M13F-6 6a).
     """
     compat = f"-o compatibility={compatibility} " if compatibility else ""
+    props = "".join(f"-O org.zark:{k}={v} " for k, v in sorted((marks or {}).items()))
     return (
         f"zpool create -f -o ashift=12 {compat}-O atime=off -O xattr=sa "
-        + f"-O dnodesize=auto -O normalization=formD -m none -R {altroot} "
+        + f"-O dnodesize=auto -O normalization=formD {props}-m none -R {altroot} "
         + f"{pool} {device}"
     )
 
