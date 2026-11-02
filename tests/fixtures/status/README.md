@@ -72,6 +72,7 @@ no `reclaim_bytes` is a ZFS figure.
 | `hidepid-other-boot` | as `hidepid-running`, the case's `boot_id` another boot's | as `idle` | `edge` |
 | `proc-gone` | `running`'s file; the case's `/proc` has `1/` but not the pid | as `idle` | `edge` |
 | `proc-reused` | `running`'s file; the case's `/proc` has `1/` and the pid with other start ticks | as `idle` | `edge` |
+| `boot-ext4` | absent | as `idle` on a system whose `/boot` is an ext4 partition: rpool alone, the `boot` object at 86 % (`warning`, a `boot_capacity` notice), black's `last_point_record` | `ok` |
 
 ## Liveness
 

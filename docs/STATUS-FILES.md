@@ -305,7 +305,8 @@ the MOTD shows.
 | `generated_by` | string, open enumeration | `timer` for `zark status --refresh`, `status` for `zark status` by hand, else the command that wrote it (`backup`, `prepare`, `registry`, `prune`, ...). For people and logs |
 | `registry` | string | the `known_drives.json` the writer used (`$ZARK_CONFIG_DIR`, the portable tree's `etc/`, or `/etc/zark/`) |
 | `thresholds` | object | the writer's limits, so readers judge as zark does: `capacity_warning_pct`, `capacity_critical_pct`, `rpo_warning_days`, and `stale_after_s`, after which a reader treats this file as stale (three refresh intervals of the alerts timer) |
-| `source_pools` | array | one entry per source pool present, rpool then bpool |
+| `source_pools` | array | one entry per source pool present: rpool, then bpool when the system has one (a system whose `/boot` is an ext4 partition, Ubuntu 26.10 and later on UEFI, has rpool alone) |
+| `boot` | object, optional | an ext4 `/boot`'s space (see "Boot object"); absent on a system with a bpool, whose space is a source pool's |
 | `drives` | array | one entry per drive in the writer's registry, sorted by name |
 | `notices` | array | the MOTD's lines, structured |
 
@@ -336,7 +337,7 @@ compute:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `name` | string | `rpool` or `bpool` |
+| `name` | string | `rpool` or `bpool`; a reader never assumes both are there |
 | `space` | Space object or null | null when the pool could not be read this time |
 | `level` | `ok`, `warning`, `critical`, or null | from `capacity_pct`; null with `space` |
 | `datasets` | array, optional | every dataset of the pool, sorted by name; absent when `space` is null or the listing failed (a `read_error` notice then says so) |
@@ -369,6 +370,23 @@ other) is the reader's.
 A drive entry may carry the same listing for the drive's pool (see "Drive
 contents").
 
+### Boot object
+
+On a system whose `/boot` is an ext4 partition of its own, its space, read
+with `statvfs` in the same pass as the source pools. Old kernels fill it,
+so it is judged with the same `thresholds` as a pool.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mountpoint` | string | `/boot` |
+| `fstype` | string | `ext4` |
+| `source` | string | the partition, as `findmnt` names it |
+| `space` | object | `used_bytes` (`(f_blocks - f_bfree) * f_frsize`), `available_bytes` (`f_bavail * f_frsize`, what users can write), `size_bytes` (`f_blocks * f_frsize`), `capacity_pct` (used over used plus available, rounded up, as `df` prints it), `measured_at` |
+| `level` | `ok`, `warning`, `critical` | from `capacity_pct` and `thresholds` |
+
+It has no `pool_*` figures: a file system has no reserve of the kind a
+pool has.
+
 ### Drive entry
 
 | Field | Type | Meaning |
@@ -388,6 +406,7 @@ contents").
 | `non_point_snapshots` | object, optional | the drive's other snapshots, counted |
 | `retention_next` | object, optional | what the drive's policy would remove at a backup a few days later |
 | `reclaim_by_age` | array, optional | per month, what removing every older point zark would remove frees |
+| `last_point_record` | object, optional | the last completed backup's point, as recorded on the drive: `written_by` (the zark that wrote it) and `min_recover` (the oldest zark that recovers it, null when any does); written by `backup`, carried forward otherwise |
 
 `last_run`:
 
@@ -610,6 +629,7 @@ colour and an icon without parsing text.
 | `code` | What | `level` |
 |---|---|---|
 | `capacity` | a source pool at or above a threshold, one per pool | `warning` or `critical` |
+| `boot_capacity` | an ext4 `/boot` at or above a threshold; `subject` is `/boot` | `warning` or `critical` |
 | `backup_age` | days since each drive's last backup | `warning` when the newest is older than `rpo_warning_days`, else `info` |
 | `no_anchor` | a drive with no anchor in the source, one per drive | `warning` |
 | `read_error` | the source pools, or their datasets, could not be read | `warning` |

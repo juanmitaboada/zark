@@ -514,7 +514,30 @@ def _pool_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     if not names:
         lines.append([("  no source pool imported", "dim")])
     lines += [_pool_row(inp, opt, n, files.get(n, {}).get("space")) for n in names]
+    boot = (doc or {}).get("boot")
+    if isinstance(boot, dict) and isinstance(boot.get("space"), dict):
+        lines.append(_boot_row(boot, _thresholds(doc), opt))
     return lines
+
+
+def _boot_row(boot: Mapping[str, Any], thresholds: Mapping[str, Any], opt: ViewOptions) -> Line:
+    """An ext4 /boot's space from status.json's ``boot`` (M12-6 6a): a file
+    system, so no reserved figure and its type where a pool's health goes."""
+    space: Mapping[str, Any] = boot["space"]
+    level, style = _level_style(space, thresholds)
+    cap = _int(space.get("capacity_pct"))
+    row: Line = [
+        ("  /boot ", "bold"),
+        (meter(_cap_fraction(space), 12, opt.unicode_bars), style),
+        (f"{fmt_bytes(_int(space.get('used_bytes'))):>11}", ""),
+        (f"{fmt_bytes(_int(space.get('available_bytes'))):>11}", ""),
+        (f"{'-':>11}", "dim"),
+        (f"{cap if cap is not None else '-':>5} %", style),
+        (f"  {clean(str(boot.get('fstype', '-'))):<8}", "dim"),
+    ]
+    if level != "ok":
+        row.append((level, style))
+    return row
 
 
 def _drive_row(drive: Mapping[str, Any], width: int, where: str, now: datetime) -> Line:

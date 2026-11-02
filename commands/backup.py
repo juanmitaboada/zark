@@ -1076,6 +1076,7 @@ class _RunRecord:
         self.space: Space | None = None
         self.contents: drive_contents.DriveContents | None = None
         self.done = False
+        self.point_record: tuple[str, str] | None = None  # written_by, min_recover (M13F-4)
 
     def measure(self, pool: str) -> None:
         """Read the drive's space now (it is imported) and show it."""
@@ -1107,7 +1108,13 @@ class _RunRecord:
             result, progress.started_at(), now_utc_iso(), point, missing, message
         )
         last = point if result == "completed" else None
-        up = status_file.DriveUpdate(run_, self.space, last, contents=self.contents)
+        up = status_file.DriveUpdate(
+            run_,
+            self.space,
+            last,
+            contents=self.contents,
+            last_point_record=self.point_record if last else None,
+        )
         progress.record(self.guid, up)
 
     def finish(self) -> None:
@@ -1191,6 +1198,7 @@ def run(
     pool_name = drive.name
     pool_guid = drive.guid
     record = _RunRecord(pool_guid)
+    record.point_record = pool_record.versions(pools_mark) if pools_mark else None
     registered = cfg.known_drives.get(pool_name)
     progress.set_drive(pool_name, pool_guid, registered.drive_id if registered else "")
     progress.on_end(record.finish)

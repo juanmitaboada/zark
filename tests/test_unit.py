@@ -346,6 +346,7 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestRecoverRefusesBeforeErasing,
     TestSetupBootCopy,
     TestSetupSteps,
+    TestStatusBoot,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -392,6 +393,7 @@ BOOT_LAYOUT_SUITES = (
     TestMountExt4Boot,
     TestFinishExt4Boot,
     TestMountBootCopy,
+    TestStatusBoot,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the
@@ -22899,6 +22901,20 @@ def _frame_text(case: str, width: int = 80, **opts: Any) -> str:
     inp = mview.Inputs(reading=r, live=opts.pop("live", None), by_id=Path("/nonexistent"))
     lines = mview.frame(inp, mview.ViewOptions(width=width, version="2.1.0", **opts))
     return "\n".join(mview.line_text(li) for li in lines)
+
+
+class TestMonitorBoot:  # pylint: disable=missing-function-docstring
+    """M12-6 6a: the monitor shows an ext4 /boot under the pools."""
+
+    def test_the_boot_row_follows_rpool(self):
+        text = _frame_text("boot-ext4")
+        pools = text[text.index("POOLS") :]
+        assert "  rpool " in pools and "  /boot " in pools and "bpool" not in pools
+        row = next(ln for ln in pools.splitlines() if ln.startswith("  /boot "))
+        assert "86 %" in row and "ext4" in row and row.rstrip().endswith("warning")
+
+    def test_a_bpool_system_has_no_boot_row(self):
+        assert "  /boot " not in _frame_text("idle")
 
 
 class TestMonitorOlderPoints:  # pylint: disable=missing-function-docstring

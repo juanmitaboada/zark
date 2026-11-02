@@ -38,7 +38,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from lib import anchors, certificates, sh, statusdirs, survey
-from lib.config import Config, zark_command
+from lib.boot_layout import boot_mount
+from lib.config import Config, now_utc_iso, zark_command
 from lib.drives import drive_staleness_days, no_anchor_lines
 from lib.log import Log
 from lib.origin_prune import inventory
@@ -61,6 +62,54 @@ def cap_level(pct: int) -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class BootSpace:  # pylint: disable=too-many-instance-attributes
+    """An ext4 ``/boot``'s space (M12-6 6a), from ``statvfs``."""
+
+    mountpoint: str
+    fstype: str
+    source: str
+    used_bytes: int
+    available_bytes: int
+    size_bytes: int
+    capacity_pct: int
+    measured_at: str
+
+    def to_json(self) -> dict[str, object]:
+        """status.json's ``boot`` object, its ``level`` aside."""
+        return {
+            "mountpoint": self.mountpoint,
+            "fstype": self.fstype,
+            "source": self.source,
+            "space": {
+                "used_bytes": self.used_bytes,
+                "available_bytes": self.available_bytes,
+                "size_bytes": self.size_bytes,
+                "capacity_pct": self.capacity_pct,
+                "measured_at": self.measured_at,
+            },
+        }
+
+
+def read_boot_space(path: str = "/boot") -> BootSpace | None:
+    """``/boot``'s space when it is an ext4 mount of its own; None otherwise
+    (a bpool system: bpool's space is a source pool). The percentage is
+    df's: used over used plus what is available to users, rounded up."""
+    mount = boot_mount()
+    if mount is None or mount.fstype != "ext4":
+        return None
+    try:
+        v = os.statvfs(path)
+    except OSError:
+        return None
+    used = (v.f_blocks - v.f_bfree) * v.f_frsize
+    avail = v.f_bavail * v.f_frsize
+    pct = -(-used * 100 // (used + avail)) if used + avail else 0
+    return BootSpace(
+        path, mount.fstype, mount.source, used, avail, v.f_blocks * v.f_frsize, pct, now_utc_iso()
+    )
+
+
 @dataclass
 class Status:  # pylint: disable=too-many-instance-attributes
     """Everything the report, the MOTD and the notifications say."""
@@ -74,6 +123,7 @@ class Status:  # pylint: disable=too-many-instance-attributes
     shared_drives: list[str] = field(default_factory=list)  # the drive of each `shared` line
     spaces: dict[str, Space | None] = field(default_factory=dict)  # pool → its Space (R1)
     datasets: dict[str, list[DatasetUsage] | None] = field(default_factory=dict)  # pool → R2
+    boot: BootSpace | None = None  # an ext4 /boot (M12-6 6a)
 
 
 @dataclass(frozen=True)
@@ -100,6 +150,8 @@ def gather(cfg: Config, log: Log) -> Status:
         r = sh.run(f"zpool list -Hp -o capacity {pool}")
         if r.ok and r.output.strip().isdigit():
             st.caps[pool] = int(r.output.strip())
+    if "bpool" not in pools:
+        st.boot = read_boot_space()
     st.ages = {name: drive_staleness_days(info) for name, info in sorted(cfg.known_drives.items())}
     if "rpool" not in pools:
         return st
@@ -133,6 +185,19 @@ def cap_lines(st: Status) -> list[tuple[str, str]]:
     return out
 
 
+def boot_line(st: Status) -> tuple[str, str] | None:
+    """(level, text) when an ext4 ``/boot`` is at a warning or critical
+    level, with the pools' thresholds (M12-6 6a); old kernels fill it."""
+    level = cap_level(st.boot.capacity_pct) if st.boot else ""
+    if not st.boot or not level:
+        return None
+    limit = CAP_CRITICAL if level == "critical" else CAP_WARNING
+    return level, (
+        f"/boot is {st.boot.capacity_pct}% full ({level} from {limit}%): "
+        + "remove old kernels with sudo apt autoremove --purge"
+    )
+
+
 def residue_line(n: int) -> str:
     """The one wording of the legacy residues in origin, for backup,
     `zark status` and the MOTD (decided 2026-10-13, M3P.8 2a)."""
@@ -163,6 +228,8 @@ def notices(st: Status) -> list[Notice]:
         Notice(level, "capacity", pool, text)
         for (level, text), pool in zip(cap_lines(st), _cap_pools(st), strict=True)
     ]
+    if line := boot_line(st):
+        out.append(Notice(line[0], "boot_capacity", "/boot", line[1]))
     stale, rpo = rpo_line(st)
     if rpo:
         out.append(Notice("warning" if stale else "info", "backup_age", None, rpo))

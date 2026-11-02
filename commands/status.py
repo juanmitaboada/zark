@@ -28,11 +28,13 @@ only the MOTD file and status.json (docs/STATUS-FILES.md), from one read.
 
 import os
 from datetime import UTC, datetime
+from typing import Any
 
 from commands.setup import sanoid_conf_gap
 from lib import cli_spec, exclusions, notify, status, status_file, statusdirs, survey
 from lib.config import Config, zark_command
 from lib.log import Log
+from lib.pool_record import MIN_RECOVER_EXT4
 from lib.zfs import ZFS
 
 
@@ -57,6 +59,25 @@ def _report(st: status.Status, log: Log) -> None:
         log.warn(st.read_error)
     if st.residues:
         log.info(status.residue_line(st.residues))
+    if st.boot is not None:
+        boot = status.boot_line(st)
+        text = boot[1] if boot else f"/boot: {st.boot.capacity_pct}% full"
+        (log.error if boot and boot[0] == "critical" else log.warn if boot else log.ok)(text)
+        # An ext4 point needs a zark that lays that disk out (M12-8).
+        log.info(f"Points of this system are recovered with zark {MIN_RECOVER_EXT4} or later")
+
+
+def _point_records(doc: dict[str, Any] | None, log: Log) -> None:
+    """Each drive's last point's record, as backup left it in status.json
+    (M13F-4 4a): the zark that wrote it and the oldest that recovers it."""
+    for d in (doc or {}).get("drives", []):
+        rec = d.get("last_point_record") if isinstance(d, dict) else None
+        if isinstance(rec, dict) and rec.get("written_by"):
+            need = rec.get("min_recover")
+            log.info(
+                f"{d.get('name')}: last point written by zark {rec['written_by']}"
+                + (f", recovered with zark {need} or later" if need else "")
+            )
 
 
 def _exclusions(log: Log) -> None:
@@ -118,4 +139,5 @@ def run(args: list[str]) -> None:
     log.banner("STATUS", "Source pools and backup drives")
     st = status_file.refresh(cfg, log, "status")
     _report(st, log)
+    _point_records(status_file.read(), log)
     _exclusions(log)

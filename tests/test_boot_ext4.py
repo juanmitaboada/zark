@@ -37,6 +37,7 @@ import commands.mount as mount_mod
 import commands.prepare as prepare_mod
 import commands.recover as recover_mod
 import commands.setup as setup_mod
+import commands.status as status_cmd
 import lib.mount as lib_mount
 from lib import (
     boot_chain,
@@ -50,6 +51,8 @@ from lib import (
     recover_ext4,
     replication as repl,
     retention,
+    status,
+    status_file,
     survey,
     zfs,
     zfs_features,
@@ -1821,3 +1824,111 @@ class TestMountBootCopy:  # pylint: disable=missing-function-docstring
             )
         text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
         assert f"backup/{_BE_ROOT}/zark-boot" in text and "(the copy of an ext4 /boot)" in text
+
+
+def _statvfs(blocks: int, bfree: int, bavail: int, frsize: int = 4096) -> object:
+    return type(
+        "V", (), {"f_blocks": blocks, "f_bfree": bfree, "f_bavail": bavail, "f_frsize": frsize}
+    )()
+
+
+class TestStatusBoot:  # pylint: disable=missing-function-docstring
+    """M12-6 6a, M13F-4 4a: /boot's space and the last point's record."""
+
+    def test_an_ext4_boot_is_measured_as_df_does(self):
+        mount = boot_layout.BootMount("ext4", "/dev/sda2", _UUID)
+        with (
+            patch.object(status, "boot_mount", return_value=mount),
+            patch.object(status.os, "statvfs", return_value=_statvfs(1000, 200, 150)),
+        ):
+            got = status.read_boot_space()
+        assert got is not None and got.source == "/dev/sda2"
+        assert (got.used_bytes, got.available_bytes) == (800 * 4096, 150 * 4096)
+        assert got.capacity_pct == 85  # 800 / 950, rounded up
+        assert got.size_bytes == 1000 * 4096
+
+    def test_no_boot_space_without_an_ext4_mount(self):
+        with patch.object(status, "boot_mount", return_value=None):
+            assert status.read_boot_space() is None
+        zfs_boot = boot_layout.BootMount("zfs", "bpool/BOOT/x", "")
+        with patch.object(status, "boot_mount", return_value=zfs_boot):
+            assert status.read_boot_space() is None
+
+    @staticmethod
+    def _st(pct: int) -> status.Status:
+        st = status.Status()
+        st.boot = status.BootSpace(
+            "/boot", "ext4", "/dev/sda2", 1, 1, 2, pct, "2026-11-02T10:00:00Z"
+        )
+        return st
+
+    def test_the_notice_follows_the_pools_thresholds(self):
+        assert status.boot_line(self._st(79)) is None
+        assert status.boot_line(self._st(80))[0] == "warning"  # type: ignore[index]
+        level, text = status.boot_line(self._st(95))  # type: ignore[misc]
+        assert level == "critical" and "remove old kernels" in text
+        (n,) = [n for n in status.notices(self._st(85)) if n.code == "boot_capacity"]
+        assert n.subject == "/boot" and n.level == "warning"
+        assert "/boot is 85% full" in status.motd_text(self._st(85))
+
+    def test_status_json_carries_boot_and_the_point_record(self):
+        cfg = MagicMock()
+        cfg.known_drives = {}
+        doc = status_file.build(
+            self._st(85), cfg, "test", None, generated_at="2026-11-02T10:00:00Z"
+        )
+        assert doc["boot"]["level"] == "warning" and doc["boot"]["space"]["capacity_pct"] == 85
+        assert "boot" not in status_file.build(status.Status(), cfg, "test", None)
+
+    def test_a_drive_keeps_its_last_point_record(self):
+        info = MagicMock(guid="111", drive_id="usb-X", autoeject=False, last_backup_at=None)
+        cfg = MagicMock()
+        cfg.known_drives = {"black": info}
+        cfg.drive_policy.return_value = MagicMock(window_days=30, max_age_days=0, margin_pct=10)
+        up = status_file.DriveUpdate(last_point_record=("2.2.0-rc2", "2.2.0"))
+        doc = status_file.build(status.Status(), cfg, "backup", None, {"111": up})
+        rec = doc["drives"][0]["last_point_record"]
+        assert rec == {"written_by": "2.2.0-rc2", "min_recover": "2.2.0"}
+        again = status_file.build(status.Status(), cfg, "timer", doc)
+        assert again["drives"][0]["last_point_record"] == rec
+        bpool = status_file.DriveUpdate(last_point_record=("2.2.0-rc2", ""))
+        doc = status_file.build(status.Status(), cfg, "backup", None, {"111": bpool})
+        assert doc["drives"][0]["last_point_record"]["min_recover"] is None
+        bare = status_file.build(status.Status(), cfg, "timer", None)
+        assert "last_point_record" not in bare["drives"][0]
+
+    def test_zark_status_names_each_drives_record(self):
+        doc = {
+            "drives": [
+                {
+                    "name": "black",
+                    "last_point_record": {"written_by": "2.2.0", "min_recover": "2.2.0"},
+                },
+                {"name": "blue", "last_point_record": {"written_by": "2.1.1", "min_recover": None}},
+                {"name": "green"},
+            ]
+        }
+        out = StringIO()
+        with redirect_stdout(out):
+            status_cmd._point_records(doc, _log())  # pylint: disable=protected-access
+        text = out.getvalue()
+        assert "black: last point written by zark 2.2.0, recovered with zark 2.2.0 or later" in text
+        assert "blue: last point written by zark 2.1.1" in text and "green" not in text
+
+    def test_backup_records_the_point_only_when_complete(self):
+        def ended(result: str) -> object:
+            rec = backup_mod._RunRecord("111")  # pylint: disable=protected-access
+            rec.point_record = ("2.2.0-rc2", "2.2.0")
+            rec.eng = MagicMock(point="zark_2026-11-02_10:00:00Z")
+            rec.point_taken = True
+            with (
+                patch.object(backup_mod.progress, "record") as recorded,
+                patch.object(
+                    backup_mod.progress, "started_at", return_value="2026-11-02T10:00:00Z"
+                ),
+            ):
+                rec.result(result)
+            return recorded.call_args.args[1].last_point_record
+
+        assert ended("completed") == ("2.2.0-rc2", "2.2.0")
+        assert ended("incomplete") is None

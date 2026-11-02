@@ -95,6 +95,8 @@ class DriveUpdate:
     last_backup_point: str | None = None
     unless_started_at: str = ""
     contents: DriveContents | None = None
+    # The last point's written_by and min_recover (M13F-4 4a), "" when not set.
+    last_point_record: tuple[str, str] | None = None
 
 
 def _space_and_contents(before: dict[str, Any], up: DriveUpdate) -> tuple[Any, dict[str, Any]]:
@@ -183,6 +185,11 @@ def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,t
         ):
             last_run = up.last_run.to_json()
         space, contents = _space_and_contents(before, up)
+        record = (
+            {"written_by": up.last_point_record[0], "min_recover": up.last_point_record[1] or None}
+            if up.last_point_record is not None
+            else before.get("last_point_record")
+        )
         drives.append(
             {
                 "name": name,
@@ -202,6 +209,7 @@ def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,t
                 "last_run": last_run,
                 "space": space,
                 **contents,
+                **({"last_point_record": record} if isinstance(record, dict) else {}),
             }
         )
     return {
@@ -218,6 +226,11 @@ def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,t
             "stale_after_s": STALE_AFTER_S,
         },
         "source_pools": pools,
+        **(
+            {"boot": {**st.boot.to_json(), "level": cap_level(st.boot.capacity_pct) or "ok"}}
+            if st.boot
+            else {}
+        ),
         "drives": drives,
         "notices": [
             {"level": n.level, "code": n.code, "subject": n.subject, "text": n.text}

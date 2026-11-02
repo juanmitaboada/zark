@@ -108,6 +108,40 @@
         }
       }
     },
+    "boot": {
+      "type": "object",
+      "required": [
+        "mountpoint",
+        "fstype",
+        "source",
+        "space",
+        "level"
+      ],
+      "properties": {
+        "mountpoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fstype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "space": {
+          "$ref": "#/$defs/boot_space"
+        },
+        "level": {
+          "enum": [
+            "ok",
+            "warning",
+            "critical"
+          ]
+        }
+      }
+    },
     "drives": {
       "type": "array",
       "items": {
@@ -431,6 +465,24 @@
                 }
               }
             }
+          },
+          "last_point_record": {
+            "type": "object",
+            "required": [
+              "written_by",
+              "min_recover"
+            ],
+            "properties": {
+              "written_by": {
+                "type": "string"
+              },
+              "min_recover": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
           }
         }
       }
@@ -501,6 +553,39 @@
           "minimum": 0
         },
         "pool_free_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capacity_pct": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "measured_at": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        }
+      }
+    },
+    "boot_space": {
+      "type": "object",
+      "required": [
+        "used_bytes",
+        "available_bytes",
+        "size_bytes",
+        "capacity_pct",
+        "measured_at"
+      ],
+      "properties": {
+        "used_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "available_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "size_bytes": {
           "type": "integer",
           "minimum": 0
         },
