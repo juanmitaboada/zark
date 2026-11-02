@@ -1,0 +1,2 @@
+dm_crypt-0 PARTUUID=00000000-0000-4000-8000-0000000000a3 /dev/urandom cipher=aes-cbc-essiv:sha256,initramfs,plain,size=256,swap
+data PARTUUID=00000000-0000-4000-8000-0000000000a4 none luks,discard

@@ -12497,7 +12497,7 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
     """J, M4c-4/5/7/8: finish reports what it did, never touches the pools' import."""
 
     @staticmethod
-    def _run(  # pylint: disable=too-many-locals
+    def _run(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
         grub_failure: str = "",
         initrd_failures: tuple[str, ...] = (),
         health: str = "ONLINE",
@@ -12506,12 +12506,14 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         unmounted: tuple[str, ...] = (),
         bpool_guid: str = "",
         ext4: bool = False,
+        boot_mounts: bool = True,
     ) -> tuple[str, bool, list[str]]:
         order: list[str] = []
 
         def fake_run(cmd: str, **_kw: object) -> RunResult:
             order.append(cmd)
-            return RunResult(returncode=0, stdout="", stderr="", command=cmd)
+            down = not boot_mounts and cmd in ("findmnt -n /boot", "mount /boot")
+            return RunResult(returncode=int(down), stdout="", stderr="", command=cmd)
 
         def fake_grub(*a: object) -> str:
             order.append(f"regenerate_grub_cfg {a[1]} {a[3]}")
@@ -12575,6 +12577,15 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         assert not exited and "FINISH COMPLETE" in out
         assert "rpool: ONLINE" in out and "bpool: ONLINE" not in out
         assert "findmnt -n /boot" in order
+
+    def test_an_ext4_boot_that_does_not_mount_writes_nothing_into_it(self):
+        """M13R-9: no initrd and no grub.cfg into the root's /boot directory;
+        the banner names /boot."""
+        out, _, order = self._run(ext4=True, boot_mounts=False)
+        assert "findmnt -n /boot" in order and "mount /boot" in order
+        assert not [c for c in order if c.startswith(("regenerate_initrd", "regenerate_grub_cfg"))]
+        assert "FINISH COMPLETE" not in out
+        assert "/boot (ext4) is not mounted: mount /boot, then run finish again" in out, out
 
     def test_no_pool_is_exported_or_imported(self):
         # M4c-4: an export of the running rpool unmounts what is not busy, then fails.

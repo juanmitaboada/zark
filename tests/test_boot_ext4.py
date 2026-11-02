@@ -1449,6 +1449,15 @@ class TestBootRewrite:  # pylint: disable=missing-function-docstring
             )
         ]
 
+    def test_fstab_leaves_another_mount_point_with_the_old_uuid(self):
+        """M13R-9: only the line whose mount point is /boot moves."""
+        text = (_FIXTURES / "fstab-selectors").read_text(encoding="ascii")
+        new, n = boot_rewrite.rewrite_fstab(text, _UUID, _NEW_UUID)
+        assert n == 1
+        srv = f"/dev/disk/by-uuid/{_UUID} /srv ext4 defaults 0 2\n"
+        assert srv in text and srv in new
+        assert new == text.replace(f"{_UUID} /boot ", f"{_NEW_UUID} /boot ")
+
     def test_fstab_uuid_form_and_case(self):
         text = f"UUID={_UUID.upper()}\t/boot\text4\tdefaults\t0\t1\n"
         new, n = boot_rewrite.rewrite_fstab(text, _UUID, _NEW_UUID)
@@ -1463,6 +1472,31 @@ class TestBootRewrite:  # pylint: disable=missing-function-docstring
         new, n = boot_rewrite.rewrite_crypttab(text, _NEW_PARTUUID)
         assert n == 1
         assert new == text.replace(_SWAP_PARTUUID, _NEW_PARTUUID)
+
+    def test_crypttab_leaves_a_device_that_is_not_the_swap(self):
+        """M13R-9: only the line whose options name swap moves."""
+        text = (_FIXTURES / "crypttab-selectors").read_text(encoding="ascii")
+        new, n = boot_rewrite.rewrite_crypttab(text, _NEW_PARTUUID)
+        assert n == 1
+        data = "data PARTUUID=00000000-0000-4000-8000-0000000000a4 none luks,discard\n"
+        assert data in text and data in new
+        assert new == text.replace(_SWAP_PARTUUID, _NEW_PARTUUID)
+
+    def test_a_grub_cfg_without_the_old_uuid_is_an_error_of_the_recover(self):
+        """M13R-9: _rewrite_grub_uuid names it at once, before grub-install."""
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "grub.cfg"
+            text = (_FIXTURES / "grub.cfg").read_text(encoding="ascii").replace(_UUID, _NEW_UUID)
+            _ = cfg.write_text(text, encoding="ascii")
+            errors = boot_chain._rewrite_grub_uuid(cfg, _UUID, _NEW_UUID, _log())  # pylint: disable=protected-access
+            assert errors == [
+                f"grub.cfg: no search line names /boot's old UUID {_UUID}: GRUB may not find it"
+            ]
+            assert cfg.read_text(encoding="ascii") == text
+            _ = cfg.write_text((_FIXTURES / "grub.cfg").read_text(encoding="ascii"), "ascii")
+            with redirect_stdout(StringIO()):
+                assert not boot_chain._rewrite_grub_uuid(cfg, _UUID, _NEW_UUID, _log())  # pylint: disable=protected-access
+            assert _UUID not in cfg.read_text(encoding="ascii")
 
     def test_crypttab_without_a_swap_changes_nothing(self):
         text = "keystore-rpool /dev/zvol/rpool/keystore none luks\n"
