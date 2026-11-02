@@ -16,7 +16,7 @@ Reads of origin and of a backup drive, and the checks before a run.
 
 ``read_origin`` and ``read_dest`` list the datasets, snapshots and
 bookmarks a run plans from (strictly when asked: :class:`ReadError`);
-``require_bookmark_v2`` and ``require_boot_pool`` refuse a run that could
+``require_bookmark_v2`` and ``require_boot_layout`` refuse a run that could
 not anchor or would leave ``/boot`` out.
 """
 
@@ -25,6 +25,7 @@ import shlex
 from typing import NoReturn
 
 from lib import sh
+from lib.boot_layout import Layout, boot_mount, ext4_problems
 from lib.config import zark_command
 from lib.identity import disks_under
 from lib.log import Log
@@ -253,16 +254,21 @@ def _rpool_disks() -> set[str]:
     return disks
 
 
-def _refuse_without_bpool(log: Log) -> NoReturn:
+# Support for /boot on ext4 is tracked here (M12C-7).
+EXT4_ISSUE = "https://github.com/juanmitaboada/zark/issues/5"
+
+
+def refuse_without_bpool(log: Log) -> NoReturn:
     """No bpool imported and none to import: a layout zark does not back up
     (M6P.2, M9b-8 8a). ``/boot``'s file system is named when it is a mount
-    of its own (Ubuntu 26.10 with Secure Boot puts it on ext4)."""
+    of its own (Ubuntu 26.10 and later put it on ext4 on UEFI machines,
+    whatever Secure Boot's state: M12C-7)."""
     r = sh.run("findmnt -n -o FSTYPE,SOURCE /boot")
     fields = r.output.split() if r.ok else []
     if len(fields) >= 2:
         where = (
             f"/boot is on {fields[0]} ({fields[1]}), outside ZFS: Ubuntu 26.10 and later "
-            + "install it there when Secure Boot is on"
+            + "install it there on UEFI machines"
         )
     else:
         where = "/boot is not a mount of its own: it is a directory of the root file system"
@@ -271,14 +277,41 @@ def _refuse_without_bpool(log: Log) -> NoReturn:
         causes=[where, "zark backs up the layout Ubuntu's installer makes, with a bpool"],
         solutions=[
             "zark supports Ubuntu 24.04 LTS and 26.04 LTS as their installers lay out ZFS "
-            + "(rpool, bpool and the keystore), with Secure Boot on"
+            + "(rpool, bpool and the keystore), with Secure Boot on",
+            f"Support for /boot on ext4: {EXT4_ISSUE}",
         ],
     )
 
 
-def require_boot_pool(log: Log) -> None:
-    """Refuse while a pool named bpool can be imported here but is not
-    (M2R-4), and when there is no bpool at all (M9b-8).
+def _ext4_layout(log: Log) -> Layout:
+    """No bpool, imported or importable: ``ext4`` when ``/boot`` is the 26.10
+    installer's ext4 partition on rpool's disk with a kernel of this root;
+    any other ``/boot`` is refused with its reason (M12-1 1a, M12R-7)."""
+    mount = boot_mount()
+    if mount is None or mount.fstype != "ext4":
+        refuse_without_bpool(log)
+    problems = ext4_problems(mount, _rpool_disks())
+    if problems:
+        log.fatal(
+            "/boot on ext4 is not as Ubuntu's installer lays it out",
+            causes=[f"/boot is {mount.source} (ext4)", *problems],
+            solutions=[
+                "zark backs up /boot on ext4 when it is a partition of rpool's disk, mounted, "
+                + "with the kernels of the running root",
+                "If /boot did not mount at boot: sudo mount /boot, then run again",
+            ],
+        )
+    return "ext4"
+
+
+# Every path that does not return ends in log.fatal (NoReturn), which pylint does not follow.
+def require_boot_layout(log: Log) -> Layout:  # pylint: disable=inconsistent-return-statements
+    """This system's boot layout (M12-1 1a): ``bpool`` when bpool is
+    imported and ``/boot`` is not also an ext4 mount; ``ext4`` as
+    :func:`_ext4_layout` reads it when there is no bpool at all.
+
+    Refuse while a pool named bpool can be imported here but is not
+    (M2R-4), and when there is neither layout (M9b-8).
 
     With bpool not imported ``/boot`` is not mounted either, so the pool's
     absence from ``zpool list`` is all there is to see; a run would then
@@ -293,10 +326,22 @@ def require_boot_pool(log: Log) -> None:
     unmounted (P6).
     """
     if sh.run("zpool list -H -o name bpool").ok:
-        return
+        mount = boot_mount()
+        if mount is not None and mount.fstype == "ext4":
+            log.fatal(
+                "This system has a bpool and /boot on ext4",
+                causes=[
+                    f"bpool is imported, and /boot is {mount.source} (ext4)",
+                    "zark backs up one boot layout per system: bpool, or /boot on ext4",
+                ],
+                solutions=[
+                    "Check which /boot this system boots from: findmnt /boot; zfs list -r bpool"
+                ],
+            )
+        return "bpool"
     candidates = _importable_bpools()
     if not candidates:
-        _refuse_without_bpool(log)
+        return _ext4_layout(log)
     mine = _rpool_disks()
     own: list[str] = []
     unknown = False

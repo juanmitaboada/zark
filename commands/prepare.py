@@ -54,7 +54,8 @@ def run(
     log.banner("PREPARE NEW BACKUP DRIVE")
     warn_rpool_mountpoint_lost(log)
     survey.require_bookmark_v2(log)
-    survey.require_boot_pool(log)
+    if survey.require_boot_layout(log) == "ext4":
+        survey.refuse_without_bpool(log)
 
     # ── Verify rpool keystore accessible ─────────────────────────────────
     if not Path("/run/keystore/rpool/system.key").exists():

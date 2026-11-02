@@ -321,6 +321,11 @@ from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E4
     FSnap,
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
+from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestBootLayoutCallers,
+    TestBootLayoutKernels,
+    TestBootLayoutOrigin,
+)
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
     TestSitePage,
@@ -340,6 +345,9 @@ from tests.test_status_files import (  # pylint: disable=wrong-import-position #
 
 # The certificates matrix's tests live in their own module, named here for the same reason.
 SITE_SUITES = (TestSiteCertificates, TestSitePage, TestSitePrivacy)
+
+# The boot layouts' tests live in their own module (M13), named here for the same reason.
+BOOT_LAYOUT_SUITES = (TestBootLayoutCallers, TestBootLayoutKernels, TestBootLayoutOrigin)
 
 # The status files' tests live in their own module (M7-15); main() runs the
 # Test* classes of this module's globals, so they are named here.
@@ -17810,7 +17818,7 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
 
     def test_an_importable_bpool_elsewhere_does_not_stop_a_run_with_bpool_imported(self) -> None:
         """M4aV-3 Q4 (and the M2 review's N55): this system's bpool is
-        imported and another disk's bpool is importable: require_boot_pool
+        imported and another disk's bpool is importable: require_boot_layout
         returns at once, and the run goes on."""
         fake = _fresh_fake()
         assert "bpool" in fake.pools
@@ -18878,7 +18886,7 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
         out = StringIO()
         with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(out):
             try:
-                survey.require_boot_pool(make_log())
+                survey.require_boot_layout(make_log())
             except SystemExit:
                 return unframed(out.getvalue())
         raise AssertionError("expected a refusal")
@@ -18912,23 +18920,33 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
         mock.on("zpool list -H -o name bpool").fails("no such pool")
         mock.on("env LC_ALL=C ZPOOL_VDEV_NAME_PATH=1 zpool import").succeeds("")
         if findmnt is None:
+            mock.on("findmnt -n -o FSTYPE,SOURCE,UUID /boot").returns(1)
             mock.on("findmnt -n -o FSTYPE,SOURCE /boot").returns(1)
         else:
             mock.on("findmnt -n -o FSTYPE,SOURCE /boot").succeeds(findmnt)
         out = StringIO()
         with patch_sh(mock), patch("builtins.input", return_value=""), redirect_stdout(out):
             try:
-                survey.require_boot_pool(make_log())
+                if findmnt is None:
+                    survey.require_boot_layout(make_log())
+                else:
+                    survey.refuse_without_bpool(make_log())
             except SystemExit:
                 return unframed(out.getvalue())
         raise AssertionError("expected a refusal")
 
-    def test_a_system_with_boot_on_ext4_is_refused_naming_it(self):
-        """M6P.2, M9b-8 8a: Ubuntu 26.10 with Secure Boot, /boot on ext4."""
+    def test_the_refusal_names_boot_on_ext4(self):
+        """M6P.2, M9b-8 8a, M12C-7: /boot on ext4 is the 26.10 installer's on
+        UEFI, whatever Secure Boot's state; the text says so and links the issue."""
         out = self._without("ext4 /dev/nvme0n1p2\n")
         assert "This system has no bpool" in out
-        assert "/boot is on ext4 (/dev/nvme0n1p2), outside ZFS: Ubuntu 26.10 and later" in out
+        assert (
+            "/boot is on ext4 (/dev/nvme0n1p2), outside ZFS: Ubuntu 26.10 and later install it "
+            + "there on UEFI machines"
+        ) in out
+        assert "Secure Boot is on" not in out
         assert "zark supports Ubuntu 24.04 LTS and 26.04 LTS as their installers lay out" in out
+        assert "https://github.com/juanmitaboada/zark/issues/5" in out
 
     def test_a_system_with_boot_in_its_root_is_refused(self):
         """M9b-8 8a: /boot a directory of rpool's root, not a mount."""
@@ -18939,9 +18957,10 @@ class TestBootPoolRefusal:  # pylint: disable=missing-function-docstring
     def test_an_imported_bpool_passes(self):
         mock = MockShell()
         mock.on("zpool list -H -o name bpool").succeeds("bpool")
+        mock.on("findmnt -n -o FSTYPE,SOURCE,UUID /boot").succeeds("zfs bpool/BOOT/ubuntu_x\n")
         with patch_sh(mock), redirect_stdout(StringIO()):
-            survey.require_boot_pool(make_log())
-        assert mock.was_not_called("findmnt -n -o FSTYPE,SOURCE /boot")
+            assert survey.require_boot_layout(make_log()) == "bpool"
+        assert mock.was_not_called("zpool import")
 
     def test_own_bpool_is_imported_by_id(self):
         out = self._refusal(self._bpool("111", f"{_NVME}-part3"))

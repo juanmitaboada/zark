@@ -1125,7 +1125,8 @@ def run(
     warn_rpool_mountpoint_lost(log)
     warn_kernel_named_vdevs(log)
     survey.require_bookmark_v2(log)
-    survey.require_boot_pool(log)
+    if survey.require_boot_layout(log) == "ext4":
+        survey.refuse_without_bpool(log)
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")

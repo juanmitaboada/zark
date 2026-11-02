@@ -13,6 +13,7 @@ zark/
 │   ├── apt_guard.py           # The apt/dpkg guard against kernel upgrades with a drive in
 │   ├── backup_layout.py       # What a backup pool holds, read by recover and mount
 │   ├── boot_chain.py          # A restored system's boot chain: mounts, GRUB, initrd scripts
+│   ├── boot_layout.py         # Which boot layout a system has: bpool, or /boot on ext4
 │   ├── certificates.py        # Self-test reports, the local record, certificates
 │   ├── cleanup.py             # Cleanup and safe teardown
 │   ├── cli_spec.py            # The command line declared once: groups, help, words
