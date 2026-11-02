@@ -38,6 +38,8 @@ with ``zfs set`` while a pool with zvols is imported.
 
 from dataclasses import dataclass
 
+from lib.boot_layout import BOOT_COPY
+
 # Ubuntu installer layout under rpool/ROOT/<be>/ (24.04 - 26.04).
 UBUNTU_ROOT_CHILDREN_OFF = frozenset({"usr", "var"})
 UBUNTU_ROOT_CHILDREN_ON = frozenset(
@@ -106,6 +108,9 @@ def ubuntu_layout(rel: str, be: str) -> tuple[str, str] | None:  # pylint: disab
         return ("on", "/")
     if rel.startswith(f"{root}/"):
         child = rel[len(root) + 1 :]
+        if child == BOOT_COPY:
+            # The copy of an ext4 /boot (M12-2 2e): never mounted with the tree.
+            return ("noauto", "legacy")
         if child in UBUNTU_ROOT_CHILDREN_OFF:
             return ("off", f"/{child}")
         if child in UBUNTU_ROOT_CHILDREN_ON:

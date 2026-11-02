@@ -328,6 +328,8 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestPoolRecordBoot,
     TestPoolRecordCapture,
     TestRecoverRefusesBeforeErasing,
+    TestSetupBootCopy,
+    TestSetupSteps,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -357,6 +359,8 @@ BOOT_LAYOUT_SUITES = (
     TestPoolRecordBoot,
     TestPoolRecordCapture,
     TestRecoverRefusesBeforeErasing,
+    TestSetupBootCopy,
+    TestSetupSteps,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the

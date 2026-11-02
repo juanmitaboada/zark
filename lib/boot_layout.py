@@ -93,3 +93,20 @@ def ext4_problems(mount: BootMount, rpool_disks: set[str], root: str = "") -> li
             + "/lib/modules/<version>): it may not have been mounted at boot"
         )
     return problems
+
+
+def system_layout() -> Layout | None:
+    """This system's layout as far as it can be told without refusing:
+    ``bpool`` when bpool is imported, ``ext4`` when ``/boot`` is an ext4
+    mount, None otherwise (``setup`` asks nothing then; ``backup`` and
+    ``prepare`` refuse with the reason)."""
+    if sh.run("zpool list -H -o name bpool").ok:
+        return "bpool"
+    mount = boot_mount()
+    return "ext4" if mount is not None and mount.fstype == "ext4" else None
+
+
+def boot_copies() -> list[str]:
+    """Every ``zark-boot`` under ``rpool/ROOT`` (one per boot environment)."""
+    r = sh.run("zfs list -H -o name -r rpool/ROOT")
+    return [ln.strip() for ln in r.lines if ln.strip().endswith(f"/{BOOT_COPY}")] if r.ok else []

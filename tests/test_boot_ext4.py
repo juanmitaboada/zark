@@ -29,8 +29,10 @@ from unittest.mock import MagicMock, patch
 import commands.backup as backup_mod
 import commands.prepare as prepare_mod
 import commands.recover as recover_mod
-from lib import boot_layout, pool_record, survey, zfs_features
+import commands.setup as setup_mod
+from lib import boot_layout, exclusions, mount_props, pool_record, survey, zfs_features
 from lib.log import Log
+from lib.zfs import DatasetInfo
 from tests.mock_sh import MockShell, patch_sh
 
 ORIGIN = ("rpool", "bpool")
@@ -508,3 +510,151 @@ class TestRecoverRefusesBeforeErasing:  # pylint: disable=missing-function-docst
         assert not _refusal(_record(written_by="2.2.0-rc2"))
         assert not _refusal(_record())
         assert not _refusal(None)
+
+
+_COPY = "rpool/ROOT/ubuntu_abc123/zark-boot"
+
+
+def _setup_shell(exists: bool = False, props: str = "posix\nsa\n") -> MockShell:
+    mock = MockShell()
+    mock.on("findmnt -n -o SOURCE /").succeeds("rpool/ROOT/ubuntu_abc123\n")
+    listing = "rpool/ROOT\nrpool/ROOT/ubuntu_abc123\n" + (f"{_COPY}\n" if exists else "")
+    mock.on("zfs list -H -o name -r rpool/ROOT").succeeds(listing)
+    mock.on(f"zfs create -o canmount=noauto -o mountpoint=legacy {_COPY}").succeeds("")
+    mock.on(f"zfs get -H -o value acltype,xattr {_COPY}").succeeds(props)
+    return mock
+
+
+def _keep(mock: MockShell, answer: bool = True) -> tuple[bool, str]:
+    """(refused, what was printed) of setup's /boot step."""
+    out = StringIO()
+    with (
+        patch_sh(mock),
+        patch("lib.log.Log.ask", return_value=answer),
+        patch("builtins.input", return_value=""),
+        redirect_stdout(out),
+    ):
+        try:
+            setup_mod.keep_boot(_log())
+        except SystemExit:
+            return True, out.getvalue()
+    return False, out.getvalue()
+
+
+class TestSetupBootCopy:  # pylint: disable=missing-function-docstring
+    """M12-2 2e, M13F-1 1a: setup creates zark-boot on an ext4 system."""
+
+    def test_it_is_created_in_one_zfs_create_with_its_properties(self):
+        mock = _setup_shell()
+        refused, out = _keep(mock)
+        assert not refused
+        assert mock.was_called(f"zfs create -o canmount=noauto -o mountpoint=legacy {_COPY}")
+        assert mock.was_not_called("zfs set")
+        assert f"{_COPY} created" in out
+        assert "canmount=noauto, mountpoint=legacy" in out and "space: about" in out
+
+    def test_declined_it_is_not_created_and_backup_will_refuse(self):
+        mock = _setup_shell()
+        refused, out = _keep(mock, answer=False)
+        assert not refused and mock.was_not_called("zfs create")
+        assert "backup and prepare refuse this system until it exists" in out
+
+    def test_an_existing_copy_is_left_as_it_is(self):
+        mock = _setup_shell(exists=True)
+        refused, out = _keep(mock)
+        assert not refused and mock.was_not_called("zfs create")
+        assert f"{_COPY} exists" in out
+
+    def test_without_acls_and_xattrs_from_rpool_it_is_refused(self):
+        refused, out = _keep(_setup_shell(props="off\non\n"))
+        assert refused
+        assert "zfs get acltype,xattr: off, on" in out
+
+    def test_a_leftover_copy_on_a_bpool_system_is_named_not_removed(self):
+        mock = _setup_shell(exists=True)
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            setup_mod._unused_boot_copies(_log())  # pylint: disable=protected-access
+        assert f"{_COPY}: no longer used by zark" in out.getvalue()
+        assert mock.was_not_called("zfs destroy")
+
+    def test_a_bpool_system_without_one_prints_nothing_new(self):
+        mock = _setup_shell()
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            setup_mod._unused_boot_copies(_log())  # pylint: disable=protected-access
+        assert not out.getvalue()
+
+    def test_the_layout_setup_reads(self):
+        mock = MockShell()
+        mock.on("zpool list -H -o name bpool").succeeds("bpool")
+        with patch_sh(mock):
+            assert boot_layout.system_layout() == "bpool"
+        mock = MockShell()
+        mock.on("zpool list -H -o name bpool").fails("no such pool")
+        mock.on("findmnt -n -o FSTYPE,SOURCE,UUID /boot").succeeds(f"ext4 /dev/sda2 {_UUID}\n")
+        with patch_sh(mock):
+            assert boot_layout.system_layout() == "ext4"
+        mock = MockShell()
+        mock.on("zpool list -H -o name bpool").fails("no such pool")
+        with patch_sh(mock):
+            assert boot_layout.system_layout() is None
+
+    def test_sanoid_covers_it_through_the_boot_environment(self):
+        ds = DatasetInfo(name=_COPY, type="filesystem")
+        assert setup_mod._classify(ds, "ubuntu_abc123") is None  # pylint: disable=protected-access
+        be = DatasetInfo(name="rpool/ROOT/ubuntu_abc123", type="filesystem")
+        rule = setup_mod._classify(be, "ubuntu_abc123")  # pylint: disable=protected-access
+        assert rule is not None and rule["template"] == "production" and rule["recursive"]
+
+    def test_it_is_never_excluded(self):
+        assert exclusions.never_excluded(_COPY) == "a boot environment is never excluded"
+
+    def test_recover_never_mounts_it_with_the_tree(self):
+        props = mount_props.choose(
+            _COPY, "ubuntu_abc123", zark={}, cache={}, empty_with_children=False
+        )
+        assert (props.canmount, props.mountpoint, props.source) == ("noauto", "legacy", "ubuntu")
+
+
+def _setup_steps(layout: str | None) -> list[tuple[int, int, str]]:
+    """The steps ``zark setup`` announces on a system of ``layout``."""
+    steps: list[tuple[int, int, str]] = []
+    with (
+        patch.dict(setup_mod.DEPS, clear=True),
+        patch.object(setup_mod, "system_layout", return_value=layout),
+        patch.object(setup_mod, "keep_boot"),
+        patch.object(setup_mod, "_unused_boot_copies"),
+        patch.object(setup_mod, "configure_sanoid", return_value=True),
+        patch.object(setup_mod, "_initial_snapshots"),
+        patch.object(setup_mod, "ensure_bookmark_v2"),
+        patch.object(setup_mod, "_check_secure_boot_alternatives"),
+        patch.object(setup_mod, "_install_guards"),
+        patch.object(setup_mod.alerts, "install"),
+        patch.object(setup_mod.certificates, "show_warnings"),
+        patch("lib.log.Log.step", lambda _s, n, t, text: steps.append((n, t, text))),
+        patch_sh(MockShell()),
+        redirect_stdout(StringIO()),
+    ):
+        try:
+            setup_mod.run([])
+        except SystemExit:
+            pass
+    return steps
+
+
+class TestSetupSteps:  # pylint: disable=missing-function-docstring
+    """A bpool system's setup is as before; an ext4 one has one more step."""
+
+    def test_a_bpool_system_has_the_six_steps_of_before(self):
+        steps = _setup_steps("bpool")
+        assert [(n, t) for n, t, _ in steps] == [(n, 6) for n in range(1, 7)]
+        assert "Keeping /boot for backups..." not in [s for _, _, s in steps]
+
+    def test_an_ext4_system_keeps_boot_before_sanoid(self):
+        steps = _setup_steps("ext4")
+        assert [(n, t) for n, t, _ in steps] == [(n, 7) for n in range(1, 8)]
+        assert [s for _, _, s in steps][1:3] == [
+            "Keeping /boot for backups...",
+            "Configuring sanoid...",
+        ]
