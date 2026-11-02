@@ -32,6 +32,8 @@ vdev in it. Level 2 (:mod:`lib.selftest_l2`) runs on a scratch stick.
 
 Nothing here runs ``zfs set mountpoint`` or ``zfs set canmount`` (the
 chase.c:648 rule): mount properties are given at creation or receive time.
+The bench refuses such a command, and a ``zfs inherit`` of either, before
+it runs (:func:`refuse_mount_property`), however it was built.
 Mounts happen inside ``unshare -m`` and are unmounted before it ends, since
 the kernel tears an emptied namespace down lazily (Linux 7.0
 fs/namespace.c:6238-6245).
@@ -40,6 +42,7 @@ fs/namespace.c:6238-6245).
 import importlib
 import json
 import os
+import re
 import secrets
 import shlex
 import time
@@ -195,6 +198,28 @@ def observed(value: str) -> str:
     return f"<{len(v)} characters, in zark.log>"
 
 
+# A zfs set or zfs inherit naming mountpoint or canmount within one command
+# of a shell line (nothing of ;, &, | or a newline between the verb and the
+# property): the chase.c:648 rule, enforced where the bench runs commands.
+_MOUNT_PROPERTY = re.compile(r"\b(zfs\s+(?:set|inherit))\b[^;&|\n]*\b(?:mountpoint|canmount)\b")
+
+
+def refuse_mount_property(cmd: str) -> None:
+    """Raise :class:`Fail` when ``cmd`` holds a ``zfs set`` or ``zfs
+    inherit`` of ``mountpoint`` or ``canmount`` (M13R-12): with a pool that
+    has zvols imported (origin's keystore on every installed host) such an
+    operation is what the chase.c:648 crash follows. Checked on the string
+    that would run, so a command built from variables or in pieces is seen
+    too; the FAIL names only the command's first words."""
+    m = _MOUNT_PROPERTY.search(cmd)
+    if m:
+        verb = " ".join(m.group(1).split())
+        raise Fail(
+            "a command that sets no mount property (the chase.c:648 rule)",
+            f"a `{verb}` of a mount property, refused before it ran",
+        )
+
+
 class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attributes
     """Where the level-1 checks run: a directory, its pools, a command runner.
 
@@ -250,7 +275,9 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
     # ── commands ─────────────────────────────────────────────────────────
 
     def run(self, cmd: str, stdin: str | None = None) -> sh.RunResult:
-        """Run a command, logged."""
+        """Run a command, logged; a mount property's ``zfs set`` or ``zfs
+        inherit`` is refused before it runs (:func:`refuse_mount_property`)."""
+        refuse_mount_property(cmd)
         return sh.run(cmd, log=self.log, input=stdin)
 
     def ok(self, cmd: str, stdin: str | None = None) -> sh.RunResult:
@@ -269,7 +296,9 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
         return r
 
     def pipe(self, send: str, recv: str) -> sh.RunResult:
-        """``send | recv``, logged."""
+        """``send | recv``, logged; refused as :meth:`run` refuses."""
+        refuse_mount_property(send)
+        refuse_mount_property(recv)
         return sh.run_pipe(send, recv, log=self.log)
 
     def pipe_ok(self, send: str, recv: str) -> sh.RunResult:
@@ -339,7 +368,10 @@ class Bench:  # pylint: disable=too-many-public-methods,too-many-instance-attrib
         return r
 
     def in_namespace(self, script: str) -> sh.RunResult:
-        """Run ``script`` in a mount namespace of its own (private propagation)."""
+        """Run ``script`` in a mount namespace of its own (private propagation);
+        the script is checked before it is quoted, then the command again
+        by :meth:`run`."""
+        refuse_mount_property(script)
         return self.run(f"unshare -m --propagation private sh -c {shlex.quote(script)}")
 
     # ── pools ────────────────────────────────────────────────────────────

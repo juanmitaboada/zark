@@ -2145,6 +2145,83 @@ class TestSelftestBoot:  # pylint: disable=missing-function-docstring
     def test_boot_09_skips_its_drift_part_without_the_script(self):
         assert self._boot_09(None)[0] == "SKIP"
 
+    def test_the_bench_refuses_a_mount_property_however_it_is_built(self):
+        """M13R-12: Bench.run, pipe and in_namespace refuse a zfs set or zfs
+        inherit of mountpoint or canmount before anything runs, naming only
+        the command's first words; user properties and creation pass."""
+        be = "zst0/ROOT/secret_be"
+        refused = (
+            ("run", "zfs set canmount=on x"),
+            ("run", "zfs inherit mountpoint x"),
+            ("run", "zfs set " + "mountpoint=/ " + be),
+            ("run", "zfs  set -u org.zark:t=1 canmount=noauto x"),
+            ("in_namespace", f"true && zfs inherit -r canmount {be}"),
+            ("pipe", f"zfs send x@s|zfs set mountpoint=legacy {be}"),
+        )
+        accepted = (
+            "zfs set org.zark:t=1 x",
+            "zfs create -o canmount=noauto -o mountpoint=legacy x",
+            "zfs set org.zark:t=1 x; zfs get -H canmount x",
+            "zfs inherit org.zark:replicate x && zfs get mountpoint x",
+        )
+        mock = MockShell()
+        bench = selftest.Bench(_log(), MagicMock(), root=None)
+        with patch_sh(mock):
+            for method, cmd in refused:
+                came = ""
+                try:
+                    if method == "pipe":
+                        send, recv = cmd.split("|")
+                        _ = bench.pipe(send, recv)
+                    else:
+                        _ = getattr(bench, method)(cmd)
+                except selftest.Fail as e:
+                    came = e.came
+                assert came.startswith("a `zfs ") and "secret" not in came, (cmd, came)
+            assert not mock.calls, mock.calls
+            for cmd in accepted:
+                _ = bench.run(cmd)  # no Fail: it ran
+        assert mock.calls == list(accepted), mock.calls
+
+    def test_boot_04_passes_on_a_bench_that_answers_as_zfs_does(self):
+        """BOOT-04 through the real Bench's commands, ZFS's answers scripted:
+        PASS; a zfs set of a mount property added anywhere in it is refused
+        by the bench and turns it into a FAIL (M13R-12, G05 and G06)."""
+        tag = "0000000"
+        c, b = f"zst{tag}c", f"zst{tag}b"
+        mock = MockShell()
+        mock.on(r"^zpool get -Hp -o value guid ", regex=True).succeeds("1")
+        mock.on(r"^zfs get -Hp -o value encryptionroot ", regex=True).succeeds(c)
+        mock.on(r"^zfs get -Hp -o value acltype ", regex=True).succeeds("posix")
+        mock.on(r"^zfs get -Hp -o value xattr ", regex=True).succeeds("sa")
+        mock.on(r"^zfs get -H -o source ", regex=True).succeeds(f"inherited from {c}")
+        mock.on(r"^zfs mount ", regex=True).fails("cannot mount: legacy mountpoint")
+        mock.on(r"^unshare -m .*echo MOUNT", regex=True).succeeds("MOUNT\nSNAP")
+        copy = f"{b}/be/{boot_layout.BOOT_COPY}"
+        mock.on(f"zfs list -Hp -t snapshot -o name,guid,createtxg -r {copy}").succeeds(
+            f"{copy}@p1\t11\t5\n{copy}@p2\t12\t9"
+        )
+        mock.on(r"^(zpool create|zfs create|zfs snapshot|unshare|zpool sync|zfs send)", regex=True)
+        check = next(k for k in selftest.all_checks() if k.cid == "BOOT-04")
+
+        # sh.run_pipe as the Bench calls it (log by keyword), into the mock.
+        def pipe(send: str, recv: str, log: object = None) -> sh.RunResult:
+            del log
+            return mock.mock_run(f"{send} | {recv}")
+
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch_sh(mock),
+            patch.object(selftest.sh, "run_pipe", pipe),
+        ):
+            bench = selftest.Bench(_log(), MagicMock(), root=td)
+            bench.tag = tag
+            Path(bench.dir).mkdir(parents=True)
+            with redirect_stdout(StringIO()):
+                res = selftest.run_one(check, bench)
+        assert res.result == "PASS", (res.expected, res.came)
+        assert not [k for k in mock.calls if re.search(r"zfs\s+(set|inherit)\b", k)]
+
     def test_no_check_sets_a_mount_property(self):
         """M13R-7, lib/selftest.py's rule: no string a selftest module runs
         holds a zfs set of mountpoint or canmount (docstrings left out, they
