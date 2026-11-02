@@ -201,7 +201,11 @@ def observed(value: str) -> str:
 # A zfs set or zfs inherit naming mountpoint or canmount within one command
 # of a shell line (nothing of ;, &, | or a newline between the verb and the
 # property): the chase.c:648 rule, enforced where the bench runs commands.
-_MOUNT_PROPERTY = re.compile(r"\b(zfs\s+(?:set|inherit))\b[^;&|\n]*\b(?:mountpoint|canmount)\b")
+# The property's name must not follow a ``:``, ``.`` or ``-`` or a word
+# character: ``org.zark:canmount`` is a user property (M13R-14).
+_MOUNT_PROPERTY = re.compile(
+    r"\b(zfs\s+(?:set|inherit))\b[^;&|\n]*(?<![\w:.-])(?:mountpoint|canmount)\b"
+)
 
 
 def refuse_mount_property(cmd: str) -> None:

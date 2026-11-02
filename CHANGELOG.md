@@ -74,7 +74,8 @@ zark 2.2 is built on `main` as `2.2.0-rc2` (`lib/config.py`) and
   (M13R-10), so a later grub2 that widens them is caught. The self-test's
   bench refuses, before it runs, any `zfs set` or `zfs inherit` of
   `mountpoint` or `canmount`, however the command was built (the
-  chase.c:648 rule, M13R-12).
+  chase.c:648 rule, M13R-12); zark's user properties of the same names
+  (`org.zark:canmount`, `org.zark:mountpoint`) pass (M13R-14).
 
 #### Changed
 

@@ -2174,6 +2174,9 @@ class TestSelftestBoot:  # pylint: disable=missing-function-docstring
             "zfs create -o canmount=noauto -o mountpoint=legacy x",
             "zfs set org.zark:t=1 x; zfs get -H canmount x",
             "zfs inherit org.zark:replicate x && zfs get mountpoint x",
+            # M13R-14: zark's own record of a mount property is a user one.
+            "zfs set org.zark:canmount=on org.zark:mountpoint=/ x",
+            "zfs inherit org.zark:mountpoint x",
         )
         mock = MockShell()
         bench = selftest.Bench(_log(), MagicMock(), root=None)
