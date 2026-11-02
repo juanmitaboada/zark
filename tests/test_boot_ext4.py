@@ -32,9 +32,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import commands.backup as backup_mod
+import commands.finish as finish_mod
+import commands.mount as mount_mod
 import commands.prepare as prepare_mod
 import commands.recover as recover_mod
 import commands.setup as setup_mod
+import lib.mount as lib_mount
 from lib import (
     boot_chain,
     boot_layout,
@@ -1669,3 +1672,152 @@ class TestBootChainExt4:  # pylint: disable=missing-function-docstring
         errors, _, _, _ = _ext4_chain(_UUID)
         assert any("the ESP's EFI/ubuntu/grub.cfg still names" in e for e in errors), errors
         assert any("does not name /boot's UUID" in e for e in errors), errors
+
+
+class TestFstabBoot:  # pylint: disable=missing-function-docstring
+    """M12 readings 6: /boot as the installed system's fstab names it."""
+
+    def test_the_fixture_names_an_ext4_boot(self):
+        text = (_FIXTURES / "fstab").read_text(encoding="ascii")
+        assert boot_rewrite.fstab_boot(text) == (_UUID, "ext4")
+
+    def test_uuid_form_and_no_boot_line(self):
+        assert boot_rewrite.fstab_boot(f"UUID={_UUID.upper()} /boot ext4 defaults 0 1\n") == (
+            _UUID,
+            "ext4",
+        )
+        assert boot_rewrite.fstab_boot("/dev/sda2 /boot ext4 defaults 0 1\n") == ("", "")
+        assert boot_rewrite.fstab_boot(f"# UUID={_UUID} /boot ext4\n") == ("", "")
+        assert boot_rewrite.fstab_boot("") == ("", "")
+
+
+def _mount_boot(
+    fstab: str | None, dev: str, readonly: bool = False
+) -> tuple[str | None, MockShell]:
+    """lib.mount.mount_ext4_boot on a fake root whose fstab is ``fstab``
+    (none when None), rpool on sda, ``blkid -U`` giving ``dev``."""
+    with tempfile.TemporaryDirectory() as td:
+        if fstab is not None:
+            (Path(td) / "etc").mkdir()
+            _ = (Path(td) / "etc/fstab").write_text(fstab, encoding="ascii")
+        mock = MockShell()
+        mock.on(f"blkid -U {_UUID}").succeeds(f"{dev}\n" if dev else "")
+        mock.on("zpool list -vHP rpool").succeeds(
+            "rpool\t100G\t1G\t99G\n\t/dev/sda4\t100G\t1G\t99G\n"
+        )
+        mock.on_prefix("mount -t ext4").succeeds("")
+        with (
+            patch_sh(mock),
+            patch.object(lib_mount, "disks_under", side_effect=lambda p: {p.rstrip("0123456789")}),
+            redirect_stdout(StringIO()),
+        ):
+            got = lib_mount.mount_ext4_boot(td, readonly, _log())
+        return (got.replace(td, "<root>") if got else got), mock
+
+
+class TestMountExt4Boot:  # pylint: disable=missing-function-docstring
+    """M12 readings 6: chroot, mount local and repair-boot mount an ext4 /boot."""
+
+    _FSTAB = f"/dev/disk/by-uuid/{_UUID} /boot ext4 defaults 0 1\n"
+
+    def test_the_partition_on_rpools_disk_is_mounted(self):
+        got, mock = _mount_boot(self._FSTAB, "/dev/sda2")
+        assert got == "<root>/boot"
+        assert any(c.startswith("mount -t ext4 /dev/sda2 ") for c in mock.calls)
+
+    def test_read_only_replays_no_journal(self):
+        _, mock = _mount_boot(self._FSTAB, "/dev/sda2", readonly=True)
+        assert any(c.startswith("mount -t ext4 -o ro,noload /dev/sda2 ") for c in mock.calls)
+
+    def test_a_partition_on_another_disk_or_none_is_not_mounted(self):
+        for dev in ("/dev/sdb2", ""):
+            got, mock = _mount_boot(self._FSTAB, dev)
+            assert got == "" and mock.was_not_called("mount -t ext4")
+
+    def test_a_bpool_system_is_left_to_bpool(self):
+        assert _mount_boot("rpool/ROOT/x / zfs defaults 0 0\n", "/dev/sda2")[0] is None
+        assert _mount_boot(None, "/dev/sda2")[0] is None
+
+
+class TestFinishExt4Boot:  # pylint: disable=missing-function-docstring
+    """M12 readings 6: finish mounts an ext4 /boot before writing into it."""
+
+    @staticmethod
+    def _ensure(findmnt: bool, mount: bool) -> tuple[str, MockShell]:
+        mock = MockShell()
+        _ = (
+            mock.on("findmnt -n /boot").succeeds("")
+            if findmnt
+            else mock.on("findmnt -n /boot").fails("")
+        )
+        _ = mock.on("mount /boot").succeeds("") if mount else mock.on("mount /boot").fails("no")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            return finish_mod.ensure_ext4_boot(_log()), mock
+
+    def test_a_mounted_boot_needs_nothing(self):
+        why, mock = self._ensure(True, False)
+        assert not why and mock.was_not_called("mount /boot")
+
+    def test_an_unmounted_boot_is_mounted_or_named(self):
+        assert not self._ensure(False, True)[0]
+        assert "is not mounted" in self._ensure(False, False)[0]
+
+    def test_the_layout_comes_from_fstab(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "fstab"
+            _ = f.write_text((_FIXTURES / "fstab").read_text(encoding="ascii"), encoding="ascii")
+            assert finish_mod.ext4_boot_system(str(f))
+            _ = f.write_text("rpool/ROOT/x / zfs defaults 0 0\n", encoding="ascii")
+            assert not finish_mod.ext4_boot_system(str(f))
+            assert not finish_mod.ext4_boot_system(str(Path(td) / "none"))
+
+
+class TestMountBootCopy:  # pylint: disable=missing-function-docstring
+    """M12R-17: zark mount mounts the point's zark-boot at /boot and names it."""
+
+    @staticmethod
+    def _mount(present: set[str]) -> tuple[int, list[str], MockShell]:
+        mock = MockShell()
+        mock.on("zfs list -H -o name -r backup/rpool/ROOT").succeeds(
+            f"backup/rpool/ROOT\nbackup/{_BE_ROOT}",
+        )
+        mock.on_prefix("mount -t zfs -o ro,zfsutil").succeeds()
+        mock.on("mkdir -p /mnt/zark/backup").succeeds()
+        plan = [
+            mount_mod.LayoutMount("rpool/USERDATA/home_x", "/mnt/zark/backup/home"),
+            mount_mod.LayoutMount(f"{_BE_ROOT}/zark-boot", "", "canmount=noauto [layout]"),
+        ]
+        with (
+            patch_sh(mock),
+            patch.object(mount_mod, "_plan_origin_layout", return_value=plan),
+            patch.object(mount_mod.Path, "is_file", return_value=False),
+            patch.object(
+                mount_mod.Path, "is_dir", autospec=True, side_effect=lambda p: str(p) in present
+            ),
+            redirect_stdout(StringIO()),
+        ):
+            mounted, skipped = mount_mod._mount_origin_layout(  # pylint: disable=protected-access
+                "backup", "/mnt/zark/backup", _log()
+            )
+        return mounted, [m.rel for m in skipped], mock
+
+    def test_the_copy_is_mounted_after_the_tree(self):
+        mounted, skipped, mock = self._mount({"/mnt/zark/backup/home", "/mnt/zark/backup/boot"})
+        mounts = [c for c in mock.calls if c.startswith("mount -t zfs")]
+        assert mounts[-1] == (
+            f"mount -t zfs -o ro,zfsutil backup/{_BE_ROOT}/zark-boot /mnt/zark/backup/boot"
+        )
+        assert mounted == 3 and f"{_BE_ROOT}/zark-boot" not in skipped
+
+    def test_without_a_boot_directory_it_stays_listed(self):
+        mounted, skipped, _ = self._mount({"/mnt/zark/backup/home"})
+        assert mounted == 2 and f"{_BE_ROOT}/zark-boot" in skipped
+
+    def test_the_banner_names_it(self):
+        out = StringIO()
+        with redirect_stdout(out):
+            mount_mod._show_result(  # pylint: disable=protected-access
+                _log(), "backup", "/mnt/zark/backup", True, 3, [], f"backup/{_BE_ROOT}/zark-boot"
+            )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert f"backup/{_BE_ROOT}/zark-boot" in text and "(the copy of an ext4 /boot)" in text

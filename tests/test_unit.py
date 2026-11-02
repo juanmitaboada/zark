@@ -333,6 +333,10 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestBootRewrite,
     TestEngineBeforePoint,
     TestEngineLayoutChange,
+    TestFinishExt4Boot,
+    TestFstabBoot,
+    TestMountBootCopy,
+    TestMountExt4Boot,
     TestPoolRecordBoot,
     TestPoolRecordCapture,
     TestRecoverBootCopyBack,
@@ -384,6 +388,10 @@ BOOT_LAYOUT_SUITES = (
     TestRecoverBootCopyBack,
     TestRecoverEsp,
     TestBootChainExt4,
+    TestFstabBoot,
+    TestMountExt4Boot,
+    TestFinishExt4Boot,
+    TestMountBootCopy,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the
@@ -12288,6 +12296,7 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         gaps: tuple[str, ...] = (),
         unmounted: tuple[str, ...] = (),
         bpool_guid: str = "",
+        ext4: bool = False,
     ) -> tuple[str, bool, list[str]]:
         order: list[str] = []
 
@@ -12315,6 +12324,7 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
             patch.object(finish_mod, "Path", _FinishPath),
             patch.object(finish_mod, "warn_rpool_mountpoint_lost"),
             patch.object(finish_mod, "warn_kernel_named_vdevs"),
+            patch.object(finish_mod, "ext4_boot_system", return_value=ext4),
             patch.object(finish_mod.grub_guard, "install"),
             patch.object(finish_mod.apt_guard, "install"),
             patch.object(finish_mod, "installed_kernels", return_value=["7.0.0-38-generic"]),
@@ -12349,6 +12359,13 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         assert "FINISH COMPLETE" in out and "GRUB config updated ✓" in out
         assert "initrds rebuilt ✓" in out and "EFI binaries present ✓" in out
         assert "regenerate_grub_cfg update-grub ['7.0.0-38-generic']" in order
+
+    def test_an_ext4_system_checks_rpool_alone(self):
+        """M12 readings 6: no bpool is no failure when /boot is an ext4 partition."""
+        out, exited, order = self._run(ext4=True)
+        assert not exited and "FINISH COMPLETE" in out
+        assert "rpool: ONLINE" in out and "bpool: ONLINE" not in out
+        assert "findmnt -n /boot" in order
 
     def test_no_pool_is_exported_or_imported(self):
         # M4c-4: an export of the running rpool unmounts what is not busy, then fails.

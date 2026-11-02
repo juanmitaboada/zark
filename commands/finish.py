@@ -29,6 +29,7 @@ from pathlib import Path
 from commands.setup import sanoid_conf_gap
 from lib import alerts, apt_guard, grub_guard, sh
 from lib.boot_chain import esp_of_rpool_disk
+from lib.boot_rewrite import fstab_boot
 from lib.config import zark_command
 from lib.grub_cfg import regenerate_grub_cfg
 from lib.identity import read_pool_label
@@ -135,14 +136,14 @@ def check_esp_and_efi(esp: str, log: Log) -> str:
     return f"{', '.join(still)} missing in {EFI_DIR} ({', '.join(rcs)})"
 
 
-def mount_canmount_on(log: Log) -> list[str]:
-    """M4c-11: every filesystem of rpool and bpool that should be mounted
-    (``canmount=on``, an absolute mountpoint, its key available, no resume
-    token) and is not gets one ``zfs mount``; returns those still unmounted
-    (["<the listing>"] when it cannot be read)."""
+def mount_canmount_on(log: Log, pools: tuple[str, ...] = ("rpool", "bpool")) -> list[str]:
+    """M4c-11: every filesystem of ``pools`` (those the system has) that
+    should be mounted (``canmount=on``, an absolute mountpoint, its key
+    available, no resume token) and is not gets one ``zfs mount``; returns
+    those still unmounted (["<the listing>"] when it cannot be read)."""
     r = sh.run(
         "zfs list -H -o name,canmount,mountpoint,keystatus,receive_resume_token,mounted "
-        + "-t filesystem -r rpool bpool",
+        + f"-t filesystem -r {' '.join(pools)}",
     )
     if not r.ok:
         log.warn("Cannot list the datasets to check what is mounted")
@@ -165,6 +166,28 @@ def mount_canmount_on(log: Log) -> list[str]:
     if not left:
         log.ok("Every canmount=on dataset is mounted ✓")
     return left
+
+
+def ext4_boot_system(fstab: str = "/etc/fstab") -> bool:
+    """The system's fstab names an ext4 ``/boot`` (Ubuntu 26.10 and later on
+    UEFI: no bpool, M12-1)."""
+    try:
+        text = Path(fstab).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return fstab_boot(text)[1] == "ext4"
+
+
+def ensure_ext4_boot(log: Log) -> str:
+    """An ext4 ``/boot`` mounted before the initrds and grub.cfg are written:
+    ``findmnt``, else ``mount /boot``. "" when it is mounted; else why not."""
+    if sh.run("findmnt -n /boot").ok:
+        return ""
+    if sh.run("mount /boot", log=log).ok:
+        log.ok("/boot (ext4) mounted")
+        return ""
+    log.error("/boot (ext4) is not mounted and mount /boot failed")
+    return "/boot (ext4) is not mounted: mount /boot, then run finish again"
 
 
 def setup_gaps(zfs: ZFS) -> list[str]:
@@ -266,16 +289,25 @@ def run(
             _ = f.write("GRUB_RECORDFAIL_TIMEOUT=0\n")
         log.ok("GRUB_RECORDFAIL_TIMEOUT=0 set")
 
+    # An ext4 /boot must be mounted before anything is written into it: else
+    # the initrds and grub.cfg would land in the root's /boot directory.
+    ext4 = ext4_boot_system()
+    boot_failure = ensure_ext4_boot(log) if ext4 else ""
+
     # Initrds before update-grub: 10_linux_zfs lists only kernels that have one.
-    initrd_failures = regenerate_initrd("", log)
+    initrd_failures = regenerate_initrd("", log) if not boot_failure else [boot_failure]
 
     grub_cfg = Path("/boot/grub/grub.cfg")
-    grub_failure = regenerate_grub_cfg(
-        grub_cfg,
-        "update-grub",
-        Path(f"{grub_cfg}.pre-finish"),
-        installed_kernels(""),
-        log,
+    grub_failure = (
+        regenerate_grub_cfg(
+            grub_cfg,
+            "update-grub",
+            Path(f"{grub_cfg}.pre-finish"),
+            installed_kernels(""),
+            log,
+        )
+        if not boot_failure
+        else boot_failure
     )
 
     # Fix bpool UUID in grub.cfg
@@ -295,12 +327,14 @@ def run(
 
     # ── 4. Datasets ──────────────────────────────────────────────────────
     log.step(4, TOTAL_STEPS, "Checking the mounted datasets...")
-    unmounted = mount_canmount_on(log)
+    # The system's pools: rpool alone when /boot is an ext4 partition.
+    system_pools = ("rpool",) if ext4 else ("rpool", "bpool")
+    unmounted = mount_canmount_on(log, system_pools)
 
     # ── 5. Verify ────────────────────────────────────────────────────────
     log.step(5, TOTAL_STEPS, "Verifying system state...")
     unhealthy: list[str] = []
-    for pool in ("rpool", "bpool"):
+    for pool in system_pools:  # no bpool is no failure on an ext4 system
         health = zfs.pool_health(pool)
         if health == "ONLINE":
             log.ok(f"  {pool}: ONLINE ✓")

@@ -33,6 +33,7 @@ from pathlib import Path
 
 from lib import cli_spec, drive_marks, exclusions, sh, zfs_features
 from lib.backup_layout import find_be, list_datasets, root_is_empty, zark_props
+from lib.boot_layout import BOOT_COPY
 from lib.cleanup import Cleanup
 from lib.config import Config, zark_command
 from lib.drives import backup_device, scan_connected_drives, select_drive
@@ -168,7 +169,25 @@ def _mount_origin_layout(  # pylint: disable=too-many-locals
         else:
             skipped.append(LayoutMount(item.rel, "", r.stderr.strip() or "mount failed"))
     skipped += [m for m in plan if not m.target]
+    copy = f"rpool/ROOT/{be}/{BOOT_COPY}"
+    if any(m.rel == copy for m in skipped) and _mount_boot_copy(f"{pool}/{copy}", mnt, opts, log):
+        mounted += 1
+        skipped = [m for m in skipped if m.rel != copy]
     return mounted, skipped
+
+
+def _mount_boot_copy(dataset: str, mnt: str, opts: str, log: Log) -> bool:
+    """The point's copy of an ext4 ``/boot`` (``zark-boot``, ``legacy``, so
+    the tree leaves it out) at ``<mnt>/boot``, after the tree (M12R-17)."""
+    boot = f"{mnt.rstrip('/')}/boot"
+    if not Path(boot).is_dir():
+        log.warn(f"No directory {boot}: {dataset} not mounted")
+        return False
+    if not sh.run(f"mount -t zfs -o {opts} {dataset} {boot}", log=log).ok:
+        log.warn(f"Cannot mount {dataset} at {boot}")
+        return False
+    log.ok(f"/boot's copy ({dataset}) mounted at {boot}")
+    return True
 
 
 def _mount_local_system(log: Log, zfs: ZFS, cleanup: Cleanup) -> None:
@@ -236,14 +255,26 @@ def _warn_read_write(log: Log) -> None:
 
 
 def _show_result(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    log: Log, pool_name: str, mnt_point: str, readonly: bool, mounted: int, archived: list[str]
+    log: Log,
+    pool_name: str,
+    mnt_point: str,
+    readonly: bool,
+    mounted: int,
+    archived: list[str],
+    boot_copy: str = "",
 ) -> None:
-    """POOL MOUNTED, then the archived lineages' names (M5aP.7)."""
+    """POOL MOUNTED, then the archived lineages' names (M5aP.7); ``boot_copy``
+    the ``zark-boot`` mounted at ``/boot``, named (M12R-17)."""
     root_path = mnt_point  # _mount_origin_layout mounted the boot environment there
     result_lines = [
         f"Mount point: {log.W}{mnt_point}{log.N}",
         f"Mode:        {log.W}{'read-only' if readonly else 'read-write'}{log.N}",
         f"Datasets:    {log.W}{mounted}{log.N}",
+        *(
+            [f"/boot:       {log.W}{boot_copy}{log.N}", "             (the copy of an ext4 /boot)"]
+            if boot_copy
+            else []
+        ),
         "",
         f"{log.Y}Browse data:{log.N}",
         f"  ls {mnt_point}/",
@@ -383,7 +414,9 @@ def run(
 
     for line in exclusions.held_lines(pool_name):
         log.info(line)
-    _show_result(log, pool_name, mnt_point, readonly, mounted, archived)
+    source = sh.run(f"findmnt -n -o SOURCE {mnt_point.rstrip('/')}/boot").output.strip()
+    boot_copy = source if source.endswith(f"/{BOOT_COPY}") else ""
+    _show_result(log, pool_name, mnt_point, readonly, mounted, archived, boot_copy)
 
     # Leave mounted for the user
     cleanup.disable()

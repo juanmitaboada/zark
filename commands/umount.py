@@ -259,8 +259,10 @@ def _umount_local_system(log: Log) -> None:
         ks.umount()
 
     left: list[str] = []
+    # rpool alone on a system whose /boot is an ext4 partition (M12-1).
+    exported = [p for p in ("rpool", "bpool") if sh.run(f"zpool list {p}").ok]
     for pool in ("bpool", "rpool"):  # bpool first (it sits under /boot)
-        if not sh.run(f"zpool list {pool}").ok:
+        if pool not in exported:
             continue
         sh.run(f"zfs unload-key -r {pool}")
         if sh.run(f"zpool export {pool}").ok:
@@ -292,7 +294,7 @@ def _umount_local_system(log: Log) -> None:
             ],
         )
         raise SystemExit(1)
-    log.banner_ok("SYSTEM UNMOUNTED", ["rpool/bpool exported cleanly ✓"])
+    log.banner_ok("SYSTEM UNMOUNTED", [f"{'/'.join(exported)} exported cleanly ✓"])
 
 
 def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements # noqa: E501

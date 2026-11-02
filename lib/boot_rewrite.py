@@ -122,3 +122,19 @@ def kernels_without_entry(grub_cfg: str, kernels: list[str]) -> list[str]:
     ``grub.cfg`` boots."""
     booted = set(_LINUX_RE.findall(grub_cfg))
     return [v for v in kernels if v not in booted]
+
+
+_BY_UUID = "/dev/disk/by-uuid/"
+
+
+def fstab_boot(text: str) -> tuple[str, str]:
+    """``/boot``'s file system UUID and type in an fstab (``UUID=`` or
+    ``/dev/disk/by-uuid/``); ("", "") without such a line."""
+    for line in text.splitlines():
+        f = _fields(line)
+        if len(f) >= 3 and f[1] == "/boot":
+            spec = f[0]
+            uuid = spec[5:] if spec.startswith("UUID=") else spec.removeprefix(_BY_UUID)
+            if uuid != spec and _UUID_RE.fullmatch(uuid):
+                return uuid.lower(), f[2]
+    return "", ""

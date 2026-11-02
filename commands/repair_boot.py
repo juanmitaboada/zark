@@ -14,7 +14,8 @@
 """
 zark repair-boot - Fix boot issues from a live USB.
 
-Imports rpool/bpool, mounts the system, regenerates grub.cfg and initrd.
+Imports rpool (and bpool, when the system has one), mounts the system and its
+/boot, regenerates grub.cfg and initrd.
 Use when grub.cfg is corrupted (e.g., update-grub ran with backup drive connected).
 """
 
@@ -109,7 +110,8 @@ def run(
     if kernels:
         log.ok(f"System mounted at {REPAIR_MNT} ({len(kernels)} kernel(s))")
     else:
-        log.fatal(f"No kernels found in {REPAIR_MNT}/boot - bpool may not be mounted")
+        boot = "bpool" if zfs.pool_exists("bpool") else "the ext4 /boot its fstab names"
+        log.fatal(f"No kernels found in {REPAIR_MNT}/boot - {boot} may not be mounted")
 
     # ── 3. Chroot setup, grub guard, initrd ──────────────────────────────
     # Before update-grub: 10_linux_zfs only lists kernels that have an
@@ -141,7 +143,7 @@ def run(
 
     # zpool.cache
     cache_path = f"{REPAIR_MNT}/etc/zfs/zpool.cache"
-    zfs.write_zpool_cache(cache_path, ["rpool", "bpool"])
+    zfs.write_zpool_cache(cache_path, [p for p in ("rpool", "bpool") if zfs.pool_exists(p)])
 
     guard_wrote = grub_guard.install(target_root=REPAIR_MNT, log=log)
 

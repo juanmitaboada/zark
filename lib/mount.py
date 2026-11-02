@@ -27,10 +27,13 @@ Used by:
 
 import os
 import shlex
+from pathlib import Path
 
 from lib.backup_layout import choose_dataset
+from lib.boot_rewrite import fstab_boot
 from lib.cleanup import Cleanup
 from lib.config import zark_command
+from lib.identity import disks_under
 from lib.keystore import KeystoreLike, open_keystore
 from lib.log import Log
 from lib.sh import run
@@ -202,6 +205,7 @@ def mount_system_pools(
     """
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
+    # pylint: disable=too-many-statements  # the ext4 /boot branch (M12 readings 6)
     # ── Import rpool (no-mount) under altroot ─────────────────────────────
     if not zfs.pool_exists("rpool"):
         # pool_import scans by-id first; the hint is only its fallback.
@@ -269,8 +273,13 @@ def mount_system_pools(
     if other_bes:
         log.info(f"Other boot environments are not mounted: {', '.join(other_bes)}")
 
-    # ── Import + mount bpool (/boot) ──────────────────────────────────────
-    if not zfs.pool_exists("bpool"):
+    # ── /boot: an ext4 partition named by the root's fstab, else bpool ────
+    ext4_boot = mount_ext4_boot(altroot, readonly, log)
+    if ext4_boot is not None:
+        if ext4_boot:
+            cleanup.track_mount(ext4_boot)
+            mount_points.append(ext4_boot)
+    elif not zfs.pool_exists("bpool"):
         # The operator's hint reaches bpool as it reaches rpool (M5a-12); the
         # by-id scan still goes first.
         if zfs.pool_import(
@@ -280,7 +289,7 @@ def mount_system_pools(
         else:
             log.warn("Could not import bpool - /boot will be unavailable in the chroot")
     bpool_boot = f"bpool/BOOT/{ubuntu_name}"
-    if zfs.dataset_exists(bpool_boot):
+    if ext4_boot is None and zfs.dataset_exists(bpool_boot):
         bp_mp = _mount_in_tree(bpool_boot, altroot, zfs, log, readonly)
         if bp_mp:
             cleanup.track_mount(bp_mp)
@@ -295,6 +304,44 @@ def mount_system_pools(
             )
 
     return altroot, ubuntu_name
+
+
+def mount_ext4_boot(altroot: str, readonly: bool, log: Log) -> str | None:
+    """The installed system's ``/boot`` when its fstab (under ``altroot``,
+    the root already mounted) names an ext4 one (M12 readings 6): the
+    partition with that UUID, checked to be on a disk of rpool's vdevs,
+    mounted at ``<altroot>/boot`` (``ro,noload`` when ``readonly``: no
+    journal replay). Its mount point; "" when it could not be mounted;
+    None when the system has no ext4 ``/boot`` (a bpool system)."""
+    try:
+        fstab = Path(altroot, "etc/fstab").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    uuid, fstype = fstab_boot(fstab)
+    if fstype != "ext4":
+        return None
+    dev = run(f"blkid -U {shlex.quote(uuid)}").output.strip()
+    vdevs = run("zpool list -vHP rpool")
+    rpool_disks = {
+        d
+        for line in (vdevs.lines[1:] if vdevs.ok else [])
+        if (path := line.strip().split("\t")[0].split(" ")[0]).startswith("/dev/")
+        for d in disks_under(path)
+    }
+    if not dev or not disks_under(dev) & rpool_disks:
+        log.warn(
+            f"/boot (ext4, UUID {uuid}) is not on rpool's disk"
+            + (f" ({dev})" if dev else ": no partition has that UUID")
+            + " - /boot will be unavailable"
+        )
+        return ""
+    target = f"{altroot.rstrip('/')}/boot"
+    opts = "-o ro,noload " if readonly else ""
+    if not run(f"mount -t ext4 {opts}{dev} {target}", log=log).ok:
+        log.warn(f"Cannot mount /boot ({dev}) at {target} - /boot will be unavailable")
+        return ""
+    log.ok(f"/boot ({dev}, ext4) mounted at {target}" + (" read-only" if readonly else ""))
+    return target
 
 
 def rpool_mountpoint_lost() -> bool:
