@@ -85,7 +85,7 @@ sudo apt update
 sudo apt install zark
 ```
 
-Supported series: noble (24.04 LTS), resolute (26.04 LTS). The package installs zark under `/usr/share/zark/`, exposes it as `/usr/bin/zark`,
+Supported series: noble (24.04 LTS), resolute (26.04 LTS), stonking (26.10). The package installs zark under `/usr/share/zark/`, exposes it as `/usr/bin/zark`,
 and creates `/etc/zark/` for `known_drives.json`. Logs go to `/var/log/zark.log`.
 
 ### Standalone .deb download (when PPA isn't an option)

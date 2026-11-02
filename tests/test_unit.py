@@ -7593,8 +7593,13 @@ class TestPpaSeries:  # pylint: disable=missing-function-docstring,too-few-publi
         assert table and all(re.fullmatch(r"\d\d\.\d\d", v) for v in table.values()), table
         readme = (root / "README.md").read_text(encoding="utf-8")
         line = next(ln for ln in readme.splitlines() if ln.startswith("Supported series:"))
-        named = dict(re.findall(r"([a-z]+) \((\d\d\.\d\d) LTS\)", line))
+        found = re.findall(r"([a-z]+) \((\d\d\.\d\d)( LTS)?\)", line)
+        named = {series: release for series, release, _ in found}
         assert named == table, (named, table)
+        # Ubuntu's LTS releases are the even years' .04 ones; an interim series is named without it.
+        for series, release, lts in found:
+            year, month = release.split(".")
+            assert bool(lts) == (month == "04" and int(year) % 2 == 0), (series, release, lts)
         packaging = (root / "debian" / "README.packaging.md").read_text(encoding="utf-8")
         for series, release in table.items():
             assert f"{series} ({release}" in packaging, series
@@ -27178,8 +27183,8 @@ class TestSelftestStopsEndToEnd:  # pylint: disable=missing-function-docstring
 
 class TestCiWorkflow:  # pylint: disable=missing-function-docstring
     """RELP.8 (M7-1 1a): every CI job names its Ubuntu series, the .deb is
-    built on 24.04 and installed on 26.04 too, and a manual run checks both
-    without attaching anything to a release."""
+    built on 24.04 and installed on 26.04 and 26.10 (M15-3) too, and a
+    manual run checks them without attaching anything to a release."""
 
     _REPO = Path(__file__).resolve().parent.parent
     _CI = _REPO / ".github" / "workflows" / "ci.yml"
@@ -27192,7 +27197,7 @@ class TestCiWorkflow:  # pylint: disable=missing-function-docstring
 
     def test_no_job_follows_ubuntu_latest(self):
         jobs = self._jobs()
-        assert set(jobs) == {"tests", "lint", "package", "smoke-2604"}, sorted(jobs)
+        assert set(jobs) == {"tests", "lint", "package", "smoke-2604", "smoke-2610"}, sorted(jobs)
         runs_on = re.compile(r"^    runs-on: (\S+)$", re.M)
         runners = {job: runs_on.findall(body) for job, body in jobs.items()}
         assert runners == {
@@ -27200,10 +27205,16 @@ class TestCiWorkflow:  # pylint: disable=missing-function-docstring
             "lint": ["ubuntu-24.04"],
             "package": ["ubuntu-24.04"],
             "smoke-2604": ["ubuntu-26.04"],
+            "smoke-2610": ["ubuntu-26.04"],
         }, runners
         assert not re.search(r"runs-on:\s*\S*-latest", self._CI.read_text("utf-8"))
+        # M15-3: the interim series runs in its own image, named by release, not by a moving tag.
+        container = re.compile(r"^    container: (\S+)$", re.M)
+        containers = {job: container.findall(body) for job, body in jobs.items()}
+        used = {job: c for job, c in containers.items() if c}
+        assert used == {"smoke-2610": ["ubuntu:26.10"]}, containers
 
-    def test_the_deb_is_checked_on_both_series_by_hand_too(self):
+    def test_the_deb_is_checked_on_every_series_by_hand_too(self):
         text = self._CI.read_text("utf-8")
         assert re.search(r"^on:\n(?:  .*\n)*  workflow_dispatch:\n", text, re.M), text[:400]
         jobs = self._jobs()
@@ -27211,10 +27222,11 @@ class TestCiWorkflow:  # pylint: disable=missing-function-docstring
             "if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'"
             in jobs["package"]
         )
-        assert "needs: [package]" in jobs["smoke-2604"]
-        assert "uses: actions/download-artifact@" in jobs["smoke-2604"]
-        assert "name: zark-release-assets" in jobs["smoke-2604"]
-        for job in ("package", "smoke-2604"):
+        for job in ("smoke-2604", "smoke-2610"):
+            assert "needs: [package]" in jobs[job], job
+            assert "uses: actions/download-artifact@" in jobs[job], job
+            assert "name: zark-release-assets" in jobs[job], job
+        for job in ("package", "smoke-2604", "smoke-2610"):
             assert ".github/smoke-deb.sh " in jobs[job], job
         smoke = self._REPO / ".github" / "smoke-deb.sh"
         assert smoke.stat().st_mode & 0o111, "smoke-deb.sh must be executable"

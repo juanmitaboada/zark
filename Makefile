@@ -502,9 +502,10 @@ version: ## Show current version
 # Series covered by the PPA. Only currently-supported Ubuntu releases:
 # Launchpad rejects uploads to EOL series with "<series> is obsolete and
 # will not accept new uploads." Update this list when adding/dropping
-# support for a release. As of October 2026:
+# support for a release. As of November 2026:
 #   - noble    (24.04 LTS) - supported until 2036
 #   - resolute (26.04 LTS) - released 2026-04
+#   - stonking (26.10)     - released 2026-10-15, supported until 2027-07
 # Releases dropped along the way (do not re-add without checking
 # https://wiki.ubuntu.com/Releases first):
 #   - oracular (24.10) - EOL 2025-07
@@ -513,7 +514,7 @@ version: ## Show current version
 # One table, series:release, from which the series list and each upload's
 # version suffix (~ubuntu<release>.1) are derived; README.md and
 # debian/README.packaging.md name the same series (a test checks it).
-PPA_TABLE    := noble:24.04 resolute:26.04
+PPA_TABLE    := noble:24.04 resolute:26.04 stonking:26.10
 PPA_SERIES   := $(foreach s,$(PPA_TABLE),$(firstword $(subst :, ,$(s))))
 # Upload target. We use a named profile (`zark-ppa`) rather than the
 # canonical `ppa:juanmitaboada/zark` shorthand so the configuration

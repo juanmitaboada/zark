@@ -257,6 +257,16 @@ PPA until the final 2.2.0.
 - Readers also testing `enclosure_id` (M16-8b): the enclosure's link exists with any disk in it.
 - Upgrading the registry on load (M16-5c): it would write from read-only commands.
 
+### M15 - the release
+
+#### Changed
+
+- **Ubuntu 26.10 (stonking) in the PPA** (M15-1, M15-3): `make deb-ppa`
+  uploads for noble, resolute and stonking (`2.2.0-1~ubuntu26.10.1`); every
+  dependency is in stonking's archive. CI installs the `.deb` built on
+  24.04 on 26.10 too, in an `ubuntu:26.10` container, since GitHub has no
+  26.10 runner.
+
 ## [2.1.1] - 2026-10-30
 
 ### For zark 2.1.0 users

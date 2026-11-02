@@ -15,13 +15,15 @@
 #   package     - builds the .deb on Ubuntu 24.04 and smoke-tests it there;
 #                 on a release tag it also attaches it to the GitHub Release.
 #   smoke-2604  - installs that same .deb on Ubuntu 26.04 and smoke-tests it.
-#                 Both run on tags and on a manual run, so a branch can be
-#                 checked on both supported series before any tag.
+#   smoke-2610  - the same on Ubuntu 26.10, in an ubuntu:26.10 container on a
+#                 26.04 runner (GitHub has no 26.10 runner image).
+#                 All run on tags and on a manual run, so a branch can be
+#                 checked on every supported series before any tag.
 #
 # Every job names its runner image: `ubuntu-latest` moves from 24.04 to
 # 26.04 during 2026-10/11 (RELP.8), and a job must not change series by
 # itself. The .deb is built on the oldest supported series, so its dpkg and
-# debhelper make a package both series install.
+# debhelper make a package every series installs.
 #
 # What this workflow does NOT cover
 # ─────────────────────────────────
@@ -209,4 +211,30 @@ jobs:
       - name: Smoke test the .deb
         run: |
           sudo apt-get update
+          .github/smoke-deb.sh dist/zark_*_amd64.deb
+
+  # ── The same .deb on Ubuntu 26.10 (M15-3) ────────────────────────────
+  #
+  # GitHub's hosted runners are LTS releases only, so the interim series
+  # runs in the official ubuntu:26.10 image: its Depends resolve from
+  # stonking's archive and the entry point runs with stonking's Python.
+  smoke-2610:
+    name: smoke (.deb on 26.10)
+    runs-on: ubuntu-26.04
+    container: ubuntu:26.10
+    needs: [package]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fetch the .deb built on 24.04
+        uses: actions/download-artifact@v8
+        with:
+          name: zark-release-assets
+          path: dist
+
+      - name: Smoke test the .deb
+        # The image runs as root and has no sudo, which the script calls.
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y sudo
           .github/smoke-deb.sh dist/zark_*_amd64.deb

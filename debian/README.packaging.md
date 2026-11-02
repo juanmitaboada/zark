@@ -145,9 +145,10 @@ GPG keyring.
 ## 4. Upload to the PPA
 
 Launchpad needs **one source package per target Ubuntu series**. The
-PPA covers the currently-supported Ubuntu releases. As of October 2026:
-noble (24.04 LTS, supported until 2036) and resolute (26.04 LTS). Each upload
-is distinguished by a `~ubuntuXX.YY.N` suffix on the version. The
+PPA covers the currently-supported Ubuntu releases. As of November 2026:
+noble (24.04 LTS, supported until 2036), resolute (26.04 LTS) and
+stonking (26.10, supported until July 2027). Each upload is distinguished
+by a `~ubuntuXX.YY.N` suffix on the version. The
 authoritative list lives in `Makefile`'s `PPA_SERIES` variable -
 update it there when Ubuntu drops a release.
 

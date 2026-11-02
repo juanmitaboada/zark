@@ -15,7 +15,7 @@
 #
 # smoke-deb.sh <zark_*_amd64.deb> - install a built .deb on the runner,
 # check that zark starts, then purge it. CI runs it on Ubuntu 24.04, where
-# the package is built, and on 26.04 (RELP.8).
+# the package is built, on 26.04 (RELP.8) and on 26.10 (M15-3).
 #
 # It catches regressions in debian/control's Depends: if a dependency is
 # missing, apt fails here. It also checks that the symlink layout works
