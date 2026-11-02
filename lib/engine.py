@@ -53,6 +53,7 @@ from typing import Protocol
 
 from lib import sh
 from lib.anchors import POINT_FOR, anchor_point, point_owners, release_point
+from lib.boot_layout import Layout
 from lib.cleanup import Cleanup
 from lib.dependents import DestroyPlan, destroy_dependents
 from lib.drive_marks import drive_snapshots
@@ -161,6 +162,10 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
     exclusions: frozenset[str] = field(default_factory=frozenset)
     # Hears the transfers and meters each send; backup sets it, prepare does not (D2).
     observer: TransferObserver | None = None
+    # Origin's boot layout: with ext4, a bpool tree on the drive is kept (M12-4 4a).
+    layout: Layout = "bpool"
+    # Runs after sanoid is paused and before the point (the copy of an ext4 /boot).
+    before_point: Callable[[], bool] | None = None
     _timer_was_active: bool = False
     # `zfs send -nvP` sizes by their exact arguments (M7-8 8a): a round's
     # planning asks again only for a send whose plan changed.
@@ -258,7 +263,7 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
         self.dest = read_dest(self.pool, strict=True)
         for pool in ("rpool", "bpool"):
             held = any(rel == pool or rel.startswith(f"{pool}/") for rel in self.dest)
-            if held and pool not in self.pools:
+            if held and pool not in self.pools and not (pool == "bpool" and self.layout == "ext4"):
                 raise ReadError(
                     f"{pool} is not imported, and {self.pool} holds its backup "
                     + f"(import it first: sudo zpool import {pool})"
@@ -926,7 +931,7 @@ def blocked_by_parent(rel: str, failed: set[str]) -> bool:
 
 
 @dataclass
-class Result:
+class Result:  # pylint: disable=too-many-instance-attributes
     """What a replication run achieved."""
 
     plans: list[DatasetPlan] = field(default_factory=list)  # final survey
@@ -936,11 +941,18 @@ class Result:
     enospc: bool = False
     error: str = ""
     unverified: str = ""  # why the state after the transfers could not be read
+    stale: str = ""  # why the point does not hold what it should (an ext4 /boot that changed)
 
     @property
     def ok(self) -> bool:
         """I-D: every expected dataset reached the point (and is anchored)."""
-        return not self.aborted and not self.unverified and bool(self.plans) and reached(self.plans)
+        return (
+            not self.aborted
+            and not self.unverified
+            and not self.stale
+            and bool(self.plans)
+            and reached(self.plans)
+        )
 
 
 Decide = Callable[[list[DatasetPlan], "Run"], bool]
@@ -1081,6 +1093,8 @@ def execute(run: Run, cleanup: Cleanup, decide: Decide) -> Result:
     try:
         if not run.pause_sanoid():
             return Result(aborted=True, error="sanoid is still running after the wait")
+        if run.before_point is not None and not run.before_point():
+            return Result(aborted=True, error="could not copy /boot before the point")
         # Tracked first: rpool's point is taken before bpool's, so a failure
         # or an interrupt between the two calls leaves rpool's to undo.
         cleanup.track_action(run.undo_point)

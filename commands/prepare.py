@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from lib import anchors, drive_marks, engine, exclusions, pool_record, registry, sh, survey
+from lib.boot_layout import BootRefresh, require_boot_copy
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso, zark_command
 from lib.drives import record_backup, validate_external_block_device
@@ -55,8 +56,8 @@ def run(
     warn_rpool_mountpoint_lost(log)
     survey.require_bookmark_v2(log)
     layout = survey.require_boot_layout(log)
-    if layout == "ext4":
-        survey.refuse_without_bpool(log)
+    # On an ext4 system a point is never taken without its /boot (M12 plan 5.2).
+    boot = BootRefresh(require_boot_copy(log), log) if layout == "ext4" else None
     # How origin's pools are, for recover (M6-5); before anything is written (M13C-5).
     pools_mark = pool_record.capture(log, layout)
     pool_record.require(pools_mark, layout, log)
@@ -179,7 +180,7 @@ def run(
 
     altroot = backup_altroot(new_pool)
     _ = sh.run(f"mkdir -p {altroot}")
-    compat = drive_compatibility(("rpool", "bpool"), log)
+    compat = drive_compatibility(pool_record.pools_for(layout), log)
     r = sh.run(create_command(new_pool, ident.by_id_path, altroot, compat), log=log)
     if not r.ok:
         log.fatal(f"Failed to create pool: {r.stderr.strip()}")
@@ -187,7 +188,11 @@ def run(
     log.ok(f"Pool '{new_pool}' created" + (f" (compatibility={compat})" if compat else ""))
 
     # ── Initial send: the backup point only (decision 2) ─────────────────
-    log.step(2, 4, f"Sending a backup point of rpool and bpool → {new_pool}...")
+    log.step(
+        2,
+        4,
+        f"Sending a backup point of {' and '.join(pool_record.pools_for(layout))} → {new_pool}...",
+    )
     rpool_used = sh.run("zfs list -H -o used rpool").output
     log.info(f"~{rpool_used} to transfer")
     new_guid = zfs.pool_guid(new_pool)
@@ -198,14 +203,20 @@ def run(
         log,
         point_name(datetime.now(UTC)),
         exclusions=declared.no_backup,
+        layout=layout,
+        before_point=boot.refresh if boot is not None else None,
     )
 
     def decide(plans: list[DatasetPlan], _eng: engine.Run) -> bool:
+        if boot is not None and boot.check():
+            log.warn(boot.stale)
         return all(p.state in (State.NEW, State.EXCLUDED) for p in plans)
 
     res = engine.execute(eng, cleanup, decide)
     if res.aborted:
         log.fatal(f"Initial send not started: {res.error or 'the new pool is not empty'}")
+    if boot is not None:
+        res.stale = boot.stale
     for p in res.plans:
         if p.state is State.EXCLUDED and p.declared:
             log.info(f"  {p.rel}: excluded from backups ({sh.humanize_bytes(p.used)})")

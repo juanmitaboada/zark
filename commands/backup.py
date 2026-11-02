@@ -55,6 +55,7 @@ from lib import (
     status_file,
     survey,
 )
+from lib.boot_layout import BOOT_COPY, BootRefresh, require_boot_copy
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso, zark_command
 from lib.dependents import DestroyPlan, also, destroy_plan, rollback_blockers, takes_lines
@@ -256,6 +257,12 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
         if p.kept:
             log.info(f"  {p.rel}: only on the backup, kept")
             continue
+        if eng.layout == "ext4" and p.rel.startswith("bpool/"):
+            # A bpool tree from before /boot moved to ext4: kept with its
+            # points and pruned with them, never asked about (M12-4 4a).
+            log.info(f"  {p.rel}: bpool's backup from before /boot moved to ext4, kept")
+            actions.append(partial(eng.keep_orphan, p, datetime.now(UTC).strftime("%Y-%m-%d")))
+            continue
         # What `zfs destroy -r` refuses for (M5bV-3): an archived lineage kept
         # by a ROLLBACK is a clone of one of the orphan's snapshots, and goes
         # first; any other clone keeps the destroy from being offered.
@@ -419,6 +426,8 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
                 + f"({_gib(freed)} destroyed)"
             )
         opts.append("decide one by one")
+        if any(_is_boot_copy(t) for t in diverged):
+            log.warn(_BOOT_COPY_DIVERGED)
         archived = sum(len(d.order) for d in each.values())
         also_all = f", and {archived} archived lineage(s) cloned from them" if archived else ""
         pick = _ask_confirmed(
@@ -433,6 +442,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
                 )
             },
             {destroy: [line for t in diverged for line in _takes(eng, each[t])]},
+            default=1 if fits and any(_is_boot_copy(t) for t in diverged) else 0,
         )
         if pick == 0:
             skipped.update(diverged)
@@ -466,6 +476,8 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
                 f"destroy it{on_drive} on the backup and resend in full ({_gib(freed)} destroyed)"
             )
         log.warn(f"  {p.rel}: no snapshot in common with the backup ({p.note})")
+        if _is_boot_copy(p.rel):
+            log.warn(_BOOT_COPY_DIVERGED)
         _warn_blockers(deps, pool_name, log)
         pick = _ask_confirmed(
             log,
@@ -478,6 +490,7 @@ def _decide(  # noqa: C901 # pylint: disable=too-many-locals,too-many-branches,t
                 )
             },
             {destroy: _takes(eng, deps)},
+            default=1 if fits and _is_boot_copy(p.rel) else 0,
         )
         if pick == 0:
             sizes = before
@@ -841,12 +854,27 @@ def _typed(log: Log, word: str, what: str) -> bool:
     return answer == word
 
 
+# A zark-boot deleted and created again on origin has no snapshot in
+# common with the drive's (M12R-16): what destroy would cost.
+_BOOT_COPY_DIVERGED = (
+    "  zark-boot holds /boot for every ext4 point on this drive: destroy removes it from "
+    + "every older point, and zark can then no longer recover those points; archive keeps "
+    + "them recoverable"
+)
+
+
+def _is_boot_copy(rel: str) -> bool:
+    """True for an ext4 system's copy of /boot, ``rpool/ROOT/<be>/zark-boot``."""
+    return rel.startswith("rpool/ROOT/") and rel.endswith(f"/{BOOT_COPY}")
+
+
 def _ask_confirmed(
     log: Log,
     question: str,
     opts: list[str],
     confirm: dict[int, tuple[str, str]],
     takes: dict[int, list[str]] | None = None,
+    default: int = 0,
 ) -> int:
     """Numbered choice whose destructive options need a typed word.
 
@@ -856,7 +884,7 @@ def _ask_confirmed(
     nor silently pick another option.
     """
     while True:
-        pick = log.ask_choice(question, opts, 0)
+        pick = log.ask_choice(question, opts, default)
         if pick not in confirm:
             return pick
         lines = (takes or {}).get(pick, [])
@@ -937,6 +965,10 @@ def _incomplete_lines(res: engine.Result, point: str) -> tuple[list[str], int]:
     for p in missing:
         groups.setdefault(_next_step(p, res.outcomes.get(p.rel), res), []).append(p.rel)
     lines = [f"The result could not be checked: {res.unverified}", ""] if res.unverified else []
+    if res.stale and not missing:
+        # Every dataset reached the point, but /boot changed under it (M12R-7).
+        return [res.stale, "", "Run backup again."], 0
+    lines += [res.stale, ""] if res.stale else []
     lines.append(f"{len(missing)} dataset(s) did not reach {point}:")
     shown = 0
     for step, rels in groups.items():
@@ -1126,8 +1158,8 @@ def run(
     warn_kernel_named_vdevs(log)
     survey.require_bookmark_v2(log)
     layout = survey.require_boot_layout(log)
-    if layout == "ext4":
-        survey.refuse_without_bpool(log)
+    # On an ext4 system a point is never taken without its /boot (M12 plan 5.2).
+    boot = BootRefresh(require_boot_copy(log), log) if layout == "ext4" else None
     # How origin's pools are, for recover (M6-5); before anything is written (M13C-5).
     pools_mark = pool_record.capture(log, layout)
     pool_record.require(pools_mark, layout, log)
@@ -1282,6 +1314,8 @@ def run(
         exclusions=declared.no_backup,
         # progress.json's transfer and its byte counters (M7-8, M7-2).
         observer=progress.TransferProgress() if progress.active() else None,
+        layout=layout,
+        before_point=boot.refresh if boot is not None else None,
     )
     _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
     log.info(f"Tip: run '{zark_command(sudo=False)} monitor' in another terminal for progress")
@@ -1294,12 +1328,16 @@ def run(
         # The engine asks after it took the point (engine.execute).
         record.point_taken = True
         progress.set_point(run_.point)
+        if boot is not None and boot.check():
+            log.warn(boot.stale)
         return _decide(plans, run_, pool_name, dst_info, log, policy, declared)
 
     log.step(7, TOTAL_STEPS, "Replicating (this may take a while)...")
     res = engine.execute(eng, cleanup, decide)
     if res.aborted:
         log.fatal(f"Backup not started: {res.error or 'aborted'}")
+    if boot is not None:
+        res.stale = boot.stale
 
     _show_table(res, eng.point, log)
     # What the point leaves out, on whatever of it reached the drive (M5b-7).
@@ -1375,8 +1413,9 @@ def run(
     if not res.ok:
         lines, missing = _incomplete_lines(res, eng.point)
         log.banner_error("BACKUP INCOMPLETE", lines)
-        _notify("❌ Backup incomplete", f"{missing} dataset(s) not backed up")
-        record.result("incomplete", missing=missing, message=f"{missing} dataset(s) not backed up")
+        why = f"{missing} dataset(s) not backed up" if missing or not res.stale else res.stale
+        _notify("❌ Backup incomplete", why)
+        record.result("incomplete", missing=missing, message=why)
         raise SystemExit(1)
 
     # ── Persist last_backup_at (only for a complete, verified backup) ────

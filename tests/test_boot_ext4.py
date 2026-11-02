@@ -21,6 +21,7 @@ finds them; run that file, not this one.
 
 import json
 import tempfile
+from collections.abc import Callable
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -30,7 +31,16 @@ import commands.backup as backup_mod
 import commands.prepare as prepare_mod
 import commands.recover as recover_mod
 import commands.setup as setup_mod
-from lib import boot_layout, exclusions, mount_props, pool_record, survey, zfs_features
+from lib import (
+    boot_layout,
+    engine,
+    exclusions,
+    mount_props,
+    pool_record,
+    replication as repl,
+    survey,
+    zfs_features,
+)
 from lib.log import Log
 from lib.zfs import DatasetInfo
 from tests.mock_sh import MockShell, patch_sh
@@ -189,7 +199,8 @@ def _refused_before(run: object, patches: list[object], forbidden: str) -> MockS
 
 
 class TestBootLayoutCallers:  # pylint: disable=missing-function-docstring
-    """backup and prepare refuse an ext4 system until its /boot is kept."""
+    """backup and prepare refuse an ext4 system without its zark-boot
+    before anything is scanned or written (M12 plan 5.2)."""
 
     def test_backup_refuses_before_scanning(self):
         scan = MagicMock()
@@ -207,7 +218,7 @@ class TestBootLayoutCallers:  # pylint: disable=missing-function-docstring
             "zpool import -d",
         )
         scan.assert_not_called()
-        assert mock.was_called("findmnt -n -o FSTYPE,SOURCE /boot")
+        assert mock.was_called("findmnt -n -o SOURCE /")
 
     def test_prepare_refuses_before_touching_the_disk(self):
         _ = _refused_before(
@@ -658,3 +669,259 @@ class TestSetupSteps:  # pylint: disable=missing-function-docstring
             "Keeping /boot for backups...",
             "Configuring sanoid...",
         ]
+
+
+def _refresh_shell(rsync_rc: int = 0, mount_ok: bool = True) -> MockShell:
+    mock = MockShell()
+    if mount_ok:
+        mock.on_prefix(f"mount -t zfs {_COPY} /").succeeds("")
+    else:
+        mock.on_prefix(f"mount -t zfs {_COPY} /").returns(1, "", "no such dataset")
+    mock.on_prefix("rsync -aHAX").returns(rsync_rc, "", "" if not rsync_rc else "vanished")
+    mock.on_prefix("umount /").succeeds("")
+    return mock
+
+
+class TestBootRefresh:  # pylint: disable=missing-function-docstring
+    """M12-2 2e, M12R-7: /boot copied into zark-boot before the point."""
+
+    def test_the_copy_runs_rsync_into_the_mounted_dataset_and_unmounts_it(self):
+        mock = _refresh_shell()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert boot_layout.refresh_boot_copy("ubuntu_abc123", _log())
+        calls = [c for c in mock._calls if c.startswith(("mount", "rsync", "umount"))]  # pylint: disable=protected-access
+        assert len(calls) == 3
+        tmp = calls[0].split()[-1]
+        assert calls[0] == f"mount -t zfs {_COPY} {tmp}"
+        assert calls[1] == (
+            "rsync -aHAX --numeric-ids --delete --inplace --one-file-system "
+            + f"--exclude=/efi/ /boot/ {tmp}/"
+        )
+        assert calls[2] == f"umount {tmp}"
+        assert not Path(tmp).exists()
+
+    def test_any_rsync_status_but_0_fails_and_still_unmounts(self):
+        for rc in (23, 24, 1):
+            mock = _refresh_shell(rsync_rc=rc)
+            out = StringIO()
+            with patch_sh(mock), redirect_stdout(out):
+                assert not boot_layout.refresh_boot_copy("ubuntu_abc123", _log())
+            assert mock.was_called("umount /")
+            assert f"rsync status {rc}" in out.getvalue()
+
+    def test_a_copy_that_cannot_be_mounted_fails_without_rsync(self):
+        mock = _refresh_shell(mount_ok=False)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not boot_layout.refresh_boot_copy("ubuntu_abc123", _log())
+        assert mock.was_not_called("rsync")
+
+    def test_the_manifest_leaves_the_esp_out_and_sees_a_new_kernel(self):
+        with tempfile.TemporaryDirectory() as boot:
+            Path(boot, "efi", "EFI").mkdir(parents=True)
+            Path(boot, "efi", "EFI", "shim").write_text("s", encoding="ascii")
+            Path(boot, "vmlinuz-1").write_text("k", encoding="ascii")
+            before = boot_layout.manifest(boot)
+            assert [e[0] for e in before] == ["vmlinuz-1"]
+            Path(boot, "efi", "EFI", "grub").write_text("g", encoding="ascii")
+            assert not boot_layout.manifest_diff(before, boot_layout.manifest(boot))
+            Path(boot, "vmlinuz-2").write_text("k", encoding="ascii")
+            assert boot_layout.manifest_diff(before, boot_layout.manifest(boot)) == ["vmlinuz-2"]
+
+    def test_a_boot_that_changed_after_the_copy_makes_the_point_stale(self):
+        refresh = boot_layout.BootRefresh("ubuntu_abc123", _log())
+        manifests = iter(
+            [(("vmlinuz-1", 1, 1, 1),), (("vmlinuz-1", 1, 1, 1), ("vmlinuz-2", 1, 2, 2))]
+        )
+        with (
+            patch.object(boot_layout, "manifest", side_effect=lambda *_a: next(manifests)),
+            patch.object(boot_layout, "refresh_boot_copy", return_value=True),
+        ):
+            assert refresh.refresh()
+            assert refresh.check() == (
+                "/boot changed during the run (vmlinuz-2): the point is not marked complete"
+            )
+
+    def test_an_unchanged_boot_leaves_the_point_whole(self):
+        refresh = boot_layout.BootRefresh("ubuntu_abc123", _log())
+        with (
+            patch.object(boot_layout, "manifest", return_value=(("vmlinuz-1", 1, 1, 1),)),
+            patch.object(boot_layout, "refresh_boot_copy", return_value=True),
+        ):
+            assert refresh.refresh()
+            assert not refresh.check()
+
+    def test_a_stale_point_is_not_ok(self):
+        res = engine.Result(plans=[repl.DatasetPlan("rpool", repl.State.AT_POINT)])
+        assert res.ok
+        res.stale = "/boot changed during the run (vmlinuz-2): the point is not marked complete"
+        assert not res.ok
+        lines, missing = backup_mod._incomplete_lines(res, "zark_p")  # pylint: disable=protected-access
+        assert missing == 0 and lines[0] == res.stale
+
+    def test_a_missing_copy_is_refused_before_anything_is_written(self):
+        out = StringIO()
+        with (
+            patch_sh(_setup_shell()),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            try:
+                boot_layout.require_boot_copy(_log())
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected a refusal")
+        assert f"This system has no {_COPY}" in out.getvalue()
+        assert "Nothing was written" in out.getvalue()
+
+    def test_an_existing_copy_gives_the_boot_environment(self):
+        with patch_sh(_setup_shell(exists=True)):
+            assert boot_layout.require_boot_copy(_log()) == "ubuntu_abc123"
+
+
+def _execute(before: bool | None) -> tuple[list[str], engine.Result]:
+    """engine.execute with the point, sanoid and the copy recorded in order."""
+    order: list[str] = []
+
+    def step(name: str, result: bool) -> Callable[..., bool]:
+        def record(*_a: object) -> bool:
+            order.append(name)
+            return result
+
+        return record
+
+    run = engine.Run(
+        "backup",
+        "111",
+        _log(),
+        "zark_p",
+        pools=["rpool"],
+        before_point=None if before is None else step("copy", before),
+    )
+    with (
+        patch.object(engine.Run, "pause_sanoid", step("pause", True)),
+        patch.object(engine.Run, "resume_sanoid", step("resume", True)),
+        patch.object(engine.Run, "take_point", step("point", False)),
+        patch.object(engine.Run, "undo_point", lambda _s: None),
+    ):
+        res = engine.execute(run, MagicMock(), lambda _p, _r: True)
+    return order, res
+
+
+class TestEngineBeforePoint:  # pylint: disable=missing-function-docstring
+    """The copy of /boot runs after sanoid is paused and before the point."""
+
+    def test_the_copy_comes_between_the_pause_and_the_point(self):
+        order, _ = _execute(True)
+        assert order == ["pause", "copy", "point", "resume"]
+
+    def test_a_failed_copy_takes_no_point(self):
+        order, res = _execute(False)
+        assert order == ["pause", "copy", "resume"]
+        assert res.aborted and res.error == "could not copy /boot before the point"
+
+    def test_without_a_copy_the_run_is_as_before(self):
+        order, _ = _execute(None)
+        assert order == ["pause", "point", "resume"]
+
+
+def _survey(layout: str) -> str:
+    """ "" or the ReadError of a survey that finds a bpool tree on the drive."""
+    lay: boot_layout.Layout = "ext4" if layout == "ext4" else "bpool"
+    run = engine.Run("backup", "111", _log(), "zark_p", pools=["rpool"], layout=lay)
+    dest = {"bpool": MagicMock(), "bpool/BOOT/ubuntu_x": MagicMock()}
+    with (
+        patch.object(engine, "read_origin", return_value={}),
+        patch.object(engine, "read_dest", return_value=dest),
+        patch.object(engine, "plan", return_value=[]),
+    ):
+        try:
+            _ = run.survey()
+        except engine.ReadError as e:
+            return str(e)
+    return ""
+
+
+class TestEngineLayoutChange:  # pylint: disable=missing-function-docstring
+    """M12-4 4a: a drive with bpool's backup, given an ext4 system."""
+
+    def test_an_ext4_system_keeps_the_bpool_tree(self):
+        assert not _survey("ext4")
+
+    def test_a_bpool_system_without_bpool_is_refused_as_before(self):
+        assert "bpool is not imported, and backup holds its backup" in _survey("bpool")
+
+    def test_backup_keeps_it_without_asking(self):
+        eng = MagicMock()
+        eng.layout = "ext4"
+        plans = [repl.DatasetPlan("bpool/BOOT/ubuntu_x", repl.State.ORPHAN, used=5)]
+        ask = MagicMock(side_effect=AssertionError("asked"))
+        with patch.object(Log, "ask_choice", ask), redirect_stdout(StringIO()):
+            assert backup_mod._decide(plans, eng, "backup", None, _log())  # pylint: disable=protected-access
+        eng.keep_orphan.assert_called_once()
+        assert eng.keep_orphan.call_args.args[0] is plans[0]
+
+    def test_a_bpool_system_still_asks(self):
+        eng = MagicMock()
+        eng.layout = "bpool"
+        eng.dest = {}
+        plans = [repl.DatasetPlan("bpool/BOOT/ubuntu_x", repl.State.ORPHAN, used=5)]
+        with (
+            patch.object(Log, "ask_choice", return_value=0) as ask,
+            patch.object(backup_mod, "destroy_plan", return_value=MagicMock(ok=False)),
+            patch.object(backup_mod, "_warn_blockers"),
+            redirect_stdout(StringIO()),
+        ):
+            assert backup_mod._decide(plans, eng, "backup", None, _log())  # pylint: disable=protected-access
+        ask.assert_called_once()
+        eng.keep_orphan.assert_not_called()
+
+
+class TestBootCopyDiverged:  # pylint: disable=missing-function-docstring
+    """M12R-16: a zark-boot recreated on origin; archive is the default."""
+
+    def test_the_question_says_what_destroy_costs_and_defaults_to_archive(self):
+        eng = MagicMock()
+        eng.layout = "ext4"
+        eng.estimate.return_value = 1
+        plans = [repl.DatasetPlan(_COPY, repl.State.DIVERGED, used=5, note="no common snapshot")]
+        defaults: list[int] = []
+
+        def choice(_q: str, _opts: list[str], default: int = 0) -> int:
+            defaults.append(default)
+            return 0
+
+        out = StringIO()
+        with (
+            patch.object(Log, "ask_choice", side_effect=choice),
+            patch.object(backup_mod, "destroy_plan", return_value=MagicMock(ok=False)),
+            patch.object(backup_mod, "_warn_blockers"),
+            patch.object(backup_mod, "_on_drive", return_value=[_COPY]),
+            patch.object(backup_mod, "_make_room", return_value=[]),
+            redirect_stdout(out),
+        ):
+            dst = MagicMock(avail_bytes=10**12)
+            _ = backup_mod._decide(plans, eng, "backup", dst, _log())  # pylint: disable=protected-access
+        assert defaults == [1]
+        assert "destroy removes it from every older point" in out.getvalue()
+
+    def test_another_dataset_still_defaults_to_skip(self):
+        eng = MagicMock()
+        eng.estimate.return_value = 1
+        plans = [repl.DatasetPlan("rpool/var", repl.State.DIVERGED, used=5, note="x")]
+        defaults: list[int] = []
+
+        def choice(_q: str, _opts: list[str], default: int = 0) -> int:
+            defaults.append(default)
+            return 0
+
+        with (
+            patch.object(Log, "ask_choice", side_effect=choice),
+            patch.object(backup_mod, "destroy_plan", return_value=MagicMock(ok=False)),
+            patch.object(backup_mod, "_warn_blockers"),
+            patch.object(backup_mod, "_on_drive", return_value=["rpool/var"]),
+            patch.object(backup_mod, "_make_room", return_value=[]),
+            redirect_stdout(StringIO()),
+        ):
+            _ = backup_mod._decide(plans, eng, "backup", MagicMock(avail_bytes=10**12), _log())  # pylint: disable=protected-access
+        assert defaults == [0]
