@@ -9599,6 +9599,11 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert self._prepare(_fresh_fake(()), cfg_dir, out=out, extra=tuple(patches)) == 1
         seen["complete"].assert_not_called()
         assert "blue" not in json.loads((cfg_dir / "known_drives.json").read_text())
+        # M13R-6: the banner names the changed /boot, not a send that did not complete.
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        banner = text[text.index("DRIVE NOT REGISTERED") :]
+        assert "/boot changed during the run" in banner
+        assert "The initial send did not complete" not in banner
 
     def test_an_ext4_prepare_without_its_record_creates_nothing(self):
         """M13R-4 (M11b): capture gave nothing on ext4: FATAL before zpool create."""

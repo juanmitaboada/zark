@@ -34,7 +34,7 @@ from lib.drives import record_backup, validate_external_block_device
 from lib.health import check_device, render_report
 from lib.log import Log
 from lib.mount import warn_rpool_mountpoint_lost
-from lib.replication import DatasetPlan, Ref, State, point_name
+from lib.replication import DatasetPlan, Ref, State, point_name, reached
 from lib.retention import Policy
 from lib.zfs import ZFS, backup_altroot, create_command, drive_compatibility
 
@@ -270,12 +270,15 @@ def run(
         # H16: a drive whose data or keystore did not land is never registered,
         # so the anchors its datasets got would belong to no entry (M2R-6).
         left = anchors.drop_anchors_of(new_guid, log)
+        # A changed /boot is named as such: every dataset may have reached
+        # the point, as backup's banner says (M13R-6).
+        why = [res.stale] if res.stale else []
+        if not res.ok and (not res.stale or res.unverified or not reached(res.plans)):
+            why.append("The initial send did not complete:")
         log.banner_error(
             "DRIVE NOT REGISTERED",
             [
-                "The initial send did not complete:"
-                if not res.ok
-                else "The keystore did not land.",
+                *(why if not res.ok else ["The keystore did not land."]),
                 "See the messages above. The drive has NOT been registered.",
                 f"Wipe and retry: {zark_command()} purge {ident.by_id_path}",
                 *([left] if left else []),
