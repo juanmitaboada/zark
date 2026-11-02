@@ -4,30 +4,51 @@ The commands, a first backup and a recovery step by step, what zark needs, and i
 
 ## Commands
 
-| Command            | Description                                                  |
-|--------------------|--------------------------------------------------------------|
-| `explore`          | Scan for ZFS pools, show known/unknown drives                |
-| `setup`            | Install dependencies, configure sanoid for automatic snapshots |
-| `prepare`          | Initialize a new blank drive as a backup target              |
-| `backup`           | Incremental encrypted backup: one restore point per run      |
-| `recover`          | Full bare-metal system recovery from backup                  |
-| `finish`           | Post-recovery finalization (run from the recovered system)   |
-| `repair-boot`      | Fix boot issues from a live USB without full recovery        |
-| `chroot`           | Open an interactive chroot into the installed system (live USB) |
-| `mount`            | Mount a backup pool - or the local system (`mount local`) - for inspection/chroot |
-| `umount`           | Unmount a backup pool, or the local system (`umount local`)  |
-| `clean`            | Release what an interrupted zark run left mounted or imported |
-| `purge`            | Securely wipe a managed backup drive                         |
-| `monitor`          | Live view of a running command and the backups' state (no root) |
-| `simulate`         | Boot the target disk in QEMU/KVM to verify the boot chain    |
-| `health`           | Non-destructive risk checks on a backup drive                |
-| `prune`            | Reclaim space in the source or on a backup drive (interactive) |
-| `status`           | Source pools' fill level and each drive's backup age         |
-| `alerts`           | Install or remove the status MOTD and hourly timer           |
-| `registry`         | List, forget or fix drives; set each drive's retention       |
-| `exclude`          | Leave datasets out of backups, of sanoid's snapshots, or both |
-| `fix-rpool-mountpoint` | Give a restored rpool back `mountpoint=/` (live USB)     |
-| `selftest`         | Check that this platform's ZFS and tools behave as zark relies on |
+`zark --help` lists them in the same groups and order.
+
+### Backup
+
+| Command    | Description |
+|------------|-------------|
+| `backup`   | Incremental encrypted backup: one restore point per run |
+| `exclude`  | Leave datasets out of backups, of sanoid's snapshots, or both |
+| `prepare`  | Initialize a new blank drive as a backup target |
+| `prune`    | Reclaim space in the source or on a backup drive (interactive) |
+| `purge`    | Securely wipe a managed backup drive |
+| `registry` | List, forget or fix drives; set each drive's retention |
+
+### Recovery (live USB)
+
+| Command                | Description |
+|------------------------|-------------|
+| `chroot`               | Open an interactive chroot into the installed system (live USB) |
+| `finish`               | Post-recovery finalization (run from the recovered system) |
+| `fix-rpool-mountpoint` | Give a restored rpool back `mountpoint=/` (live USB) |
+| `recover`              | Full bare-metal system recovery from backup |
+| `repair-boot`          | Fix boot issues from a live USB without full recovery |
+| `simulate`             | Boot the target disk in QEMU/KVM to verify the boot chain |
+
+### Inspection
+
+| Command   | Description |
+|-----------|-------------|
+| `explore` | Scan for ZFS pools, show known/unknown drives |
+| `health`  | Non-destructive risk checks on a backup drive |
+| `monitor` | Live view of a running command and the backups' state (no root) |
+| `mount`   | Mount a backup pool - or the local system (`mount local`) - for inspection/chroot |
+| `status`  | Source pools' fill level and each drive's backup age |
+| `umount`  | Unmount a backup pool, or the local system (`umount local`) |
+
+### Setup and upkeep
+
+| Command    | Description |
+|------------|-------------|
+| `alerts`   | Install or remove the status MOTD and hourly timer |
+| `clean`    | Release what an interrupted zark run left mounted or imported |
+| `selftest` | Check that this platform's ZFS and tools behave as zark relies on |
+| `setup`    | Install dependencies, configure sanoid for automatic snapshots |
+
+bash completes the commands, their options and arguments: installed with the package, or `source completion/zark` from a portable tree.
 
 ## Quick start
 
