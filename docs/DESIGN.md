@@ -55,6 +55,7 @@ zark/
 │   ├── retention.py           # Destination retention: which snapshots may go
 │   ├── sanoid_retention.py    # sanoid's retention, read for the drive's window
 │   ├── selftest.py            # The platform self-test: checks, bench, runner
+│   ├── selftest_boot.py       # Level-1 checks for a /boot on ext4
 │   ├── selftest_host.py       # Level-1 checks on the host's own tools
 │   ├── selftest_l1.py         # Level-1 checks on ZFS, file-backed pools
 │   ├── selftest_l2.py         # Level-2 checks on a scratch stick

@@ -154,7 +154,7 @@ def check(  # pylint: disable=too-many-arguments
 
 
 # The modules whose checks register themselves when imported, in run order.
-CHECK_MODULES = ("lib.selftest_l1", "lib.selftest_host", "lib.selftest_l2")
+CHECK_MODULES = ("lib.selftest_l1", "lib.selftest_host", "lib.selftest_boot", "lib.selftest_l2")
 
 
 def all_checks() -> list[Check]:

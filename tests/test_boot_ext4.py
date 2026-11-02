@@ -51,6 +51,8 @@ from lib import (
     recover_ext4,
     replication as repl,
     retention,
+    selftest,
+    selftest_boot,
     status,
     status_file,
     survey,
@@ -1932,3 +1934,108 @@ class TestStatusBoot:  # pylint: disable=missing-function-docstring
 
         assert ended("completed") == ("2.2.0-rc2", "2.2.0")
         assert ended("incomplete") is None
+
+
+def _run_check(cid: str) -> tuple[str, str]:
+    """(result, expected) of one boot check on a bench that builds nothing."""
+    c = next(c for c in selftest.all_checks() if c.cid == cid)
+    with tempfile.TemporaryDirectory() as td:
+        bench = selftest.Bench(_log(), MagicMock(), root=td)
+        Path(bench.dir).mkdir(parents=True, exist_ok=True)
+        with redirect_stdout(StringIO()):
+            res = selftest.run_one(c, bench)
+    return res.result, res.expected
+
+
+_EXT4_MOUNT = boot_layout.BootMount("ext4", "/dev/sda2", _UUID)
+
+
+class TestSelftestBoot:  # pylint: disable=missing-function-docstring
+    """M13 plan section 3: the boot checks pass, fail and skip as they should."""
+
+    def test_the_pure_checks_pass(self):
+        for cid in ("BOOT-07", "BOOT-08", "BOOT-10"):
+            assert _run_check(cid)[0] == "PASS", cid
+
+    def test_host_checks_skip_on_a_bpool_host(self):
+        with patch.object(selftest_boot, "boot_mount", return_value=None):
+            for cid in ("BOOT-01", "BOOT-05"):
+                assert _run_check(cid)[0] == "SKIP", cid
+
+    def test_boot_01_reads_every_field(self):
+        def boot_01(probe: str) -> str:
+            mock = MockShell()
+            mock.on("grub-probe -t fs /boot").succeeds(f"{probe}\n")
+            mock.on("blkid -p -s UUID -o value /dev/sda2").succeeds(f"{_UUID}\n")
+            with (
+                patch_sh(mock),
+                patch.object(selftest_boot, "boot_mount", return_value=_EXT4_MOUNT),
+                patch.object(selftest_boot.shutil, "which", return_value="/usr/bin/x"),
+                patch.object(pool_record, "capture_boot", return_value=(_boot_record(), "")),
+            ):
+                return _run_check("BOOT-01")[0]
+
+        assert boot_01("ext2") == "PASS"
+        assert boot_01("zfs") == "FAIL"
+
+    def test_boot_05_reads_the_esps_search_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "grub.cfg"
+            with (
+                patch.object(selftest_boot, "boot_mount", return_value=_EXT4_MOUNT),
+                patch.object(selftest_boot, "_ESP_GRUB", cfg),
+            ):
+                _ = cfg.write_text((_FIXTURES / "esp-grub.cfg").read_text("ascii"), "ascii")
+                assert _run_check("BOOT-05")[0] == "PASS"
+                _ = cfg.write_text(f"search.fs_uuid {_NEW_UUID} root hd0,gpt2\n", "ascii")
+                assert _run_check("BOOT-05")[0] == "FAIL"
+
+    def test_boot_06_fails_only_a_bpool_host_without_zfs(self):
+        with tempfile.TemporaryDirectory() as td:
+            img = Path(td) / "grubx64.efi.signed"
+            with patch.object(selftest_boot, "_SIGNED_GRUB", img):
+                assert _run_check("BOOT-06")[0] == "SKIP"
+                _ = img.write_bytes(b"\0part_gpt\0zfs\0zfscrypt\0zfsinfo\0")
+                with patch.object(selftest_boot, "boot_mount", return_value=None):
+                    assert _run_check("BOOT-06")[0] == "PASS"
+                _ = img.write_bytes(b"\0part_gpt\0ext2\0")
+                with patch.object(selftest_boot, "boot_mount", return_value=None):
+                    assert _run_check("BOOT-06")[0] == "FAIL"
+                with patch.object(selftest_boot, "boot_mount", return_value=_EXT4_MOUNT):
+                    assert _run_check("BOOT-06")[0] == "PASS"
+
+    def test_boot_02_wants_exactly_the_allowlist(self):
+        features = " ".join(pool_record.EXT4_FEATURES)
+
+        def mock(extra: str) -> MockShell:
+            m = MockShell()
+            m.on_prefix("mkfs.ext4 -F -O none,").succeeds("")
+            m.on_prefix("tune2fs -l").succeeds(
+                f"Filesystem features:      {features}{extra}\nBlock count:              16384\n"
+            )
+            m.on_prefix("blkid -p -s UUID").succeeds(f"{_NEW_UUID}\n")
+            m.on_prefix("blkid -p -s LABEL").succeeds("t\n")
+            return m
+
+        with patch.object(selftest_boot.shutil, "which", return_value="/usr/sbin/x"):
+            with patch_sh(mock("")):
+                assert _run_check("BOOT-02")[0] == "PASS"
+            with patch_sh(mock(" casefold")):
+                assert _run_check("BOOT-02")[0] == "FAIL"
+        with patch.object(selftest_boot.shutil, "which", return_value=None):
+            assert _run_check("BOOT-02")[0] == "SKIP"
+
+    def test_boot_09s_selections_never_take_the_copy(self):
+        be = "c/be"
+        rows = [
+            ("c", "on", "none"),
+            (be, "noauto", "/"),
+            (f"{be}/zark-boot", "noauto", "legacy"),
+            (f"{be}/boot", "off", "legacy"),
+            ("c/BOOT/be", "on", "/boot"),
+        ]
+        roots = selftest_boot._grub_roots(rows)  # pylint: disable=protected-access
+        boots = selftest_boot._grub_boots(be, rows)  # pylint: disable=protected-access
+        assert roots == [be]
+        assert boots == [f"{be}/boot", "c/BOOT/be"]
+        assert f"{be}/zark-boot" not in roots + boots
