@@ -67,6 +67,7 @@ zark/
 │   ├── statusdirs.py          # /run/zark and /var/lib/zark, readable by anyone
 │   ├── survey.py              # Reads of origin and of a drive, and the checks before a run
 │   ├── transfer_eta.py        # The monitor's time left, from the run's own pace
+│   ├── upgrade_risk.py        # Whether the 24.04 to 26.04 upgrade would stop rpool's mounts
 │   ├── zfs.py                 # ZFS pool and dataset operations
 │   └── zfs_features.py        # OpenZFS pool features and their first release
 ├── commands/

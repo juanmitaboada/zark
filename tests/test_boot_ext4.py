@@ -56,6 +56,7 @@ from lib import (
     status,
     status_file,
     survey,
+    upgrade_risk,
     zfs,
     zfs_features,
 )
@@ -2039,3 +2040,86 @@ class TestSelftestBoot:  # pylint: disable=missing-function-docstring
         assert roots == [be]
         assert boots == [f"{be}/boot", "c/BOOT/be"]
         assert f"{be}/zark-boot" not in roots + boots
+
+
+def _exposed(**over: object) -> str:
+    """upgrade_risk.exposed with every condition true, then ``over`` applied:
+    release, version, cache (bytes), encrypted, shell, binds."""
+    conds: dict[str, object] = {
+        "release": "24.04",
+        "version": "2.2.2-0ubuntu9.5",
+        "cache": b"rpool\t/\n",
+        "encrypted": "rpool\n",
+        "shell": b"#!/bin/sh\n",
+        "binds": "zfs-load-key-rpool.service zfs-import.target",
+    }
+    conds.update(over)
+    with tempfile.TemporaryDirectory() as td:
+        cache, gen = Path(td) / "rpool", Path(td) / "gen"
+        if conds["cache"] is not None:
+            _ = cache.write_bytes(conds["cache"])  # type: ignore[arg-type]
+        _ = gen.write_bytes(conds["shell"])  # type: ignore[arg-type]
+        mock = MockShell()
+        mock.on("dpkg-query -W -f='${Version}' zfsutils-linux").succeeds(str(conds["version"]))
+        mock.on("zfs get -H -o value -r -t filesystem encryptionroot rpool").succeeds(
+            str(conds["encrypted"])
+        )
+        mock.on("systemctl show -p BindsTo --value var-lib-dpkg.mount").succeeds(
+            str(conds["binds"])
+        )
+        with (
+            patch_sh(mock),
+            patch.object(
+                upgrade_risk.platform_facts, "ubuntu_release", return_value=conds["release"]
+            ),
+            patch.object(upgrade_risk, "LIST_CACHE", cache),
+            patch.object(upgrade_risk, "GENERATOR", gen),
+        ):
+            return upgrade_risk.exposed()
+
+
+class TestUpgradeRisk:  # pylint: disable=missing-function-docstring
+    """M12P.3, M12C-6, M12R-9, M13F-2 2a: the exposed 24.04 host, warned."""
+
+    def test_every_condition_is_needed(self):
+        assert "zfsutils-linux 2.2.2" in _exposed()
+        for over in (
+            {"release": "26.04"},
+            {"release": "26.10"},
+            {"version": "2.4.1-1ubuntu5.1"},
+            {"cache": None},
+            {"cache": b""},
+            {"encrypted": "-\n-\n"},
+            {"shell": b"\x7fELF"},
+            {"binds": "zfs-load-key@rpool.service"},
+        ):
+            assert not _exposed(**over), over
+
+    def test_the_motd_and_status_carry_the_warning(self):
+        st = status.Status(upgrade_risk="why")
+        (n,) = [n for n in status.notices(st) if n.code == "upgrade_risk"]
+        assert n.level == "warning" and "sudo dpkg --configure -a" in n.text
+        assert "docs/UPGRADING.md" in status.motd_text(st)
+        assert not [n for n in status.notices(status.Status()) if n.code == "upgrade_risk"]
+        out = StringIO()
+        with redirect_stdout(out):
+            status_cmd._report(st, _log())  # pylint: disable=protected-access
+        assert "stops rpool's" in out.getvalue() and "(why)" in out.getvalue()
+
+    def test_upg_01_skips_off_24_04(self):
+        with patch.object(selftest_boot.platform_facts, "ubuntu_release", return_value="26.04"):
+            assert _run_check("UPG-01")[0] == "SKIP"
+
+    def test_upg_01_reads_what_exposed_reads(self):
+        def upg(shell: bool, binds: str) -> str:
+            with (
+                patch.object(selftest_boot.platform_facts, "ubuntu_release", return_value="24.04"),
+                patch.object(upgrade_risk, "generator_is_shell", return_value=shell),
+                patch.object(upgrade_risk, "binds_to", return_value=binds.split()),
+            ):
+                return _run_check("UPG-01")[0]
+
+        assert upg(True, "zfs-load-key-rpool.service") == "PASS"
+        assert upg(False, "zfs-load-key-rpool.service") == "FAIL"
+        assert upg(True, "zfs-load-key@rpool.service") == "FAIL"
+        assert upg(True, "local-fs-pre.target") == "SKIP"

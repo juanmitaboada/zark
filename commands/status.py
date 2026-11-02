@@ -31,7 +31,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 from commands.setup import sanoid_conf_gap
-from lib import cli_spec, exclusions, notify, status, status_file, statusdirs, survey
+from lib import (
+    cli_spec,
+    exclusions,
+    notify,
+    status,
+    status_file,
+    statusdirs,
+    survey,
+    upgrade_risk,
+)
 from lib.config import Config, zark_command
 from lib.log import Log
 from lib.pool_record import MIN_RECOVER_EXT4
@@ -59,6 +68,9 @@ def _report(st: status.Status, log: Log) -> None:
         log.warn(st.read_error)
     if st.residues:
         log.info(status.residue_line(st.residues))
+    if st.upgrade_risk:
+        log.warn(upgrade_risk.WARNING)
+        log.info(f"  ({st.upgrade_risk})")
     if st.boot is not None:
         boot = status.boot_line(st)
         text = boot[1] if boot else f"/boot: {st.boot.capacity_pct}% full"

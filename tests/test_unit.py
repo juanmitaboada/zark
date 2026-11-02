@@ -348,6 +348,7 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestSetupBootCopy,
     TestSetupSteps,
     TestStatusBoot,
+    TestUpgradeRisk,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -396,6 +397,7 @@ BOOT_LAYOUT_SUITES = (
     TestMountBootCopy,
     TestStatusBoot,
     TestSelftestBoot,
+    TestUpgradeRisk,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the
@@ -24228,8 +24230,8 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
         # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05, POOL-15;
-        # M11: DST-06; M14: RDR-02; M13: BOOT-01 to BOOT-10
-        assert len([c for c in checks if c.level == 1]) == 71
+        # M11: DST-06; M14: RDR-02; M13: BOOT-01 to BOOT-10, UPG-01
+        assert len([c for c in checks if c.level == 1]) == 72
         assert len([c for c in checks if c.level == 2]) == 8
         assert len({c.cid for c in checks}) == len(checks)
         # A check whose expectations changed gets its next revision (M9b, M11).

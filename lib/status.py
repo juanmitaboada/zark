@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import anchors, certificates, sh, statusdirs, survey
+from lib import anchors, certificates, sh, statusdirs, survey, upgrade_risk
 from lib.boot_layout import boot_mount
 from lib.config import Config, now_utc_iso, zark_command
 from lib.drives import drive_staleness_days, no_anchor_lines
@@ -124,6 +124,7 @@ class Status:  # pylint: disable=too-many-instance-attributes
     spaces: dict[str, Space | None] = field(default_factory=dict)  # pool → its Space (R1)
     datasets: dict[str, list[DatasetUsage] | None] = field(default_factory=dict)  # pool → R2
     boot: BootSpace | None = None  # an ext4 /boot (M12-6 6a)
+    upgrade_risk: str = ""  # why the 24.04 to 26.04 upgrade would stop the mounts (M12P.3)
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ def gather(cfg: Config, log: Log) -> Status:
             st.caps[pool] = int(r.output.strip())
     if "bpool" not in pools:
         st.boot = read_boot_space()
+    st.upgrade_risk = upgrade_risk.exposed()
     st.ages = {name: drive_staleness_days(info) for name, info in sorted(cfg.known_drives.items())}
     if "rpool" not in pools:
         return st
@@ -248,6 +250,8 @@ def notices(st: Status) -> list[Notice]:
     if st.residues:
         out.append(Notice("info", "origin_residues", None, residue_line(st.residues)))
     out += [Notice("warning", "selftest", None, line) for line in st.selftest]
+    if st.upgrade_risk:
+        out.append(Notice("warning", "upgrade_risk", None, upgrade_risk.WARNING))
     return out
 
 

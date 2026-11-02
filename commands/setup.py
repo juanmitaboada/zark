@@ -49,7 +49,17 @@ import os
 from pathlib import Path
 from typing import TypedDict
 
-from lib import alerts, apt_guard, certificates, cli_spec, exclusions, grub_guard, sh, survey
+from lib import (
+    alerts,
+    apt_guard,
+    certificates,
+    cli_spec,
+    exclusions,
+    grub_guard,
+    sh,
+    survey,
+    upgrade_risk,
+)
 from lib.boot_layout import Layout, boot_copies, boot_copy, running_be, system_layout
 from lib.config import zark_command
 
@@ -1118,6 +1128,9 @@ def run(
     _install_guards(log)
     # Space and backup-age alerts: MOTD and an hourly timer (M3 decision 13a).
     alerts.install(log)
+    if why := upgrade_risk.exposed():
+        log.warn(upgrade_risk.WARNING)
+        log.info(f"  ({why})")
 
     log.banner_ok(
         "SETUP COMPLETE",

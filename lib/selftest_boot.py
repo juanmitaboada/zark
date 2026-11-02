@@ -26,7 +26,7 @@ import shlex
 import shutil
 from pathlib import Path
 
-from lib import boot_rewrite, exclusions, pool_record, sh
+from lib import boot_rewrite, exclusions, platform_facts, pool_record, sh, upgrade_risk
 from lib.boot_layout import BOOT_COPY, boot_mount
 from lib.recover_ext4 import mkfs_boot_command
 from lib.selftest import Bench, Fail, Skip, check, exit_status, expect, text_of
@@ -503,4 +503,38 @@ def boot_08(_b: Bench) -> None:
         crypttab == _CRYPTTAB.replace("00000000-0000-4000-8000-0000000000a3", part),
         "only its PARTUUID",
         crypttab.strip(),
+    )
+
+
+# ── the 24.04 to 26.04 upgrade ───────────────────────────────────────────
+
+
+@check(
+    "UPG-01",
+    1,
+    1,
+    "24.04: rpool's mount units are bound to zfs-load-key-rpool.service by the shell generator",
+    depends=("upgrade_risk.exposed (M12P.3, M12R-9)",),
+)
+def upg_01(_b: Bench) -> None:
+    """On Ubuntu 24.04 with an encrypted rpool, what
+    :func:`lib.upgrade_risk.exposed` (lib/upgrade_risk.py:67) reads holds:
+    the installed zfs-mount-generator is the shell script
+    (lib/upgrade_risk.py:52) and ``var-lib-dpkg.mount`` is bound to
+    ``zfs-load-key-rpool.service`` (lib/upgrade_risk.py:61). SKIP on 26.04
+    and 26.10, which build the C generator with the ``@`` name, so their
+    upgrades rename nothing; and when that mount is bound to no key unit
+    (rpool not encrypted, or not mounted through zfs-list.cache). It reads
+    no pool: only the generator's file and systemd."""
+    if platform_facts.ubuntu_release() != "24.04":
+        raise Skip("not Ubuntu 24.04: 26.04 and later build the C generator, nothing renames")
+    binds = upgrade_risk.binds_to()
+    if not any(u.startswith("zfs-load-key") for u in binds):
+        raise Skip(f"{upgrade_risk.PROBE_UNIT} is bound to no ZFS key unit here")
+    expect(upgrade_risk.generator_is_shell(), "the shell generator", str(upgrade_risk.GENERATOR))
+    expect(
+        upgrade_risk.KEY_UNIT in binds,
+        f"{upgrade_risk.PROBE_UNIT} bound to {upgrade_risk.KEY_UNIT}",
+        "bound to another name",
+        " ".join(binds),
     )
