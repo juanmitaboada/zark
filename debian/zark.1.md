@@ -31,10 +31,16 @@ month; the only thing **zark** keeps in the source pool between backups is a
 bookmark per drive.
 
 **zark** supports Ubuntu 24.04 LTS and 26.04 LTS as their installers lay out
-ZFS (**rpool**, **bpool** and the keystore), with Secure Boot on. **backup**
-and **prepare** refuse a system without a **bpool** of its own, naming where
-*/boot* is: Ubuntu 26.10 and later put */boot* on ext4 on UEFI machines,
-with Secure Boot on or off.
+ZFS (**rpool**, **bpool** and the keystore), and Ubuntu 26.10 and later on
+UEFI machines, whose installer puts */boot* on an ext4 partition of
+**rpool**'s disk and makes no **bpool**, with Secure Boot on. The layout is
+read at every run; **backup** and **prepare** refuse any other, naming where
+*/boot* is. On an ext4 system **setup** creates
+**rpool/ROOT/**\<be\>**/zark-boot**, a copy of */boot* that **backup** and
+**prepare** refresh before every point, so each point holds the root and
+its */boot* together. Such a point is recovered with **zark** 2.2 or later
+only: **zark** 2.1.1 and earlier take it for a **bpool** point, erase the
+disk and leave no */boot*.
 
 A full restore - partitioning, **rpool** + **bpool** recreation, LUKS keystore
 reconstruction, GRUB and initramfs regeneration - runs from an Ubuntu Live USB
@@ -113,6 +119,22 @@ end-to-end sequences.
     **zark-forensics** under **FILES**), its counters and first permanent
     errors are shown, and the run continues only on a yes (default no).
     Any other state stops the run.
+
+    On a system whose */boot* is an ext4 partition, **backup** and
+    **prepare** refuse to run without **rpool/ROOT/**\<be\>**/zark-boot**
+    (run **setup**) or without a record of how */boot* is (its file
+    system, partition, ESP and swap), before the drive is scanned or
+    touched. Before the point they copy */boot* into it (**rsync -aHAX
+    \--delete**, */boot/efi* left out, **sanoid** paused); a non-zero rsync
+    status stops the run before the point, and a */boot* that changed
+    between the copy and the point (a kernel installed meanwhile) leaves
+    the point incomplete, naming the paths. Each point records the
+    **zark** that wrote it and, on such a system, the oldest that recovers
+    it (2.2.0). A drive's **bpool** backup is kept with its points when the
+    system's */boot* moved to ext4. When **zark-boot** was created again
+    and no longer shares a snapshot with the drive, the question says that
+    destroying the drive's copy makes its older points unrecoverable;
+    archive is the default when it fits.
 
     **backup** and **prepare** refuse to run while a pool named **bpool**
     can be imported (**zpool import** lists it) but is not. The refusal
@@ -683,6 +705,23 @@ end-to-end sequences.
     and *devices=off*, and *dnodesize=auto* on **rpool**, so every
     restored dataset that does not set its own inherits them.
 
+    A point whose */boot* was an ext4 partition (its record says so, or,
+    without a record, the drive holds its **zark-boot** or carries
+    *org.zark:origin-layout=ext4*) is laid out as its record says: the ESP
+    (its recorded size, between 1 and 4 GiB), */boot* (at least 2 GiB), the
+    swap when origin had one, **rpool** the rest, and no **bpool**. */boot*
+    is made with exactly origin's ext4 features, its label and a new UUID,
+    filled at step 13 from the restored **zark-boot**, and the new UUID
+    replaces origin's in every **search** line of */boot/grub/grub.cfg*
+    and in */etc/fstab*; the swap's *PARTUUID=* in */etc/crypttab* names
+    the new partition; **grub-install** writes it in the ESP. A UUID left
+    behind, or a restored kernel without a **linux** line, is an error of
+    the banner. **rsync** and **e2fsprogs** are installed on the live for
+    such a point only. **recover** refuses, before anything is erased, a
+    point whose record names an oldest **zark** newer than itself, a point
+    whose record is there but cannot be read, and such a point without a
+    record (an interrupted run or a carried **sanoid** snapshot).
+
     The recovered system boots without **zark** present and receives
     normal **apt**(8) upgrades thereafter. **zark** is needed only for
     backup and recovery; once the disaster is over it can be unplugged
@@ -900,7 +939,9 @@ end-to-end sequences.
     banner lists them with the command to browse one. A subtree excluded
     from backups that the drive still holds is mounted like any other,
     with a line naming the point that left it out and the drive's last
-    copy of it.
+    copy of it. A point whose */boot* was an ext4 partition has its
+    **zark-boot** mounted read-only at the tree's */boot*, and the banner
+    names it.
 
     With no argument, scans for connected backup drives. With the
     *target* **local** (aliases **system**, **rpool**) it instead mounts
@@ -914,7 +955,11 @@ end-to-end sequences.
     as not mounted. A link in the installed tree is resolved inside it by
     the same rule as the backup's tree, here and for **chroot** and
     **repair-boot**: a dataset under the tree's */var/run* mounts on the
-    tree's */run*, never the live session's.
+    tree's */run*, never the live session's. On a system whose */boot* is
+    an ext4 partition no **bpool** is imported: the partition the
+    installed root's */etc/fstab* names, when it is on **rpool**'s disk, is
+    mounted at the tree's */boot* (read-only without the journal replayed,
+    in read-only mode), here and for **chroot** and **repair-boot**.
 
     The complementary command is **umount**.
 
@@ -930,7 +975,13 @@ end-to-end sequences.
     notification for a pool at a warning or critical level, at most once a
     day per pool and level. Both forms also write
     */var/lib/zark/status.json* from the same read (see **FILES**).
-    Read-only for zark's state.
+    On a system whose */boot* is an ext4 partition it also says how full
+    */boot* is (the same thresholds: old kernels fill it) and that its
+    points are recovered with **zark** 2.2.0 or later; per drive, the
+    **zark** that wrote its last point and the oldest that recovers it.
+    On an Ubuntu 24.04 host with an encrypted root mounted through the
+    2.2 shell generator it warns that the upgrade to 26.04 stops the root
+    pool's mounts halfway, with the recovery. Read-only for zark's state.
 
 **umount** \[*target*\]
 :   Unmount a previously **mount**-ed backup pool. Unmounts only the tree
@@ -1044,6 +1095,17 @@ end-to-end sequences.
     pool whose *compatibility* property does not list the feature is left
     as it is. **backup** and **prepare** refuse to run without it.
 
+    On a system whose */boot* is an ext4 partition, a step of its own shows
+    and asks before creating **rpool/ROOT/**\<be\>**/zark-boot** (default
+    yes; declined at the end of input) with one **zfs create -o
+    canmount=noauto -o mountpoint=legacy**, never **zfs set**, and checks
+    that it inherits *acltype=posix* and *xattr=sa*. It costs about
+    */boot*'s used size on **rpool** plus each kernel update's change,
+    held until pruned, on the system and on each drive. On a **bpool**
+    system a leftover **zark-boot** is named as no longer used. On an
+    Ubuntu 24.04 host exposed to the upgrade problem (see **status**),
+    the end of **setup** gives the same warning.
+
     **setup --remove** removes what **setup** installed besides **sanoid**'s
     configuration and timer: the status alerts, the apt guard (its hook,
     its APT config and its MOTD reminder) and the update-grub guard. A file
@@ -1105,7 +1167,8 @@ state, by **sudo zark status** or by the timer; **zark monitor** reads it
 without root. The GNOME Shell extension (Ubuntu 26.04) is the package
 *gnome-shell-extension-zark* in the same PPA, suggested and not installed by
 default. **recover** creates only the top of a subtree excluded from backups;
-**backup** and **prepare** refuse a system without its own **bpool**.
+**backup** and **prepare** refuse a system with neither its own **bpool** nor
+the ext4 */boot* of Ubuntu 26.10 and later.
 
 ## Upgrading from zark 1.x
 

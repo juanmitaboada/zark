@@ -1,3 +1,24 @@
+zark (2.2.0~rc2-1) UNRELEASED; urgency=medium
+
+  * Milestone M13 of zark 2.2 (/boot on ext4, Ubuntu 26.10 and later on
+    UEFI). Not for release: nothing is published until the final 2.2.0.
+  * backup, prepare and recover support the layout with /boot on an ext4
+    partition and no bpool. setup creates rpool/ROOT/<be>/zark-boot, the
+    copy of /boot that every point holds; recover lays the disk out as the
+    point records it and rewrites /boot's UUID in grub.cfg, fstab and
+    crypttab.
+  * Each point records the zark that wrote it and, for /boot on ext4, the
+    oldest zark that recovers it; recover refuses before erasing a point
+    it must not recover, one whose record cannot be read, and an ext4
+    point without a record. zark 2.1.1 must not recover an ext4 point.
+  * chroot, mount local, repair-boot, finish and zark mount handle an ext4
+    /boot; /boot's space in zark status, the MOTD and status.json.
+  * A warning on Ubuntu 24.04 hosts that the upgrade to 26.04 stops the
+    root pool's mounts. New self-test checks BOOT-01 to BOOT-10 and UPG-01.
+  * Depends on rsync and e2fsprogs.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 02 Nov 2026 12:51:11 +0100
+
 zark (2.2.0~rc1-1) UNRELEASED; urgency=medium
 
   * Milestone M14 of zark 2.2 (the status readers' rows and the CLI). Not

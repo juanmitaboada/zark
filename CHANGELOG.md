@@ -18,6 +18,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### M13 - /boot on ext4
 
+zark 2.2 is built on `main` as `2.2.0-rc2` (`lib/config.py`) and
+`2.2.0~rc2-1` UNRELEASED (`debian/changelog`).
+
+#### Added
+
+- **Ubuntu 26.10 and later on UEFI, with `/boot` on ext4 and no bpool**
+  (M12-1 1a): `backup`, `prepare` and `recover` support the layout the
+  26.10 installer makes (ESP, `/boot` on an ext4 partition of rpool's
+  disk, an encrypted swap, rpool with the keystore), with Secure Boot on
+  or off. The layout is read at every run, never assumed from the release;
+  anything else (`/boot` a directory of the root, on another disk, both a
+  bpool and an ext4 `/boot`, an ext4 `/boot` with no kernel of the root)
+  is refused with its reason and a link to issue #5.
+- **`rpool/ROOT/<be>/zark-boot`, the copy of an ext4 `/boot`** (M12-2
+  2e): on such a system `zark setup` creates it, with consent, in one
+  `zfs create -o canmount=noauto -o mountpoint=legacy`: the first dataset
+  zark creates on origin. It inherits rpool's encryption, ACLs and
+  xattrs, sanoid covers it with the boot environment's rule, and it costs
+  about `/boot`'s used size on rpool plus each kernel update's delta until
+  pruned, on origin and on each drive. `backup` and `prepare` refresh it
+  with `rsync -aHAX --delete` before every point (sanoid paused), so each
+  point holds the root and its `/boot` together; a non-zero rsync status
+  stops the run before the point, and a `/boot` that changed between the
+  copy and the point leaves the point incomplete, naming the paths.
+- **Each point records `written_by`, and an ext4 point its `/boot` and
+  `min_recover` `2.2.0`** (M12-8): recover refuses, before erasing, a
+  point whose `min_recover` this zark does not meet or cannot read
+  (`-rcN` ignored: an rc of 2.2.0 recovers what 2.2.0 does). `zark
+  status` shows the last point's two fields per drive (`last_point_record`
+  in `status.json`).
+- **recover lays an ext4 point's disk out as origin had it** (M12-5 5a):
+  the ESP (its recorded size, between 1 and 4 GiB), `/boot` (at least
+  2 GiB), the swap when origin had one, rpool the rest; no bpool. The new
+  `/boot` is made with exactly origin's ext4 features and a new UUID
+  (M12-3 3a), filled from the restored `zark-boot`, and its UUID replaces
+  origin's in `/boot/grub/grub.cfg` (every `search` line) and fstab, with
+  the swap's PARTUUID in crypttab; grub-install writes it in the ESP.
+  Checks after: the old UUID nowhere, the new one where GRUB looks, an
+  entry for each restored kernel. `rsync`, `mkfs.ext4`, `tune2fs` and
+  `blkid` are installed on the live for an ext4 point only.
+- **`/boot`'s space in `zark status`, the MOTD and `status.json`**
+  (M12-6 6a): an ext4 `/boot` judged with the pools' thresholds (old
+  kernels fill it), an optional `boot` object in `status.json`, and a row
+  in `zark monitor`.
+- **A warning on a 24.04 host that the upgrade to 26.04 would stop its
+  mounts** (M12-7 7a, M12C-6): in `zark status`, the MOTD and `zark
+  setup`, with the recovery if it happened (`dpkg --configure -a`, a
+  reboot). 26.04 and 26.10 hosts print nothing.
+- **Self-test checks BOOT-01 to BOOT-10 and UPG-01**: what zark reads of
+  an ext4 `/boot`, the file system recover makes, `zark-boot`'s
+  properties and round trip, GRUB's selections, the rewrites, and the
+  24.04 upgrade's units.
+
 #### Changed
 
 - **recover refuses a point whose record of origin's pools is there but
@@ -36,6 +89,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recover refuses such a point (an interrupted run, a carried sanoid
   snapshot) before anything is erased, instead of laying the disk out
   with a bpool.
+- **`chroot`, `mount local`, `repair-boot` and `finish` mount an ext4
+  `/boot`** named by the restored root's fstab (checked to be on rpool's
+  disk); `finish` mounts it before writing the initrds and `grub.cfg`,
+  and no longer reports a missing bpool on such a system as unhealthy.
+  `zark mount` mounts a point's `zark-boot` read-only at `<tree>/boot`.
+- **The DIVERGED question for a recreated `zark-boot` says what destroy
+  costs** (M12R-16): the older points on the drive could no longer be
+  recovered; archive, which keeps them, is the default when it fits.
+- **A drive's bpool tree is kept with its points when the system's
+  `/boot` moved to ext4** (M12-4 4a), and pruned with them.
+- **`backup` and `prepare` read origin's pool record before the drive is
+  scanned or touched** (M13C-5); on an ext4 system a record that cannot
+  be read stops the run with nothing written.
+- **Packaging**: `rsync` and `e2fsprogs` join `Depends` (M12R-10).
+
+#### Known limitations
+
+- **zark 2.1.1 and earlier must not recover an ext4 point.** Its recover
+  takes the point for a bpool one with no record: it erases the disk, lays
+  it out with an empty bpool and leaves no `/boot`, after one warning
+  (M12R-2). 2.1.1 cannot change, and no shape of the record stops it; an
+  ext4 point is recovered with zark 2.2 or later only. A bpool system's
+  points read as before.
+- `prepare` writes no `status.json`, so a new drive shows its
+  `last_point_record` after its first backup.
+- A bpool point is not recovered onto the ext4 layout, nor the reverse
+  (M12-5 5a).
+
+#### Alternatives weighed and not taken
+
+- Keeping `/boot` per point in a tree of the drive with its own
+  encryption root (M12-2 2a): a key of its own, a window between the
+  point and the copy, a copy back with its own `load-key`, and a tree
+  every reader would have to learn. In git: large binaries, no xattrs or
+  ACLs, and ZFS snapshots already version the tree. Unencrypted (2b), as
+  an image of the partition (2c), or not at all with `/boot` regenerated
+  from packages (2d): dropped; a separate pool does not fit 26.10's
+  layout.
+- Origin's UUID for the new `/boot` (M12-3 3b): with origin's disk still
+  attached, two file systems would share it and fstab's by-uuid link
+  would pick one by udev's order.
+- Refusing a drive that holds a bpool tree once the system is ext4
+  (M12-4 4b).
+- Recovering a bpool point onto the ext4 layout in 2.2 (M12-5 5b).
+- `/boot`'s space in `zark status` only, not in the status files (M12-6
+  6b).
+- No workaround for the 24.04 upgrade (M12-7 7b), or only a note in
+  `docs/UPGRADING.md` (7c).
+- A 2.1.x release that refuses a record carrying `boot` (M12-8 8b), or
+  documentation alone (8c).
 
 ### M14 - the status readers' rows and the CLI
 
