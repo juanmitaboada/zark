@@ -646,6 +646,16 @@ class TestRecoverPointLayout:  # pylint: disable=missing-function-docstring
             else:
                 raise AssertionError("no RecordError")
 
+    def test_an_ext4_record_is_refused_before_the_pools_are_planned(self):
+        """M13R-3 (M08): _pools_from_record itself calls the refusal."""
+        for rec, said in (
+            (_record(boot=_boot_record(), min_recover="2.2.0"), "which this zark does not"),
+            (_record(min_recover="9.0.0"), "This point needs zark 9.0.0 or later"),
+        ):
+            out, mock, got = _from_record(rec)
+            assert got is None and said in out, out
+            assert "Nothing was erased" in out and mock.was_not_called("zpool upgrade -v")
+
     def test_the_drive_is_marked_at_create(self):
         cmd = zfs.create_command("b", "/d", "/r", "", {"origin-layout": "ext4"})
         assert "-O org.zark:origin-layout=ext4 -m none" in cmd
@@ -696,8 +706,24 @@ def _keep(mock: MockShell, answer: bool = True) -> tuple[bool, str]:
     return False, out.getvalue()
 
 
+def _eof(_prompt: str) -> str:
+    raise EOFError
+
+
 class TestSetupBootCopy:  # pylint: disable=missing-function-docstring
     """M12-2 2e, M13F-1 1a: setup creates zark-boot on an ext4 system."""
+
+    def test_a_closed_terminal_declines_the_copy(self):
+        """M13R-5 (M25): EOF at the question creates nothing, though yes is
+        the default for a person who presses Enter."""
+        mock = _setup_shell()
+        out = StringIO()
+        with patch_sh(mock), patch("builtins.input", side_effect=_eof), redirect_stdout(out):
+            try:
+                setup_mod.keep_boot(_log())
+            except SystemExit:
+                pass
+        assert mock.was_not_called("zfs create")
 
     def test_it_is_created_in_one_zfs_create_with_its_properties(self):
         mock = _setup_shell()
@@ -1048,6 +1074,43 @@ class TestBootCopyDiverged:  # pylint: disable=missing-function-docstring
             _ = backup_mod._decide(plans, eng, "backup", dst, _log())  # pylint: disable=protected-access
         assert defaults == [1]
         assert "destroy removes it from every older point" in out.getvalue()
+
+    @staticmethod
+    def _defaults(rels: list[str], avail: int) -> list[int]:
+        """The default of each DIVERGED question _decide asks for ``rels``."""
+        eng = MagicMock()
+        eng.layout = "ext4"
+        eng.estimate.return_value = 1
+        plans = [repl.DatasetPlan(r, repl.State.DIVERGED, used=5, note="x") for r in rels]
+        defaults: list[int] = []
+
+        def choice(_q: str, _opts: list[str], default: int = 0) -> int:
+            defaults.append(default)
+            return 0
+
+        with (
+            patch.object(Log, "ask_choice", side_effect=choice),
+            patch.object(backup_mod, "destroy_plan", return_value=MagicMock(ok=False)),
+            patch.object(backup_mod, "_warn_blockers"),
+            patch.object(backup_mod, "_on_drive", side_effect=lambda _e, rel: [rel]),
+            patch.object(backup_mod, "_make_room", return_value=[]),
+            redirect_stdout(StringIO()),
+        ):
+            dst = MagicMock(avail_bytes=avail)
+            _ = backup_mod._decide(plans, eng, "backup", dst, _log())  # pylint: disable=protected-access
+        return defaults
+
+    def test_archive_is_not_the_default_when_it_does_not_fit(self):
+        """M13R-5 (M22b): without room the archive option is not offered,
+        so the default stays on skip."""
+        assert self._defaults([_COPY], 0) == [0]
+
+    def test_the_grouped_question_defaults_to_archive_with_the_copy_in_it(self):
+        """M13R-5 (M22c): zark-boot among several lineages: archive for all,
+        when it fits; skip otherwise."""
+        assert self._defaults([_COPY, "rpool/var"], 10**12) == [1]
+        assert self._defaults([_COPY, "rpool/var"], 0) == [0]
+        assert self._defaults(["rpool/srv", "rpool/var"], 10**12) == [0]
 
     def test_another_dataset_still_defaults_to_skip(self):
         eng = MagicMock()

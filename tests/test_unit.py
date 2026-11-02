@@ -176,6 +176,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     apt_guard,
     backup_layout,
     boot_chain,
+    boot_layout,
     drive_contents,
     drive_marks,
     engine,
@@ -9298,12 +9299,14 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         cfg_dir: Path,
         readback: Readback | None = None,
         out: StringIO | None = None,
+        extra: tuple[AbstractContextManager[object], ...] = (),
         **answers: str,
     ) -> int:
         """Run prepare; ``answers`` by the first word of an input question
         (Pool, Days); anything not given takes the default. ``readback`` is
         the drive's read-back (ONLINE when not given); ``out`` gets stdout;
-        ``self.asked`` the yes/no questions, each answered yes."""
+        ``self.asked`` the yes/no questions, each answered yes; ``extra``
+        patches are entered last."""
         answers = {"Pool": "blue", **answers}
         self.asked = []
 
@@ -9336,6 +9339,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
                 patch.object(Cleanup, "register", lambda _self: None),
                 redirect_stdout(StringIO() if out is None else out),
                 redirect_stderr(StringIO()),
+                *extra,
             ):
                 stack.enter_context(cm)
             try:
@@ -9569,6 +9573,43 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         registry_write_atomic(cfg_dir / "known_drives.json", {})
         assert self._prepare(fake, cfg_dir) == 1
         assert "blue" not in json.loads((cfg_dir / "known_drives.json").read_text())
+
+    def test_an_ext4_prepare_marks_the_drive_and_refreshes_the_copy(self):
+        """M13R-4 (M38b), M13F-6 6a: the drive is created with its layout mark,
+        and the engine gets the BootRefresh's refresh."""
+        patches, seen = _ext4_guards(changed=False)
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out, extra=tuple(patches)) == 0, out.getvalue()
+        assert len(seen["runs"]) == 1
+        made = seen["runs"][0]
+        assert made["layout"] == "ext4" and _is_refresh(made["before_point"])
+        assert seen["order"][:2] == ["manifest", "copy"]
+        create = next(c for c in fake.calls if c.startswith("zpool create"))
+        assert "-O org.zark:origin-layout=ext4" in create
+
+    def test_an_ext4_prepare_whose_boot_changed_registers_nothing(self):
+        """M13R-4 (M33): /boot changed during the first send: not registered."""
+        patches, seen = _ext4_guards(changed=True)
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        assert self._prepare(_fresh_fake(()), cfg_dir, out=out, extra=tuple(patches)) == 1
+        seen["complete"].assert_not_called()
+        assert "blue" not in json.loads((cfg_dir / "known_drives.json").read_text())
+
+    def test_an_ext4_prepare_without_its_record_creates_nothing(self):
+        """M13R-4 (M11b): capture gave nothing on ext4: FATAL before zpool create."""
+        patches, _ = _ext4_guards(changed=False, record="")
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out, extra=tuple(patches)) == 1
+        assert "Cannot record how this system's pools" in out.getvalue()
+        assert not any(c.startswith("zpool create") for c in fake.calls)
 
     def test_prepare_refuses_disk_without_by_id(self):
         ident = DiskIdentity(disk="/dev/sdb", by_id="")
@@ -17064,6 +17105,53 @@ class _TickingClock:  # pylint: disable=too-few-public-methods
         return datetime.now(tz) + timedelta(seconds=next(cls._ticks))
 
 
+_BOOT_BEFORE = (("vmlinuz-6.20.0-1-generic", 1, 1, 1),)
+_BOOT_AFTER = (("vmlinuz-6.20.0-2-generic", 2, 2, 2),)
+
+
+def _ext4_guards(
+    changed: bool, record: str = '{"format": 1}'
+) -> tuple[list[AbstractContextManager[object]], dict[str, Any]]:
+    """Patches that make a backup or prepare run an ext4 one on FakeZfs, with
+    the real BootRefresh: /boot's manifest is ``_BOOT_BEFORE`` at the copy and
+    ``_BOOT_AFTER`` after the point when ``changed``. What the run did lands
+    in the dict: ``order`` (manifest and copy calls), ``runs`` (each
+    engine.Run's keyword arguments), ``complete`` (record_complete's mock)."""
+    seen: dict[str, Any] = {"order": [], "runs": [], "complete": MagicMock(return_value=True)}
+
+    def manifest(*_a: Any) -> boot_layout.Manifest:
+        seen["order"].append("manifest")
+        first = seen["order"].count("manifest") == 1
+        return _BOOT_BEFORE if first or not changed else _BOOT_AFTER
+
+    def copy(*_a: Any) -> bool:
+        seen["order"].append("copy")
+        return True
+
+    real_run = engine.Run
+
+    def spy_run(*a: Any, **kw: Any) -> engine.Run:
+        seen["runs"].append(kw)
+        return real_run(*a, **kw)
+
+    patches: list[AbstractContextManager[object]] = [
+        patch.object(survey, "require_boot_layout", return_value="ext4"),
+        patch.object(backup_mod, "require_boot_copy", return_value="be"),
+        patch.object(prepare_mod, "require_boot_copy", return_value="be"),
+        patch.object(pool_record, "capture", return_value=record),
+        patch.object(boot_layout, "manifest", side_effect=manifest),
+        patch.object(boot_layout, "refresh_boot_copy", side_effect=copy),
+        patch.object(engine, "Run", side_effect=spy_run),
+        patch.object(drive_marks, "record_complete", seen["complete"]),
+    ]
+    return patches, seen
+
+
+def _is_refresh(hook: object) -> bool:
+    """``hook`` is a BootRefresh's own refresh, bound to it."""
+    return getattr(hook, "__func__", None) is boot_layout.BootRefresh.refresh
+
+
 class TestBackupCommand:  # pylint: disable=too-many-public-methods
     """`zark backup` end to end on FakeZfs (drive discovery and keystore stubbed)."""
 
@@ -17114,6 +17202,48 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
             except SystemExit as e:
                 rc = int(e.code or 0)
         return cfg, rc
+
+    def test_an_ext4_run_refreshes_the_copy_before_the_point(self) -> None:
+        """M13R-4 (M37, M38, M44): the engine gets the layout and the
+        BootRefresh's own refresh, which takes the manifest before the copy."""
+        patches, seen = _ext4_guards(changed=False)
+        fake = _fresh_fake()
+        out = StringIO()
+        _, rc = self._run(fake, *patches, redirect_stdout(out))
+        assert rc == 0, out.getvalue()
+        assert len(seen["runs"]) == 1
+        made = seen["runs"][0]
+        assert made["layout"] == "ext4" and _is_refresh(made["before_point"])
+        assert seen["order"][:2] == ["manifest", "copy"] and seen["order"].count("copy") == 1
+        seen["complete"].assert_called_once()
+        assert fake.ds["backup"].props["org.zark:origin-layout"] == "ext4"
+
+    def test_an_ext4_run_whose_boot_changed_is_not_complete(self) -> None:
+        """M13R-4 (M15, M16): /boot changed between the copy and the point:
+        BACKUP INCOMPLETE naming the path, no completion mark, exit 1."""
+        patches, seen = _ext4_guards(changed=True)
+        out = StringIO()
+        _, rc = self._run(_fresh_fake(), *patches, redirect_stdout(out))
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert rc == 1, text
+        seen["complete"].assert_not_called()
+        assert "BACKUP INCOMPLETE" in text
+        assert "vmlinuz-6.20.0-1-generic" in text and "/boot changed during the run" in text
+
+    def test_an_ext4_run_without_its_record_stops_before_the_drives(self) -> None:
+        """M13R-4 (M11): capture gave nothing on ext4: FATAL before the drives
+        are scanned."""
+        patches, _ = _ext4_guards(changed=False, record="")
+        scan = MagicMock(return_value=[])
+        out = StringIO()
+        _, rc = self._run(
+            _fresh_fake(),
+            *patches,
+            patch.object(backup_mod, "scan_connected_drives", scan),
+            redirect_stdout(out),
+        )
+        assert rc == 1 and "Cannot record how this system's pools" in out.getvalue()
+        scan.assert_not_called()
 
     @staticmethod
     def _freeing(fake: FakeZfs, figures: list[int]) -> None:
