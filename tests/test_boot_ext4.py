@@ -23,6 +23,7 @@ import json
 import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -36,8 +37,10 @@ from lib import (
     engine,
     exclusions,
     mount_props,
+    origin_prune,
     pool_record,
     replication as repl,
+    retention,
     survey,
     zfs_features,
 )
@@ -925,3 +928,64 @@ class TestBootCopyDiverged:  # pylint: disable=missing-function-docstring
         ):
             _ = backup_mod._decide(plans, eng, "backup", MagicMock(avail_bytes=10**12), _log())  # pylint: disable=protected-access
         assert defaults == [0]
+
+
+_DAY = 86400
+_NOW = 1793664000  # 2026-11-03T00:00:00Z
+
+
+def _pt(days_ago: float) -> str:
+    return repl.point_name(datetime.fromtimestamp(_NOW - days_ago * _DAY, UTC))
+
+
+def _dest(rel: str, ages: list[float], orphan: str = "") -> repl.Dest:
+    snaps = [
+        repl.Ref(_pt(a), f"{rel}-{a}", i + 1, int(_NOW - a * _DAY))
+        for i, a in enumerate(sorted(ages, reverse=True))
+    ]
+    return repl.Dest(rel, orphan=orphan, snaps=snaps)
+
+
+class TestBootCopyRetention:  # pylint: disable=missing-function-docstring
+    """M12-2 2e, M12R-5: zark-boot and a kept bpool tree prune with their
+    points; nothing new in the code."""
+
+    def test_zark_boot_goes_and_stays_with_its_point(self):
+        be = "rpool/ROOT/ubuntu_abc123"
+        ages = [45.0, 44.0, 1.0]  # two in the same month outside the window
+        dest = {be: _dest(be, ages), _COPY: _dest(_COPY, ages)}
+        complete = {_pt(a) for a in ages}
+        out = retention.plan_prune(dest, complete, retention.Policy(window_days=30), _NOW)
+        gone = {r.target for r in out.snapshots}
+        older, monthly = _pt(45.0), _pt(44.0)
+        assert f"{be}@{older}" in gone and f"{_COPY}@{older}" in gone
+        assert f"{_COPY}@{monthly}" not in gone and f"{_COPY}@{_pt(1.0)}" not in gone
+        assert not out.datasets
+
+    def test_a_kept_bpool_tree_with_every_point_too_old_is_destroyed_whole(self):
+        be = "rpool/ROOT/ubuntu_abc123"
+        tree = "bpool/BOOT/ubuntu_old"
+        dest = {be: _dest(be, [1.0]), tree: _dest(tree, [95.0, 94.0], orphan="kept@2026-11-02")}
+        complete = {_pt(1.0), _pt(95.0), _pt(94.0)}
+        policy = retention.Policy(window_days=30, max_age_days=60)
+        out = retention.plan_prune(dest, complete, policy, _NOW)
+        assert {r.target for r in out.snapshots} == {f"{tree}@{_pt(95.0)}", f"{tree}@{_pt(94.0)}"}
+        assert [top for top, _ in out.datasets] == [tree]
+
+    def test_a_kept_bpool_tree_with_a_point_in_the_window_stays(self):
+        be = "rpool/ROOT/ubuntu_abc123"
+        tree = "bpool/BOOT/ubuntu_old"
+        dest = {be: _dest(be, [1.0]), tree: _dest(tree, [95.0, 5.0], orphan="kept@2026-11-02")}
+        complete = {_pt(1.0), _pt(95.0), _pt(5.0)}
+        policy = retention.Policy(window_days=30, max_age_days=60)
+        out = retention.plan_prune(dest, complete, policy, _NOW)
+        assert {r.target for r in out.snapshots} == {f"{tree}@{_pt(95.0)}"}
+        assert not out.datasets
+
+    def test_origin_prune_offers_zark_boots_old_sanoid_snapshots(self):
+        old = int(_NOW - 40 * _DAY)
+        snap = repl.Ref("autosnap_2026-09-24_00:00:01_daily", "g", 1, old)
+        origin = {_COPY: repl.Origin(_COPY, "filesystem", "noauto", "legacy", snaps=[snap])}
+        inv = origin_prune.inventory(origin, {})
+        targets = [i.target for i in origin_prune.older_than(inv, _NOW - 30 * _DAY)]
+        assert targets == [f"{_COPY}@autosnap_2026-09-24_00:00:01_daily"]
