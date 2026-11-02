@@ -184,6 +184,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     grub_guard,
     pool_record,
     reclaim,
+    recover_ext4,
     restore_plan,
     survey,
 )
@@ -349,6 +350,7 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestSetupSteps,
     TestStatusBoot,
     TestUpgradeRisk,
+    _boot_record,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -9890,6 +9892,7 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
 
 _MANIFEST = Path(__file__).parent / "fixtures" / "phase0-stick-manifest.txt"
 _BE = "ubuntu_g8v4da"
+_BOOT_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "boot-ext4"
 
 
 def _manifest_snapshot_lines() -> list[str]:
@@ -11294,6 +11297,206 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             mock = self._run_in(td, "YES", calls=calls, meta_fail=True)
         assert "choose_point" not in calls
         assert mock.was_not_called("wipefs")
+
+
+class TestRecoverExt4Run:  # pylint: disable=missing-function-docstring
+    """M13R-8: ``recover.run`` for a point whose ``/boot`` was on ext4, steps 4
+    to 15 with their own code (partitioning from the record, ``mkfs.ext4``,
+    the mounts of step 13, the copy back, the ESP, the rewrites) on the
+    harness of :class:`TestRecoverNoWipeBeforeYes`; what reads the drive,
+    the keys and the chroot is stubbed as in its whole-run tests."""
+
+    _OLD = "0b0e7e57-0000-4000-8000-000000000001"
+    _NEW = "11111111-2222-4333-8444-555555555555"
+    _SWAP = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    _COPY_SNAP = "autosnap_2026-09-01_00:00:00_daily"
+
+    def _run(  # pylint: disable=too-many-locals
+        self, swap: bool = True, shell_setup: Callable[[MockShell], None] | None = None
+    ) -> tuple[MockShell, dict[str, Any]]:
+        """One ext4 run; (the shell, what it saw: ``mnt``, ``boot``, the calls
+        of the stubbed steps, the banner)."""
+        boot = _boot_record(dataset=f"rpool/ROOT/{_BE}/{boot_layout.BOOT_COPY}")
+        if not swap:
+            boot = dc_replace(boot, swap=None)
+        rec = pool_record.PoolRecord(
+            "26.10", "zfs-2.4.4", "zfs-kmod-2.4.4", {}, written_by="2.2.0", boot=boot
+        )
+        copy = f"rpool/ROOT/{_BE}/{boot_layout.BOOT_COPY}"
+        point = restore_points(_stick_snaps(), f"rpool/ROOT/{_BE}")[-1]
+        row = RestoreRow(
+            copy,
+            Snap(copy, self._COPY_SNAP, "1", 1, 1),
+            props=MountProps("noauto", "legacy", "cache"),
+            options=["-o canmount=noauto", "-o mountpoint=legacy"],
+            effective="legacy",
+        )
+        plan = RestorePlan("backup", "/dev/sdb1", _BE, point, [row], "k@k", 1, "617fca2c")
+        seen: dict[str, Any] = {"boot": boot, "bpool": [], "gaps": [], "vdev": [], "chain": []}
+        mock_ref: list[MockShell] = []
+
+        def shell(mock: MockShell) -> None:
+            mock_ref.append(mock)
+            if shell_setup is not None:
+                shell_setup(mock)
+            _ = mock.on("blkid -p -s UUID -o value /dev/sda2").succeeds(self._NEW)
+            _ = mock.on("blkid -s PARTUUID -o value /dev/sda3").succeeds(self._SWAP)
+            _ = mock.on("blkid -s UUID -o value /dev/sda1").succeeds("ABCD-1234")
+
+        def vdev(disk: str, n: int, _log: Log) -> str:
+            seen["vdev"].append((disk, n))
+            return f"/dev/disk/by-id/target-part{n}"
+
+        def bpool(*args: object) -> tuple[str, list[str]]:
+            seen["bpool"].append(args)
+            return "", []
+
+        def gaps(*args: object) -> list[str]:
+            seen["gaps"].append(args)
+            return []
+
+        def chain(*args: object, **kw: object) -> list[str]:
+            seen["chain"].append((len(mock_ref[0].calls), args, kw))
+            return []
+
+        def banner(_self: Log, title: str, lines: list[str] | None = None) -> None:
+            seen["banner"] = (title, "\n".join(lines or []))
+
+        real_exists = Path.exists
+
+        def exists(self: Path) -> bool:  # the target disk's partitions
+            return str(self).startswith("/dev/sda") or real_exists(self)
+
+        with tempfile.TemporaryDirectory() as td:
+            mnt = os.path.join(td, "mnt")
+            seen["mnt"] = mnt
+            for rel in ("usr/bin", "etc"):
+                Path(mnt, rel).mkdir(parents=True)
+            Path(mnt, "usr/bin/bash").write_text("", encoding="ascii")
+            for name in ("fstab", "crypttab"):
+                _ = shutil.copy(_BOOT_FIXTURES / name, Path(mnt, "etc", name))
+            extra: list[AbstractContextManager[object]] = [
+                patch.object(recover_mod, "RECOVER_MNT", mnt),
+                patch.object(boot_chain, "RECOVER_MNT", mnt),
+                patch.object(Path, "exists", exists),
+                patch.object(recover_mod, "build_plan", return_value=plan),
+                patch.object(recover_mod, "_pools_from_record", return_value=({}, "ext4", rec)),
+                patch.object(recover_mod, "restore_rpool_rows", return_value=[]),
+                patch.object(recover_mod, "_restore_encryption_root", return_value=[]),
+                patch.object(recover_mod, "restore_bpool", side_effect=bpool),
+                patch.object(recover_mod, "_export_verified"),
+                patch.object(recover_mod, "_refuse_imported_system_pools"),
+                patch.object(recover_mod, "_stable_vdev", side_effect=vdev),
+                patch.object(recover_mod, "drop_prepare_snapshot"),
+                patch.object(recover_mod, "kernel_gaps", side_effect=gaps),
+                patch.object(recover_mod, "install_boot_chain", side_effect=chain),
+                patch.object(recover_mod, "regenerate_initrd", return_value=[]),
+                patch.object(Log, "banner_ok", autospec=True, side_effect=banner),
+                patch.object(Log, "banner_error", autospec=True, side_effect=banner),
+            ]
+            mock = TestRecoverNoWipeBeforeYes()._run_in(  # pylint: disable=protected-access
+                td, "YES", shell_setup=shell, extra=extra, everything_succeeds=True
+            )
+            seen["fstab"] = Path(mnt, "etc/fstab").read_text(encoding="ascii")
+            seen["crypttab"] = Path(mnt, "etc/crypttab").read_text(encoding="ascii")
+        return mock, seen
+
+    @staticmethod
+    def _at(calls: list[str], text: str) -> int:
+        """Index of the first call that starts with ``text``; fails without one."""
+        found = [i for i, c in enumerate(calls) if c.startswith(text)]
+        assert found, f"{text!r} not run"
+        return found[0]
+
+    def test_an_ext4_point_is_laid_out_mounted_copied_and_rewritten_in_order(self):  # pylint: disable=too-many-locals
+        mock, seen = self._run()
+        calls, mnt, boot = mock.calls, seen["mnt"], seen["boot"]
+        parts = recover_ext4.ext4_partitions(boot)
+        sgdisk = [c for c in calls if c.startswith("sgdisk -n")]
+        assert sgdisk == recover_ext4.sgdisk_commands(parts, "/dev/sda"), sgdisk
+        assert len(sgdisk) == 4 and sgdisk[-1].endswith("-t4:BF00 /dev/sda")
+        mkfs = self._at(calls, "mkfs.ext4")
+        assert calls[mkfs] == recover_ext4.mkfs_boot_command(boot, "/dev/sda2")
+        create = self._at(calls, "zpool create")
+        assert self._at(calls, "blkid -p -s UUID -o value /dev/sda2") < create
+        assert mkfs < create
+        assert seen["vdev"] == [("/dev/sda", 4)]
+        assert "/dev/disk/by-id/target-part4" in calls[create]
+        assert not [c for c in calls if c.startswith("zpool create") and "bpool" in c]
+        assert not seen["bpool"] and not mock.was_called("zfs mount bpool")
+        # Step 13: the root, the new /boot on partition 2, the copy into it,
+        # then the rest; the ESP after the copy.
+        root = self._at(calls, f"zfs mount rpool/ROOT/{_BE}")
+        ext4 = self._at(calls, f"mount -t ext4 /dev/sda2 {mnt}/boot")
+        mount_all = self._at(calls, "zfs mount -a")
+        copy = self._at(calls, f"mount -t zfs -o ro rpool/ROOT/{_BE}/zark-boot ")
+        rsync = self._at(calls, "rsync -aHAX --numeric-ids ")
+        assert calls[rsync].endswith(f"/ {mnt}/boot/")
+        vfat = self._at(calls, "mkfs.vfat -F32 /dev/sda1")
+        esp = self._at(calls, f"mount /dev/sda1 {mnt}/boot/efi")
+        assert root < ext4 < mount_all < copy < rsync < vfat < esp
+        assert seen["gaps"] == [(mnt, self._COPY_SNAP, boot_layout.BOOT_COPY)]
+        # The rewrites, then the boot chain told the layout and both UUIDs.
+        assert f"/dev/disk/by-uuid/{self._NEW} /boot ext4" in seen["fstab"]
+        assert self._OLD not in seen["fstab"]
+        assert f"dm_crypt-0 PARTUUID={self._SWAP} " in seen["crypttab"]
+        assert len(seen["chain"]) == 1
+        at, _args, kw = seen["chain"][0]
+        assert at > esp
+        assert kw["layout"] == "ext4" and kw["boot_uuids"] == (self._OLD, self._NEW)
+        assert not mock.was_called("apt-get install")
+        title, lines = seen["banner"]
+        assert title == "RECOVERY COMPLETE", lines
+        assert "bpool" not in lines
+
+    def test_a_record_without_swap_gives_three_partitions(self):
+        mock, seen = self._run(swap=False)
+        calls = mock.calls
+        sgdisk = [c for c in calls if c.startswith("sgdisk -n")]
+        assert len(sgdisk) == 3 and sgdisk[-1].endswith("-t3:BF00 /dev/sda"), sgdisk
+        assert seen["vdev"] == [("/dev/sda", 3)]
+        assert "/dev/disk/by-id/target-part3" in calls[self._at(calls, "zpool create")]
+        assert not mock.was_called("blkid -s PARTUUID")
+        assert seen["crypttab"] == (_BOOT_FIXTURES / "crypttab").read_text(encoding="ascii")
+        assert seen["banner"][0] == "RECOVERY COMPLETE", seen["banner"]
+
+    def test_a_failed_mount_of_the_new_boot_stops_before_the_copy(self):
+        def fail(mock: MockShell) -> None:
+            _ = mock.on_prefix("mount -t ext4 /dev/sda2 ").fails("wrong fs type")
+
+        mock, seen = self._run(shell_setup=fail)
+        assert mock.was_called("mount -t ext4 /dev/sda2 ")
+        assert not mock.was_called("zfs mount -a") and not mock.was_called("rsync ")
+        assert not seen["chain"]
+        title, lines = seen["banner"]
+        assert title == "FATAL ERROR" and "Cannot mount the new /boot (/dev/sda2)" in lines
+
+    def test_a_failed_copy_is_an_error_of_the_recover(self):
+        def fail(mock: MockShell) -> None:
+            _ = mock.on_prefix("rsync -aHAX --numeric-ids ").fails("no space", rc=11)
+
+        _, seen = self._run(shell_setup=fail)
+        title, lines = seen["banner"]
+        assert title == "RECOVERY COMPLETED WITH ERRORS"
+        assert "/boot: copying rpool/ROOT/" in lines and "rsync status 11" in lines, lines
+
+    def test_an_unreadable_new_uuid_stops_before_rpool_is_created(self):
+        def empty(mock: MockShell) -> None:
+            _ = mock.on("blkid -p -s UUID -o value /dev/sda2").succeeds("")
+
+        mock, seen = self._run(shell_setup=empty)
+        assert mock.was_called("mkfs.ext4") and not mock.was_called("zpool create")
+        title, lines = seen["banner"]
+        assert title == "FATAL ERROR" and "Cannot read the new /boot's UUID" in lines
+
+    def test_the_live_gets_the_ext4_tools_it_lacks(self):
+        def no_rsync(mock: MockShell) -> None:
+            _ = mock.on("which rsync").fails()
+
+        mock, _ = self._run(shell_setup=no_rsync)
+        assert mock.was_called("apt-get install -y rsync")
+        installs = [c for c in mock.calls if c.startswith("apt-get install")]
+        assert installs == ["apt-get install -y rsync"], installs
 
 
 class TestRecoverListCache:  # pylint: disable=missing-function-docstring
