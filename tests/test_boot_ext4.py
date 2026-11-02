@@ -65,7 +65,7 @@ from lib import (
 )
 from lib.log import Log
 from lib.restore_points import Snap
-from lib.zfs import ZFS, DatasetInfo
+from lib.zfs import BACKUP_ALTROOT_BASE, ZFS, DatasetInfo
 from tests.mock_sh import MockShell, patch_sh
 
 ORIGIN = ("rpool", "bpool")
@@ -256,6 +256,8 @@ class TestBootLayoutCallers:  # pylint: disable=missing-function-docstring
 
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "boot-ext4"
+# The mountpoint the bench lists for a dataset at / of its pool "c".
+_ALTROOT_C = f"{BACKUP_ALTROOT_BASE}/c"
 _UUID = "0b0e7e57-0000-4000-8000-000000000001"
 _SWAP_PARTUUID = "00000000-0000-4000-8000-0000000000a3"
 _LINUX_FS = "0fc63daf-8483-4772-8e79-3d69d8477de4"
@@ -2078,12 +2080,33 @@ class TestSelftestBoot:  # pylint: disable=missing-function-docstring
         assert boots == [f"{be}/boot", "c/BOOT/be"]
         assert f"{be}/zark-boot" not in roots + boots
 
+    def test_boot_09_reads_the_bench_without_its_altroot(self):
+        """M13R-11: the altroot itself is /, a value under it loses the
+        prefix, legacy and none stay, a sibling path is not under it."""
+        rows = [
+            ("c", "on", "none"),
+            ("c/be", "noauto", _ALTROOT_C),
+            ("c/be/boot", "on", f"{_ALTROOT_C}/boot"),
+            ("c/be/zark-boot", "noauto", "legacy"),
+            ("c/x", "on", f"{_ALTROOT_C}x"),
+        ]
+        got = selftest_boot._unrooted(rows, _ALTROOT_C)  # pylint: disable=protected-access
+        assert got == [
+            ("c", "on", "none"),
+            ("c/be", "noauto", "/"),
+            ("c/be/boot", "on", "/boot"),
+            ("c/be/zark-boot", "noauto", "legacy"),
+            ("c/x", "on", f"{_ALTROOT_C}x"),
+        ]
+        assert not selftest_boot._grub_roots(rows)  # pylint: disable=protected-access
+
     @staticmethod
     def _boot_09(script: str | None) -> tuple[str, MagicMock]:
         """BOOT-09 on a bench whose zfs list gives an installer's BE and its
         copy, with ``script`` as the host's 10_linux_zfs (None: absent);
         (PASS, FAIL: <came> or SKIP, the bench)."""
-        rows = "c\ton\tnone\nc/be\tnoauto\t/\nc/be/zark-boot\tnoauto\tlegacy\n"
+        # As the bench lists them: under the pool's altroot (M13R-11).
+        rows = f"c\ton\tnone\nc/be\tnoauto\t{_ALTROOT_C}\nc/be/zark-boot\tnoauto\tlegacy\n"
         bench = MagicMock()
         bench.make_pool.return_value = "c"
         bench.fs.side_effect = lambda name, *_props: name

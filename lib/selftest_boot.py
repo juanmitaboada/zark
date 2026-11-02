@@ -30,6 +30,7 @@ from lib import boot_rewrite, exclusions, platform_facts, pool_record, sh, upgra
 from lib.boot_layout import BOOT_COPY, boot_mount
 from lib.recover_ext4 import mkfs_boot_command
 from lib.selftest import Bench, Fail, Skip, check, exit_status, expect, text_of
+from lib.zfs import BACKUP_ALTROOT_BASE
 
 
 def _q(s: str) -> str:
@@ -342,6 +343,24 @@ def boot_04(b: Bench) -> None:
 # ── what GRUB and setup do with zark-boot ────────────────────────────────
 
 
+def _unrooted(rows: list[tuple[str, str, str]], root: str) -> list[tuple[str, str, str]]:
+    """The bench's ``zfs list`` rows with its pool's altroot ``root`` taken
+    off each mountpoint, as the installed system lists them and as
+    10_linux_zfs compares them (its ``rel_pool_root`` has no altroot). libzfs
+    prints a mountpoint with the altroot in front, and ``/`` as the altroot
+    itself (OpenZFS 2.4.1 lib/libzfs/libzfs_dataset.c:2697-2760; POOL-02):
+    ``root`` becomes ``/``, a value under it loses the prefix, ``legacy``,
+    ``none`` and anything else stay as they are (M13R-11)."""
+    out: list[tuple[str, str, str]] = []
+    for name, can, mp in rows:
+        if mp == root:
+            mp = "/"
+        elif mp.startswith(f"{root}/"):
+            mp = mp[len(root) :]
+        out.append((name, can, mp))
+    return out
+
+
 def _grub_roots(rows: list[tuple[str, str, str]]) -> list[str]:
     """10_linux_zfs's root candidates as M13's review read them: a dataset
     with canmount on or noauto whose mountpoint is ``/``."""
@@ -425,14 +444,18 @@ def boot_09(b: Bench) -> None:
     ``/``; ``/boot``: the child named ``<root>/boot``, a dataset named as
     the root mounted at ``/boot``, a canmount=on one at ``/boot``) never
     give ``zark-boot``; recover's inferred mount properties agree
-    (lib/mount_props.py:108-112). Then the host's 10_linux_zfs must still
+    (lib/mount_props.py:108-112). The bench's pool is imported under an
+    altroot, so its listing is read with the altroot taken off first
+    (:func:`_unrooted`), never with a pool imported without one: a BE with
+    ``mountpoint=/`` there would be the running root's. Then the host's 10_linux_zfs must still
     hold those selections (:data:`GRUB_ZFS_SELECTIONS`), read only; without
     the script that part skips."""
     c, be, copy = _copy_tree(b)
     try:
         r = b.ok(f"zfs list -H -o name,canmount,mountpoint -r {c}")
-        rows = [tuple(ln.split("\t")) for ln in r.lines if ln.count("\t") == 2]
-        roots = _grub_roots(rows)  # type: ignore[arg-type]
+        listed = [tuple(ln.split("\t")) for ln in r.lines if ln.count("\t") == 2]
+        rows = _unrooted(listed, f"{BACKUP_ALTROOT_BASE}/{c}")  # type: ignore[arg-type]
+        roots = _grub_roots(rows)
         ok = be in roots and copy not in roots
         expect(
             ok,
@@ -440,7 +463,7 @@ def boot_09(b: Bench) -> None:
             f"{len(roots)} root(s)",
             " ".join(roots),
         )
-        boots = _grub_boots(be, rows)  # type: ignore[arg-type]
+        boots = _grub_boots(be, rows)
         expect(copy not in boots, "the copy not a /boot", f"{len(boots)} /boot(s)", " ".join(boots))
     finally:
         b.drop_pool(c)
