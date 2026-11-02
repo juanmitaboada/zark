@@ -39,6 +39,7 @@ from lib import (
     mount_props,
     origin_prune,
     pool_record,
+    recover_ext4,
     replication as repl,
     retention,
     survey,
@@ -569,11 +570,10 @@ def _from_record(
         patch("builtins.input", return_value=""),
     ):
         try:
-            got = dict(
-                recover_mod._pools_from_record(  # pylint: disable=protected-access
-                    "backup", _POINT, _SNAPS if snaps is None else snaps, _BE, meta or {}, _log()
-                )
+            specs, _, _ = recover_mod._pools_from_record(  # pylint: disable=protected-access
+                "backup", _POINT, _SNAPS if snaps is None else snaps, _BE, meta or {}, _log()
             )
+            got = dict(specs)
         except SystemExit:
             got = None
     return out.getvalue(), mock, got
@@ -1193,3 +1193,175 @@ class TestBootCopyRetention:  # pylint: disable=missing-function-docstring
         inv = origin_prune.inventory(origin, {})
         targets = [i.target for i in origin_prune.older_than(inv, _NOW - 30 * _DAY)]
         assert targets == [f"{_COPY}@autosnap_2026-09-24_00:00:01_daily"]
+
+
+def _plan(rows: dict[str, bool]) -> MagicMock:
+    """A restore plan whose rows are ``rel -> restored``."""
+    plan = MagicMock()
+    plan.be = "ubuntu_abc123"
+    plan.pool = "backup"
+    plan.keystore_snap = "backup/keystore@p"
+    plan.row.side_effect = lambda rel: MagicMock(restored=rows[rel]) if rel in rows else None
+    return plan
+
+
+def _preflight(
+    plan: MagicMock, boot: pool_record.BootRecord | None, missing: str = "", layout: str = ""
+) -> str:
+    mock = MockShell()
+    mock.on("findmnt -rn -o TARGET").succeeds("/\n")
+    mock.on("zpool list rpool").fails("no such pool")
+    mock.on("zpool list bpool").fails("no such pool")
+    for tool in [*recover_mod.RECOVER_TOOLS, *recover_ext4.EXT4_RECOVER_TOOLS]:
+        if tool == missing:
+            mock.on(f"which {tool}").fails("")
+        else:
+            mock.on(f"which {tool}").succeeds(f"/usr/bin/{tool}")
+    mock.on("zfs list backup/keystore").succeeds("backup/keystore")
+    out = StringIO()
+    with (
+        patch_sh(mock),
+        patch.object(recover_mod, "_check_sizes"),
+        patch("builtins.input", return_value=""),
+        redirect_stdout(out),
+    ):
+        try:
+            recover_mod._preflight(  # pylint: disable=protected-access
+                plan,
+                "/dev/sda",
+                _log(),
+                boot,
+                layout or ("ext4" if boot is not None else "bpool"),  # type: ignore[arg-type]
+            )
+        except SystemExit:
+            return "REFUSED\n" + out.getvalue()
+    return out.getvalue()
+
+
+_BE_ROOT = "rpool/ROOT/ubuntu_abc123"
+
+
+class TestRecoverExt4Layout:  # pylint: disable=missing-function-docstring
+    """M12-5 5a, M12R-6, M12R-8, M13F-5: an ext4 point's preflight and disk."""
+
+    def test_the_disk_is_laid_out_as_origin_had_it(self):
+        parts = recover_ext4.ext4_partitions(_boot_record())
+        assert [(p.number, p.size, p.type_code, p.role) for p in parts] == [
+            (1, 2201600 * 512, "EF00", "esp"),
+            (2, 2 * 1024**3, "8300", "boot"),
+            (3, 4 * 1024**3, "8300", "swap"),
+            (4, 0, "BF00", "rpool"),
+        ]
+        assert recover_ext4.sgdisk_commands(parts, "/dev/sda") == [
+            "sgdisk -n1:1M:+1100800K -t1:EF00 /dev/sda",
+            "sgdisk -n2:0:+2097152K -t2:8300 /dev/sda",
+            "sgdisk -n3:0:+4194304K -t3:8300 /dev/sda",
+            "sgdisk -n4:0:0 -t4:BF00 /dev/sda",
+        ]
+
+    def test_without_swap_or_esp_record_rpool_is_the_third(self):
+        small = _boot_record(
+            esp=None, swap=None, partition=pool_record.Partition(512 * 1024**2, _LINUX_FS)
+        )
+        parts = recover_ext4.ext4_partitions(small)
+        assert [(p.number, p.size, p.role) for p in parts] == [
+            (1, 1024**3, "esp"),
+            (2, 2 * 1024**3, "boot"),
+            (3, 0, "rpool"),
+        ]
+        before = recover_mod._before_rpool_bytes(small)  # pylint: disable=protected-access
+        assert before == 2 * 1024**2 + 3 * 1024**3
+
+    def test_the_esp_keeps_its_recorded_size_within_bounds(self):
+        """N3: at least 1 GiB, at most 4 GiB, whatever /boot/efi was mounted from."""
+
+        def esp(size: int) -> int:
+            return recover_ext4.esp_bytes(_boot_record(esp=pool_record.Esp(size, "1A2B-3C4D")))
+
+        assert esp(2201600 * 512) == 2201600 * 512
+        assert esp(512 * 1024**2) == 1024**3
+        assert esp(500 * 1024**3) == 4 * 1024**3
+        assert recover_ext4.esp_bytes(_boot_record(esp=None)) == 1024**3
+
+    def test_the_new_boot_has_exactly_the_recorded_features_and_a_new_uuid(self):
+        cmd = recover_ext4.mkfs_boot_command(_boot_record(), "/dev/sda2")
+        assert cmd == ("mkfs.ext4 -F -O none," + ",".join(pool_record.EXT4_FEATURES) + " /dev/sda2")
+        assert " -U " not in cmd
+        assert "-L boot " in recover_ext4.mkfs_boot_command(_boot_record(label="boot"), "/dev/x")
+
+    def test_an_ext4_point_without_its_boot_copy_is_refused(self):
+        out = _preflight(_plan({_BE_ROOT: True}), _boot_record())
+        assert out.startswith("REFUSED")
+        assert f"This point has no copy of /boot ({_BE_ROOT}/zark-boot)" in out
+        assert "Nothing was erased" in out
+
+    def test_an_ext4_point_whose_copy_is_not_restored_is_refused(self):
+        out = _preflight(_plan({_BE_ROOT: True, _COPY: False}), _boot_record())
+        assert out.startswith("REFUSED")
+
+    def test_an_ext4_point_with_its_copy_passes_without_the_bpool_warning(self):
+        out = _preflight(_plan({_BE_ROOT: True, _COPY: True}), _boot_record())
+        assert not out.startswith("REFUSED")
+        assert "No bpool snapshot" not in out
+
+    def test_an_ext4_point_needs_rsync_and_e2fsprogs(self):
+        out = _preflight(_plan({_BE_ROOT: True, _COPY: True}), _boot_record(), missing="rsync")
+        assert out.startswith("REFUSED") and "Missing tools in the live session: rsync" in out
+
+    def test_an_ext4_point_without_its_record_is_refused_here_too(self):
+        """M13R-1: the preflight takes the layout from the drive too."""
+        out = _preflight(_plan({_BE_ROOT: True, _COPY: True}), None, layout="ext4")
+        assert out.startswith("REFUSED") and "has no record of origin's disk" in out
+
+    def test_a_bpool_point_needs_none_of_them(self):
+        out = _preflight(_plan({_BE_ROOT: True}), None, missing="rsync")
+        assert not out.startswith("REFUSED")
+        assert "No bpool snapshot at this point" in out
+
+    def test_an_ext4_points_pools_are_rpool_alone(self):
+        rec = _record(
+            pools={"rpool": pool_record.PoolState("off", {"encryption": "active"})},
+            boot=_boot_record(),
+            min_recover="2.2.0",
+        )
+        mock = MockShell()
+        mock.on("zpool upgrade -v").succeeds("")
+        with (
+            patch_sh(mock),
+            patch.object(pool_record, "read", return_value=rec),
+            patch.object(recover_mod, "refuse_unrecoverable"),
+            patch.object(recover_mod.zfs_features, "parse_upgrade_v", return_value=["encryption"]),
+            redirect_stdout(StringIO()),
+        ):
+            specs, layout, got = recover_mod._pools_from_record(  # pylint: disable=protected-access
+                "backup", "p", [], "ubuntu_abc123", {}, _log()
+            )
+        assert set(specs) == {"rpool"} and layout == "ext4" and got is rec
+
+    def test_an_ext4_point_on_a_live_lacking_an_active_feature_is_refused(self):
+        rec = _record(
+            pools={
+                "rpool": pool_record.PoolState(
+                    "off", {"encryption": "active", "block_cloning_endian": "active"}
+                )
+            },
+            boot=_boot_record(),
+            min_recover="2.2.0",
+        )
+        out = StringIO()
+        with (
+            patch_sh(MockShell()),
+            patch.object(pool_record, "read", return_value=rec),
+            patch.object(recover_mod, "refuse_unrecoverable"),
+            patch.object(recover_mod.zfs_features, "parse_upgrade_v", return_value=["encryption"]),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            try:
+                recover_mod._pools_from_record("backup", "p", [], "ubuntu_abc123", {}, _log())  # pylint: disable=protected-access
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("expected a refusal")
+        assert "This live's ZFS lacks features origin's pools had active" in out.getvalue()
+        assert "Nothing was erased" in out.getvalue()

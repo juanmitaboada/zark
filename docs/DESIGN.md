@@ -45,6 +45,8 @@ zark/
 │   ├── pool_record.py         # How origin's pools were at a backup point (features, versions)
 │   ├── progress.py            # /run/zark/progress.json: what the running command does
 │   ├── reclaim.py             # What removing snapshots from a drive frees
+│   ├── recover_checks.py      # What recover refuses from a point's record, before erasing
+│   ├── recover_ext4.py        # recover's disk for a point whose /boot was on ext4
 │   ├── registry.py            # known_drives.json: parsing, validation, atomic writes
 │   ├── replication.py         # Backup planner: what each dataset needs (pure)
 │   ├── restore_plan.py        # recover's plan: the point and what each dataset gets

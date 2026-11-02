@@ -72,7 +72,7 @@ from lib import (
 )
 from lib.backup_layout import find_be as _find_be
 from lib.boot_chain import RECOVER_MNT, install_boot_chain, mount_restored_system
-from lib.boot_layout import Layout
+from lib.boot_layout import BOOT_COPY, Layout
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, zark_command
 from lib.drives import backup_device, scan_connected_drives, select_drive
@@ -80,6 +80,14 @@ from lib.identity import BY_ID_DIR, by_id_names, preferred_by_id, protected_disk
 from lib.initrd import installed_kernels, kernels_without_vmlinuz, regenerate_initrd
 from lib.keystore import SYSTEM_KEY_PATH, Keystore, open_keystore
 from lib.log import Log
+from lib.recover_checks import refuse_unreadable, refuse_unrecoverable
+from lib.recover_ext4 import (
+    EXT4_RECOVER_TOOLS,
+    before_rpool_bytes,
+    ext4_partitions,
+    mkfs_boot_command,
+    sgdisk_commands,
+)
 from lib.restore_plan import (
     RestorePlan,
     RestoreRow,
@@ -146,6 +154,13 @@ _BPOOL_PART_BYTES = 2 * 1024**3
 _RECOVER_TARGET_OVERHEAD_PCT = 5
 
 
+def _before_rpool_bytes(boot: pool_record.BootRecord | None) -> int:
+    """The disk space before rpool's partition, alignment slack included."""
+    if boot is None:
+        return _LAYOUT_BEFORE_RPOOL_MIB * 1024**2
+    return before_rpool_bytes(boot)
+
+
 # The tools recover runs on the live, by the package that has them (M2P.3):
 # no syncoid, pv, mbuffer, lzop, bc or sanoid, which recover never runs.
 RECOVER_TOOLS = {
@@ -158,9 +173,10 @@ RECOVER_TOOLS = {
 }
 
 
-def _install_missing_tools(log: Log) -> None:
+def _install_missing_tools(log: Log, tools: dict[str, str] | None = None) -> None:
     """Install the packages of the tools the live lacks, only those."""
-    missing = sorted({pkg for t, pkg in RECOVER_TOOLS.items() if not sh.run(f"which {t}").ok})
+    wanted = RECOVER_TOOLS if tools is None else tools
+    missing = sorted({pkg for t, pkg in wanted.items() if not sh.run(f"which {t}").ok})
     if missing:
         log.info(f"Installing required packages: {' '.join(missing)}")
         _ = sh.run(f"apt-get install -y {' '.join(missing)}", log=log)
@@ -275,97 +291,17 @@ def _abort_missing_keystore(reason: str, pool_name: str, log: Log) -> NoReturn:
 # ── Restore plan ─────────────────────────────────────────────────────────
 
 
-def _refuse_min_recover(min_recover: str, written_by: str, log: Log) -> None:
-    """FATAL when this zark does not meet ``min_recover`` or cannot read it
-    (M12-8); nothing when it does."""
-    if pool_record.recovers(min_recover):
-        return
-    title = (
-        f"This point needs zark {min_recover} or later to recover"
-        if pool_record.zark_version_tuple(min_recover) is not None
-        else "This point's record names an oldest zark this one cannot read: " + min_recover
-    )
-    log.fatal(
-        title,
-        causes=[f"It was written by zark {written_by or '(not recorded)'}; this is zark {VERSION}"],
-        solutions=[
-            "Run recover from a live session with a newer zark",
-            "Nothing was erased",
-        ],
-    )
-
-
-def refuse_unrecoverable(rec: pool_record.PoolRecord | None, layout: Layout, log: Log) -> None:
-    """Refuse, before anything is erased, a point this zark must not
-    recover: one whose ``min_recover`` it does not meet or cannot read
-    (M12-8), one whose ``/boot`` is on ext4 but which has no record to lay
-    the disk out from (M13R-1), and any ext4 point, which this build does
-    not lay out (M13F-3). ``layout`` is :func:`lib.pool_record.point_layout`'s."""
-    if rec is None:
-        if layout == "ext4":
-            log.fatal(
-                "This point's /boot is on ext4, and it has no record of origin's disk",
-                causes=[
-                    "The drive holds a copy of /boot or says its system has /boot on ext4, "
-                    + "but this point does not record origin's pools and partitions",
-                    "An interrupted run and a carried sanoid snapshot have no record; "
-                    + "without one recover cannot lay the disk out",
-                ],
-                solutions=[
-                    "Choose a point of a complete backup run",
-                    "Nothing was erased",
-                ],
-            )
-        return
-    _refuse_min_recover(rec.min_recover, rec.written_by, log)
-    if layout == "ext4":
-        log.fatal(
-            "This point's /boot is on ext4, which this zark does not recover",
-            causes=[
-                f"Written by zark {rec.written_by or '(not recorded)'} for a system with /boot "
-                + "on an ext4 partition and no bpool",
-                *(
-                    [f"Its /boot record is unreadable: {rec.boot_problem}"]
-                    if rec.boot_problem
-                    else []
-                ),
-            ],
-            solutions=[
-                "Run recover with a zark that recovers the ext4 layout",
-                "Nothing was erased",
-            ],
-        )
-
-
-def _refuse_unreadable(point: str, e: pool_record.RecordError, log: Log) -> NoReturn:
-    """FATAL for a record that is there but cannot be read (M13R-2): by the
-    zark it names when it names one this zark does not meet, else as
-    unreadable. Never a pass: the record decides how the disk is laid out."""
-    _refuse_min_recover(e.min_recover, e.written_by, log)
-    log.fatal(
-        f"The record of origin's pools at {point} cannot be read: {e}",
-        causes=[
-            f"It was written by zark {e.written_by or '(not recorded)'}; this is zark {VERSION}",
-            "recover lays the disk out from this record; without it the point's layout "
-            + "is not known",
-        ],
-        solutions=[
-            "Choose another point",
-            "Run recover from a live session with a newer zark",
-            "Nothing was erased",
-        ],
-    )
-
-
 def _pools_from_record(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     pool: str, point: str, snaps: list[Snap], be: str, meta: dict[str, str], log: Log
-) -> dict[str, pool_record.Create]:
-    """How rpool and bpool are created from the point's record of origin's
-    pools (M6-6), decided before anything is erased: a feature origin had
-    active that this ZFS lacks is a FATAL here, and so is a record that
-    cannot be read (M13R-2). Empty without a record: the pools are created
-    as before 2.0.0-rc11, with a WARN (M6-7), unless the point is an ext4
-    one by the drive's other marks (M13R-1)."""
+) -> tuple[dict[str, pool_record.Create], Layout, pool_record.PoolRecord | None]:
+    """How the point's pools are created from its record of origin's pools
+    (M6-6), decided before anything is erased: a feature origin had active
+    that this ZFS lacks is a FATAL here, and so is a record that cannot be
+    read (M13R-2). The pools are rpool and bpool for a bpool point, rpool
+    alone for an ext4 one. Empty specs without a record: the pools are
+    created as before 2.0.0-rc11, with a WARN (M6-7), unless the point is
+    an ext4 one by the drive's other marks (M13R-1). The point's layout
+    (:func:`lib.pool_record.point_layout`) and its record come back too."""
     try:
         rec = pool_record.read(pool, point, snaps)
     except survey.ReadError as e:
@@ -375,20 +311,22 @@ def _pools_from_record(  # pylint: disable=too-many-arguments,too-many-positiona
             solutions=[f"Check the drive: zpool status {pool}", "Run recover again"],
         )
     except pool_record.RecordError as e:
-        _refuse_unreadable(point, e, log)
-    refuse_unrecoverable(rec, pool_record.point_layout(rec, snaps, be, meta), log)
+        refuse_unreadable(point, e, log)
+    layout = pool_record.point_layout(rec, snaps, be, meta)
+    refuse_unrecoverable(rec, layout, log)
+    pools = pool_record.pools_for(layout)
     known = set(zfs_features.parse_upgrade_v(sh.run("zpool upgrade -v").stdout))
-    if rec is None or not known or not all(p in rec.pools for p in ("rpool", "bpool")):
-        live = ", ".join(ln.strip() for ln in sh.run("zfs version").lines) or "unknown"
+    if rec is None or not known or not all(p in rec.pools for p in pools):
         # Both lines: without -d, zpool create enables what the module supports
         # (fi_zfs_mod_supported, cmd/zpool/zpool_main.c:2240-2286 at OpenZFS 2.4.1).
         log.warn(
-            f"{_no_record_why(rec, known)}: rpool gets every feature "
-            + f"of this live's ZFS ({live}). If the restored "
+            f"{_no_record_why(rec, known, pools)}: rpool gets every feature of this live's ZFS "
+            + f"({', '.join(ln.strip() for ln in sh.run('zfs version').lines) or 'unknown'}). "
+            + "If the restored "
             + "system runs an older OpenZFS, it may not import rpool once one of them is active."
         )
-        return {}
-    specs = {p: pool_record.create_spec(rec.pools[p], known) for p in ("rpool", "bpool")}
+        return {}, layout, rec
+    specs = {p: pool_record.create_spec(rec.pools[p], known) for p in pools}
     lacking = [f"{p}: {', '.join(s.lacking_active)}" for p, s in specs.items() if s.lacking_active]
     if lacking:
         names = sorted({f for s in specs.values() for f in s.lacking_active})
@@ -425,13 +363,17 @@ def _pools_from_record(  # pylint: disable=too-many-arguments,too-many-positiona
             log.info(f"  {p}: not enabled, this ZFS lacks them: {', '.join(s.lacking_enabled)}")
         if s.compat_missing:
             log.info(f"  {p}: compatibility={s.compat_missing} left off (not on this live)")
-    return specs
+    return specs, layout, rec
 
 
-def _no_record_why(rec: pool_record.PoolRecord | None, known: set[str]) -> str:
+def _no_record_why(
+    rec: pool_record.PoolRecord | None,
+    known: set[str],
+    pools: tuple[str, ...] = pool_record.ORIGIN_POOLS,
+) -> str:
     """Why the pools are created as before 2.0.0-rc11, for recover's WARN (M6-7)."""
     # A whole record on a live that lists no feature is not an old point (M6R-4).
-    if rec is not None and not known and all(p in rec.pools for p in ("rpool", "bpool")):
+    if rec is not None and not known and all(p in rec.pools for p in pools):
         return (
             "This live's zpool upgrade -v lists no feature, so origin's recorded pool "
             + "features cannot be checked against it"
@@ -503,6 +445,31 @@ def _rpool_create_cmd(
     )
 
 
+def _create_bpool(
+    bpool_spec: pool_record.Create | None, bpool_vdev: str, cleanup: Cleanup, log: Log
+) -> None:
+    """Step 7's bpool, as origin had it (M6-6); without a record, only
+    GRUB-safe features."""
+    features = (
+        bpool_spec.options()
+        if bpool_spec
+        else "-d " + " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
+    )
+    r = sh.run(
+        f"zpool create -f -o ashift=12 -o autotrim=on {features} "
+        + f"{pool_record.root_options(bpool_spec, ROOT_PROPS['bpool'])[0]} "
+        # The root at /boot, as the installer has it (M6X.1); canmount=off keeps
+        # zpool create from mounting it (lib/libzfs/libzfs_mount.c:241-262).
+        + "-O mountpoint=/boot -O canmount=off "
+        + f"-R {RECOVER_MNT} bpool {bpool_vdev}",
+        log=log,
+    )
+    if not r.ok:
+        log.fatal("Failed to create bpool")
+    cleanup.track_pool("bpool")
+    log.ok("bpool created")
+
+
 def _stable_vdev(disk: str, n: int, log: Log) -> str:
     """Partition ``n`` of ``disk`` by its /dev/disk/by-id name, for the pool vdev.
 
@@ -529,8 +496,11 @@ def _disk_size_bytes(disk: str) -> int:
         return 0
 
 
-def _check_sizes(plan: RestorePlan, target_disk: str, log: Log) -> None:
-    """Hallazgo 14: size against the chosen point, fail-closed on any unknown."""
+def _check_sizes(
+    plan: RestorePlan, target_disk: str, log: Log, boot: pool_record.BootRecord | None = None
+) -> None:
+    """Hallazgo 14: size against the chosen point, fail-closed on any unknown;
+    ``boot`` the record of an ext4 point, whose partitions come before rpool's."""
     unknown = [r.rel for r in plan.rows if r.restored and r.referenced < 0]
     if plan.keystore_bytes < 0:
         unknown.append("keystore")
@@ -543,7 +513,7 @@ def _check_sizes(plan: RestorePlan, target_disk: str, log: Log) -> None:
                 *([f"size of {target_disk} unknown"] if disk_bytes <= 0 else []),
             ],
         )
-    rpool_part = disk_bytes - _LAYOUT_BEFORE_RPOOL_MIB * 1024**2
+    rpool_part = disk_bytes - _before_rpool_bytes(boot)
     need_r = plan.rpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
     need_b = plan.bpool_bytes * (100 + _RECOVER_TARGET_OVERHEAD_PCT) // 100
     if need_r > rpool_part or need_b > _BPOOL_PART_BYTES:
@@ -559,7 +529,11 @@ def _check_sizes(plan: RestorePlan, target_disk: str, log: Log) -> None:
     log.info(
         f"Restore size: rpool {sh.humanize_bytes(plan.rpool_bytes)} "
         + f"(partition {sh.humanize_bytes(max(rpool_part, 0))}), "
-        + f"bpool {sh.humanize_bytes(plan.bpool_bytes)} (partition 2G)",
+        + (
+            f"bpool {sh.humanize_bytes(plan.bpool_bytes)} (partition 2G)"
+            if boot is None
+            else f"/boot on ext4 (partition {sh.humanize_bytes(ext4_partitions(boot)[1].size)})"
+        ),
     )
     if need_r > rpool_part or need_b > _BPOOL_PART_BYTES:
         log.fatal(
@@ -625,8 +599,16 @@ def _refuse_imported_system_pools(log: Log) -> None:
         )
 
 
-def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
-    """Everything that can fail without the disk being erased (hallazgo 15)."""
+def _preflight(
+    plan: RestorePlan,
+    target_disk: str,
+    log: Log,
+    boot: pool_record.BootRecord | None = None,
+    layout: Layout = "bpool",
+) -> None:
+    """Everything that can fail without the disk being erased (hallazgo 15);
+    ``layout`` the point's (:func:`lib.pool_record.point_layout`), ``boot``
+    the record of an ext4 point."""
     _refuse_imported_system_pools(log)
     # Checked here, not after the wipe: zpool create refuses a non-empty
     # <altroot><mountpoint>, and step 6's rm stays off mounted subtrees.
@@ -643,7 +625,8 @@ def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
             causes=held,
             solutions=[*(f"sudo umount -R {t}" for t in tops), "Or reboot the live USB"],
         )
-    missing = [t for t in RECOVER_TOOLS if not sh.run(f"which {t}").ok]
+    tools = [*RECOVER_TOOLS, *(EXT4_RECOVER_TOOLS if layout == "ext4" else ())]
+    missing = [t for t in tools if not sh.run(f"which {t}").ok]
     if missing:
         log.fatal(f"Missing tools in the live session: {' '.join(missing)}")
     be_row = plan.row(f"rpool/ROOT/{plan.be}")
@@ -653,10 +636,30 @@ def _preflight(plan: RestorePlan, target_disk: str, log: Log) -> None:
         _abort_missing_keystore("no_dataset", plan.pool, log)
     if not plan.keystore_snap:
         _abort_missing_keystore("no_snapshot", plan.pool, log)
-    bpool_row = plan.row(f"bpool/BOOT/{plan.be}")
-    if bpool_row is None or not bpool_row.restored:
-        log.warn("No bpool snapshot at this point - kernels will need reinstallation")
-    _check_sizes(plan, target_disk, log)
+    if layout == "ext4":
+        if boot is None:
+            # Refused before by refuse_unrecoverable; here too, as the disk is
+            # laid out from the record alone (M13R-1).
+            log.fatal(
+                "This point's /boot is on ext4, and it has no record of origin's disk",
+                solutions=["Choose a point of a complete backup run", "Nothing was erased"],
+            )
+        # /boot has no other source than its copy in the point (M12R-6, M12R-2).
+        copy = plan.row(f"rpool/ROOT/{plan.be}/{BOOT_COPY}")
+        if copy is None or not copy.restored:
+            log.fatal(
+                f"This point has no copy of /boot (rpool/ROOT/{plan.be}/{BOOT_COPY})",
+                causes=[
+                    "/boot was an ext4 partition on origin: the point keeps it in that dataset, "
+                    + "and recover has nothing else to make /boot from"
+                ],
+                solutions=["Choose another point", "Nothing was erased"],
+            )
+    else:
+        bpool_row = plan.row(f"bpool/BOOT/{plan.be}")
+        if bpool_row is None or not bpool_row.restored:
+            log.warn("No bpool snapshot at this point - kernels will need reinstallation")
+    _check_sizes(plan, target_disk, log, boot)
 
 
 def _receive(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -1090,7 +1093,13 @@ def run(
         excluded = None
     plan = build_plan(pool_name, device, ubuntu_name, point, snaps, log, complete, excluded)
     show_plan(plan, log, {i.guid: n for n, i in cfg.known_drives.items()})
-    pools_spec = _pools_from_record(pool_name, point_name(point), snaps, ubuntu_name, meta, log)
+    pools_spec, layout, rec = _pools_from_record(
+        pool_name, point_name(point), snaps, ubuntu_name, meta, log
+    )
+    # An ext4 point (M12-5 5a): its record says how its disk was laid out.
+    boot = rec.boot if rec is not None else None
+    if layout == "ext4":
+        _install_missing_tools(log, EXT4_RECOVER_TOOLS)
     if plan.hostid:
         _ = sh.run(f"zgenhostid -f 0x{plan.hostid}", log=log)
         log.ok(f"Hostid set to: {sh.run('hostid').output}")
@@ -1102,7 +1111,7 @@ def run(
     log.step(5, TOTAL_STEPS, "Selecting internal disk...")
     _refuse_imported_system_pools(log)
     internal_disk = _select_target(backup_disk, log)
-    _preflight(plan, internal_disk, log)
+    _preflight(plan, internal_disk, log, boot, layout)
 
     log.blank()
     log.warn(f"This will COMPLETELY ERASE {internal_disk}")
@@ -1151,47 +1160,47 @@ def run(
 
     _ = sh.run(f"wipefs -a {internal_disk}", log=log)
     _ = sh.run(f"sgdisk --zap-all {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n1:1M:+1G   -t1:EF00 {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n2:0:+2G    -t2:BE00 {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n3:0:+8G    -t3:8200 {internal_disk}", log=log)
-    _ = sh.run(f"sgdisk -n4:0:0      -t4:BF00 {internal_disk}", log=log)
+    parts = ext4_partitions(boot) if boot is not None else []
+    if boot is not None:
+        for cmd in sgdisk_commands(parts, internal_disk):
+            _ = sh.run(cmd, log=log)
+    else:
+        _ = sh.run(f"sgdisk -n1:1M:+1G   -t1:EF00 {internal_disk}", log=log)
+        _ = sh.run(f"sgdisk -n2:0:+2G    -t2:BE00 {internal_disk}", log=log)
+        _ = sh.run(f"sgdisk -n3:0:+8G    -t3:8200 {internal_disk}", log=log)
+        _ = sh.run(f"sgdisk -n4:0:0      -t4:BF00 {internal_disk}", log=log)
     _ = sh.run(f"partprobe {internal_disk}")
     _ = sh.run("sleep 3")
     _ = sh.run("udevadm settle --timeout=10")  # by-id -partN links come from udev
 
-    for i in range(1, 5):
+    for i in range(1, (len(parts) or 4) + 1):
         if not Path(sh.part(internal_disk, i)).exists():
             log.fatal(f"Partition {sh.part(internal_disk, i)} not created")
         _ = sh.run(f"zpool labelclear -f {sh.part(internal_disk, i)}")
     log.ok("Partitions created")
+    rpool_n = parts[-1].number if parts else 4
+    new_boot_uuid = ""
+    if boot is not None:
+        boot_dev = sh.part(internal_disk, 2)
+        if not sh.run(mkfs_boot_command(boot, boot_dev), log=log).ok:
+            log.fatal(f"Cannot make the new /boot on {boot_dev}")
+        new_boot_uuid = sh.run(f"blkid -p -s UUID -o value {boot_dev}").output.strip()
+        if not new_boot_uuid:
+            log.fatal(f"Cannot read the new /boot's UUID on {boot_dev}")
+        log.ok(f"/boot made on {boot_dev} (ext4, UUID {new_boot_uuid})")
 
     # ── 7. Create pools ──────────────────────────────────────────────────
-    log.step(7, TOTAL_STEPS, "Creating bpool + rpool...")
-
-    bpool_vdev = _stable_vdev(internal_disk, 2, log)
-    rpool_vdev = _stable_vdev(internal_disk, 4, log)
-    log.info(f"Pool devices: bpool {bpool_vdev}, rpool {rpool_vdev}")
-
-    # bpool as origin had it (M6-6); without a record, only GRUB-safe features.
-    bpool_spec = pools_spec.get("bpool")
-    features = (
-        bpool_spec.options()
-        if bpool_spec
-        else "-d " + " ".join(f"-o feature@{f}=enabled" for f in BPOOL_FEATURES_BASE.split())
+    log.step(
+        7, TOTAL_STEPS, "Creating rpool..." if boot is not None else "Creating bpool + rpool..."
     )
-    r = sh.run(
-        f"zpool create -f -o ashift=12 -o autotrim=on {features} "
-        + f"{pool_record.root_options(bpool_spec, ROOT_PROPS['bpool'])[0]} "
-        # The root at /boot, as the installer has it (M6X.1); canmount=off keeps
-        # zpool create from mounting it (lib/libzfs/libzfs_mount.c:241-262).
-        + "-O mountpoint=/boot -O canmount=off "
-        + f"-R {RECOVER_MNT} bpool {bpool_vdev}",
-        log=log,
-    )
-    if not r.ok:
-        log.fatal("Failed to create bpool")
-    cleanup.track_pool("bpool")
-    log.ok("bpool created")
+
+    rpool_vdev = _stable_vdev(internal_disk, rpool_n, log)
+    if boot is None:
+        bpool_vdev = _stable_vdev(internal_disk, 2, log)
+        log.info(f"Pool devices: bpool {bpool_vdev}, rpool {rpool_vdev}")
+        _create_bpool(pools_spec.get("bpool"), bpool_vdev, cleanup, log)
+    else:
+        log.info(f"Pool device: rpool {rpool_vdev}")
 
     # Set at create time: the backup pool (with its keystore zvol) is still
     # imported, so a later `zfs set mountpoint` is forbidden (chase.c:648).
