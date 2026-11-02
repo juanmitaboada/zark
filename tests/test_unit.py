@@ -323,6 +323,7 @@ from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E4
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestBootChainExt4,
     TestBootCopyDiverged,
     TestBootCopyRetention,
     TestBootLayoutCallers,
@@ -382,6 +383,7 @@ BOOT_LAYOUT_SUITES = (
     TestBootRewrite,
     TestRecoverBootCopyBack,
     TestRecoverEsp,
+    TestBootChainExt4,
 )
 
 # The status files' tests live in their own module (M7-15); main() runs the

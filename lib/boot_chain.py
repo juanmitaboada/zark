@@ -23,7 +23,8 @@ import re
 import tempfile
 from pathlib import Path
 
-from lib import apt_guard, grub_guard, sh
+from lib import apt_guard, boot_rewrite, grub_guard, sh
+from lib.boot_layout import Layout
 from lib.cleanup import Cleanup
 from lib.config import zark_command
 from lib.identity import disks_under
@@ -276,12 +277,18 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     cleanup: Cleanup,
     log: Log,
     bpool_as_recorded: bool = False,
+    layout: Layout = "bpool",
+    boot_uuids: tuple[str, str] = ("", ""),
 ) -> list[str]:
     """Chroot binds, zpool.cache, grub.cfg fix, signed GRUB/shim, keystore hook, guards.
 
+    ``layout`` is the point's; for an ext4 point ``boot_uuids`` are origin's
+    and the new ``/boot``'s UUIDs, and ``grub.cfg``'s ``search`` lines move
+    from one to the other (M12-3 3a), checked after grub-install (M12R-13).
+
     Returns the errors for recover's summary: the ESP device not recorded
     in debconf (M4c-9), a signed EFI binary missing after the reconfigures
-    (M4c-7).
+    (M4c-7), a check of an ext4 ``/boot`` that failed (M12R-13).
     """
     errors: list[str] = []
     # Bind mounts for chroot
@@ -294,18 +301,22 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     _ = sh.run(f"mount -t efivarfs efivarfs {RECOVER_MNT}/sys/firmware/efi/efivars")
     cleanup.track_mount(f"{RECOVER_MNT}/sys/firmware/efi/efivars")
 
-    # zpool.cache - required so grub and initrd can locate both pools
+    # zpool.cache - required so grub and initrd can locate the pools
     cache_path = f"{RECOVER_MNT}/etc/zfs/zpool.cache"
-    zfs.write_zpool_cache(cache_path, ["rpool", "bpool"])
+    zfs.write_zpool_cache(cache_path, ["rpool"] if layout == "ext4" else ["rpool", "bpool"])
     log.ok("zpool.cache written")
 
-    # Fix bpool GUID in grub.cfg (bpool was created fresh - new GUID)
-    bpool_guid = zfs.pool_guid("bpool")
-    if bpool_guid:
-        bpool_hex = format(int(bpool_guid), "016x")
-        _ = fix_grub_bpool_uuid(Path(f"{RECOVER_MNT}/boot/grub/grub.cfg"), bpool_hex, log)
+    grub_cfg = Path(f"{RECOVER_MNT}/boot/grub/grub.cfg")
+    if layout == "ext4":
+        errors += _rewrite_grub_uuid(grub_cfg, *boot_uuids, log)
     else:
-        log.warn("Cannot read bpool GUID - grub.cfg may have stale UUID")
+        # Fix bpool GUID in grub.cfg (bpool was created fresh - new GUID)
+        bpool_guid = zfs.pool_guid("bpool")
+        if bpool_guid:
+            bpool_hex = format(int(bpool_guid), "016x")
+            _ = fix_grub_bpool_uuid(grub_cfg, bpool_hex, log)
+        else:
+            log.warn("Cannot read bpool GUID - grub.cfg may have stale UUID")
 
     # ── Install GRUB bootloader (standard Ubuntu procedure) ─────────────
     # Replicate exactly what Ubuntu does on every grub package update:
@@ -415,7 +426,11 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     # ("encryption key not loaded").  The backup grub.cfg is valid: it
     # references rpool/bpool by name, and the first kernel update on the
     # running system will regenerate it via the standard apt trigger.
-    log.ok("grub.cfg preserved from backup (bpool UUID updated) ✓")
+    log.ok(
+        "grub.cfg preserved from backup ("
+        + ("/boot's UUID updated" if layout == "ext4" else "bpool UUID updated")
+        + ") ✓"
+    )
 
     # Verify Secure Boot chain
     shim_ok = Path(f"{RECOVER_MNT}/boot/efi/EFI/ubuntu/shimx64.efi").exists()
@@ -430,6 +445,8 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
             f"EFI: {', '.join(gone)} missing in /boot/efi/EFI/ubuntu after the signed packages' "
             + "reconfigure",
         )
+    if layout == "ext4":
+        errors += _check_ext4_boot(grub_cfg, *boot_uuids, log)
 
     # Install keystore boot module - opens LUKS keystore zvol AFTER ZFS import
     # but BEFORE dataset mounting, so /run/keystore/rpool/system.key is available.
@@ -443,7 +460,7 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
         _install_keystore_dracut(RECOVER_MNT, ubuntu_name, log)
         # Without origin's record of bpool (M6-6): the extended features (safe
         # for GRUB on dracut systems, Ubuntu 26.04); with it, bpool already has what origin's had.
-        if not bpool_as_recorded:
+        if not bpool_as_recorded and layout == "bpool":
             for feat in BPOOL_FEATURES_EXTENDED.split():
                 _ = sh.run(f"zpool set feature@{feat}=enabled bpool")
             log.ok(f"bpool extended features enabled ({len(BPOOL_FEATURES_EXTENDED.split())})")
@@ -472,6 +489,57 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     # recovered system from half-applying while a backup drive is connected.
     apt_guard.install(target_root=RECOVER_MNT, log=log)
     return errors
+
+
+def _rewrite_grub_uuid(grub_cfg: Path, old_uuid: str, new_uuid: str, log: Log) -> list[str]:
+    """``grub.cfg``'s ``search`` lines moved to the new ``/boot`` (no
+    update-grub in the chroot: the grub guard, with the drive connected);
+    the error lines."""
+    try:
+        text = grub_cfg.read_text(encoding="utf-8")
+    except OSError as e:
+        return [f"grub.cfg: not read ({e}): it still names /boot's old UUID {old_uuid}"]
+    new, changed = boot_rewrite.rewrite_grub_uuid(text, old_uuid, new_uuid)
+    if not changed:
+        return [f"grub.cfg: no search line names /boot's old UUID {old_uuid}: GRUB may not find it"]
+    _ = grub_cfg.write_text(new, encoding="utf-8")
+    log.ok(f"grub.cfg /boot UUID updated in {changed} search line(s): {new_uuid}")
+    return []
+
+
+def _check_ext4_boot(grub_cfg: Path, old_uuid: str, new_uuid: str, log: Log) -> list[str]:
+    """Checks (a) and (b) of a recovered ext4 ``/boot`` (M12R-13), after
+    grub-install wrote the ESP's ``grub.cfg``; one error line per failure."""
+
+    def read(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    cfg = read(grub_cfg)
+    problems = boot_rewrite.grub_uuid_problems(
+        cfg,
+        read(Path(f"{RECOVER_MNT}/boot/efi/EFI/ubuntu/grub.cfg")),
+        read(Path(f"{RECOVER_MNT}/etc/fstab")),
+        old_uuid,
+        new_uuid,
+    )
+    # Regular vmlinuz-<v> files only, as the bpool count above (M1P.8).
+    kernels = sorted(
+        k.name.removeprefix("vmlinuz-")
+        for k in Path(f"{RECOVER_MNT}/boot").glob("vmlinuz-*")
+        if k.is_file() and not k.is_symlink()
+    )
+    problems += [
+        f"/boot/grub/grub.cfg has no entry for the restored kernel {v}"
+        for v in boot_rewrite.kernels_without_entry(cfg, kernels)
+    ]
+    for line in problems:
+        log.error(line)
+    if not problems:
+        log.ok(f"/boot checked: its UUID in grub.cfg and the ESP, {len(kernels)} kernel(s) ✓")
+    return problems
 
 
 # The template is a multiselect owned by grub-efi-amd64 (and grub2-common);

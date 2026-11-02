@@ -53,7 +53,7 @@ from lib import (
 )
 from lib.log import Log
 from lib.restore_points import Snap
-from lib.zfs import DatasetInfo
+from lib.zfs import ZFS, DatasetInfo
 from tests.mock_sh import MockShell, patch_sh
 
 ORIGIN = ("rpool", "bpool")
@@ -522,10 +522,8 @@ class TestRecoverRefusesBeforeErasing:  # pylint: disable=missing-function-docst
         assert "names an oldest zark this one cannot read: soon" in out
         assert "Nothing was erased" in out
 
-    def test_an_ext4_point_is_refused(self):
-        out = _refusal(_record(boot=_boot_record(), min_recover="2.2.0"))
-        assert "This point's /boot is on ext4, which this zark does not recover" in out
-        assert "Nothing was erased" in out
+    def test_an_ext4_point_with_its_record_goes_on(self):
+        assert not _refusal(_record(boot=_boot_record(), min_recover="2.2.0"))
 
     def test_an_unreadable_boot_entry_is_refused(self):
         value = json.dumps({"format": 1, "pools": {}, "boot": {"layout": "zfs"}})
@@ -654,7 +652,7 @@ class TestRecoverPointLayout:  # pylint: disable=missing-function-docstring
     def test_an_ext4_record_is_refused_before_the_pools_are_planned(self):
         """M13R-3 (M08): _pools_from_record itself calls the refusal."""
         for rec, said in (
-            (_record(boot=_boot_record(), min_recover="2.2.0"), "which this zark does not"),
+            (_record(boot_problem="malformed", min_recover="2.2.0"), "its /boot on ext4 cannot"),
             (_record(min_recover="9.0.0"), "This point needs zark 9.0.0 or later"),
         ):
             out, mock, got = _from_record(rec)
@@ -1387,6 +1385,47 @@ def _changed_lines(before: str, after: str) -> list[tuple[str, str]]:
 class TestBootRewrite:  # pylint: disable=missing-function-docstring
     """M12-3 3a, BOOT-EXT4-8: fstab and crypttab moved to the new /boot and swap."""
 
+    def test_grub_cfg_moves_every_search_line_and_nothing_else(self):
+        text = (_FIXTURES / "grub.cfg").read_text(encoding="ascii")
+        new, n = boot_rewrite.rewrite_grub_uuid(text, _UUID, _NEW_UUID)
+        changed = _changed_lines(text, new)
+        assert n == 6 and len(changed) == 6
+        assert all(
+            a.lstrip().startswith("search") and a.replace(_UUID, _NEW_UUID) == b for a, b in changed
+        )
+        assert "0b0e7e57-0000-4000-8000-0000000000f0" in new  # the other disk's entry
+        assert _UUID not in new
+
+    def test_the_esp_line_and_a_bare_search_move_too(self):
+        esp = f"search.fs_uuid {_UUID} root hd0,gpt2 \nset prefix=($root)'/grub'\n"
+        new, n = boot_rewrite.rewrite_grub_uuid(esp, _UUID.upper(), _NEW_UUID)
+        assert n == 1 and new.startswith(f"search.fs_uuid {_NEW_UUID} root hd0,gpt2 \n")
+        assert boot_rewrite.rewrite_grub_uuid(f"search {_UUID}\n", _UUID, _NEW_UUID)[1] == 1
+
+    def test_a_grub_cfg_without_the_old_uuid_changes_nothing(self):
+        text = f"  linux /vmlinuz-1 root=ZFS=x {_UUID}\n  search --fs-uuid other\n"
+        assert boot_rewrite.rewrite_grub_uuid(text, _UUID, _NEW_UUID) == (text, 0)
+
+    def test_check_a_passes_on_a_rewritten_system_and_names_each_failure(self):
+        cfg = (_FIXTURES / "grub.cfg").read_text(encoding="ascii")
+        esp = (_FIXTURES / "esp-grub.cfg").read_text(encoding="ascii")
+        fstab = (_FIXTURES / "fstab").read_text(encoding="ascii")
+        moved = [boot_rewrite.rewrite_grub_uuid(t, _UUID, _NEW_UUID)[0] for t in (cfg, esp)]
+        new_fstab = boot_rewrite.rewrite_fstab(fstab, _UUID, _NEW_UUID)[0]
+        assert not boot_rewrite.grub_uuid_problems(moved[0], moved[1], new_fstab, _UUID, _NEW_UUID)
+        problems = boot_rewrite.grub_uuid_problems(cfg, esp, fstab, _UUID, _NEW_UUID)
+        assert len(problems) == 5, problems
+        assert any(p.startswith("/etc/fstab still names") for p in problems)
+        assert any(p.startswith("no search line of /boot/grub/grub.cfg") for p in problems)
+
+    def test_check_b_names_a_kernel_without_an_entry(self):
+        cfg = (_FIXTURES / "grub.cfg").read_text(encoding="ascii")
+        have = ["7.3.0-10-generic", "7.3.0-9-generic"]
+        assert not boot_rewrite.kernels_without_entry(cfg, have)
+        assert boot_rewrite.kernels_without_entry(cfg, [*have, "7.3.0-11-generic"]) == [
+            "7.3.0-11-generic"
+        ]
+
     def test_fstab_changes_only_the_boot_line(self):
         text = (_FIXTURES / "fstab").read_text(encoding="ascii")
         new, n = boot_rewrite.rewrite_fstab(text, _UUID, _NEW_UUID)
@@ -1555,3 +1594,78 @@ class TestRecoverEsp:  # pylint: disable=missing-function-docstring
         assert "Cannot create" in out and mock.was_not_called("mount /dev/sda1")
         _, out, _ = self._esp(mount_ok=False)
         assert "Cannot mount the new ESP" in out
+
+
+def _chain_root(td: str, esp_uuid: str) -> None:
+    """A restored ext4 system under ``td``: grub.cfg as origin had it, the
+    ESP's grub.cfg as grub-install writes it, fstab already rewritten, two
+    kernels, dracut."""
+    root = Path(td)
+    for rel in ("boot/grub", "boot/efi/EFI/ubuntu", "etc", "usr/bin"):
+        (root / rel).mkdir(parents=True, exist_ok=True)
+    _ = (root / "boot/grub/grub.cfg").write_text(
+        (_FIXTURES / "grub.cfg").read_text(encoding="ascii"), encoding="ascii"
+    )
+    esp = (_FIXTURES / "esp-grub.cfg").read_text(encoding="ascii").replace(_UUID, esp_uuid)
+    _ = (root / "boot/efi/EFI/ubuntu/grub.cfg").write_text(esp, encoding="ascii")
+    fstab = (_FIXTURES / "fstab").read_text(encoding="ascii")
+    _ = (root / "etc/fstab").write_text(
+        boot_rewrite.rewrite_fstab(fstab, _UUID, _NEW_UUID)[0], encoding="ascii"
+    )
+    for name in ("shimx64.efi", "grubx64.efi"):
+        _ = (root / "boot/efi/EFI/ubuntu" / name).write_text("")
+    for v in ("7.3.0-10-generic", "7.3.0-9-generic"):
+        _ = (root / f"boot/vmlinuz-{v}").write_text("")
+    (root / "boot/vmlinuz").symlink_to("vmlinuz-7.3.0-10-generic")
+    _ = (root / "usr/bin/dracut").write_text("")
+
+
+def _ext4_chain(esp_uuid: str) -> tuple[list[str], MockShell, MagicMock, str]:
+    """install_boot_chain for an ext4 point on a fake root: its errors, the
+    shell, write_zpool_cache's mock, and grub.cfg afterwards."""
+    with tempfile.TemporaryDirectory() as td:
+        _chain_root(td, esp_uuid)
+        mock = MockShell()
+        mock.on_prefix(f"chroot {td} debconf-show").succeeds(
+            "* grub-efi/install_devices: /dev/sda1\n"
+        )
+        mock.on_prefix(f"chroot {td} env LC_ALL=C bash -c").succeeds()
+        mock.on_prefix("find /dev/disk/by-id/").succeeds("")
+        cache = MagicMock()
+        with (
+            patch_sh(mock),
+            patch.object(boot_chain, "RECOVER_MNT", td),
+            patch.object(boot_chain.grub_guard, "install"),
+            patch.object(boot_chain.apt_guard, "install"),
+            patch.object(boot_chain, "_install_keystore_dracut"),
+            patch.object(boot_chain, "_force_latest_signed_alternative"),
+            patch.object(ZFS, "write_zpool_cache", cache),
+            redirect_stdout(StringIO()),
+        ):
+            errors = boot_chain.install_boot_chain(
+                "/dev/sda",
+                "ubuntu_abc123",
+                ZFS(_log()),
+                MagicMock(),
+                _log(),
+                layout="ext4",
+                boot_uuids=(_UUID, _NEW_UUID),
+            )
+        cfg = (Path(td) / "boot/grub/grub.cfg").read_text(encoding="ascii")
+    return errors, mock, cache, cfg
+
+
+class TestBootChainExt4:  # pylint: disable=missing-function-docstring
+    """M12R-1, M12R-13, M12-3 3a: the boot chain of an ext4 point."""
+
+    def test_rpool_alone_grub_cfg_moved_and_both_checks_pass(self):
+        errors, mock, cache, cfg = _ext4_chain(_NEW_UUID)
+        assert not errors, errors
+        assert cache.call_args.args[1] == ["rpool"]
+        assert _UUID not in cfg and cfg.count(_NEW_UUID) == 6
+        assert mock.was_not_called("zpool set feature@") and mock.was_not_called("bpool")
+
+    def test_an_esp_that_still_names_the_old_uuid_is_an_error(self):
+        errors, _, _, _ = _ext4_chain(_UUID)
+        assert any("the ESP's EFI/ubuntu/grub.cfg still names" in e for e in errors), errors
+        assert any("does not name /boot's UUID" in e for e in errors), errors

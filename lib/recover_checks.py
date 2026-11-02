@@ -13,9 +13,9 @@
 # limitations under the License.
 """
 What recover refuses before anything is erased because of the point's
-record of origin's pools (M12-8, M13R-1, M13R-2, M13F-3): a point that
-needs a newer zark, one whose record cannot be read, one whose ``/boot``
-is on ext4 without a record to lay the disk out from.
+record of origin's pools (M12-8, M13R-1, M13R-2): a point that needs a
+newer zark, one whose record cannot be read, one whose ``/boot`` is on
+ext4 without a readable record to lay the disk out from.
 """
 
 from typing import NoReturn
@@ -49,9 +49,9 @@ def refuse_min_recover(min_recover: str, written_by: str, log: Log) -> None:
 def refuse_unrecoverable(rec: pool_record.PoolRecord | None, layout: Layout, log: Log) -> None:
     """Refuse, before anything is erased, a point this zark must not
     recover: one whose ``min_recover`` it does not meet or cannot read
-    (M12-8), one whose ``/boot`` is on ext4 but which has no record to lay
-    the disk out from (M13R-1), and any ext4 point, which this build does
-    not lay out (M13F-3). ``layout`` is :func:`lib.pool_record.point_layout`'s."""
+    (M12-8), and one whose ``/boot`` is on ext4 but which has no record to
+    lay the disk out from (M13R-1) or whose ``boot`` entry cannot be read.
+    ``layout`` is :func:`lib.pool_record.point_layout`'s."""
     if rec is None:
         if layout == "ext4":
             log.fatal(
@@ -69,20 +69,17 @@ def refuse_unrecoverable(rec: pool_record.PoolRecord | None, layout: Layout, log
             )
         return
     refuse_min_recover(rec.min_recover, rec.written_by, log)
-    if layout == "ext4":
+    if layout == "ext4" and rec.boot is None:
         log.fatal(
-            "This point's /boot is on ext4, which this zark does not recover",
+            "This point's record of its /boot on ext4 cannot be read",
             causes=[
-                f"Written by zark {rec.written_by or '(not recorded)'} for a system with /boot "
-                + "on an ext4 partition and no bpool",
-                *(
-                    [f"Its /boot record is unreadable: {rec.boot_problem}"]
-                    if rec.boot_problem
-                    else []
-                ),
+                f"Written by zark {rec.written_by or '(not recorded)'}; this is zark {VERSION}",
+                f"Its /boot record is unreadable: {rec.boot_problem or 'absent'}",
+                "recover lays the disk out from that record",
             ],
             solutions=[
-                "Run recover with a zark that recovers the ext4 layout",
+                "Choose another point",
+                "Run recover from a live session with a newer zark",
                 "Nothing was erased",
             ],
         )

@@ -1413,7 +1413,14 @@ def run(
     # ── 15. Chroot: cachefile, grub.cfg UUID fix, grub-install, initrd ───
     log.step(15, TOTAL_STEPS, "Installing bootloader and regenerating initrd...")
     errors += install_boot_chain(
-        internal_disk, ubuntu_name, zfs, cleanup, log, bpool_as_recorded=bool(pools_spec)
+        internal_disk,
+        ubuntu_name,
+        zfs,
+        cleanup,
+        log,
+        bpool_as_recorded=bool(pools_spec),
+        layout=layout,
+        boot_uuids=(boot.uuid, new_boot_uuid) if boot is not None else ("", ""),
     )
     errors += regenerate_initrd(RECOVER_MNT, log)
 
