@@ -84,6 +84,7 @@ import commands.backup as backup_mod  # pylint: disable=wrong-import-position # 
 import commands.chroot as chroot_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.clean as clean_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.exclude as exclude_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.explore as explore_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.finish as finish_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.health as health_cmd  # pylint: disable=wrong-import-position # noqa: E402
@@ -10239,6 +10240,83 @@ class TestLocateRegistered:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         with patch_sh(mock), patch.object(drives_lib, "BY_ID_DIR", str(d)):
             assert backup_device(drive) == "/dev/sdz1"
+
+
+class TestExplore:  # pylint: disable=missing-function-docstring
+    """explore and drives that share an enclosure's name (M16-2)."""
+
+    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+
+    def _run(self, entries: dict[str, DriveInfo], found: list[ConnectedDrive], *answers: bool):
+        cfg = make_config()
+        cfg.known_drives = entries
+        asked: list[str] = []
+
+        def ask(q: str, **_k: object) -> bool:
+            asked.append(q)
+            return answers[len(asked) - 1] if len(asked) <= len(answers) else False
+
+        out = StringIO()
+        with (
+            patch.object(Config, "load", return_value=cfg),
+            patch.object(explore_mod, "scan_connected_drives", return_value=found),
+            patch("lib.log.Log.ask", side_effect=ask),
+            redirect_stdout(out),
+        ):
+            explore_mod.run([])
+        return cfg, out.getvalue(), asked
+
+    def test_two_drives_under_one_enclosure_name_are_not_duplicates(self):
+        entries = {
+            "fuji": DriveInfo("fuji", "1", self.CASE),
+            "sam": DriveInfo("sam", "2", self.CASE),
+        }
+        found = [ConnectedDrive("sam", "2", self.CASE, "/dev/sdc1", True, False, False, "exported")]
+        cfg, out, asked = self._run(entries, found)
+        assert sorted(cfg.known_drives) == ["fuji", "sam"]
+        assert "share the enclosure name" in out and "Duplicate drive_id" not in out
+        assert not any("stale" in q for q in asked)
+
+    def test_one_disk_registered_twice_still_offers_the_stale_entry(self):
+        entries = {
+            "old": DriveInfo("old", "1", self.ATA),
+            "new": DriveInfo("new", "2", self.ATA),
+        }
+        found = [ConnectedDrive("new", "2", self.ATA, "/dev/sdc1", True, False, False, "exported")]
+        cfg, _, asked = self._run(entries, found, True)
+        assert sorted(cfg.known_drives) == ["new"]
+        assert any("Remove stale entries (old)" in q for q in asked)
+
+    def test_a_registered_drive_is_never_called_stale_because_of_a_name(self):
+        """The scan found the pool 'new'; 'old' shares only the disk name of a
+        drive that is not connected: it is the one that goes."""
+        entries = {
+            "old": DriveInfo("old", "1", self.ATA),
+            "new": DriveInfo("new", "2", self.ATA),
+        }
+        found = [ConnectedDrive("old", "1", self.ATA, "/dev/sdc1", True, False, False, "exported")]
+        cfg, _, _ = self._run(entries, found, True)
+        assert sorted(cfg.known_drives) == ["old"]
+
+    def test_auto_registration_uses_the_disk_name_and_the_enclosure_name(self):
+        found = [
+            ConnectedDrive("new", "9", self.CASE, "/dev/sdc1", False, False, False, "exported")
+        ]
+        ident = DiskIdentity("/dev/sdc", self.CASE, aliases=(self.CASE, self.ATA))
+        cfg = make_config()
+        with (
+            patch.object(Config, "load", return_value=cfg),
+            patch.object(explore_mod, "scan_connected_drives", return_value=found),
+            patch.object(explore_mod, "whole_disk", return_value="/dev/sdc"),
+            patch.object(explore_mod, "names_of", return_value=ident),
+            patch("lib.log.Log.ask", return_value=True),
+            redirect_stdout(StringIO()),
+        ):
+            explore_mod.run([])
+        info = cfg.known_drives["new"]
+        assert (info.drive_id, info.enclosure_id) == (self.ATA, self.CASE)
+        assert json.loads((cfg.config_dir / "known_drives.json").read_text())["new"]["guid"] == "9"
 
 
 class TestReconcile:  # pylint: disable=missing-function-docstring

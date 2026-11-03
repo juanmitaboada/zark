@@ -24,10 +24,18 @@ For unknown/changed drives, shows the exact JSON to add.
 """
 
 from lib.config import Config, DriveInfo
-from lib.drives import scan_connected_drives
+from lib.drives import ConnectedDrive, scan_connected_drives
+from lib.identity import Kind, classify, names_of, registry_names, whole_disk
 from lib.log import Log
 
 # from lib.zfs import ZFS
+
+
+def _registry_names(d: ConnectedDrive) -> tuple[str, str]:
+    """The names to register a scanned drive under: its disk's own name when
+    it has one, as prepare registers it (M16-1)."""
+    disk = whole_disk(d.dev_path) if d.dev_path else ""
+    return registry_names(names_of(disk)) if disk else (d.drive_id, "")
 
 
 def run(
@@ -130,12 +138,20 @@ def run(
     ) in drive_id_to_names.items():
         if len(names) > 1:
             log.blank()
+            if classify(did) is not Kind.DISK:
+                # An enclosure's name is shared by every disk that goes through
+                # it: several drives under one is not a duplicate (M16-2).
+                log.info(
+                    f"{len(names)} registered drives share the enclosure name {did}: "
+                    + f"{', '.join(names)} (different disks)"
+                )
+                continue
             log.warn(f"Duplicate drive_id detected: {did}")
             log.info(f"  These entries share the same physical drive: {', '.join(names)}")
-            # Find which name actually exists as a pool
+            # Find which name actually exists as a pool, by its GUID
             real_name = None
             for d in drives:
-                if d.drive_id == did:
+                if d.name in names and cfg.known_drives[d.name].guid == d.guid:
                     real_name = d.name
                     break
             if real_name:
@@ -159,7 +175,10 @@ def run(
             if d.drive_id == "<unknown>":
                 log.warn(f"{d.name}: no stable by-id name - not registered")
                 continue
-            cfg.known_drives[d.name] = DriveInfo(name=d.name, guid=d.guid, drive_id=d.drive_id)
+            drive_id, enclosure_id = _registry_names(d)
+            cfg.known_drives[d.name] = DriveInfo(
+                name=d.name, guid=d.guid, drive_id=drive_id, enclosure_id=enclosure_id
+            )
             saved += 1
         cfg.save_drives()
         log.ok(f"Saved {saved} drive(s) to {cfg.drives_file_path}")
