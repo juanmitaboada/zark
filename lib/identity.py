@@ -19,8 +19,9 @@ Any device argument (``/dev/sdX``, ``/dev/sdX1``, ``/dev/disk/by-id/...``,
 ``lsblk`` into a :class:`DiskIdentity`: the whole-disk kernel node, its
 stable ``/dev/disk/by-id`` name, the hardware facts shown to the operator,
 and the ZFS label read from the disk itself (``zdb -l``). Commands match a
-disk against the registry through :func:`match_registry` (pool GUID from
-the on-disk label first, then ``drive_id``), never through the kernel name.
+disk against the registry through :func:`recognise` (the pool GUID from the
+on-disk label first, then the disk's own by-id name; an enclosure's name
+proves only the enclosure), never through the kernel name.
 
 :func:`protected_disks` answers "which disks must a destructive command
 never touch": disks holding a vdev of an imported pool, a mounted
@@ -307,18 +308,6 @@ def resolve_disk(device: str, *, allow_partition: bool = False) -> DiskIdentity:
         label=label,
         aliases=aliases,
     )
-
-
-def match_registry(ident: DiskIdentity, drives: dict[str, DriveInfo]) -> list[str]:
-    """Registry entries that describe ``ident``: by on-disk pool GUID, then by
-    drive_id against every by-id alias of the disk (a 1.0.12 entry may carry
-    a weak wwn- alias)."""
-    names: list[str] = []
-    if ident.label:
-        names += [n for n, info in drives.items() if info.guid == ident.label.guid]
-    ids = set(ident.aliases) | ({ident.by_id} if ident.by_id else set())
-    names += [n for n, info in drives.items() if info.drive_id in ids]
-    return list(dict.fromkeys(names))
 
 
 class Evidence(Enum):

@@ -35,7 +35,7 @@ from lib.certificates import RunInfo
 from lib.cleanup import Cleanup
 from lib.config import Config, zark_command
 from lib.drives import validate_external_block_device
-from lib.identity import DiskIdentity, match_registry, usb_ids
+from lib.identity import DiskIdentity, Evidence, recognise, usb_ids
 from lib.log import Log
 from lib.selftest import Bench, Check, Result, RunState, SetupError, all_checks, run_checks
 from lib.selftest_l2 import StickBench
@@ -121,12 +121,20 @@ def _stick_identity(dev: str, log: Log) -> DiskIdentity:
             ],
         )
     cfg = Config.load()
-    names = match_registry(ident, cfg.known_drives)
+    found = recognise(ident, cfg.known_drives)
+    names = [m.name for m in found if m.evidence is not Evidence.BUS]
     if names:
         log.fatal(
             f"{dev} is the registered backup drive {', '.join(names)}: "
             + "the self-test erases its disk",
             solutions=["Use a scratch stick that zark does not know"],
+        )
+    for m in found:
+        # Only the enclosure's name matches (M16-2): the stick is blank, so
+        # erasing it loses nothing even if it is that drive's disk.
+        log.warn(
+            f"Registry entry '{m.name}' is registered under this enclosure's name; "
+            + "nothing proves this stick is that drive. Going on: the stick is blank"
         )
     parts = [ln for ln in sh.run(f"lsblk -nr -o NAME,TYPE {ident.disk}").lines if " part" in ln]
     probe = sh.run(f"blkid -p {ident.disk}")

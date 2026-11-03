@@ -250,7 +250,6 @@ from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
     by_id_names,
     classify,
     enclosure_mates,
-    match_registry,
     preferred_by_id,
     protected_disks,
     read_pool_label,
@@ -8304,19 +8303,6 @@ class TestIdentity:  # pylint: disable=missing-function-docstring
                     return
         raise AssertionError("expected IdentityError")
 
-    def test_match_registry_by_label_guid_and_drive_id(self):
-        drives = {
-            "backup": DriveInfo("backup", "3446866051930726346", "<unknown>"),
-            "stale": DriveInfo("stale", "111", _KINGSTON_ID),
-            "other": DriveInfo("other", "222", "usb-Other-0:0"),
-        }
-        ident = DiskIdentity(
-            disk="/dev/sdb",
-            by_id=_KINGSTON_ID,
-            label=PoolLabel("backup", "3446866051930726346"),
-        )
-        assert match_registry(ident, drives) == ["backup", "stale"]
-
     def test_protected_disks(self):
         mock = MockShell()
         mock.on("zpool list -H -o name").succeeds("rpool\nbpool\nbackup")
@@ -13670,15 +13656,6 @@ class TestReviewFindings:  # pylint: disable=missing-function-docstring
             assert not zfs.import_backup_pool("backup", "/dev/x", readonly=True, guid="111")
             assert zfs.import_backup_pool("backup", "/dev/x", readonly=True, guid="999")
             assert not zfs.import_backup_pool("backup", "/dev/x", readonly=False, guid="999")
-
-    def test_registry_match_uses_every_by_id_alias(self):
-        drives = {"blue": DriveInfo("blue", "1", "wwn-0x5000000000000001")}
-        ident = DiskIdentity(
-            disk="/dev/sdb",
-            by_id=_KINGSTON_ID,
-            aliases=(_KINGSTON_ID, "wwn-0x5000000000000001"),
-        )
-        assert match_registry(ident, drives) == ["blue"]
 
     def test_second_home_dataset_is_not_stacked_on_home(self):
         snaps = _stick_snaps()
@@ -25965,12 +25942,12 @@ class TestSelftestCommand:  # pylint: disable=missing-function-docstring,protect
     def _ident(self) -> DiskIdentity:
         return DiskIdentity(
             disk="/dev/sdz",
+            aliases=("ata-Scratch_1", "usb-Scratch_1-0:0"),
             by_id="usb-Scratch_1-0:0",
             model="Scratch",
             serial="S1",
             size="1G",
             transport="usb",
-            aliases=("usb-Scratch_1-0:0",),
         )
 
     def _refused(self, mock: MockShell, cfg: Config, answer: str = "sdz") -> str:
@@ -25990,8 +25967,45 @@ class TestSelftestCommand:  # pylint: disable=missing-function-docstring,protect
 
     def test_a_registered_drive_is_refused(self):
         cfg = make_config()
-        cfg.known_drives = {"backup": DriveInfo("backup", "1", "usb-Scratch_1-0:0")}
+        cfg.known_drives = {"backup": DriveInfo("backup", "1", "ata-Scratch_1")}
         assert "registered backup drive backup" in self._refused(MockShell(), cfg)
+
+    def test_a_drive_registered_under_the_enclosures_name_only_is_a_warning(self):
+        """M16-2: the stick is blank, so nothing is lost if it is that drive's disk."""
+        cfg = make_config()
+        cfg.known_drives = {"backup": DriveInfo("backup", "1", "usb-Scratch_1-0:0")}
+        mock = MockShell()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
+        mock.on("blkid -p /dev/sdz").returns(2)
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            redirect_stdout(out),
+            patch("commands.selftest.validate_external_block_device", return_value=self._ident()),
+            patch("commands.selftest.Config.load", return_value=cfg),
+            patch("builtins.input", return_value="sdz"),
+        ):
+            assert selftest_cmd._stick_identity("/dev/sdz", make_log()).disk == "/dev/sdz"
+        assert "nothing proves this stick is that drive" in out.getvalue()
+
+    def test_a_drive_of_another_disk_name_in_the_same_enclosure_is_not_a_match(self):
+        cfg = make_config()
+        cfg.known_drives = {
+            "backup": DriveInfo("backup", "1", "ata-Other_9", enclosure_id="usb-Scratch_1-0:0")
+        }
+        mock = MockShell()
+        mock.on("lsblk -nr -o NAME,TYPE /dev/sdz").succeeds("sdz disk\n")
+        mock.on("blkid -p /dev/sdz").returns(2)
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            redirect_stdout(out),
+            patch("commands.selftest.validate_external_block_device", return_value=self._ident()),
+            patch("commands.selftest.Config.load", return_value=cfg),
+            patch("builtins.input", return_value="sdz"),
+        ):
+            selftest_cmd._stick_identity("/dev/sdz", make_log())
+        assert "nothing proves" not in out.getvalue()
 
     def test_a_disk_that_is_not_blank_is_refused(self):
         mock = MockShell()
