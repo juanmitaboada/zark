@@ -9099,10 +9099,11 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         assert mock.was_called("wipefs -a /dev/sdb")
 
 
-class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
+class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring,too-many-public-methods
     """M4a-13: a failed step or a disk that is not blank keeps the entry and anchors."""
 
     dropped: list[str]  # the GUIDs whose anchors the last _purge dropped
+    prompts: list[str]  # what each read of the terminal showed, in order
 
     def _purge(
         self,
@@ -9143,7 +9144,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
                 "_present",
                 side_effect=part1_exists if callable(part1_exists) else lambda _p: part1_exists,
             ),
-            patch("builtins.input", side_effect=[*answers, "yes", "sdb", "n"]),
+            patch("builtins.input", side_effect=[*answers, "yes", "sdb", "n"]) as inp,
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(out),
         ):
@@ -9151,6 +9152,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
                 purge_mod.run([f"/dev/disk/by-id/{_KINGSTON_ID}"])
             except SystemExit as e:
                 rc = int(e.code) if isinstance(e.code, int) else 1
+        self.prompts = [str(c.args[0]) if c.args else "" for c in inp.call_args_list]
         if rc:
             drop.assert_not_called()
         self.dropped = [c.args[0] for c in drop.call_args_list]
@@ -9229,14 +9231,30 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         assert "Drive recognized as" not in out
 
     def test_an_entry_that_names_only_the_case_is_asked_about_and_kept_by_default(self):
+        """M16R-2: the purge completes; the question was asked with default no, and
+        the DANGEROUS question came after the decline."""
         mock = MockShell()
         _wipe_succeeds(mock)
         entries = {"fuji": {"guid": "18", "drive_id": self.CASE}}
         out, rc, data = self._purge(
             mock, entries=entries, aliases=(self.ATA_B, self.CASE), label=None, answers=("", "y")
         )
-        assert rc == 0, out
+        assert rc == 0 and "DRIVE PURGED" in out, out
+        asked = out.index("Is this disk the old 'fuji'?")
+        assert asked < out.index("Purge unregistered drive? (DANGEROUS)"), out
+        assert "[y/N]" in self.prompts[0] and "[y/N]" in self.prompts[1], self.prompts
         assert "nothing proves this disk is that drive" in out
+        assert list(data) == ["fuji"] and self.dropped == []
+
+    def test_declining_both_questions_wipes_nothing(self):
+        mock = MockShell()
+        _wipe_succeeds(mock)
+        entries = {"fuji": {"guid": "18", "drive_id": self.CASE}}
+        out, rc, data = self._purge(
+            mock, entries=entries, aliases=(self.ATA_B, self.CASE), label=None, answers=("", "n")
+        )
+        assert rc == 0 and "Aborted" in out and "DRIVE PURGED" not in out, out
+        assert mock.was_not_called("sgdisk --zap-all") and mock.was_not_called("wipefs")
         assert list(data) == ["fuji"] and self.dropped == []
 
     def test_an_entry_that_names_only_the_case_goes_when_the_operator_says_so(self):
