@@ -367,6 +367,22 @@ def recognise(ident: DiskIdentity, drives: dict[str, DriveInfo]) -> list[Match]:
     return found
 
 
+def enclosure_mates(ident: DiskIdentity, drives: dict[str, DriveInfo]) -> list[str]:
+    """Registered drives that share an enclosure name with ``ident`` and are
+    not it: the disk's own names differ, so they are other disks that went
+    through the same enclosure. For messages only (M16-2)."""
+    aliases = set(ident.aliases) | ({ident.by_id} if ident.by_id else set())
+    mates: list[str] = []
+    for name, info in drives.items():
+        if _evidence(info, ident, aliases) is not None:
+            continue
+        if any(
+            n in aliases and classify(n) is Kind.BUS for n in (info.drive_id, info.enclosure_id)
+        ):
+            mates.append(name)
+    return mates
+
+
 def disks_under(device: str) -> set[str]:
     """Whole disks beneath a device (partition, dm/LUKS, md), via ``lsblk -s``."""
     r = run(f"lsblk -nrs -o NAME,TYPE {shlex.quote(device)}")

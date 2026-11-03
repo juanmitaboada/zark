@@ -32,6 +32,7 @@ from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso, zark_command
 from lib.drives import record_backup, validate_external_block_device
 from lib.health import check_device, render_report
+from lib.identity import DiskIdentity, Evidence, enclosure_mates, recognise, registry_names
 from lib.log import Log
 from lib.mount import warn_rpool_mountpoint_lost
 from lib.replication import DatasetPlan, Ref, State, point_name, reached
@@ -71,7 +72,9 @@ def run(
 
     # ── Show drive info ──────────────────────────────────────────────────
     log.info(f"Device:    {target_dev}")
-    log.info(f"Drive ID:  {ident.by_id or '-'}")
+    log.info(f"Drive ID:  {registry_names(ident)[0] or '-'}")
+    if ident.disk_id and ident.bus_id:
+        log.info(f"Enclosure: {ident.bus_id}")
     log.info(f"Model:     {ident.model}")
     log.info(f"Serial:    {ident.serial}")
     log.info(f"Size:      {ident.size}")
@@ -112,21 +115,10 @@ def run(
 
     log.ok("Drive appears empty ✓")
 
-    base_drive_id = ident.by_id
+    base_drive_id, enclosure_id = registry_names(ident)
 
     # ── Stale registry entries for this same drive ───────────────────────
-    # The drive is blank, so any entry pointing at its drive_id describes a
-    # pool that no longer exists (e.g. purged by hand, or prepared again).
-    stale = [n for n, info in cfg.known_drives.items() if info.drive_id == base_drive_id]
-    replace: set[str] = set()
-    if stale:
-        log.warn(f"Registry entries for this same drive (stale): {', '.join(stale)}")
-        question = (
-            f"Remove {', '.join(stale)} from the registry (and their anchors in origin) "
-            + "when preparing?"
-        )
-        if log.ask(question, default=True):
-            replace = set(stale)
+    replace = _stale_entries(ident, cfg, log)
 
     # ── Pool name ────────────────────────────────────────────────────────
     default_pool = "backup"
@@ -314,6 +306,7 @@ def run(
         name=new_pool,
         guid=new_guid,
         drive_id=base_drive_id,
+        enclosure_id=enclosure_id,
         last_backup_at=prepared_at,  # I13: prepare is a full backup
         autoeject=autoeject,
         extra={registry.RETENTION_KEY: retention} if retention else {},
@@ -360,6 +353,44 @@ def run(
         default_eject=False,
         autoeject=autoeject,
     )
+
+
+def _stale_entries(ident: DiskIdentity, cfg: Config, log: Log) -> set[str]:
+    """Registry entries to replace because they describe this very disk (M16-2).
+
+    The disk is blank, so an entry that names its own ``ata-`` name is a
+    pool that no longer exists: removed on a yes, default yes. An entry that
+    shares only the enclosure's name may be another drive that went through
+    the same enclosure, and it takes its anchors with it: asked per entry,
+    default no.
+    """
+    replace: set[str] = set()
+    matches = recognise(ident, cfg.known_drives)
+    own = [m.name for m in matches if m.evidence is not Evidence.BUS]
+    if own:
+        log.warn(f"Registry entries for this same drive (stale): {', '.join(own)}")
+        question = (
+            f"Remove {', '.join(own)} from the registry (and their anchors in origin) "
+            + "when preparing?"
+        )
+        if log.ask(question, default=True):
+            replace |= set(own)
+    for m in matches:
+        if m.evidence is not Evidence.BUS:
+            continue
+        log.warn(
+            f"Registry entry '{m.name}' is registered under this enclosure's name; "
+            + "nothing proves this disk is that drive"
+        )
+        if log.ask(
+            f"Is this disk the old '{m.name}'? Remove it from the registry "
+            + "(and its anchors in origin) when preparing?",
+            default=False,
+        ):
+            replace.add(m.name)
+    for name in enclosure_mates(ident, cfg.known_drives):
+        log.info(f"This enclosure also held the registered drive '{name}': another disk, kept")
+    return replace
 
 
 def _ask_retention(log: Log) -> dict[str, int]:

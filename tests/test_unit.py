@@ -249,6 +249,7 @@ from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
     PoolLabel,
     by_id_names,
     classify,
+    enclosure_mates,
     match_registry,
     preferred_by_id,
     protected_disks,
@@ -8480,6 +8481,16 @@ class TestRecognise:  # pylint: disable=missing-function-docstring
         ident = self.disk(self.ATA_A, PoolLabel("a", "18"))
         assert [m.evidence for m in recognise(ident, drives)] == [Evidence.LABEL]
 
+    def test_enclosure_mates_are_the_other_disks_of_the_case(self):
+        drives = {
+            "fuji": DriveInfo("fuji", "1", self.ATA_A, enclosure_id=self.CASE),
+            "legacy": DriveInfo("legacy", "2", self.CASE),
+            "elsewhere": DriveInfo("elsewhere", "3", "ata-Z", enclosure_id="usb-Other-0:0"),
+            "weak": DriveInfo("weak", "4", self.WWN),
+        }
+        ident = self.disk(self.ATA_B)
+        assert enclosure_mates(ident, drives) == ["fuji"]  # legacy is a BUS match, not a mate
+
     def test_registry_order_is_kept(self):
         drives = {
             "z": DriveInfo("z", "1", self.CASE),
@@ -9626,29 +9637,36 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
     """I16/I22/I23 + I-G in prepare."""
 
     asked: list[str]  # the yes/no questions of the last _prepare
+    defaults: dict[str, object]  # the default each of those questions was asked with
 
-    def _prepare(
+    def _prepare(  # pylint: disable=too-many-locals
         self,
         fake: FakeZfs,
         cfg_dir: Path,
         readback: Readback | None = None,
         out: StringIO | None = None,
         extra: tuple[AbstractContextManager[object], ...] = (),
+        disk: DiskIdentity | None = None,
+        refuse: tuple[str, ...] = (),
         **answers: str,
     ) -> int:
         """Run prepare; ``answers`` by the first word of an input question
         (Pool, Days); anything not given takes the default. ``readback`` is
         the drive's read-back (ONLINE when not given); ``out`` gets stdout;
-        ``self.asked`` the yes/no questions, each answered yes; ``extra``
-        patches are entered last."""
+        ``self.asked`` the yes/no questions, each answered yes unless it
+        contains a word of ``refuse``; ``disk`` the identity prepare sees;
+        ``extra`` patches are entered last."""
         answers = {"Pool": "blue", **answers}
         self.asked = []
 
-        def ask(q: str, **_k: object) -> bool:
-            self.asked.append(q)
-            return True
+        self.defaults = {}
 
-        ident = _purge_ident(None)
+        def ask(q: str, **k: object) -> bool:
+            self.asked.append(q)
+            self.defaults[q] = k.get("default", True)
+            return not any(w in q for w in refuse)
+
+        ident = disk or _purge_ident(None)
         report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
         if readback is None:
             readback = Readback(imported=True, health="ONLINE", reexported=True)
@@ -9734,7 +9752,8 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert self._prepare(fake, cfg_dir) == 0
         # M2V-7 (b): the question says the anchors go too.
         assert (
-            "Remove blue from the registry (and their anchors in origin) when preparing?"
+            "Is this disk the old 'blue'? Remove it from the registry "
+            + "(and its anchors in origin) when preparing?"
             in self.asked
         ), self.asked
         create = next(c for c in fake.calls if c.startswith("zpool create"))
@@ -9746,6 +9765,68 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert data["blue"]["autoeject"] is True
         assert data["blue"]["last_backup_at"]  # I13
         assert data["black"]["guid"] == "2"
+
+    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    ATA_B = "ata-SAMSUNG_HM501II_S24QJ90B100169"
+
+    def _samsung(self) -> DiskIdentity:
+        return DiskIdentity(
+            "/dev/sdb", self.CASE, "HM501II", "S24QJ90B100169", "465G", "usb",
+            aliases=(self.ATA_B, self.CASE),
+        )  # fmt: skip
+
+    def test_prepare_keeps_the_entry_of_another_disk_that_shared_the_case(self):
+        """M12P.1: the Fujitsu is registered; the SAMSUNG is prepared in its case."""
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json",
+            {"fuji": {"guid": "18", "drive_id": self.ATA_A, "enclosure_id": self.CASE}},
+        )
+        fake = _fresh_fake(())
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out, disk=self._samsung()) == 0
+        assert not any("fuji" in q for q in self.asked), self.asked
+        assert "This enclosure also held the registered drive 'fuji'" in out.getvalue()
+        data = json.loads((cfg_dir / "known_drives.json").read_text())
+        assert data["fuji"] == {
+            "guid": "18",
+            "drive_id": self.ATA_A,
+            "enclosure_id": self.CASE,
+            "last_backup_at": None,
+            "autoeject": False,
+        }
+        assert data["blue"]["drive_id"] == self.ATA_B
+        assert data["blue"]["enclosure_id"] == self.CASE
+        assert not any(c.startswith("zfs destroy") and "#zark_" in c for c in fake.calls)
+
+    def test_prepare_asks_before_taking_an_entry_that_names_only_the_case(self):
+        """A 2.1.1 entry: the case's name is all it has. Default no keeps it."""
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json", {"fuji": {"guid": "18", "drive_id": self.CASE}}
+        )
+        fake = _fresh_fake(())
+        rc = self._prepare(fake, cfg_dir, disk=self._samsung(), refuse=("Is this disk",))
+        assert rc == 0
+        asked = [q for q in self.asked if "Is this disk the old 'fuji'?" in q]
+        assert asked and self.defaults[asked[0]] is False, self.defaults
+        data = json.loads((cfg_dir / "known_drives.json").read_text())
+        assert data["fuji"]["guid"] == "18" and data["fuji"]["drive_id"] == self.CASE
+        assert data["blue"]["guid"] == "777"
+
+    def test_prepare_replaces_an_entry_that_names_this_very_disk(self):
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json",
+            {"old": {"guid": "5", "drive_id": self.ATA_B, "enclosure_id": self.CASE}},
+        )
+        fake = _fresh_fake(())
+        assert self._prepare(fake, cfg_dir, disk=self._samsung(), Pool="new") == 0
+        stale = [q for q in self.asked if q.startswith("Remove old from the registry")]
+        assert stale and self.defaults[stale[0]] is True, self.defaults
+        data = json.loads((cfg_dir / "known_drives.json").read_text())
+        assert "old" not in data and data["new"]["drive_id"] == self.ATA_B
 
     def test_prepare_on_the_engine(self):
         """Decision 2, I14/F9, R2§8.5, M1P.14: one point, no syncoid, no
