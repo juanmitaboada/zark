@@ -14818,6 +14818,55 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
                     assert export_ok, "a failed export must end with exit status 1"
         return mock, unframed(buf.getvalue())
 
+    def _umount_ejects(
+        self, status: str, known: dict[str, DriveInfo] | None = None, by_id: str | None = None
+    ):
+        """The device umount offers to eject (None when it found none)."""
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds("backup")
+        mock.on("zpool export backup").succeeds()
+        mock.on("zpool status -P backup").succeeds(status)
+        cfg = make_config()
+        cfg.known_drives = known or {}
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "backup", "home"))
+            with (
+                patch_sh(mock),
+                patch.object(umount_mod, "_namespaces", return_value=["/proc/42/ns/mnt"]),
+                patch.object(umount_mod, "MNT_BASE", td),
+                patch.object(umount_mod.Config, "load", return_value=cfg),
+                patch.object(umount_mod, "flush_device_cache"),
+                patch.object(umount_mod, "whole_disk", return_value="/dev/sdc"),
+                patch.object(umount_mod, "BY_ID_DIR", by_id or "/nonexistent"),
+                patch.object(umount_mod, "prompt_eject_or_attach") as eject,
+                patch("builtins.input", return_value="y"),
+                redirect_stdout(StringIO()),
+            ):
+                umount_mod.run([])
+        return eject.call_args.args[0]
+
+    def test_umount_ejects_the_disk_the_pool_is_on_not_the_one_the_registry_names(self):
+        """M16-9: another disk may sit now in the enclosure the entry names."""
+        status = "  pool: backup\n  NAME\n  backup\n    /dev/disk/by-id/ata-X-part1  ONLINE\n"
+        case = "usb-Seagate_USB_07BB24735163-0:0"
+        known = {"backup": DriveInfo("backup", "1", case)}
+        d = Path(tempfile.mkdtemp())
+        (d / case).write_text("")  # the registry's name leads somewhere, to another disk
+        assert self._umount_ejects(status, known, str(d)) == "/dev/sdc"
+
+    def test_umount_falls_back_on_the_registry_name_when_the_pool_names_no_device(self):
+        case = "usb-Seagate_USB_07BB24735163-0:0"
+        d = Path(tempfile.mkdtemp())
+        (d / case).write_text("")
+        got = self._umount_ejects(
+            "  pool: backup\n", {"backup": DriveInfo("backup", "1", case)}, str(d)
+        )
+        assert got == str(d / case)
+
+    def test_umount_has_no_device_to_eject_when_nothing_names_one(self):
+        known = {"backup": DriveInfo("backup", "1", "usb-Nowhere-0:0")}
+        assert self._umount_ejects("  pool: backup\n", known) is None
+
     def test_umount_cleans_directories_only_after_the_export(self):
         # Review §8: with the pool still imported, find would delete inside the backup.
         assert self._umount_backup(export_ok=False)[0].was_not_called("find /")

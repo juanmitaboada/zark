@@ -26,6 +26,7 @@ from pathlib import Path
 from lib import cli_spec, sh
 from lib.cleanup import BUSY_HINT, flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
+from lib.identity import BY_ID_DIR, whole_disk
 from lib.keystore import Keystore
 from lib.log import Log
 
@@ -373,20 +374,21 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     # runs sync but skips eject (no power-down) - durable but the
     # operator should pause a couple of seconds before unplugging.
     device_for_eject: str | None = None
+    status = sh.run(f"zpool status -P {selected}")
+    for line in status.lines:
+        for token in line.split():
+            if token.startswith("/dev/"):
+                device_for_eject = whole_disk(token) or token
+                break
+        if device_for_eject:
+            break
     info = cfg.known_drives.get(selected)
-    if info is not None and info.drive_id and info.drive_id != "<unknown>":
-        by_id = Path(f"/dev/disk/by-id/{info.drive_id}")
+    if device_for_eject is None and info is not None and info.drive_id != "<unknown>":
+        # The pool's own vdev is the authority (M16-9); the registry's name is
+        # only for a pool whose status could not be read.
+        by_id = Path(f"{BY_ID_DIR}/{info.drive_id}")
         if by_id.exists():
             device_for_eject = str(by_id)
-    if device_for_eject is None:
-        status = sh.run(f"zpool status -P {selected}")
-        for line in status.lines:
-            for token in line.split():
-                if token.startswith("/dev/"):
-                    device_for_eject = token
-                    break
-            if device_for_eject:
-                break
 
     # Export pool
     log.info(f"Exporting pool {selected}...")
