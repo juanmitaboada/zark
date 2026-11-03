@@ -31,6 +31,7 @@ import os
 import re
 import shlex
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from lib.config import DriveInfo
@@ -44,8 +45,42 @@ SYS_BLOCK = "/sys/class/block"
 # (wwn-0x5000000000000001 on both Micron drives).
 _BY_ID_RANK = ("usb-", "ata-", "nvme-", "mmc-", "virtio-", "dm-", "md-", "")
 _BY_ID_WEAK = ("wwn-", "scsi-", "nvme-eui.", "nvme-nvme.")
+# What a by-id name is made from (M16-1): the disk's own IDENTIFY or controller
+# data (it follows the disk between enclosures), the transport or bridge (it
+# follows the enclosure), or something not to rely on (_BY_ID_WEAK).
+_DISK_PREFIXES = ("ata-", "nvme-", "mmc-", "virtio-")
+_BUS_PREFIXES = ("usb-", "ieee1394-")
 _PART_SUFFIX_RE = re.compile(r"-part\d+$")
 _LSBLK_PAIR_RE = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
+
+
+class Kind(Enum):
+    """What a /dev/disk/by-id name identifies."""
+
+    DISK = "disk"  # ata-, nvme-, mmc-, virtio-: the disk itself
+    BUS = "bus"  # usb-, ieee1394-: the enclosure or bridge it sits behind
+    WEAK = "weak"  # wwn-, scsi-, nvme-eui.: may be shared by distinct disks
+    OTHER = "other"  # dm-, md-, anything else
+
+
+def classify(name: str) -> Kind:
+    """The kind of a by-id basename. WEAK is tested first: ``nvme-eui.`` and
+    ``nvme-nvme.`` begin with ``nvme-`` but are not a disk's own name."""
+    if name.startswith(_BY_ID_WEAK):
+        return Kind.WEAK
+    if name.startswith(_DISK_PREFIXES):
+        return Kind.DISK
+    if name.startswith(_BUS_PREFIXES):
+        return Kind.BUS
+    return Kind.OTHER
+
+
+def _best(names: set[str], kind: Kind, order: tuple[str, ...]) -> str:
+    """The name of ``kind`` that ranks first in ``order``; ties by name."""
+    picked = [n for n in names if classify(n) is kind]
+    if not picked:
+        return ""
+    return min(picked, key=lambda n: (next(i for i, p in enumerate(order) if n.startswith(p)), n))
 
 
 class IdentityError(Exception):
@@ -86,11 +121,30 @@ class DiskIdentity:  # pylint: disable=too-many-instance-attributes
         return f"{BY_ID_DIR}/{self.by_id}" if self.by_id else ""
 
     @property
+    def disk_id(self) -> str:
+        """The disk's own by-id name (``ata-...``), or "" when it has none."""
+        return _best(set(self.aliases) | {self.by_id}, Kind.DISK, _DISK_PREFIXES)
+
+    @property
+    def bus_id(self) -> str:
+        """The enclosure's by-id name (``usb-...``), or "" when it has none."""
+        return _best(set(self.aliases) | {self.by_id}, Kind.BUS, _BUS_PREFIXES)
+
+    @property
     def part1(self) -> str:
         """First partition, by its by-id name when one exists (ZFS vdev)."""
         if self.by_id:
             return f"{BY_ID_DIR}/{self.by_id}-part1"
         return part(self.disk, 1)
+
+
+def registry_names(ident: DiskIdentity) -> tuple[str, str]:
+    """(drive_id, enclosure_id) to register ``ident`` under (M16-1): the
+    disk's own name and the enclosure's when the disk has a name of its own;
+    otherwise the preferred name alone, which is all that identifies it."""
+    if ident.disk_id:
+        return ident.disk_id, ident.bus_id
+    return ident.by_id, ""
 
 
 def _lsblk_fields(node: str) -> dict[str, str]:

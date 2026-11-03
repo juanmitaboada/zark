@@ -239,12 +239,15 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
 from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
     DiskIdentity,
     IdentityError,
+    Kind,
     PoolLabel,
     by_id_names,
+    classify,
     match_registry,
     preferred_by_id,
     protected_disks,
     read_pool_label,
+    registry_names,
     resolve_disk,
 )
 from lib.initrd import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -8342,6 +8345,61 @@ class TestIdentity:  # pylint: disable=missing-function-docstring
         assert "/dev/sdb" not in reasons  # own_pool exempts the target itself
         with patch_sh(mock):
             assert "/dev/sdb" in protected_disks()
+
+
+class TestIdentityKinds:  # pylint: disable=missing-function-docstring
+    """What a by-id name identifies: the disk, its enclosure, or nothing sure (M16-1)."""
+
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    USB = "usb-Seagate_USB_07BB24735163-0:0"
+    WWN = "wwn-0x5000000000000001"
+
+    def test_each_prefix_has_its_kind(self):
+        cases = {
+            self.ATA: Kind.DISK,
+            "nvme-Samsung_SSD_990_PRO_S6Z_1": Kind.DISK,
+            "mmc-SD32G_0x1234": Kind.DISK,
+            "virtio-abc": Kind.DISK,
+            self.USB: Kind.BUS,
+            "ieee1394-0011": Kind.BUS,
+            self.WWN: Kind.WEAK,
+            "scsi-SATA_X": Kind.WEAK,
+            "nvme-eui.0025385b71b0": Kind.WEAK,
+            "nvme-nvme.8086-123": Kind.WEAK,
+            "dm-name-x": Kind.OTHER,
+            "": Kind.OTHER,
+        }
+        for name, kind in cases.items():
+            assert classify(name) is kind, name
+
+    def test_a_disk_behind_a_transparent_bridge_has_both_names(self):
+        ident = DiskIdentity("/dev/sdc", self.USB, aliases=(self.ATA, self.USB, self.WWN))
+        assert ident.disk_id == self.ATA
+        assert ident.bus_id == self.USB
+        assert registry_names(ident) == (self.ATA, self.USB)
+
+    def test_a_disk_behind_a_bridge_that_hides_it_has_the_bus_name_only(self):
+        ident = DiskIdentity("/dev/sdc", self.USB, aliases=(self.USB, self.WWN))
+        assert ident.disk_id == ""
+        assert registry_names(ident) == (self.USB, "")
+
+    def test_a_weak_name_alone_is_registered_as_before(self):
+        ident = DiskIdentity("/dev/sdc", self.WWN, aliases=(self.WWN,))
+        assert registry_names(ident) == (self.WWN, "")
+
+    def test_a_system_disk_has_no_enclosure(self):
+        ident = DiskIdentity("/dev/sda", self.ATA, aliases=(self.ATA, self.WWN))
+        assert registry_names(ident) == (self.ATA, "")
+
+    def test_best_name_follows_the_rank(self):
+        ident = DiskIdentity(
+            "/dev/sdc", "", aliases=("virtio-1", "ata-Z", "ata-A", "usb-B", "ieee1394-1")
+        )
+        assert ident.disk_id == "ata-A"
+        assert ident.bus_id == "usb-B"
+
+    def test_preferred_by_id_still_names_the_vdev_by_the_enclosure(self):
+        assert preferred_by_id([self.WWN, self.ATA, self.USB]) == self.USB
 
 
 class TestRegistry:  # pylint: disable=missing-function-docstring
