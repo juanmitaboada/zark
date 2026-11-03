@@ -466,8 +466,9 @@ class ZFS:
     def _is_expected(self, name: str, guid: str, device: str, root: str) -> bool:
         """After an import: the pool is the one expected (M16-7). A pool of
         that name on another disk is exported at once, before anything reads
-        or writes it, and the altroot directory the import made goes with it;
-        an unreadable GUID counts as a mismatch."""
+        or writes it, after ``udevadm settle`` as every export after a zvol
+        appears (M16R-9), and the altroot directory the import made goes with
+        it; an unreadable GUID counts as a mismatch."""
         actual = self.pool_guid(name)
         if actual == guid:
             return True
@@ -475,7 +476,8 @@ class ZFS:
             f"Pool {name} at {device} has GUID {actual or 'unreadable'}, not {guid}: "
             + "another disk; exporting it"
         )
-        if run(f"zpool export {name}", log=self.log).ok:
+        # Its zvols appeared with the import: udev's probes can hold them (M16R-9, M13R-15).
+        if self._export_after_udev(name, "Refused import"):
             remove_altroot_dir(root)  # the empty directory the import made (M16R-5)
         else:
             self.log.error(f"Could not export {name}: sudo zpool export {name}")

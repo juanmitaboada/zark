@@ -8741,6 +8741,7 @@ class TestImportBackupPool:  # pylint: disable=missing-function-docstring
             mock.on("zpool get -H -o value guid backup").fails("cannot open")
         else:
             mock.on("zpool get -H -o value guid backup").succeeds(guid_answer)
+        mock.on("udevadm settle --timeout=30").succeeds()
         mock.on("zpool export backup").succeeds()
         return mock
 
@@ -8759,7 +8760,9 @@ class TestImportBackupPool:  # pylint: disable=missing-function-docstring
             assert not ZFS(make_log()).import_backup_pool(
                 "backup", self.DEV, altroot="/mnt/zark/backup", guid="111"
             )
-        assert "zpool export backup" in mock.calls
+        # M16R-9: the export waits for udev, as every export after a zvol appears.
+        tail = [c for c in mock.calls if c.startswith(("udevadm", "zpool export"))]
+        assert tail == ["udevadm settle --timeout=30", "zpool export backup"], tail
 
     def test_the_altroot_directory_goes_with_the_export_of_a_refused_pool(self):
         """M16R-5: the import made the directory; the refused pool leaves nothing."""
@@ -8770,11 +8773,46 @@ class TestImportBackupPool:  # pylint: disable=missing-function-docstring
         mock.on(f"mkdir -p {root}").succeeds()
         mock.on(f"zpool import -N -R {root} -d {self.DEV} backup").succeeds()
         mock.on("zpool get -H -o value guid backup").succeeds("222")
+        mock.on("udevadm settle --timeout=30").succeeds()
         mock.on("zpool export backup").succeeds()
         with patch_sh(mock), redirect_stdout(StringIO()):
             assert not ZFS(make_log()).import_backup_pool(
                 "backup", self.DEV, altroot=str(root), guid="111"
             )
+        assert not root.exists()
+
+    def test_a_refused_pool_busy_once_is_exported_on_the_next_try(self):
+        """M16R-9: a probe holds the zvols at the first export; after a settle
+        the next try exports it and the altroot directory goes."""
+        root = Path(tempfile.mkdtemp()) / "backup"
+        root.mkdir()
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on(f"mkdir -p {root}").succeeds()
+        mock.on(f"zpool import -N -R {root} -d {self.DEV} backup").succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("222")
+        mock.on("udevadm settle --timeout=30").succeeds()
+        seen: list[str] = []
+
+        def run_(cmd: str, **kw: object) -> RunResult:
+            seen.append(cmd)
+            if cmd == "zpool export backup":  # busy once, then exported
+                ok = seen.count(cmd) == 2
+                return RunResult(0 if ok else 1, "", "" if ok else "pool is busy", cmd)
+            return mock.mock_run(cmd, **kw)  # type: ignore[arg-type]
+
+        with (
+            patch_sh(mock),
+            patch("lib.zfs.run", run_),
+            patch("lib.zfs.time.sleep"),
+            redirect_stdout(StringIO()),
+        ):
+            assert not ZFS(make_log()).import_backup_pool(
+                "backup", self.DEV, altroot=str(root), guid="111"
+            )
+        tail = [c for c in seen if c.startswith(("udevadm", "zpool export"))]
+        settle, export = "udevadm settle --timeout=30", "zpool export backup"
+        assert tail == [settle, export, settle, export], tail
         assert not root.exists()
 
     def test_the_altroot_directory_stays_when_the_export_failed(self):
@@ -8785,11 +8823,16 @@ class TestImportBackupPool:  # pylint: disable=missing-function-docstring
         mock.on(f"mkdir -p {root}").succeeds()
         mock.on(f"zpool import -N -R {root} -d {self.DEV} backup").succeeds()
         mock.on("zpool get -H -o value guid backup").succeeds("222")
+        mock.on("udevadm settle --timeout=30").succeeds()
         mock.on("zpool export backup").fails("busy")
-        with patch_sh(mock), redirect_stdout(StringIO()):
+        mock.on("zpool export -f backup").fails("busy")
+        with patch_sh(mock), patch("lib.zfs.time.sleep"), redirect_stdout(StringIO()):
             assert not ZFS(make_log()).import_backup_pool(
                 "backup", self.DEV, altroot=str(root), guid="111"
             )
+        tail = [c for c in mock.calls if c.startswith(("udevadm", "zpool export"))]
+        settle, export = "udevadm settle --timeout=30", "zpool export backup"
+        assert tail == [settle, export] * 3 + ["zpool export -f backup"], tail
         assert root.exists()
 
     def test_an_unreadable_guid_after_the_import_is_a_mismatch(self):
@@ -9407,6 +9450,36 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring,too-man
         with stack:
             out, rc, _ = self._purge(mock, lambda _p: not state["gone"])
         assert rc == 1 and "The disk may still hold the pool. Purge again, or look:" in out
+
+    def test_a_refused_pool_left_imported_stops_the_wipe(self):
+        """M16R-9: the import finds another pool of that name and cannot export
+        it: the wipe never runs under a pool imported from this disk, as after
+        a failed destroy."""
+
+        class _Shell(MockShell):
+            """``zpool list backup``: not imported until the import ran."""
+
+            def mock_run(self, cmd, *args, **kw):  # type: ignore[no-untyped-def]
+                if cmd == "zpool list backup":
+                    imported = any(c.startswith("zpool import") for c in self.calls)
+                    listed.returns(0 if imported else 1)
+                return super().mock_run(cmd, *args, **kw)
+
+        mock = _Shell()
+        listed = mock.on("zpool list backup")
+        mock.on("zpool get -H -o value guid backup").succeeds("999")
+        mock.on("udevadm settle --timeout=30").succeeds()
+        mock.on("zpool export backup").fails("pool is busy")
+        mock.on("zpool export -f backup").fails("pool is busy")
+        _wipe_succeeds(mock)
+        with patch("lib.zfs.time.sleep"):
+            out, rc, data = self._purge(mock)
+        assert rc == 1 and mock.was_called("zpool export -f backup"), mock.calls
+        assert "pool backup was refused at the import and is still imported" in out
+        assert "- nothing overwritten: the pool is still imported from this disk" in out
+        assert mock.was_not_called("zpool destroy")
+        assert not any(c.startswith(("dd ", "wipefs", "sgdisk")) for c in mock.calls), mock.calls
+        assert "backup" in data
 
     def test_failing_destroy_writes_nothing(self):
         mock = MockShell()

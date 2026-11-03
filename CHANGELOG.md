@@ -243,7 +243,9 @@ PPA until the final 2.2.0.
   - A name in the registry is never replaced by a weaker kind: a disk's own name by a bus
     name, nor a bus name by `wwn-` or `scsi-`, which distinct disks behind some bridges share.
 - `import_backup_pool` exports and refuses a pool whose GUID is not the expected one after an
-  import: `mount`, `recover`, `prune` and `purge` check it as `backup` did.
+  import: `mount`, `recover`, `prune` and `purge` check it as `backup` did. The export waits
+  for udev and tries again, then forces, as every export after a zvol appears (M16R-9); a pool
+  that still cannot be exported stops `purge` before the wipe, as a failed destroy does.
 - The self-test gains DSK-09 and DSK-10 (level 2: the stick's names by kind; recognition and
   location by label) and POOL-16 (level 1: the refused import).
 

@@ -81,15 +81,21 @@ def _destroy_labelled_pool(  # pylint: disable=too-many-return-statements
     if found and zfs.pool_guid(name) != guid:
         log.warn(f"A different pool named '{name}' is imported: wiping only")
         return (None, f"pool {name} not destroyed: the imported one is another disk's"), None
-    if not found and not zfs.import_backup_pool(name, vdev, guid=guid):
-        log.warn(f"Could not import '{name}': the wipe erases its labels; verified below")
-        return (None, f"pool {name} could not be imported: its labels are wiped below"), None
-    # The pool's state goes with it: keep it first, as purge found it (I7).
-    _ = forensics.capture(name, "before purge destroys it", log)
     export_first = Stop(
         "nothing overwritten: the pool is still imported from this disk",
         f"Export it (zpool export {name}), then purge again.",
     )
+    if not found and not zfs.import_backup_pool(name, vdev, guid=guid):
+        if zfs.pool_exists(name):
+            # Refused for its GUID and not exported: never wipe under it (M16R-9).
+            return (
+                False,
+                f"pool {name} was refused at the import and is still imported",
+            ), export_first
+        log.warn(f"Could not import '{name}': the wipe erases its labels; verified below")
+        return (None, f"pool {name} could not be imported: its labels are wiped below"), None
+    # The pool's state goes with it: keep it first, as purge found it (I7).
+    _ = forensics.capture(name, "before purge destroys it", log)
     done = f"pool {name} destroyed"
     if found and sh.run(f"zpool get -H -o value readonly {name}").output == "on":
         r = sh.run(f"zpool export {name}", log=log)
