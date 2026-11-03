@@ -115,6 +115,10 @@ zark 2.2 is built on `main` as `2.2.0-rc2` (`lib/config.py`) and
   udev's and udisks' probes of it held the pool "busy" for the export
   right after, so `prepare` refused to register a good drive. Each export
   now follows `udevadm settle`, tried up to three times before `-f`.
+- **`prepare`'s export after the keystore waits for udev too** (M13R-15):
+  the export right after the keystore zvol's receive waited a fixed
+  second; it now follows `udevadm settle` and is tried up to three times
+  before `-f`, as the read-back's export is.
 
 #### Known limitations
 

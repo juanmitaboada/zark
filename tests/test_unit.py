@@ -1265,6 +1265,35 @@ class TestZFS:  # pylint: disable=missing-function-docstring
         with patch_sh(mock):
             assert zfs.pool_export("busy")
 
+    def test_pool_export_after_a_zvol_waits_for_udev(self):
+        """M13R-15: prepare's export right after the keystore zvol's receive
+        waits for udev as the read-back's does, and tries again when busy,
+        instead of a fixed second."""
+        with tempfile.TemporaryDirectory() as td, patch("lib.zfs.BACKUP_ALTROOT_BASE", td):
+            mock, zfs = make_mock_zfs()
+            mock.on("zpool list blue").succeeds()
+            mock.on("zpool set cachefile=none blue").succeeds()
+            mock.on("udevadm settle --timeout=30").succeeds()
+            mock.on("sync").succeeds()
+            seen: list[str] = []
+
+            def run_(cmd: str, **kw: object) -> RunResult:
+                seen.append(cmd)
+                if cmd == "zpool export blue":  # busy once, then exported
+                    ok = seen.count(cmd) == 2
+                    return RunResult(0 if ok else 1, "", "" if ok else "pool is busy", cmd)
+                return mock.mock_run(cmd, **kw)  # type: ignore[arg-type]
+
+            d = Path(td, "blue")
+            d.mkdir()
+            with patch_sh(mock), patch("lib.zfs.run", run_), patch("lib.zfs.time.sleep") as slept:
+                assert zfs.pool_export("blue", wait_udev=True)
+            tail = [c for c in seen if c.startswith(("udevadm", "zpool export", "sleep"))]
+            settle, export = "udevadm settle --timeout=30", "zpool export blue"
+            assert tail == [settle, export, settle, export], tail
+            assert slept.call_count == 1
+            assert not d.exists()
+
     def test_pool_guid(self):
         mock, zfs = make_mock_zfs()
         mock.on("zpool get -H -o value guid rpool").succeeds("1234567890123456789")
@@ -9642,6 +9671,19 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert seen["order"][:2] == ["manifest", "copy"]
         create = next(c for c in fake.calls if c.startswith("zpool create"))
         assert "-O org.zark:origin-layout=ext4" in create
+
+    def test_the_export_after_the_keystore_waits_for_udev(self):
+        """M13R-15: the first export after the keystore zvol's receive comes
+        after udevadm settle, not after a fixed second."""
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out) == 0, out.getvalue()
+        first = fake.calls.index("zpool export blue")
+        before = fake.calls[first - 1]
+        assert before == "udevadm settle --timeout=30", fake.calls[first - 3 : first + 1]
+        assert "sleep 1" not in fake.calls[:first]
 
     def test_an_ext4_prepare_whose_boot_changed_registers_nothing(self):
         """M13R-4 (M33): /boot changed during the first send: not registered."""

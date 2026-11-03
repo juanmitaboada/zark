@@ -261,7 +261,8 @@ def run(
     # ── Export, read back, register ──────────────────────────────────────
     log.step(4, 4, "Verifying and registering the drive...")
     log.ok(f"Pool GUID: {new_guid}")
-    exported = zfs.pool_export(new_pool)
+    # The keystore zvol was received just now: udev may still be probing it.
+    exported = zfs.pool_export(new_pool, wait_udev=True)
     if exported:
         cleanup.untrack_pool(new_pool)
         flush_device_cache(log)

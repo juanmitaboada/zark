@@ -115,7 +115,8 @@ def read_space(pool: str) -> Space | None:
 
 
 DATASET_USAGE = "name,type,used,usedbydataset,usedbysnapshots,usedbychildren,usedbyrefreservation"
-# Exports the read-back tries, each after udevadm settle, before -f (eli A5).
+# Exports the read-back and prepare's first export try, each after udevadm
+# settle, before -f (eli A5, M13R-15).
 READBACK_EXPORT_TRIES = 3
 
 
@@ -459,12 +460,25 @@ class ZFS:
         self.log.error(f"Cannot import pool {name} from {device}: {last_err}")
         return False
 
-    def pool_export(self, name: str) -> bool:
-        """Export a pool safely."""
+    def pool_export(self, name: str, *, wait_udev: bool = False) -> bool:
+        """Export a pool safely.
+
+        ``wait_udev``: the pool's zvols appeared moments ago (prepare's
+        keystore receive), so udev's and udisks' probes may still hold
+        them: each try waits for ``udevadm settle`` as the read-back's do,
+        not a fixed second (M13R-15)."""
         if not self.pool_exists(name):
             return True
 
         r = run(f"zpool set cachefile=none {name}")
+        if wait_udev:
+            if self._export_after_udev(name, "Export"):
+                self.log.ok(f"Pool {name} exported")
+                run("sync")
+                remove_altroot_dir(backup_altroot(name))
+                return True
+            self.log.warn(f"Could not export {name}")
+            return False
         run("sleep 1")
         r = run(f"zpool export {name}", log=self.log)
         if r.ok:
@@ -572,14 +586,15 @@ class ZFS:
             self.log.error(f"Read-back of {name}: could NOT export it again - still imported")
         return Readback(imported=True, health=health, status=status, reexported=reexported)
 
-    def _export_after_udev(self, name: str) -> bool:
-        """``zpool export`` of the read-back's pool, each try after ``udevadm
-        settle`` (the zvol probes, step 4 above), then ``-f``."""
+    def _export_after_udev(self, name: str, what: str = "Read-back") -> bool:
+        """``zpool export`` of a pool whose zvols just appeared, each try
+        after ``udevadm settle`` (the zvol probes, the read-back's step 4
+        above), then ``-f``. ``what`` names the caller in the log."""
         for attempt in range(1, READBACK_EXPORT_TRIES + 1):
             run("udevadm settle --timeout=30", log=self.log)
             if run(f"zpool export {name}", log=self.log).ok:
                 return True
-            self.log.info(f"Read-back of {name}: export try {attempt} refused (busy?)")
+            self.log.info(f"{what} of {name}: export try {attempt} refused (busy?)")
             if attempt < READBACK_EXPORT_TRIES:
                 time.sleep(1)
         return run(f"zpool export -f {name}", log=self.log).ok
