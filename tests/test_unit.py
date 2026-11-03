@@ -9024,6 +9024,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         mock.on("zpool list backup").fails()
         vdev = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
         mock.on(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup").succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("3446866051930726346")
         mock.on("zpool destroy backup").succeeds()
         _wipe_succeeds(mock)
         ident = _purge_ident(
@@ -9039,6 +9040,25 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         assert mock.was_called("sgdisk --zap-all /dev/sdb")
         data = json.loads((cfg_dir / "known_drives.json").read_text())
         assert list(data) == ["black"]
+
+    def test_a_pool_of_another_guid_at_the_import_is_exported_and_not_destroyed(self):
+        """M16R-3: the label said one GUID; the import finds another pool of that name."""
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json",
+            {"backup": {"guid": "3446866051930726346", "drive_id": "<unknown>"}},
+        )
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        vdev = f"/dev/disk/by-id/{_KINGSTON_ID}-part1"
+        mock.on(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup").succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("999")
+        mock.on("zpool export backup").succeeds()
+        _wipe_succeeds(mock)
+        ident = _purge_ident(PoolLabel("backup", "3446866051930726346"))
+        self._run(cfg_dir, ident, mock)
+        assert mock.was_called("zpool export backup"), mock.calls
+        assert mock.was_not_called("zpool destroy")
 
     def _purge_on_fake(self, fake: FakeZfs, cfg_dir: Path, guid: str) -> str:
         ident = _purge_ident(PoolLabel("black", guid))
@@ -9121,6 +9141,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring,too-man
         )
         mock.on("zpool list backup").fails()
         mock.on_prefix("zpool import -N -R /run/zark/altroot/backup").succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("3446866051930726346")
         ident = _purge_ident(label, aliases)
         out = StringIO()
         rc = 0
