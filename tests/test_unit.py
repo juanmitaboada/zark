@@ -1310,6 +1310,33 @@ class TestZFS:  # pylint: disable=missing-function-docstring
             assert slept.call_count == 1
             assert not d.exists()
 
+    def test_pool_export_after_a_zvol_reports_a_refused_export(self):
+        """M13R-16: every try and the forced export refused as busy: False,
+        the three plain tries each after a settle, then -f, and the altroot
+        directory stays."""
+        with tempfile.TemporaryDirectory() as td, patch("lib.zfs.BACKUP_ALTROOT_BASE", td):
+            mock, zfs = make_mock_zfs()
+            mock.on("zpool list blue").succeeds()
+            mock.on("zpool set cachefile=none blue").succeeds()
+            mock.on("udevadm settle --timeout=30").succeeds()
+            seen: list[str] = []
+
+            def run_(cmd: str, **kw: object) -> RunResult:
+                seen.append(cmd)
+                if cmd.startswith("zpool export"):
+                    return RunResult(1, "", "pool is busy", cmd)
+                return mock.mock_run(cmd, **kw)  # type: ignore[arg-type]
+
+            d = Path(td, "blue")
+            d.mkdir()
+            with patch_sh(mock), patch("lib.zfs.run", run_), patch("lib.zfs.time.sleep"):
+                assert not zfs.pool_export("blue", wait_udev=True)
+            tail = [c for c in seen if c.startswith(("udevadm", "zpool export"))]
+            settle, export = "udevadm settle --timeout=30", "zpool export blue"
+            assert tail == [settle, export] * 3 + ["zpool export -f blue"], tail
+            assert d.exists()
+            assert "sync" not in seen
+
     def test_pool_guid(self):
         mock, zfs = make_mock_zfs()
         mock.on("zpool get -H -o value guid rpool").succeeds("1234567890123456789")
