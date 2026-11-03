@@ -696,6 +696,19 @@ class TestStatusJson:  # pylint: disable=missing-function-docstring
         assert doc["drives"][0]["drive_id"] == "<unknown>"
         assert not problems(doc, "status"), problems(doc, "status")
 
+    def test_the_enclosure_id_is_written_only_when_the_registry_has_one(self):
+        # M16-8: optional in schema 1; absent, not null, for an entry without it.
+        cfg = _config()
+        cfg.known_drives["fuji"] = DriveInfo(
+            "fuji", "111", "ata-FUJITSU_X", None, False, enclosure_id="usb-Seagate_Y-0:0"
+        )
+        cfg.known_drives["black"] = DriveInfo("black", "222", "usb-Micron_Z-0:0", None, False)
+        doc = status_file.build(_status(), cfg, "timer", None)
+        by_name = {d["name"]: d for d in doc["drives"]}
+        assert by_name["fuji"]["enclosure_id"] == "usb-Seagate_Y-0:0"
+        assert "enclosure_id" not in by_name["black"]
+        assert not problems(doc, "status"), problems(doc, "status")
+
     def test_the_lock_is_waited_for_then_the_write_is_skipped(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

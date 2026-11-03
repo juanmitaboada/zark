@@ -394,6 +394,7 @@ pool has.
 | `name` | string | pool name, the registry key |
 | `guid` | string | pool GUID, decimal |
 | `drive_id` | string | registry `drive_id`; readers match it against `/dev/disk/by-id` to tell whether the drive is connected |
+| `enclosure_id` | string, optional | registry `enclosure_id`: the bus name (`usb-...`) the drive was last seen under, present when `drive_id` is the disk's own name. Information only: readers must not use it to tell whether the drive is connected, since the enclosure's link exists with any disk in it |
 | `autoeject` | boolean | registry `autoeject` |
 | `retention` | object | the effective policy: `window_days`, `max_age_days` (0: off), `margin_pct` |
 | `last_backup_at` | timestamp or null | the last backup that completed and was verified; null if none |
@@ -665,6 +666,7 @@ from both files. First match wins:
 ### Drives and live figures
 
 - A drive is connected when a `/dev/disk/by-id/<drive_id>` link exists.
+  A drive entry's `enclosure_id`, when present, is not consulted: the enclosure's link exists with any disk in it.
 - A reader never imports a pool: an imported backup pool trips zark's GRUB
   and apt guards and blocks kernel upgrades. A drive's live fill comes from
   `progress.json`'s `drive.space` while zark has it imported, and from the

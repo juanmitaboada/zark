@@ -195,6 +195,7 @@ def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,t
                 "name": name,
                 "guid": info.guid,
                 "drive_id": info.drive_id or "<unknown>",
+                **({"enclosure_id": info.enclosure_id} if info.enclosure_id else {}),
                 "autoeject": info.autoeject,
                 "retention": {
                     "window_days": policy.window_days,

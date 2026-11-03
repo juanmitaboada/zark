@@ -171,6 +171,10 @@
             "type": "string",
             "minLength": 1
           },
+          "enclosure_id": {
+            "type": "string",
+            "minLength": 1
+          },
           "autoeject": {
             "type": "boolean"
           },
