@@ -53,7 +53,22 @@ zark itself goes on working after the release upgrade: on the test machine, `zar
 
 **Before it.** Back up with `sudo zark backup`, then unplug the drive before you start: zark's apt guard aborts any change to boot-critical packages (kernel, GRUB, shim, ZFS) while a backup drive is connected, and a release upgrade changes all of them.
 
-**If the upgrade stops halfway.** On the test machine the graphical upgrade from 24.04 to 26.04 stopped twice at the same point: while configuring packages, systemd unmounted part of rpool's datasets, the desktop session closed and the upgrader and dpkg stopped with it. The cause is in Ubuntu's ZFS packages, not in zark (the mount units of OpenZFS 2.2 and 2.4 depend on differently named key-loading units), so it can affect any 24.04 system with an encrypted ZFS root; it has not been fixed at the time of writing. If it happens to you:
+**To avoid a stop halfway.** On a system like this the upgrade can stop halfway (next paragraph). It renames the key-loading unit that rpool's mounts depend on; if a unit with the new name is already active, systemd has nothing to stop. On the test machine, with the steps below, the graphical upgrade from the Software Updater went through with every dataset mounted (tested once). Run them in the same boot session, immediately before you start the upgrade, with no reboot in between: the unit lives in `/run`, and a reboot removes it.
+
+1. Create the unit and start it:
+
+   ```bash
+   sudo install -d /run/systemd/system
+   printf '[Unit]\nDescription=Key unit name of OpenZFS 2.4, active before the upgrade\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n' | sudo tee /run/systemd/system/zfs-load-key@rpool.service
+   sudo systemctl daemon-reload && sudo systemctl start zfs-load-key@rpool.service
+   ```
+
+2. Check that `systemctl is-active zfs-load-key@rpool.service zfs-load-key-rpool.service` prints `active` twice.
+3. Upgrade as usual and reboot when it asks. After the reboot the unit is gone, and Ubuntu's own `zfs-load-key@rpool.service` takes its place.
+
+Create it in `/run/systemd/system`, never in `/etc/systemd/system`: there it would hide Ubuntu's unit for good.
+
+**If the upgrade stops halfway.** On the test machine the graphical upgrade from 24.04 to 26.04 stopped twice at the same point: while configuring packages, systemd unmounted part of rpool's datasets, the desktop session closed and the upgrader and dpkg stopped with it. The cause is in Ubuntu's ZFS packages, not in zark (the mount units of OpenZFS 2.2 and 2.4 depend on differently named key-loading units), so it can affect any 24.04 system with an encrypted ZFS root; it has not been fixed at the time of writing. If it happens to you, because the steps above were not followed or for any other reason:
 
 1. Switch to a text console with Ctrl+Alt+F3 and log in. The network may be down until the reboot.
 2. Finish the interrupted upgrade with `sudo dpkg --configure -a`. If `sudo` is not found (it was missing on the test machine at that point), run `/usr/lib/cargo/bin/sudo dpkg --configure -a`.
