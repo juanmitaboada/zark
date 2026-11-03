@@ -189,7 +189,7 @@ def _wait_gone(path: str, seconds: float = 15.0) -> bool:
     1,
     2,
     "the stick's identity as zark reads it",
-    depends=("identity.resolve_disk (lib/identity.py:206)", "health's bridge checks"),
+    depends=("identity.resolve_disk (lib/identity.py:268)", "health's bridge checks"),
 )
 def dsk_01(b: Bench) -> None:
     """``identity.resolve_disk``: lsblk's ``TYPE``, ``MODEL``, ``SERIAL``,

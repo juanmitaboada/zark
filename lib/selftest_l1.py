@@ -114,7 +114,7 @@ def _load_key(b: Bench, ds: str) -> None:
     1,
     "create and import with -R leave zpool.cache alone",
     depends=(
-        "I-G: ZFS.import_backup_pool (lib/zfs.py:293)",
+        "I-G: ZFS.import_backup_pool (lib/zfs.py:399)",
         "prepare's zpool create -R",
         "health's test pool",
     ),
@@ -2033,7 +2033,7 @@ def pool_16(b: Bench) -> None:
     of that name the device holds; ``import_backup_pool(..., guid=)`` reads
     its GUID (``zpool get guid``) and exports it when it is not the expected
     one, so a pool of that name on another disk is neither read nor written.
-    With the right GUID it stays imported. lib/zfs.py:395-457; OpenZFS
+    With the right GUID it stays imported. lib/zfs.py:399-464; OpenZFS
     cmd/zpool/zpool_main.c:4416-4423 (the import with ``-R``)."""
     c = b.make_pool("c")
     try:

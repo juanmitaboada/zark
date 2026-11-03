@@ -164,7 +164,7 @@ umount -R $W
     1,
     1,
     "copies in another namespace: findmnt --task, nsenter umount -R",
-    depends=("release_elsewhere and _namespaces (commands/umount.py:162, :125)", "clean (M4b-3)"),
+    depends=("release_elsewhere and _namespaces (commands/umount.py:164, :120)", "clean (M4b-3)"),
 )
 def mnt_02(b: Bench) -> None:
     """Two namespaces sharing propagation: a copy with a mount below it
@@ -211,7 +211,7 @@ umount -R $M
     1,
     1,
     "umount -R stops at a busy child; findmnt -r escapes and bind roots",
-    depends=("_unmount_tree (commands/umount.py:85)", "clean", "W-2's tell by SOURCE"),
+    depends=("_unmount_tree (commands/umount.py:87)", "clean", "W-2's tell by SOURCE"),
 )
 def mnt_03(b: Bench) -> None:
     """``umount -R`` unmounts children first and stops at a busy child,

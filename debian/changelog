@@ -1,3 +1,21 @@
+zark (2.2.0~rc3-1) UNRELEASED; urgency=medium
+
+  * Milestone M16 of zark 2.2 (drive identity). Not for release: nothing
+    is published until the final 2.2.0.
+  * A drive is recognised by its pool label or its own by-id name, never
+    by its enclosure's usb- name, which every disk that goes through the
+    enclosure shares. known_drives.json entries may carry enclosure_id;
+    an entry is corrected the first time its drive is verified by backup or
+    zark registry fix.
+  * purge and prepare no longer remove another drive's registry entry and
+    anchors because it shares the enclosure's name; they ask, default no.
+  * The scan lists a registered drive only when its label is found.
+  * import_backup_pool refuses a pool of another GUID after the import.
+  * umount ejects the device the pool is on.
+  * The self-test gains DSK-09, DSK-10 and POOL-16.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 03 Nov 2026 23:50:00 +0100
+
 zark (2.2.0~rc2-1) UNRELEASED; urgency=medium
 
   * Milestone M13 of zark 2.2 (/boot on ext4, Ubuntu 26.10 and later on
