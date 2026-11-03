@@ -221,6 +221,38 @@ PPA until the final 2.2.0.
 - `sanitize` on `iso` and the exact versions: its long-number rule turns
   an official image's date into `<n>`; refusing a FAIL in a certificate.
 
+### M16 - drive identity
+
+#### Changed
+
+- **A drive is recognised by its pool label or its own name, never by its enclosure's name**
+  (M16-1 to M16-5): a `usb-` by-id name is made by the enclosure's bridge, so two disks that go
+  through one enclosure share it. The registry now records the disk's own name as `drive_id`
+  and the enclosure's as the new optional `enclosure_id`, corrected at a drive's first verified
+  connection by `backup` or `zark registry fix` (see `docs/UPGRADING.md`). A registered drive is
+  found by its label: the scan no longer lists it as connected because a link of its name exists
+  and `zark registry list` says when another disk is at that name.
+  - `purge` and `prepare` remove a registry entry (and drop its anchors in origin) only when
+    the pool label or the disk's own name says it is this disk; an entry that shares only the
+    enclosure's name is asked about, default no (2.1.1 removed it, `prepare` with default yes).
+    The self-test's `--stick` warns instead of refusing in that case.
+  - `zark explore` no longer calls two drives that share an enclosure's name duplicates.
+  - `umount` ejects the device the pool is on, read before the export, not the one the registry's
+    name leads to.
+  - `status.json` may carry `enclosure_id` (optional, schema 1); readers do not use it.
+- `import_backup_pool` exports and refuses a pool whose GUID is not the expected one after an
+  import: `mount`, `recover`, `prune` and `purge` check it as `backup` did.
+- The self-test gains DSK-09 and DSK-10 (level 2: the stick's names by kind; recognition and
+  location by label) and POOL-16 (level 1: the refused import).
+
+#### Rejected
+
+- Keeping the enclosure's name as `drive_id` and adding the disk's name beside it (M16-1b): the
+  readers would go on reporting a different disk in the same enclosure as connected.
+- A list of every alias in the entry (M16-1c): it cannot say which names prove a disk.
+- Readers also testing `enclosure_id` (M16-8b): the enclosure's link exists with any disk in it.
+- Upgrading the registry on load (M16-5c): it would write from read-only commands.
+
 ## [2.1.1] - 2026-10-30
 
 ### For zark 2.1.0 users

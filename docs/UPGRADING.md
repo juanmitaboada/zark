@@ -1,6 +1,18 @@
 # Upgrading zark
 
-What changes when a system and its drives move from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+What changes when a system and its drives move from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+
+## Upgrading from zark 2.1
+
+zark 2.2 changes one thing in `/etc/zark/known_drives.json`: an entry may carry `enclosure_id`, and `drive_id` may be the disk's own `ata-` name instead of the enclosure's `usb-` name. Nothing on a drive changes, and no `zark setup` run is needed after the package upgrade.
+
+**Why.** A `usb-` name is made by the enclosure's bridge. Two disks that go through one enclosure share it, and 2.1 took the second for the first: `purge` and `prepare` could remove the other drive's entry and its anchors in the source. 2.2 recognises a drive by the pool label on the disk, or by the disk's own name, and treats an enclosure's name as evidence about the enclosure only.
+
+**What happens to your entries.** Nothing at the upgrade. An entry is corrected the first time its drive is connected and its pool GUID is verified by a command that may write the registry: `zark backup`, or `zark registry fix`. The entry then holds `drive_id` (the disk's own name, when the disk has one) and `enclosure_id` (the `usb-` name it is seen under). A drive behind an enclosure that hides the disk's name keeps its `usb-` name as `drive_id` and gets no `enclosure_id`. No entry is dropped and no anchor is touched. `zark registry list` shows both names.
+
+**What asks now.** `purge` and `prepare` used to treat an entry that shared only the enclosure's name as the disk's own. Such an entry (every entry 2.1 wrote, until it is corrected) is now asked about, and kept by default. `zark explore` no longer calls two drives that share an enclosure's name duplicates.
+
+**The way back.** 2.1.1 reads and rewrites a registry that has `enclosure_id` and keeps the field. On its next backup it sets `drive_id` back to the enclosure's name, as it does for any entry; 2.2 corrects it again at the next verified connection.
 
 ## Upgrading from zark 2.0
 

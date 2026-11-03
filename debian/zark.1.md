@@ -420,8 +420,13 @@ end-to-end sequences.
     **bpool** (the point only, not the source's snapshot history) the way
     **backup** does, copies over the **rpool/keystore** zvol, and records
     the drive's metadata (see **backup**). A drive without a by-id name is
-    refused rather than registered as *\<unknown\>*; registry entries left
-    for the same drive are offered for replacement.
+    refused rather than registered as *\<unknown\>*; registry entries
+    that name this very disk are offered for replacement; one that names only
+    the enclosure the disk sits in is asked about for each entry, and kept
+    by default. The drive is registered under its own by-id name
+    (*ata-...*) as *drive_id* and the enclosure's (*usb-...*) as
+    *enclosure_id*, or under the *usb-* name alone when the enclosure hides
+    the disk's.
 
     The pool is created with **compatibility=openzfs-2.2**, so that a live
     session with OpenZFS 2.2 (Ubuntu 24.04) or later can read the drive and
@@ -521,9 +526,15 @@ end-to-end sequences.
     source (its bookmarks on **rpool** and snapshots on **bpool**) and then
     its entry; the drive itself is not touched. Given a pool GUID with no
     entry, it removes only that GUID's anchors. When no drive is left
-    registered it offers to remove the backup points left in the source. **fix** rewrites *drive_id* from the
-    connected disk that carries the registered pool GUID and writes every
-    missing key. **retention** shows or changes a drive's retention: the
+    registered it offers to remove the backup points left in the source. **fix** corrects *drive_id* and
+    *enclosure_id* from the connected disk that carries the registered pool
+    GUID (the disk's own name and the enclosure it is seen under) and writes
+    every missing key; **backup** does the same once the GUID is verified.
+    A registered drive is found by its pool label, never because a by-id
+    link of its name exists: **list** says when another disk is at that
+    name. A name made by an enclosure proves the enclosure, not the disk in
+    it, so an entry that names only the enclosure (what 2.1 wrote) is asked
+    about by **purge** and **prepare**, and kept by default. **retention** shows or changes a drive's retention: the
     window in days (1-3650), the maximum age in days (**off**, or more than
     the window) and the free-space margin in percent of the drive (0-50).
     Every write is validated and atomic; a malformed file is

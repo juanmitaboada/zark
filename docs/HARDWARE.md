@@ -66,6 +66,23 @@ zark avoids this by always importing via the **exact** device path
 (`/dev/disk/by-id/<model>_<serial>-...-part1`), which embeds the unique serial
 and targets the correct partition. See `pool_import` in `lib/zfs.py`.
 
+### Naming a drive: the disk and its enclosure
+
+A by-id name is made from what the layer below reports. `ata-<model>_<serial>`
+comes from the disk's own IDENTIFY data and follows the disk from enclosure to
+enclosure, provided the bridge passes IDENTIFY through.
+`usb-<vendor>_<product>_<serial>-0:0` comes from the bridge and names the
+enclosure: every disk that goes through it has the same one, and the same
+enclosure shows another name with some disks. A bridge that does not pass
+IDENTIFY leaves only the `usb-` name.
+
+zark registers a drive under the disk's own name (`drive_id`) and the
+enclosure's (`enclosure_id`) when the disk has one, and under the `usb-` name
+alone otherwise. What proves that a disk is a registered drive is the pool GUID
+on it; a disk's own name proves the same disk; an enclosure's name proves only
+the enclosure, and `wwn-` names prove nothing (see above). `zark selftest` with
+a stick (DSK-09) records which of the two cases a bridge is.
+
 ### Distinguishing healthy from broken at disconnect
 
 The kernel always attempts a final cache flush when a USB device leaves the
