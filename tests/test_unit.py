@@ -8443,6 +8443,69 @@ class TestRegistry:  # pylint: disable=missing-function-docstring
             "future": {"a": 1},
         }
 
+    def test_enclosure_id_is_written_only_when_set(self):
+        """M16-3: an entry nobody reconciled is written exactly as 2.1.1 writes it."""
+        old = registry_serialize({"b": {"guid": "7", "drive_id": "usb-X"}}, Path("/k.json"))
+        assert "enclosure_id" not in old
+        assert json.loads(old)["b"] == {
+            "guid": "7",
+            "drive_id": "usb-X",
+            "last_backup_at": None,
+            "autoeject": False,
+        }
+        new = registry_serialize(
+            {"b": {"guid": "7", "drive_id": "ata-D", "enclosure_id": "usb-X"}}, Path("/k.json")
+        )
+        assert json.loads(new)["b"]["enclosure_id"] == "usb-X"
+        empty = registry_serialize(
+            {"b": {"guid": "7", "drive_id": "usb-X", "enclosure_id": ""}}, Path("/k.json")
+        )
+        assert "enclosure_id" not in empty
+
+    def test_enclosure_id_must_be_a_non_empty_string(self):
+        for bad in ("null", "5", '""', '"  "', "[]"):
+            text = f'{{"b": {{"guid": "1", "drive_id": "ata-D", "enclosure_id": {bad}}}}}'
+            try:
+                registry_parse(text, Path("/k.json"))
+            except RegistryError:
+                continue
+            raise AssertionError(f"expected RegistryError for {bad}")
+
+    def test_what_2_2_writes_stays_readable_by_2_1_1(self):
+        """The way back (M16 plan section 4): 2.1.1 requires guid and a non-empty
+        drive_id and keeps every other key, so only these keys may be added."""
+        text = registry_serialize(
+            {"b": {"guid": "7", "drive_id": "ata-D", "enclosure_id": "usb-X", "future": 1}},
+            Path("/k.json"),
+        )
+        entry = json.loads(text)["b"]
+        assert set(entry) == {
+            "guid",
+            "drive_id",
+            "last_backup_at",
+            "autoeject",
+            "enclosure_id",
+            "future",
+        }
+        assert entry["guid"].isdigit() and entry["drive_id"].strip()
+
+    def test_enclosure_id_survives_a_load_and_a_save(self):
+        cfg = make_config()
+        path = cfg.config_dir / "known_drives.json"
+        path.write_text(
+            '{"a": {"guid": "1", "drive_id": "ata-D", "enclosure_id": "usb-X"},'
+            + ' "b": {"guid": "2", "drive_id": "usb-Y"}}'
+        )
+        with patch.object(Config, "default_config_dir", return_value=cfg.config_dir):
+            loaded = Config.load()
+        assert loaded.known_drives["a"].enclosure_id == "usb-X"
+        assert loaded.known_drives["b"].enclosure_id == ""
+        assert "enclosure_id" not in loaded.known_drives["a"].extra
+        loaded.save_drives()
+        data = json.loads(path.read_text())
+        assert data["a"]["enclosure_id"] == "usb-X"
+        assert "enclosure_id" not in data["b"]
+
     def test_shared_and_version_keys_are_validated(self):
         """M3 decision 5e: the shapes written by backup and prepare pass; any
         other shape is refused before the file is touched."""

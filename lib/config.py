@@ -101,6 +101,7 @@ class DriveInfo:
     #                          the command's default after EJECT_TIMEOUT_SECONDS;
     #                          if False (default), the prompt waits for input.
     extra: dict[str, Any] = field(default_factory=dict)  # keys this version does not know
+    enclosure_id: str = ""  # by-id name of the enclosure, when drive_id is the disk's own
 
 
 @dataclass
@@ -184,7 +185,12 @@ class Config:
                     else None
                 ),
                 autoeject=bool(info.get("autoeject", False)),
-                extra={k: v for k, v in info.items() if k not in registry.KNOWN_KEYS},
+                extra={
+                    k: v
+                    for k, v in info.items()
+                    if k not in registry.KNOWN_KEYS and k != registry.ENCLOSURE_KEY
+                },
+                enclosure_id=str(info.get(registry.ENCLOSURE_KEY, "")),
             )
         return cfg
 
@@ -230,6 +236,7 @@ class Config:
                 "drive_id": info.drive_id,
                 "last_backup_at": info.last_backup_at,
                 "autoeject": info.autoeject,
+                **({registry.ENCLOSURE_KEY: info.enclosure_id} if info.enclosure_id else {}),
             }
         registry.write_atomic(self.drives_file_path, entries)
 

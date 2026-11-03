@@ -35,6 +35,9 @@ from typing import Any
 from lib.retention import Policy
 
 KNOWN_KEYS = ("guid", "drive_id", "last_backup_at", "autoeject")
+# Optional (M16-3): the enclosure's by-id name when drive_id is the disk's own.
+# Not in KNOWN_KEYS' required four: zark 2.1.1 keeps it as an unknown key.
+ENCLOSURE_KEY = "enclosure_id"
 UNKNOWN_DRIVE_ID = "<unknown>"
 # Optional per-drive retention settings (M3 decision 2b): key → (min, max).
 RETENTION_KEY = "retention"
@@ -62,6 +65,10 @@ def _check_entry(path: Path, name: str, entry: Any) -> None:
     drive_id = entry.get("drive_id")
     if not isinstance(drive_id, str) or not drive_id.strip():
         raise RegistryError(f"{where}: 'drive_id' must be a non-empty string")
+    if ENCLOSURE_KEY in entry and (
+        not isinstance(entry[ENCLOSURE_KEY], str) or not entry[ENCLOSURE_KEY].strip()
+    ):
+        raise RegistryError(f"{where}: {ENCLOSURE_KEY!r} must be a non-empty string")
     if "autoeject" in entry and not isinstance(entry["autoeject"], bool):
         raise RegistryError(f"{where}: 'autoeject' must be true or false")
     last = entry.get("last_backup_at")
@@ -154,8 +161,10 @@ def serialize(entries: dict[str, dict[str, Any]], path: Path) -> str:
             "last_backup_at": entry.get("last_backup_at"),
             "autoeject": bool(entry.get("autoeject", False)),
         }
+        if entry.get(ENCLOSURE_KEY):  # absent, never null: an unreconciled entry is unchanged
+            full[ENCLOSURE_KEY] = entry[ENCLOSURE_KEY]
         for key, value in entry.items():
-            if key not in KNOWN_KEYS:
+            if key not in KNOWN_KEYS and key != ENCLOSURE_KEY:
                 full[key] = value
         out[name] = full
     text = json.dumps(out, indent=2) + "\n"
