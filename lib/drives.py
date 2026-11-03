@@ -338,28 +338,35 @@ def _add_pool(  # pylint: disable=too-many-arguments,too-many-locals,too-many-po
     )
 
 
+def _imported_vdev(pool: str) -> str:
+    """The first device path in ``zpool list -vHP <pool>`` ("" when none)."""
+    r = run(f"zpool list -vHP {pool}")
+    for line in r.lines[1:] if r.ok else []:
+        path = line.strip().split("\t")[0]
+        if path.startswith("/dev/"):
+            return path
+    return ""
+
+
 def backup_device(drive: ConnectedDrive) -> str | None:
     """Exact vdev partition of a connected backup drive, for device-exact imports.
 
-    From the device the pool was found on (M16-4): its disk's own by-id name
-    first, then the preferred one, then the partition itself. The registry's
-    name is used only when the scan found no device, and then it is not
-    trusted further than the GUID check that follows the import. None when
-    the drive cannot be located on a device (a registered drive that is not
-    connected).
+    From the device the pool was found on (M16-4), or for a pool the scan
+    found imported with no device, from the pool's own vdev (M16R-1): its
+    disk's own by-id name first, then the preferred one, then the partition
+    itself. The registry's name is never a source: it names a path, and
+    another disk may sit there. None when the drive cannot be located on a
+    device (a registered drive that is not connected).
     """
-    if drive.dev_path:
-        disk = whole_disk(drive.dev_path)
-        ident = names_of(disk) if disk else DiskIdentity(disk="", by_id="")
-        for name in (ident.disk_id, ident.by_id):
-            if name and Path(f"{BY_ID_DIR}/{name}-part1").exists():
-                return f"{BY_ID_DIR}/{name}-part1"
-        return drive.dev_path
-    if drive.drive_id and drive.drive_id != "<unknown>":
-        part1 = Path(f"{BY_ID_DIR}/{drive.drive_id}-part1")
-        if part1.exists():
-            return str(part1)
-    return None
+    dev = drive.dev_path or (_imported_vdev(drive.name) if drive.state == "imported" else "")
+    if not dev:
+        return None
+    disk = whole_disk(dev)
+    ident = names_of(disk) if disk else DiskIdentity(disk="", by_id="")
+    for name in (ident.disk_id, ident.by_id):
+        if name and Path(f"{BY_ID_DIR}/{name}-part1").exists():
+            return f"{BY_ID_DIR}/{name}-part1"
+    return dev
 
 
 def reconcile(info: DriveInfo, ident: DiskIdentity, log: Log) -> bool:

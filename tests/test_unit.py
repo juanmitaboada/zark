@@ -10238,6 +10238,56 @@ class TestLocateRegistered:  # pylint: disable=missing-function-docstring
         ):
             assert backup_device(drive) == str(d / f"{self.ATA_A}-part1")
 
+    def _imported_drive(self) -> ConnectedDrive:
+        return ConnectedDrive("f", "18", self.CASE, "", True, False, False, "imported")
+
+    def _pool_on_sdd(self, vdev: bool = True) -> MockShell:
+        """Pool f imported from disk sdd (A, usb-Other); the case holds another disk."""
+        mock = MockShell()
+        if vdev:
+            mock.on("zpool list -vHP f").succeeds("f\t1G\t1G\n\t/dev/sdd1\t1G\t1G")
+        else:
+            mock.on("zpool list -vHP f").fails("no such pool")
+        mock.on_prefix("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN").succeeds(
+            'NAME="sdd1" TYPE="part" PKNAME="sdd" MODEL="" SERIAL="" SIZE="1G" TRAN=""'
+        )
+        mock.on_prefix("find /dev/disk/by-id/").succeeds(
+            "usb-Other-0:0\t../../sdd\nata-A_1\t../../sdd"
+        )
+        return mock
+
+    def test_backup_device_of_an_imported_pool_comes_from_its_vdev(self):
+        """M16R-1: the registry's name leads to another disk, B, in the case."""
+        d = self.by_id(self.CASE, "ata-A_1")
+        with (
+            patch_sh(self._pool_on_sdd()),
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            patch("lib.identity.os.path.realpath", side_effect=lambda p: p),
+        ):
+            assert backup_device(self._imported_drive()) == str(d / "ata-A_1-part1")
+
+    def test_backup_device_of_an_imported_pool_never_falls_back_on_the_registry_name(self):
+        d = self.by_id(self.CASE)
+        with patch_sh(self._pool_on_sdd(vdev=False)), patch.object(drives_lib, "BY_ID_DIR", str(d)):
+            assert backup_device(self._imported_drive()) is None
+
+    def test_the_registry_never_takes_the_name_of_another_disk_for_an_imported_pool(self):
+        """The review's scenario: the heal reads A's disk, not the case's."""
+        case_b = "ata-B_9"
+        d = self.by_id(self.CASE, "ata-A_1", case_b)
+        cfg = make_config()
+        cfg.known_drives["f"] = DriveInfo("f", "18", self.CASE)
+        with (
+            patch_sh(self._pool_on_sdd()),
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            patch("lib.identity.os.path.realpath", side_effect=lambda p: p),
+            redirect_stdout(StringIO()),
+        ):
+            device = backup_device(self._imported_drive())
+            backup_mod._heal_drive_id(cfg, "f", device, make_log())  # pylint: disable=protected-access
+        assert cfg.known_drives["f"].drive_id == "ata-A_1"
+        assert cfg.known_drives["f"].drive_id != case_b
+
     def test_backup_device_does_not_trust_the_registry_name_over_the_found_device(self):
         d = self.by_id(self.CASE)
         drive = ConnectedDrive("f", "18", self.CASE, "/dev/sdz1", True, False, False, "exported")
