@@ -10668,6 +10668,95 @@ class TestReconcile:  # pylint: disable=missing-function-docstring
         assert not (cfg.config_dir / "known_drives.json").exists()
 
 
+class TestSharedBridgeNames:  # pylint: disable=missing-function-docstring
+    """K0 (carmen, 2026-11-02): black and blue go through Micron bridges that show no
+    ata- name. Their usb- names carry each disk's own serial; scsi-3... and wwn-... are
+    the same on both. Only the usb- name tells them apart, and only the label proves."""
+
+    BLACK = "usb-Micron_CT2000X10PROSSD9_A1B2C3D4E5F6-0:0"
+    BLUE = "usb-Micron_CT2000X10SSD9_F6E5D4C3B2A1-0:0"
+    SCSI = "scsi-35000000000000001"
+    WWN = "wwn-0x5000000000000001"
+
+    def disk(self, usb: str, label: PoolLabel | None = None) -> DiskIdentity:
+        return DiskIdentity("/dev/sda", usb, aliases=(usb, self.SCSI, self.WWN), label=label)
+
+    def test_the_usb_name_alone_tells_the_two_disks_apart(self):
+        drives = {
+            "black": DriveInfo("black", "1", self.BLACK),
+            "blue": DriveInfo("blue", "2", self.BLUE),
+        }
+        assert [m.name for m in recognise(self.disk(self.BLUE), drives)] == ["blue"]
+        assert [m.name for m in recognise(self.disk(self.BLACK), drives)] == ["black"]
+        assert not enclosure_mates(self.disk(self.BLUE), drives)
+        assert not enclosure_mates(self.disk(self.BLACK), drives)
+
+    def test_the_names_both_disks_share_are_no_evidence(self):
+        """An entry that names only scsi-3... or wwn-... (what 1.0.12 could write) matches
+        neither disk, by drive_id or by enclosure_id."""
+        drives = {
+            "by_scsi": DriveInfo("by_scsi", "1", self.SCSI),
+            "by_wwn": DriveInfo("by_wwn", "2", self.WWN),
+            "enclosure": DriveInfo("enclosure", "3", self.BLACK, enclosure_id=self.WWN),
+        }
+        assert not recognise(self.disk(self.BLUE), drives)
+        assert [m.name for m in recognise(self.disk(self.BLACK), drives)] == ["enclosure"]
+        assert not enclosure_mates(self.disk(self.BLUE), drives)
+
+    def test_the_label_decides_between_them_whatever_the_shared_names_say(self):
+        drives = {
+            "black": DriveInfo("black", "1", self.WWN),
+            "blue": DriveInfo("blue", "2", self.WWN),
+        }
+        found = recognise(self.disk(self.BLUE, PoolLabel("blue", "2")), drives)
+        assert [(m.name, m.evidence) for m in found] == [("blue", Evidence.LABEL)]
+
+    def test_a_registered_name_that_both_disks_answer_to_does_not_find_the_other_one(self):
+        """blue is registered by wwn-...; black is the disk plugged in."""
+        d = Path(tempfile.mkdtemp())
+        for n in (self.WWN, self.SCSI, self.BLACK):
+            (d / n).write_text("")
+            (d / f"{n}-part1").write_text("")
+        black_label = PoolLabel("black", "1")
+
+        def read(dev: str) -> PoolLabel | None:
+            return black_label if Path(dev).name.endswith("-part1") else None
+
+        with (
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            patch.object(drives_lib, "read_pool_label", side_effect=read),
+        ):
+            found = locate_registered(DriveInfo("blue", "2", self.WWN))
+        assert found.presence is Presence.OTHER_POOL
+
+    def test_the_first_backup_after_the_upgrade_corrects_nothing(self):
+        """U2: both entries are 2.1.1's, drive_id the usb- name, no enclosure_id; the disk
+        has no ata- name, so there is nothing to record and no Registry line to print."""
+        out = StringIO()
+        for usb in (self.BLACK, self.BLUE):
+            info = DriveInfo("d", "1", usb)
+            with redirect_stdout(out):
+                assert not reconcile(info, self.disk(usb), make_log())
+            assert (info.drive_id, info.enclosure_id) == (usb, "")
+        assert "Registry:" not in out.getvalue()
+
+    def test_a_usb_name_is_never_replaced_by_a_name_the_disks_share(self):
+        """The usb- link is missing for the moment: only scsi- and wwn- name the disk."""
+        info = DriveInfo("black", "1", self.BLACK)
+        for ident in (
+            DiskIdentity("/dev/sda", self.WWN, aliases=(self.SCSI, self.WWN)),
+            DiskIdentity("/dev/sda", self.SCSI, aliases=(self.SCSI,)),
+        ):
+            assert not reconcile(info, ident, make_log())
+            assert (info.drive_id, info.enclosure_id) == (self.BLACK, "")
+
+    def test_an_entry_that_names_only_a_shared_name_is_corrected_to_the_usb_name(self):
+        info = DriveInfo("black", "1", self.WWN)
+        with redirect_stdout(StringIO()):
+            assert reconcile(info, self.disk(self.BLACK), make_log())
+        assert (info.drive_id, info.enclosure_id) == (self.BLACK, "")
+
+
 class TestRegistryCommand:  # pylint: disable=missing-function-docstring
     """I24: supported way to inspect and repair the registry."""
 

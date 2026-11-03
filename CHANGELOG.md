@@ -240,6 +240,8 @@ PPA until the final 2.2.0.
   - `umount` ejects the device the pool is on, read before the export, not the one the registry's
     name leads to.
   - `status.json` may carry `enclosure_id` (optional, schema 1); readers do not use it.
+  - A name in the registry is never replaced by a weaker kind: a disk's own name by a bus
+    name, nor a bus name by `wwn-` or `scsi-`, which distinct disks behind some bridges share.
 - `import_backup_pool` exports and refuses a pool whose GUID is not the expected one after an
   import: `mount`, `recover`, `prune` and `purge` check it as `backup` did.
 - The self-test gains DSK-09 and DSK-10 (level 2: the stick's names by kind; recognition and

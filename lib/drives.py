@@ -369,6 +369,10 @@ def backup_device(drive: ConnectedDrive) -> str | None:
     return dev
 
 
+_STRENGTH = {Kind.DISK: 3, Kind.BUS: 2, Kind.WEAK: 1, Kind.OTHER: 0}
+_STRONG = (Kind.DISK, Kind.BUS)
+
+
 def reconcile(info: DriveInfo, ident: DiskIdentity, log: Log) -> bool:
     """Bring ``info``'s names to those of the disk it was just verified on.
 
@@ -381,7 +385,13 @@ def reconcile(info: DriveInfo, ident: DiskIdentity, log: Log) -> bool:
     drive_id, enclosure_id = registry_names(ident)
     if not drive_id:
         return False
-    if classify(info.drive_id) is Kind.DISK and classify(drive_id) is not Kind.DISK:
+    # A name is never replaced by a weaker kind: a disk's own name by a bus name
+    # (the bridge hides it for now), a bus name by wwn-/scsi-, which distinct disks
+    # can share (black and blue, K0).
+    if (
+        classify(info.drive_id) in _STRONG
+        and _STRENGTH[classify(drive_id)] < _STRENGTH[classify(info.drive_id)]
+    ):
         drive_id = info.drive_id
     if classify(drive_id) is Kind.DISK:
         enclosure_id = ident.bus_id or info.enclosure_id
