@@ -21,15 +21,19 @@ and provides helpful output for unknown drives.
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 
 from lib.config import Config, DriveInfo, parse_utc_iso, zark_command
 from lib.identity import (
+    BY_ID_DIR,
     DiskIdentity,
     IdentityError,
+    PoolLabel,
     by_id_names,
     preferred_by_id,
     protected_disks,
+    read_pool_label,
     resolve_disk,
     whole_disk,
 )
@@ -76,6 +80,55 @@ class ConnectedDrive:  # pylint: disable=too-many-instance-attributes
 
 
 SYSTEM_POOLS = {"rpool", "bpool"}
+
+
+class Presence(Enum):
+    """What a registered drive's names lead to (M16-4)."""
+
+    CONNECTED = "connected"  # a name leads to a disk whose pool label is the entry's
+    OTHER_POOL = "other pool"  # a name leads to a disk with another pool's label
+    NO_LABEL = "no label"  # a name leads to a disk with no ZFS label
+    ABSENT = "absent"  # no name leads to a disk
+
+
+@dataclass(frozen=True)
+class Location:
+    """Where a registered drive is, by its label and not by a name alone."""
+
+    presence: Presence
+    name: str = ""  # the registry name (drive_id or enclosure_id) that led to the disk
+    partition: str = ""  # by-id path of the partition the label was read from
+    label: PoolLabel | None = None
+
+
+def locate_registered(info: DriveInfo) -> Location:
+    """Find ``info``'s drive through its names, then trust only its label.
+
+    A name that exists proves a disk is there, not that it is this drive:
+    another disk in the same enclosure carries the same ``usb-`` name. The
+    pool label read from that disk says whether it is the registered pool.
+    Names are tried in order (``drive_id``, ``enclosure_id``); a drive found
+    by one is not looked for by the other, and the first other thing found
+    is what is reported when none is the drive.
+    """
+    other = Location(Presence.ABSENT)
+    for name in (info.drive_id, info.enclosure_id):
+        if not name or name == "<unknown>" or "/" in name:
+            continue
+        link = Path(f"{BY_ID_DIR}/{name}")
+        part1 = Path(f"{BY_ID_DIR}/{name}-part1")
+        if not link.exists() and not part1.exists():
+            continue
+        label = read_pool_label(str(part1)) if part1.exists() else None
+        if label is None and link.exists():
+            label = read_pool_label(str(link))
+        where = str(part1) if part1.exists() else ""
+        if label is not None and label.guid == info.guid:
+            return Location(Presence.CONNECTED, name, where, label)
+        if other.presence is Presence.ABSENT:
+            state = Presence.NO_LABEL if label is None else Presence.OTHER_POOL
+            other = Location(state, name, where, label)
+    return other
 
 
 def get_drive_id(dev_path: str) -> str:
@@ -161,16 +214,17 @@ def scan_connected_drives(  # pylint: disable=too-many-locals,too-many-branches,
                 state="imported",
             )
 
-    # 3. Also check known drives by drive_id presence
+    # 3. Registered drives not seen above, found by their label: a link of
+    # the right name leads to some disk, and only its label says it is this one.
     for name, info in cfg.known_drives.items():
         if name in seen_pools:
             continue
-        by_id_path = Path(f"/dev/disk/by-id/{info.drive_id}")
-        if by_id_path.exists() or Path(f"{by_id_path}-part1").exists():
+        found = locate_registered(info)
+        if found.presence is Presence.CONNECTED:
             _add_pool(
                 name,
                 info.guid,
-                info.drive_id,
+                found.name,
                 cfg,
                 known_by_name,
                 known_by_guid,
@@ -178,6 +232,7 @@ def scan_connected_drives(  # pylint: disable=too-many-locals,too-many-branches,
                 results,
                 log,
                 state="exported",
+                dev_path=found.partition,
             )
 
     return results
@@ -282,21 +337,25 @@ def _add_pool(  # pylint: disable=too-many-arguments,too-many-locals,too-many-po
 def backup_device(drive: ConnectedDrive) -> str | None:
     """Exact vdev partition of a connected backup drive, for device-exact imports.
 
-    Prefers ``/dev/disk/by-id/<drive_id>-part1``; falls back to the by-id of
-    the disk holding the partition blkid reported, then to that partition
-    itself. None when the drive cannot be located on a device (a registered
-    drive that is not connected).
+    From the device the pool was found on (M16-4): its disk's own by-id name
+    first, then the preferred one, then the partition itself. The registry's
+    name is used only when the scan found no device, and then it is not
+    trusted further than the GUID check that follows the import. None when
+    the drive cannot be located on a device (a registered drive that is not
+    connected).
     """
-    if drive.drive_id and drive.drive_id != "<unknown>":
-        part1 = Path(f"/dev/disk/by-id/{drive.drive_id}-part1")
-        if part1.exists():
-            return str(part1)
     if drive.dev_path:
         disk = whole_disk(drive.dev_path)
-        by_id = preferred_by_id(by_id_names(disk)) if disk else ""
-        if by_id and Path(f"/dev/disk/by-id/{by_id}-part1").exists():
-            return f"/dev/disk/by-id/{by_id}-part1"
+        names = by_id_names(disk) if disk else []
+        ident = DiskIdentity(disk=disk, by_id=preferred_by_id(names), aliases=tuple(names))
+        for name in (ident.disk_id, ident.by_id):
+            if name and Path(f"{BY_ID_DIR}/{name}-part1").exists():
+                return f"{BY_ID_DIR}/{name}-part1"
         return drive.dev_path
+    if drive.drive_id and drive.drive_id != "<unknown>":
+        part1 = Path(f"{BY_ID_DIR}/{drive.drive_id}-part1")
+        if part1.exists():
+            return str(part1)
     return None
 
 

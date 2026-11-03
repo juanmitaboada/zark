@@ -208,8 +208,13 @@ from lib.config import (  # pylint: disable=wrong-import-position # noqa: E402
 )
 from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
     ConnectedDrive,
+    Location,
+    Presence,
+    backup_device,
     drive_staleness_days,
     is_drive_stale,
+    locate_registered,
+    scan_connected_drives,
     shared_snapshot_line,
     validate_external_block_device,
 )
@@ -9973,6 +9978,148 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         raise AssertionError("prepare must refuse to register <unknown>")
 
 
+class TestLocateRegistered:  # pylint: disable=missing-function-docstring
+    """A registered drive is where its label is, not where a name leads (M16-4)."""
+
+    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+
+    def by_id(self, *names: str) -> Path:
+        """A by-id directory with a disk link and a part1 link per name."""
+        d = Path(tempfile.mkdtemp())
+        for n in names:
+            (d / n).write_text("")
+            (d / f"{n}-part1").write_text("")
+        return d
+
+    def labels(self, answer: dict[str, PoolLabel | None]):
+        """read_pool_label answering by the last component of the path."""
+
+        def read(dev: str) -> PoolLabel | None:
+            return answer.get(Path(dev).name)
+
+        return patch.object(drives_lib, "read_pool_label", side_effect=read)
+
+    def test_the_registered_pool_behind_the_name_is_connected(self):
+        d = self.by_id(self.CASE)
+        info = DriveInfo("f", "18", self.CASE)
+        with (
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            self.labels({f"{self.CASE}-part1": PoolLabel("f", "18")}),
+        ):
+            found = locate_registered(info)
+        assert found.presence is Presence.CONNECTED
+        assert found.partition == str(d / f"{self.CASE}-part1")
+
+    def test_another_pool_in_the_same_case_is_not_the_drive(self):
+        d = self.by_id(self.CASE)
+        info = DriveInfo("f", "18", self.CASE)
+        other = PoolLabel("x", "99")
+        with (
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            self.labels({f"{self.CASE}-part1": other}),
+        ):
+            found = locate_registered(info)
+        assert found == Location(
+            Presence.OTHER_POOL, self.CASE, str(d / f"{self.CASE}-part1"), other
+        )
+
+    def test_a_blank_disk_in_the_same_case_is_not_the_drive(self):
+        d = self.by_id(self.CASE)
+        with patch.object(drives_lib, "BY_ID_DIR", str(d)), self.labels({}):
+            found = locate_registered(DriveInfo("f", "18", self.CASE))
+        assert found.presence is Presence.NO_LABEL
+
+    def test_no_name_that_exists_means_absent(self):
+        d = self.by_id("usb-Other-0:0")
+        with patch.object(drives_lib, "BY_ID_DIR", str(d)), self.labels({}):
+            assert locate_registered(DriveInfo("f", "18", self.CASE)).presence is Presence.ABSENT
+            assert locate_registered(DriveInfo("f", "18", "<unknown>")).presence is Presence.ABSENT
+
+    def test_the_enclosure_name_finds_a_drive_whose_disk_name_is_gone(self):
+        d = self.by_id(self.CASE)
+        info = DriveInfo("f", "18", self.ATA_A, enclosure_id=self.CASE)
+        with (
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            self.labels({f"{self.CASE}-part1": PoolLabel("f", "18")}),
+        ):
+            assert locate_registered(info).presence is Presence.CONNECTED
+
+    def test_the_disk_name_wins_when_the_case_holds_another_disk(self):
+        """Both names exist; the case's disk is not the drive, the named one is."""
+        d = self.by_id(self.CASE, self.ATA_A)
+        info = DriveInfo("f", "18", self.ATA_A, enclosure_id=self.CASE)
+        with (
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            self.labels({f"{self.ATA_A}-part1": PoolLabel("f", "18")}),
+        ):
+            found = locate_registered(info)
+        assert found.presence is Presence.CONNECTED
+        assert found.name == self.ATA_A
+
+    def test_a_path_in_the_name_is_never_followed(self):
+        d = self.by_id(self.CASE)
+        with patch.object(drives_lib, "BY_ID_DIR", str(d)), self.labels({}):
+            found = locate_registered(DriveInfo("f", "18", "../" + self.CASE))
+        assert found.presence is Presence.ABSENT
+
+    def test_the_scan_does_not_list_a_registered_drive_for_a_blank_disk_in_its_case(self):
+        d = self.by_id(self.CASE)
+        cfg = make_config()
+        cfg.known_drives["f"] = DriveInfo("f", "18", self.CASE)
+        mock = MockShell()
+        mock.on("blkid -t TYPE=zfs_member -o export").succeeds("")
+        mock.on("zpool list -H -o name").succeeds("")
+        with (
+            patch_sh(mock),
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            self.labels({}),
+        ):
+            assert not scan_connected_drives(cfg, make_log())
+
+    def test_the_scan_lists_it_when_the_label_is_its_own(self):
+        d = self.by_id(self.CASE)
+        cfg = make_config()
+        cfg.known_drives["f"] = DriveInfo("f", "18", self.CASE)
+        mock = MockShell()
+        mock.on("blkid -t TYPE=zfs_member -o export").succeeds("")
+        mock.on("zpool list -H -o name").succeeds("")
+        mock.on_prefix("lsblk").succeeds("")
+        with (
+            patch_sh(mock),
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            self.labels({f"{self.CASE}-part1": PoolLabel("f", "18")}),
+        ):
+            found = scan_connected_drives(cfg, make_log())
+        assert [(x.name, x.known, x.dev_path) for x in found] == [
+            ("f", True, str(d / f"{self.CASE}-part1"))
+        ]
+
+    def test_backup_device_goes_by_the_device_found_and_prefers_the_disk_name(self):
+        d = self.by_id(self.CASE, self.ATA_A)
+        drive = ConnectedDrive("f", "18", self.CASE, "/dev/sdc1", True, False, False, "exported")
+        mock = MockShell()
+        mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sdc1").succeeds(
+            'NAME="sdc1" TYPE="part" PKNAME="sdc" MODEL="" SERIAL="" SIZE="1G" TRAN=""'
+        )
+        mock.on_prefix("find /dev/disk/by-id/").succeeds(
+            f"{self.CASE}\t../../sdc\n{self.ATA_A}\t../../sdc"
+        )
+        with (
+            patch_sh(mock),
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            patch("lib.identity.os.path.realpath", side_effect=lambda p: p),
+        ):
+            assert backup_device(drive) == str(d / f"{self.ATA_A}-part1")
+
+    def test_backup_device_does_not_trust_the_registry_name_over_the_found_device(self):
+        d = self.by_id(self.CASE)
+        drive = ConnectedDrive("f", "18", self.CASE, "/dev/sdz1", True, False, False, "exported")
+        mock = MockShell()
+        with patch_sh(mock), patch.object(drives_lib, "BY_ID_DIR", str(d)):
+            assert backup_device(drive) == "/dev/sdz1"
+
+
 class TestRegistryCommand:  # pylint: disable=missing-function-docstring
     """I24: supported way to inspect and repair the registry."""
 
@@ -10006,6 +10153,25 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
         data = json.loads((d / "known_drives.json").read_text())
         assert data["blue"]["drive_id"] == _KINGSTON_ID
         assert data["blue"]["autoeject"] is False
+
+    def test_list_says_another_disk_is_in_the_case_not_that_the_drive_is(self):
+        """M12P.1: the registered Fujitsu is in a drawer, the SAMSUNG is in its case."""
+        case = "usb-Seagate_USB_07BB24735163-0:0"
+        d = self._cfg_dir({"f": {"guid": "18", "drive_id": "ata-FUJITSU_X", "enclosure_id": case}})
+        out = StringIO()
+        found = Location(Presence.NO_LABEL, case, "/dev/disk/by-id/x-part1", None)
+        with (
+            patch_sh(MockShell()),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch.object(registry_mod, "locate_registered", return_value=found),
+            patch.object(registry_mod.survey, "source_pools", return_value=[]),
+            redirect_stdout(out),
+        ):
+            registry_mod.run(["list"])
+        text = out.getvalue()
+        assert f"enclosure:   {case}" in text
+        assert f"another disk is at {case}: no ZFS label, not this drive" in text
+        assert "connected, GUID matches" not in text
 
     def test_retention_settings_are_validated_written_and_read(self):
         """M3 decision 2b: per-drive retention in the registry; the rest of the

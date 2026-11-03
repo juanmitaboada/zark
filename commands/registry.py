@@ -37,12 +37,17 @@ All writes go through lib.registry (validated, atomic).
 """
 
 import shlex
-from pathlib import Path
 
 from lib import anchors, cli_spec, registry, sh, survey
 from lib.config import Config, zark_command
-from lib.drives import drive_staleness_days, get_drive_id, scan_connected_drives
-from lib.identity import BY_ID_DIR, read_pool_label
+from lib.drives import (
+    Location,
+    Presence,
+    drive_staleness_days,
+    get_drive_id,
+    locate_registered,
+    scan_connected_drives,
+)
 from lib.log import Log
 
 USAGE = (
@@ -73,6 +78,20 @@ def _connected_by_id_for_guid(guid: str, cfg: Config, log: Log) -> str:
     return ""
 
 
+def _state_text(found: Location, log: Log) -> str:
+    """How `registry list` says where a drive is: by its label, never by a name."""
+    if found.presence is Presence.CONNECTED:
+        return f"{log.G}connected, GUID matches{log.N}"
+    if found.presence is Presence.OTHER_POOL and found.label is not None:
+        return (
+            f"{log.R}another disk is at {found.name}: pool {found.label.name} "
+            + f"(GUID {found.label.guid}), not this drive{log.N}"
+        )
+    if found.presence is Presence.NO_LABEL:
+        return f"{log.Y}another disk is at {found.name}: no ZFS label, not this drive{log.N}"
+    return "not connected"
+
+
 def _list(cfg: Config, log: Log) -> None:
     if not cfg.known_drives:
         log.info(f"No drives registered in {cfg.drives_file_path}")
@@ -81,22 +100,15 @@ def _list(cfg: Config, log: Log) -> None:
     for name, info in sorted(cfg.known_drives.items()):
         age = drive_staleness_days(info)
         last = f"{info.last_backup_at} ({age} day(s) ago)" if age is not None else "never"
-        part1 = Path(f"{BY_ID_DIR}/{info.drive_id}-part1")
         if info.drive_id == "<unknown>":
             state = f"{log.Y}drive_id unknown - run: zark registry fix {name}{log.N}"
-        elif not part1.exists():
-            state = "not connected"
         else:
-            label = read_pool_label(str(part1))
-            if label is None:
-                state = f"{log.Y}connected, no ZFS label{log.N}"
-            elif label.guid == info.guid:
-                state = f"{log.G}connected, GUID matches{log.N}"
-            else:
-                state = f"{log.R}connected, GUID {label.guid} ≠ registered{log.N}"
+            state = _state_text(locate_registered(info), log)
         log.raw(f"  {log.W}{name}{log.N}")
         log.raw(f"      guid:        {info.guid}")
         log.raw(f"      drive_id:    {info.drive_id}")
+        if info.enclosure_id:
+            log.raw(f"      enclosure:   {info.enclosure_id}")
         log.raw(f"      last backup: {last}")
         log.raw(f"      autoeject:   {'yes' if info.autoeject else 'no'}")
         log.raw(f"      retention:   {_policy_text(cfg, name)}")
