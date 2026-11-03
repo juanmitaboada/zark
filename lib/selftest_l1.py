@@ -2045,6 +2045,11 @@ def pool_16(b: Bench) -> None:
         expect(not got, "import refused for another GUID", "imported")
         listed = b.run(f"zpool list -H {c}")
         expect(not listed.ok, f"{c} not imported", "still imported", text_of(listed))
+        expect(
+            not os.path.exists(_altroot(c)),
+            f"{_altroot(c)} removed with the export",
+            "still there",
+        )
         got = zfs.import_backup_pool(c, b.vdev(c), altroot=_altroot(c), guid=guid)
         expect(got, "import accepted for its own GUID", "refused")
         expect(b.pool_value("guid", c) == guid, f"GUID {guid}", "another")

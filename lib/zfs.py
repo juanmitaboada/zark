@@ -456,17 +456,18 @@ class ZFS:
             if r.ok:
                 mode = "read-only" if readonly else "read-write"
                 self.log.ok(f"Pool {name} imported ({mode}, altroot={root})")
-                if guid and not self._is_expected(name, guid, device):
+                if guid and not self._is_expected(name, guid, device, root):
                     return False
                 return True
             last_err = r.stderr.strip()
         self.log.error(f"Cannot import pool {name} from {device}: {last_err}")
         return False
 
-    def _is_expected(self, name: str, guid: str, device: str) -> bool:
+    def _is_expected(self, name: str, guid: str, device: str, root: str) -> bool:
         """After an import: the pool is the one expected (M16-7). A pool of
         that name on another disk is exported at once, before anything reads
-        or writes it; an unreadable GUID counts as a mismatch."""
+        or writes it, and the altroot directory the import made goes with it;
+        an unreadable GUID counts as a mismatch."""
         actual = self.pool_guid(name)
         if actual == guid:
             return True
@@ -474,7 +475,9 @@ class ZFS:
             f"Pool {name} at {device} has GUID {actual or 'unreadable'}, not {guid}: "
             + "another disk; exporting it"
         )
-        if not run(f"zpool export {name}", log=self.log).ok:
+        if run(f"zpool export {name}", log=self.log).ok:
+            remove_altroot_dir(root)  # the empty directory the import made (M16R-5)
+        else:
             self.log.error(f"Could not export {name}: sudo zpool export {name}")
         return False
 

@@ -8734,6 +8734,37 @@ class TestImportBackupPool:  # pylint: disable=missing-function-docstring
             )
         assert "zpool export backup" in mock.calls
 
+    def test_the_altroot_directory_goes_with_the_export_of_a_refused_pool(self):
+        """M16R-5: the import made the directory; the refused pool leaves nothing."""
+        root = Path(tempfile.mkdtemp()) / "backup"
+        root.mkdir()
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on(f"mkdir -p {root}").succeeds()
+        mock.on(f"zpool import -N -R {root} -d {self.DEV} backup").succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("222")
+        mock.on("zpool export backup").succeeds()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not ZFS(make_log()).import_backup_pool(
+                "backup", self.DEV, altroot=str(root), guid="111"
+            )
+        assert not root.exists()
+
+    def test_the_altroot_directory_stays_when_the_export_failed(self):
+        root = Path(tempfile.mkdtemp()) / "backup"
+        root.mkdir()
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on(f"mkdir -p {root}").succeeds()
+        mock.on(f"zpool import -N -R {root} -d {self.DEV} backup").succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("222")
+        mock.on("zpool export backup").fails("busy")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not ZFS(make_log()).import_backup_pool(
+                "backup", self.DEV, altroot=str(root), guid="111"
+            )
+        assert root.exists()
+
     def test_an_unreadable_guid_after_the_import_is_a_mismatch(self):
         mock = self._imported(None)
         with patch_sh(mock), redirect_stdout(StringIO()):
