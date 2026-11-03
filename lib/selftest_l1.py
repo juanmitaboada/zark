@@ -56,6 +56,7 @@ from lib.zfs import (
     BACKUP_ALTROOT_BASE,
     COMPAT_DIRS,
     DRIVE_COMPATIBILITY,
+    ZFS,
     read_datasets,
     read_space,
 )
@@ -2018,3 +2019,34 @@ def key_04(b: Bench) -> None:
         expect(got == want, f"{prop} {want}", got)
         got = b.source(prop, ds)
         expect(got == "local", f"{prop} local", got)
+
+
+@check(
+    "POOL-16",
+    1,
+    1,
+    "import_backup_pool refuses a pool of another GUID and leaves nothing imported",
+    depends=("ZFS.import_backup_pool checks the GUID after the import (M16-7)",),
+)
+def pool_16(b: Bench) -> None:
+    """``zpool import -N -R <altroot> -d <vdev> <name>`` imports whatever pool
+    of that name the device holds; ``import_backup_pool(..., guid=)`` reads
+    its GUID (``zpool get guid``) and exports it when it is not the expected
+    one, so a pool of that name on another disk is neither read nor written.
+    With the right GUID it stays imported. lib/zfs.py:395-457; OpenZFS
+    cmd/zpool/zpool_main.c:4416-4423 (the import with ``-R``)."""
+    c = b.make_pool("c")
+    try:
+        guid = b.pool_value("guid", c)
+        _ = b.ok(f"zpool export {c}")
+        zfs = ZFS(b.log)
+        wrong = str(int(guid) + 1)
+        got = zfs.import_backup_pool(c, b.vdev(c), altroot=_altroot(c), guid=wrong)
+        expect(not got, "import refused for another GUID", "imported")
+        listed = b.run(f"zpool list -H {c}")
+        expect(not listed.ok, f"{c} not imported", "still imported", text_of(listed))
+        got = zfs.import_backup_pool(c, b.vdev(c), altroot=_altroot(c), guid=guid)
+        expect(got, "import accepted for its own GUID", "refused")
+        expect(b.pool_value("guid", c) == guid, f"GUID {guid}", "another")
+    finally:
+        b.drop_pool(c)

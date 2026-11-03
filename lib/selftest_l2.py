@@ -27,7 +27,9 @@ from pathlib import Path
 
 from lib import identity, sh
 from lib.cleanup import Cleanup
-from lib.identity import DiskIdentity
+from lib.config import DriveInfo
+from lib.drives import Presence, locate_registered
+from lib.identity import DiskIdentity, Evidence, Kind, classify, recognise, registry_names
 from lib.log import Log
 from lib.selftest import Bench, Fail, check, exit_status, expect, observed, text_of
 from lib.zfs import ZFS, backup_altroot, create_command, remove_altroot_base
@@ -399,3 +401,106 @@ def dsk_08(b: Bench) -> None:
     r = s.run(f"zpool import -D -d {shlex.quote(s.part1)}")
     if f"pool: {s.s}" not in r.stdout or "(DESTROYED)" not in r.stdout:
         raise Fail(f"{s.s} listed (DESTROYED) with -D", "not listed so", text_of(r))
+
+
+def names_by_kind(ident: DiskIdentity) -> str:
+    """Check the stick's by-id names against what zark registers (M16-1) and
+    say what was seen: ``disk and bus names`` or ``bus name only``.
+
+    A disk behind a bridge that passes IDENTIFY has an ``ata-`` name as well
+    as the ``usb-`` one, both naming the same node; behind one that does not,
+    only the bus name exists, which is a valid configuration and passes."""
+    kinds = {n: classify(n) for n in ident.aliases}
+    if ident.transport == "usb":
+        expect(
+            ident.bus_id != "" and kinds.get(ident.bus_id) is Kind.BUS,
+            "a usb- bus name among the by-id names",
+            ", ".join(sorted(ident.aliases)),
+        )
+    if not ident.disk_id:
+        expect(
+            registry_names(ident) == (ident.by_id, ""),
+            "the preferred name alone registered",
+            str(registry_names(ident)),
+        )
+        return "bus name only"
+    node = os.path.realpath(f"{identity.BY_ID_DIR}/{ident.disk_id}")
+    expect(node == ident.disk, f"{ident.disk_id} names {ident.disk}", node)
+    expect(
+        registry_names(ident) == (ident.disk_id, ident.bus_id),
+        "the disk's name registered, with the enclosure's",
+        str(registry_names(ident)),
+    )
+    return "disk and bus names"
+
+
+def recognition_of(ident: DiskIdentity, guid: str) -> None:
+    """With the stick's pool exported and its label readable, synthetic
+    registry entries are recognised and located as M16 says: the label first,
+    the disk's own name next, the enclosure's name only as ``BUS``, and
+    another pool behind the same names is not the drive."""
+    expect(
+        ident.label is not None and ident.label.guid == guid,
+        f"the stick's label GUID {guid}",
+        "no label" if ident.label is None else observed(ident.label.guid),
+    )
+    other = str(int(guid) + 1)
+    entries = {"by-label": DriveInfo("by-label", guid, "<unknown>")}
+    if ident.disk_id:
+        entries["by-disk"] = DriveInfo("by-disk", other, ident.disk_id)
+    if ident.bus_id:
+        entries["by-bus"] = DriveInfo("by-bus", other, ident.bus_id)
+    got = {m.name: m.evidence for m in recognise(ident, entries)}
+    want = {"by-label": Evidence.LABEL}
+    if ident.disk_id:
+        want["by-disk"] = Evidence.DISK
+    if ident.bus_id:
+        want["by-bus"] = Evidence.BUS  # an entry that names only the bus: not proven
+    expect(got == want, str(want), str(got))
+    for name in (ident.disk_id, ident.bus_id, ident.by_id):
+        if not name:
+            continue
+        found = locate_registered(DriveInfo("x", guid, name))
+        expect(found.presence is Presence.CONNECTED, f"{name} CONNECTED", found.presence.value)
+        found = locate_registered(DriveInfo("x", other, name))
+        expect(found.presence is Presence.OTHER_POOL, f"{name} OTHER_POOL", found.presence.value)
+
+
+@check(
+    "DSK-09",
+    1,
+    2,
+    "the stick's by-id names by kind: the disk's own and the enclosure's",
+    depends=("identity.classify, DiskIdentity.disk_id and bus_id, registry_names (M16-1)",),
+)
+def dsk_09(b: Bench) -> None:
+    """``names_by_kind``: a non-removable USB disk gets an ``ata-`` link when
+    the bridge answers IDENTIFY (``ata_id`` runs on it) as well as the
+    ``usb-`` one from ``usb_id``, both naming the same node; behind a bridge
+    that does not, only the ``usb-`` link exists. systemd
+    rules.d/60-persistent-storage.rules.in:61, :68-69, :72, :78, :83."""
+    s = _stick(b)
+    seen = names_by_kind(identity.resolve_disk(s.by_id))
+    s.log.info(f"DSK-09: {seen}")
+
+
+@check(
+    "DSK-10",
+    1,
+    2,
+    "a registered drive is recognised and located by its label, then by its names",
+    depends=("identity.recognise (M16-2)", "drives.locate_registered (M16-4)"),
+)
+def dsk_10(b: Bench) -> None:
+    """``recognition_of`` on the stick's exported pool: ``zdb -l`` on the
+    partition each by-id name leads to returns the pool's GUID; once the stick
+    is wiped, a name that still exists leads to a disk with no label.
+    OpenZFS module/zfs/vdev_label.c:162-170 as DSK-03."""
+    s = _stick(b)
+    guid = s.prepare()
+    recognition_of(identity.resolve_disk(s.by_id), guid)
+    _ = s.ok(f"wipefs -a {s.disk}")
+    expect(_wait_gone(s.part1), f"{s.part1} gone", "still there")
+    name = s.stick.disk_id or s.stick.by_id
+    found = locate_registered(DriveInfo("x", guid, name))
+    expect(found.presence is Presence.NO_LABEL, f"{name} NO_LABEL once wiped", found.presence.value)

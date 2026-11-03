@@ -316,6 +316,10 @@ from lib.sanoid_retention import (  # pylint: disable=wrong-import-position # no
 from lib.selftest import (  # pylint: disable=wrong-import-position # noqa: E402
     all_checks as all_selftest_checks,
 )
+from lib.selftest_l2 import (  # pylint: disable=wrong-import-position # noqa: E402
+    names_by_kind,
+    recognition_of,
+)
 from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
@@ -10240,6 +10244,65 @@ class TestLocateRegistered:  # pylint: disable=missing-function-docstring
         mock = MockShell()
         with patch_sh(mock), patch.object(drives_lib, "BY_ID_DIR", str(d)):
             assert backup_device(drive) == "/dev/sdz1"
+
+
+class TestSelftestIdentityChecks:  # pylint: disable=missing-function-docstring
+    """The logic of DSK-09 and DSK-10 (M16-10), on synthetic disks; the checks
+    themselves run on a stick."""
+
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+
+    def usb_disk(self, *names: str, label: PoolLabel | None = None) -> DiskIdentity:
+        return DiskIdentity(
+            "/dev/sdc", self.CASE, transport="usb", aliases=names or (self.CASE,), label=label
+        )
+
+    def test_a_disk_with_both_names_is_seen_as_such(self):
+        with patch("lib.selftest_l2.os.path.realpath", return_value="/dev/sdc"):
+            seen = names_by_kind(self.usb_disk(self.ATA, self.CASE))
+        assert seen == "disk and bus names"
+
+    def test_a_disk_name_that_leads_to_another_node_fails(self):
+        with patch("lib.selftest_l2.os.path.realpath", return_value="/dev/sdd"):
+            try:
+                names_by_kind(self.usb_disk(self.ATA, self.CASE))
+            except stest.Fail as e:
+                assert "names /dev/sdc" in str(e.expected)
+                return
+        raise AssertionError("expected Fail")
+
+    def test_a_bridge_that_hides_the_disk_passes_as_bus_only(self):
+        assert names_by_kind(self.usb_disk(self.CASE)) == "bus name only"
+
+    def test_a_usb_disk_with_no_usb_name_fails(self):
+        try:
+            names_by_kind(self.usb_disk(self.ATA))
+        except stest.Fail:
+            return
+        raise AssertionError("expected Fail")
+
+    def test_recognition_and_location_by_label(self):
+        d = Path(tempfile.mkdtemp())
+        for n in (self.ATA, self.CASE):
+            (d / n).write_text("")
+            (d / f"{n}-part1").write_text("")
+        label = PoolLabel("p", "100")
+        ident = self.usb_disk(self.ATA, self.CASE, label=label)
+
+        def read(dev: str) -> PoolLabel | None:
+            return label if dev.endswith("-part1") else None
+
+        with (
+            patch.object(drives_lib, "BY_ID_DIR", str(d)),
+            patch.object(drives_lib, "read_pool_label", side_effect=read),
+        ):
+            recognition_of(ident, "100")
+            try:
+                recognition_of(ident, "999")
+            except stest.Fail:
+                return
+        raise AssertionError("a label of another GUID must fail")
 
 
 class TestExplore:  # pylint: disable=missing-function-docstring
@@ -25278,9 +25341,10 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
     def test_the_registry_has_the_planned_checks(self):
         checks = all_selftest_checks()
         # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05, POOL-15;
-        # M11: DST-06; M14: RDR-02; M13: BOOT-01 to BOOT-10, UPG-01
-        assert len([c for c in checks if c.level == 1]) == 72
-        assert len([c for c in checks if c.level == 2]) == 8
+        # M11: DST-06; M14: RDR-02; M13: BOOT-01 to BOOT-10, UPG-01;
+        # M16: POOL-16, DSK-09, DSK-10
+        assert len([c for c in checks if c.level == 1]) == 73
+        assert len([c for c in checks if c.level == 2]) == 10
         assert len({c.cid for c in checks}) == len(checks)
         # A check whose expectations changed gets its next revision (M9b, M11).
         revs = {"SNP-07": 2, "POOL-13": 2, "DST-05": 2}
