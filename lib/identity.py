@@ -148,6 +148,13 @@ def registry_names(ident: DiskIdentity) -> tuple[str, str]:
     return ident.by_id, ""
 
 
+def names_of(disk: str) -> DiskIdentity:
+    """The by-id names of a whole disk as a :class:`DiskIdentity`, without
+    reading its label: enough to say which names to register it under."""
+    names = by_id_names(disk)
+    return DiskIdentity(disk=disk, by_id=preferred_by_id(names), aliases=tuple(names))
+
+
 def _lsblk_fields(node: str) -> dict[str, str]:
     """``lsblk -dn -P`` for one node as a dict (empty on failure)."""
     r = run(f"lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN {shlex.quote(node)}")

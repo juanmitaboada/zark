@@ -44,10 +44,11 @@ from lib.drives import (
     Location,
     Presence,
     drive_staleness_days,
-    get_drive_id,
     locate_registered,
+    reconcile,
     scan_connected_drives,
 )
+from lib.identity import DiskIdentity, names_of, whole_disk
 from lib.log import Log
 
 USAGE = (
@@ -63,19 +64,24 @@ _RETENTION_ARGS = {
 }
 
 
-def _connected_by_id_for_guid(guid: str, cfg: Config, log: Log) -> str:
-    """By-id name of the connected disk that carries the pool with ``guid``."""
+def _connected_disk_for_guid(guid: str, cfg: Config, log: Log) -> DiskIdentity | None:
+    """The connected disk that carries the pool with ``guid``, with its by-id names."""
     for d in scan_connected_drives(cfg, log):
         if d.guid != guid:
             continue
-        if d.dev_path:
-            return get_drive_id(d.dev_path)
-        vdevs = sh.run(f"zpool list -vHP {d.name}")
-        for line in vdevs.lines[1:] if vdevs.ok else []:
-            path = line.strip().split("\t")[0]
-            if path.startswith("/dev/"):
-                return get_drive_id(path)
-    return ""
+        paths = [d.dev_path] if d.dev_path else []
+        if not paths:
+            vdevs = sh.run(f"zpool list -vHP {d.name}")
+            paths = [
+                line.strip().split("\t")[0]
+                for line in (vdevs.lines[1:] if vdevs.ok else [])
+                if line.strip().startswith("/dev/")
+            ]
+        for path in paths:
+            disk = whole_disk(path)
+            if disk:
+                return names_of(disk)
+    return None
 
 
 def _state_text(found: Location, log: Log) -> str:
@@ -285,16 +291,13 @@ def _fix(cfg: Config, log: Log, only: str | None) -> None:
     changed = 0
     for name in names:
         info = cfg.known_drives[name]
-        by_id = _connected_by_id_for_guid(info.guid, cfg, log)
-        if not by_id:
+        ident = _connected_disk_for_guid(info.guid, cfg, log)
+        if ident is None:
             log.info(f"{name}: pool GUID {info.guid} not found on any connected disk - skipped")
-            continue
-        if by_id == info.drive_id:
-            log.ok(f"{name}: drive_id already correct ({by_id})")
-            continue
-        log.ok(f"{name}: drive_id {info.drive_id} → {by_id}")
-        info.drive_id = by_id
-        changed += 1
+        elif reconcile(info, ident, log):
+            changed += 1
+        else:
+            log.ok(f"{name}: drive_id already correct ({info.drive_id})")
     cfg.save_drives()  # also writes every key of every entry
     log.ok(f"Registry written ({changed} drive_id change(s)): {cfg.drives_file_path}")
 

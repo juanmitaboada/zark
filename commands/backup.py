@@ -63,11 +63,12 @@ from lib.drives import (
     backup_device,
     drive_staleness_days,
     no_anchor_lines,
+    reconcile,
     record_backup,
     scan_connected_drives,
     select_drive,
 )
-from lib.identity import by_id_names, preferred_by_id, whole_disk
+from lib.identity import names_of, whole_disk
 from lib.keystore import Keystore, open_keystore
 from lib.log import Log
 from lib.mount import warn_kernel_named_vdevs, warn_rpool_mountpoint_lost
@@ -998,23 +999,18 @@ def _write_metadata(pool_name: str, source_pool: str, point: str, log: Log) -> N
 
 
 def _heal_drive_id(cfg: Config, pool_name: str, device: str | None, log: Log) -> None:
-    """Rewrite the registry's drive_id when the verified pool sits on another by-id.
+    """Correct the registry's names for this drive from the disk it sits on.
 
     Runs after the pool GUID matched the registry, so the disk is known to be
-    the registered one; a placeholder ("<unknown>") or stale drive_id left by
-    1.0.12 is replaced by the by-id this disk actually has.
+    the registered one; the names it has now replace a placeholder
+    ("<unknown>"), a stale name or a legacy enclosure name (M16-5).
     """
     info = cfg.known_drives.get(pool_name)
     if info is None or not device:
         return
     disk = whole_disk(device)
-    by_id = preferred_by_id(by_id_names(disk)) if disk else ""
-    if not by_id or by_id == info.drive_id:
-        return
-    old = info.drive_id
-    info.drive_id = by_id
-    cfg.save_drives()
-    log.ok(f"Registry: {pool_name} drive_id {old} → {by_id}")
+    if disk and reconcile(info, names_of(disk), log):
+        cfg.save_drives()
 
 
 SHOWN_ERRORS = 20

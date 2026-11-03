@@ -29,11 +29,15 @@ from lib.identity import (
     BY_ID_DIR,
     DiskIdentity,
     IdentityError,
+    Kind,
     PoolLabel,
     by_id_names,
+    classify,
+    names_of,
     preferred_by_id,
     protected_disks,
     read_pool_label,
+    registry_names,
     resolve_disk,
     whole_disk,
 )
@@ -346,8 +350,7 @@ def backup_device(drive: ConnectedDrive) -> str | None:
     """
     if drive.dev_path:
         disk = whole_disk(drive.dev_path)
-        names = by_id_names(disk) if disk else []
-        ident = DiskIdentity(disk=disk, by_id=preferred_by_id(names), aliases=tuple(names))
+        ident = names_of(disk) if disk else DiskIdentity(disk="", by_id="")
         for name in (ident.disk_id, ident.by_id):
             if name and Path(f"{BY_ID_DIR}/{name}-part1").exists():
                 return f"{BY_ID_DIR}/{name}-part1"
@@ -357,6 +360,34 @@ def backup_device(drive: ConnectedDrive) -> str | None:
         if part1.exists():
             return str(part1)
     return None
+
+
+def reconcile(info: DriveInfo, ident: DiskIdentity, log: Log) -> bool:
+    """Bring ``info``'s names to those of the disk it was just verified on.
+
+    The caller has matched the pool GUID on ``ident``'s disk (M16-5): the
+    registry's names are then corrected, never trusted. A disk's own name is
+    never replaced by a bus name (the disk sits behind a bridge that hides
+    it for now); ``enclosure_id`` follows the bus name the disk is seen
+    under. Returns True when the entry changed; the caller saves it.
+    """
+    drive_id, enclosure_id = registry_names(ident)
+    if not drive_id:
+        return False
+    if classify(info.drive_id) is Kind.DISK and classify(drive_id) is not Kind.DISK:
+        drive_id = info.drive_id
+    if classify(drive_id) is Kind.DISK:
+        enclosure_id = ident.bus_id or info.enclosure_id
+    else:
+        enclosure_id = ""
+    if (drive_id, enclosure_id) == (info.drive_id, info.enclosure_id):
+        return False
+    log.ok(
+        f"Registry: {info.name} drive_id {info.drive_id} -> {drive_id}"
+        + (f", enclosure_id {enclosure_id}" if enclosure_id else "")
+    )
+    info.drive_id, info.enclosure_id = drive_id, enclosure_id
+    return True
 
 
 def select_drive(

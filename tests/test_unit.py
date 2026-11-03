@@ -214,6 +214,7 @@ from lib.drives import (  # pylint: disable=wrong-import-position # noqa: E402
     drive_staleness_days,
     is_drive_stale,
     locate_registered,
+    reconcile,
     scan_connected_drives,
     shared_snapshot_line,
     validate_external_block_device,
@@ -10240,6 +10241,85 @@ class TestLocateRegistered:  # pylint: disable=missing-function-docstring
             assert backup_device(drive) == "/dev/sdz1"
 
 
+class TestReconcile:  # pylint: disable=missing-function-docstring
+    """The registry's names follow the disk once its GUID is verified (M16-5)."""
+
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    WWN = "wwn-0x5000000000000001"
+
+    def ident(self, *names: str) -> DiskIdentity:
+        return DiskIdentity("/dev/sdc", names[0] if names else "", aliases=names)
+
+    def test_a_2_1_1_entry_gets_the_disk_name_and_keeps_the_case_name(self):
+        info = DriveInfo("f", "18", self.CASE)
+        out = StringIO()
+        with redirect_stdout(out):
+            assert reconcile(info, self.ident(self.CASE, self.ATA, self.WWN), make_log())
+        assert (info.drive_id, info.enclosure_id) == (self.ATA, self.CASE)
+        assert f"Registry: f drive_id {self.CASE} -> {self.ATA}, enclosure_id {self.CASE}" in (
+            out.getvalue()
+        )
+
+    def test_an_entry_that_is_already_right_is_left_alone(self):
+        info = DriveInfo("f", "18", self.ATA, enclosure_id=self.CASE)
+        assert not reconcile(info, self.ident(self.CASE, self.ATA), make_log())
+
+    def test_a_placeholder_is_replaced(self):
+        info = DriveInfo("f", "18", "<unknown>")
+        with redirect_stdout(StringIO()):
+            assert reconcile(info, self.ident(self.CASE), make_log())
+        assert (info.drive_id, info.enclosure_id) == (self.CASE, "")
+
+    def test_the_disk_name_is_never_replaced_by_a_bus_name(self):
+        """The disk sits behind a bridge that hides its name, for now."""
+        info = DriveInfo("f", "18", self.ATA, enclosure_id=self.CASE)
+        with redirect_stdout(StringIO()):
+            assert reconcile(info, self.ident("usb-Other-0:0"), make_log())
+        assert (info.drive_id, info.enclosure_id) == (self.ATA, "usb-Other-0:0")
+
+    def test_the_disk_name_stays_when_there_is_no_name_at_all(self):
+        info = DriveInfo("f", "18", self.ATA, enclosure_id=self.CASE)
+        assert not reconcile(info, self.ident(self.WWN), make_log())
+        assert (info.drive_id, info.enclosure_id) == (self.ATA, self.CASE)
+
+    def test_a_disk_copied_to_another_takes_the_new_disk_name(self):
+        info = DriveInfo("f", "18", self.ATA, enclosure_id=self.CASE)
+        new = "ata-SAMSUNG_HM501II_S24QJ90B100169"
+        with redirect_stdout(StringIO()):
+            assert reconcile(info, self.ident(self.CASE, new), make_log())
+        assert info.drive_id == new
+
+    def test_a_bus_only_drive_gets_no_enclosure_id(self):
+        info = DriveInfo("f", "18", "usb-Old-0:0", enclosure_id="usb-Stale-0:0")
+        with redirect_stdout(StringIO()):
+            assert reconcile(info, self.ident(self.CASE), make_log())
+        assert (info.drive_id, info.enclosure_id) == (self.CASE, "")
+
+    def test_backup_corrects_and_saves_the_registry_after_the_guid_matched(self):
+        cfg = make_config()
+        cfg.known_drives["f"] = DriveInfo("f", "18", self.CASE)
+        ident = self.ident(self.CASE, self.ATA)
+        with (
+            patch.object(backup_mod, "whole_disk", return_value="/dev/sdc"),
+            patch.object(backup_mod, "names_of", return_value=ident),
+            redirect_stdout(StringIO()),
+        ):
+            backup_mod._heal_drive_id(cfg, "f", "/dev/sdc1", make_log())  # pylint: disable=protected-access
+        data = json.loads((cfg.config_dir / "known_drives.json").read_text())
+        assert data["f"]["drive_id"] == self.ATA and data["f"]["enclosure_id"] == self.CASE
+
+    def test_backup_does_not_write_when_nothing_changed(self):
+        cfg = make_config()
+        cfg.known_drives["f"] = DriveInfo("f", "18", self.ATA, enclosure_id=self.CASE)
+        with (
+            patch.object(backup_mod, "whole_disk", return_value="/dev/sdc"),
+            patch.object(backup_mod, "names_of", return_value=self.ident(self.CASE, self.ATA)),
+        ):
+            backup_mod._heal_drive_id(cfg, "f", "/dev/sdc1", make_log())  # pylint: disable=protected-access
+        assert not (cfg.config_dir / "known_drives.json").exists()
+
+
 class TestRegistryCommand:  # pylint: disable=missing-function-docstring
     """I24: supported way to inspect and repair the registry."""
 
@@ -10292,6 +10372,40 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
         assert f"enclosure:   {case}" in text
         assert f"another disk is at {case}: no ZFS label, not this drive" in text
         assert "connected, GUID matches" not in text
+
+    def test_fix_upgrades_a_2_1_1_entry_to_the_disk_name_and_the_case_name(self):
+        """M16-5: a second `fix` changes nothing."""
+        case = "usb-Seagate_USB_07BB24735163-0:0"
+        ata = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+        d = self._cfg_dir({"fuji": {"guid": "777", "drive_id": case}})
+        mock = MockShell()
+        mock.on("blkid -t TYPE=zfs_member -o export").succeeds(
+            "DEVNAME=/dev/sdb1\nLABEL=fuji\nUUID=777\nTYPE=zfs_member\n",
+        )
+        mock.on("zpool list -H -o name").succeeds("")
+        mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sdb1").succeeds(
+            _LSBLK_SDB1,
+        )
+        mock.on("lsblk -dn -P -o NAME,TYPE,PKNAME,MODEL,SERIAL,SIZE,TRAN /dev/sdb").succeeds(
+            _LSBLK_SDB,
+        )
+        mock.on_prefix("find /dev/disk/by-id/").succeeds(
+            f"{case}\t../../sdb\n{ata}\t../../sdb\nwwn-0x5000000000000001\t../../sdb"
+        )
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch("lib.identity.os.path.realpath", side_effect=lambda p: p),
+            redirect_stdout(out),
+        ):
+            registry_mod.run(["fix"])
+            first = (d / "known_drives.json").read_text()
+            registry_mod.run(["fix"])
+        data = json.loads(first)
+        assert data["fuji"]["drive_id"] == ata and data["fuji"]["enclosure_id"] == case
+        assert (d / "known_drives.json").read_text() == first
+        assert "1 drive_id change(s)" in out.getvalue() and "0 drive_id change(s)" in out.getvalue()
 
     def test_retention_settings_are_validated_written_and_read(self):
         """M3 decision 2b: per-drive retention in the registry; the rest of the
