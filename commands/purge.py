@@ -32,7 +32,7 @@ from lib import anchors, forensics, sh
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
-from lib.identity import match_registry, read_pool_label
+from lib.identity import DiskIdentity, Evidence, enclosure_mates, read_pool_label, recognise
 from lib.log import Log
 from lib.zfs import ZFS, backup_altroot, remove_altroot_base, remove_altroot_dir
 
@@ -293,6 +293,46 @@ def _wipe(target_dev: str, part1: str, log: Log, steps: bool = True) -> Wiped:
     return Wiped(marks, checks_clean=all(ok is True for ok, _ in checks))
 
 
+def _entries_to_remove(ident: DiskIdentity, cfg: Config, log: Log) -> list[str] | None:
+    """Registry entries that go with this disk, asked before anything is
+    wiped (M16-2); None when the operator declines to purge it.
+
+    An entry whose pool label is on the disk, or whose drive_id is the
+    disk's own name, describes it: removed, as before. One that shares only
+    the enclosure's name may be another drive that went through the same
+    enclosure, and removing it drops its anchors in origin: asked for each,
+    default no.
+    """
+    found = recognise(ident, cfg.known_drives)
+    sure = [m.name for m in found if m.evidence is not Evidence.BUS]
+    for name in enclosure_mates(ident, cfg.known_drives):
+        log.info(f"This enclosure also held the registered drive '{name}': another disk, kept")
+    if sure:
+        log.ok(f"Drive recognized as: {', '.join(sure)}")
+    unproven = [m.name for m in found if m.evidence is Evidence.BUS]
+    if not sure and not unproven:
+        log.warn("Drive is NOT registered in known_drives.json")
+        if not log.ask("Purge unregistered drive? (DANGEROUS)"):
+            return None
+    remove = list(sure)
+    for name in unproven:
+        log.warn(
+            f"Registry entry '{name}' is registered under this enclosure's name; "
+            + "nothing proves this disk is that drive"
+        )
+        if log.ask(
+            f"Is this disk the old '{name}'? Remove it from the registry "
+            + "(and its anchors in origin) after the purge?",
+            default=False,
+        ):
+            remove.append(name)
+    if unproven and not remove and not sure:
+        log.warn("Drive is NOT registered in known_drives.json")
+        if not log.ask("Purge unregistered drive? (DANGEROUS)"):
+            return None
+    return remove
+
+
 def _report_lines(marks: list[Mark]) -> list[str]:
     sign = {True: "✓", False: "✗", None: "-"}
     return [f"{sign[ok]} {text}" for ok, text in marks]
@@ -319,14 +359,10 @@ def run(
     if ident.label:
         log.info(f"Pool on disk: {ident.label.name} (GUID {ident.label.guid})")
 
-    matched = match_registry(ident, cfg.known_drives)
-    if matched:
-        log.ok(f"Drive recognized as: {', '.join(matched)}")
-    else:
-        log.warn("Drive is NOT registered in known_drives.json")
-        if not log.ask("Purge unregistered drive? (DANGEROUS)"):
-            log.info("Aborted")
-            return
+    matched = _entries_to_remove(ident, cfg, log)
+    if matched is None:
+        log.info("Aborted")
+        return
 
     # Double confirmation
     log.info("Type 'yes' to confirm:")

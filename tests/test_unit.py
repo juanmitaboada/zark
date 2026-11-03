@@ -8840,7 +8840,7 @@ class TestKeystoreReadonlyAndRetry:  # pylint: disable=missing-function-docstrin
         assert gp.call_count == 3
 
 
-def _purge_ident(label: PoolLabel | None) -> DiskIdentity:
+def _purge_ident(label: PoolLabel | None, aliases: tuple[str, ...] = ()) -> DiskIdentity:
     return DiskIdentity(
         disk="/dev/sdb",
         by_id=_KINGSTON_ID,
@@ -8848,7 +8848,12 @@ def _purge_ident(label: PoolLabel | None) -> DiskIdentity:
         size="115.5G",
         transport="usb",
         label=label,
+        aliases=aliases,
     )
+
+
+_KINGSTON_ATA = "ata-Kingston_DT_microDuo_3C_408D5C15CFA5E961091D0CCA"
+_PURGE_LABEL = PoolLabel("backup", "3446866051930726346")
 
 
 class TestForensics:  # pylint: disable=missing-function-docstring
@@ -9019,7 +9024,7 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
             cfg_dir / "known_drives.json",
             {
                 "backup": {"guid": "3446866051930726346", "drive_id": "<unknown>"},
-                "old": {"guid": "1", "drive_id": _KINGSTON_ID},
+                "old": {"guid": "1", "drive_id": _KINGSTON_ATA},
                 "black": {"guid": "2", "drive_id": "usb-Micron-0:0"},
             },
         )
@@ -9029,7 +9034,9 @@ class TestPurgeIdentity:  # pylint: disable=missing-function-docstring
         mock.on(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup").succeeds()
         mock.on("zpool destroy backup").succeeds()
         _wipe_succeeds(mock)
-        ident = _purge_ident(PoolLabel("backup", "3446866051930726346"))
+        ident = _purge_ident(
+            PoolLabel("backup", "3446866051930726346"), (_KINGSTON_ATA, _KINGSTON_ID)
+        )
         self._run(cfg_dir, ident, mock)
         assert mock.was_called(f"zpool import -N -R /run/zark/altroot/backup -d {vdev} backup")
         assert mock.was_called("zpool destroy backup")
@@ -9110,6 +9117,9 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         mock: MockShell,
         part1_exists: bool | Callable[[str], bool] = False,
         entries: dict[str, dict[str, str]] | None = None,
+        aliases: tuple[str, ...] = (),
+        label: PoolLabel | None = _PURGE_LABEL,
+        answers: tuple[str, ...] = (),
     ) -> tuple[str, int, dict[str, object]]:
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(
@@ -9118,7 +9128,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         )
         mock.on("zpool list backup").fails()
         mock.on_prefix("zpool import -N -R /run/zark/altroot/backup").succeeds()
-        ident = _purge_ident(PoolLabel("backup", "3446866051930726346"))
+        ident = _purge_ident(label, aliases)
         out = StringIO()
         rc = 0
         # Taken, unless the test's own udev model (_udev) answers for it.
@@ -9141,7 +9151,7 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
                 "_present",
                 side_effect=part1_exists if callable(part1_exists) else lambda _p: part1_exists,
             ),
-            patch("builtins.input", side_effect=["yes", "sdb", "n"]),
+            patch("builtins.input", side_effect=[*answers, "yes", "sdb", "n"]),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
             redirect_stdout(out),
         ):
@@ -9197,12 +9207,55 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring
         mock.on("zpool destroy backup").succeeds()
         _wipe_succeeds(mock)
         entries = {
-            "backup": {"guid": "3446866051930726346", "drive_id": _KINGSTON_ID},
-            "old": {"guid": "222", "drive_id": _KINGSTON_ID},
+            "backup": {"guid": "3446866051930726346", "drive_id": _KINGSTON_ATA},
+            "old": {"guid": "222", "drive_id": _KINGSTON_ATA},
         }
-        _, rc, data = self._purge(mock, entries=entries)
+        _, rc, data = self._purge(mock, entries=entries, aliases=(_KINGSTON_ATA, _KINGSTON_ID))
         assert rc == 0 and not data
         assert self.dropped == ["3446866051930726346", "222"], self.dropped
+
+    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    ATA_B = "ata-SAMSUNG_HM501II_S24QJ90B100169"
+
+    def test_a_disk_that_shared_the_case_does_not_take_the_other_drives_entry(self):
+        """M12P.1: purging the SAMSUNG in the Fujitsu's case leaves the Fujitsu's
+        entry and its anchors alone."""
+        mock = MockShell()
+        _wipe_succeeds(mock)
+        entries = {"fuji": {"guid": "18", "drive_id": self.ATA_A, "enclosure_id": self.CASE}}
+        out, rc, data = self._purge(
+            mock,
+            entries=entries,
+            aliases=(self.ATA_B, self.CASE),
+            label=None,
+            answers=("y",),  # Purge unregistered drive?
+        )
+        assert rc == 0 and "DRIVE PURGED" in out, out
+        assert list(data) == ["fuji"] and self.dropped == []
+        assert "This enclosure also held the registered drive 'fuji'" in out
+        assert "Drive recognized as" not in out
+
+    def test_an_entry_that_names_only_the_case_is_asked_about_and_kept_by_default(self):
+        mock = MockShell()
+        _wipe_succeeds(mock)
+        entries = {"fuji": {"guid": "18", "drive_id": self.CASE}}
+        out, rc, data = self._purge(
+            mock, entries=entries, aliases=(self.ATA_B, self.CASE), label=None, answers=("", "y")
+        )
+        assert rc == 0, out
+        assert "nothing proves this disk is that drive" in out
+        assert list(data) == ["fuji"] and self.dropped == []
+
+    def test_an_entry_that_names_only_the_case_goes_when_the_operator_says_so(self):
+        mock = MockShell()
+        _wipe_succeeds(mock)
+        entries = {"fuji": {"guid": "18", "drive_id": self.CASE}}
+        out, rc, data = self._purge(
+            mock, entries=entries, aliases=(self.ATA_B, self.CASE), label=None, answers=("y",)
+        )
+        assert rc == 0, out
+        assert data == {} and self.dropped == ["18"]
 
     def test_the_partitions_are_read_after_udev_settled(self):
         """MIGR-1, M9b-7 7a: lsblk runs after the zap and a udev settle."""
