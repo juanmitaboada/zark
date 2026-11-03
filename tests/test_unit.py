@@ -8697,6 +8697,51 @@ class TestImportBackupPool:  # pylint: disable=missing-function-docstring
         assert len(imports) == 2
         assert all(f"-d {self.DEV} backup" in c and "-N -R" in c for c in imports)
 
+    def _imported(self, guid_answer: str | None) -> MockShell:
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on("mkdir -p /mnt/zark/backup").succeeds()
+        mock.on(f"zpool import -N -R /mnt/zark/backup -d {self.DEV} backup").succeeds()
+        if guid_answer is None:
+            mock.on("zpool get -H -o value guid backup").fails("cannot open")
+        else:
+            mock.on("zpool get -H -o value guid backup").succeeds(guid_answer)
+        mock.on("zpool export backup").succeeds()
+        return mock
+
+    def test_a_fresh_import_of_the_expected_guid_stays_imported(self):
+        mock = self._imported("111")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert ZFS(make_log()).import_backup_pool(
+                "backup", self.DEV, altroot="/mnt/zark/backup", guid="111"
+            )
+        assert "zpool export backup" not in mock.calls
+
+    def test_a_fresh_import_of_another_guid_is_exported_and_refused(self):
+        """M16-7: a pool of that name on another disk in the registered one's place."""
+        mock = self._imported("222")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not ZFS(make_log()).import_backup_pool(
+                "backup", self.DEV, altroot="/mnt/zark/backup", guid="111"
+            )
+        assert "zpool export backup" in mock.calls
+
+    def test_an_unreadable_guid_after_the_import_is_a_mismatch(self):
+        mock = self._imported(None)
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert not ZFS(make_log()).import_backup_pool(
+                "backup", self.DEV, altroot="/mnt/zark/backup", guid="111"
+            )
+        assert "zpool export backup" in mock.calls
+
+    def test_no_guid_given_means_no_check(self):
+        mock = self._imported("222")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            assert ZFS(make_log()).import_backup_pool(
+                "backup", self.DEV, altroot="/mnt/zark/backup"
+            )
+        assert "zpool get -H -o value guid backup" not in mock.calls
+
     def test_refuses_without_device(self):
         mock = MockShell()
         mock.on("zpool list backup").fails()

@@ -419,7 +419,8 @@ class ZFS:
         A pool that is already imported is accepted only if it was imported
         under an altroot, in the requested read-only/read-write mode, and
         (when ``guid`` is given) is the expected pool; otherwise the caller
-        is told to export it.
+        is told to export it. A pool imported from ``device`` is checked against
+        ``guid`` too, and exported when it is another one.
         """
         if self.pool_exists(name):
             current = run(f"zpool get -H -o value altroot {name}").output
@@ -455,9 +456,26 @@ class ZFS:
             if r.ok:
                 mode = "read-only" if readonly else "read-write"
                 self.log.ok(f"Pool {name} imported ({mode}, altroot={root})")
+                if guid and not self._is_expected(name, guid, device):
+                    return False
                 return True
             last_err = r.stderr.strip()
         self.log.error(f"Cannot import pool {name} from {device}: {last_err}")
+        return False
+
+    def _is_expected(self, name: str, guid: str, device: str) -> bool:
+        """After an import: the pool is the one expected (M16-7). A pool of
+        that name on another disk is exported at once, before anything reads
+        or writes it; an unreadable GUID counts as a mismatch."""
+        actual = self.pool_guid(name)
+        if actual == guid:
+            return True
+        self.log.error(
+            f"Pool {name} at {device} has GUID {actual or 'unreadable'}, not {guid}: "
+            + "another disk; exporting it"
+        )
+        if not run(f"zpool export {name}", log=self.log).ok:
+            self.log.error(f"Could not export {name}: sudo zpool export {name}")
         return False
 
     def pool_export(self, name: str, *, wait_udev: bool = False) -> bool:
