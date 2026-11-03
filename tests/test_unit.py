@@ -10443,7 +10443,13 @@ class TestExplore:  # pylint: disable=missing-function-docstring
     CASE = "usb-Seagate_USB_07BB24735163-0:0"
     ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
 
-    def _run(self, entries: dict[str, DriveInfo], found: list[ConnectedDrive], *answers: bool):
+    def _run(
+        self,
+        entries: dict[str, DriveInfo],
+        found: list[ConnectedDrive],
+        *answers: bool,
+        aliases: tuple[str, ...] = (),
+    ):
         cfg = make_config()
         cfg.known_drives = entries
         asked: list[str] = []
@@ -10456,6 +10462,10 @@ class TestExplore:  # pylint: disable=missing-function-docstring
         with (
             patch.object(Config, "load", return_value=cfg),
             patch.object(explore_mod, "scan_connected_drives", return_value=found),
+            patch.object(explore_mod, "whole_disk", return_value="/dev/sdc"),
+            patch.object(
+                explore_mod, "names_of", return_value=DiskIdentity("/dev/sdc", "", aliases=aliases)
+            ),
             patch("lib.log.Log.ask", side_effect=ask),
             redirect_stdout(out),
         ):
@@ -10479,9 +10489,37 @@ class TestExplore:  # pylint: disable=missing-function-docstring
             "new": DriveInfo("new", "2", self.ATA),
         }
         found = [ConnectedDrive("new", "2", self.ATA, "/dev/sdc1", True, False, False, "exported")]
-        cfg, _, asked = self._run(entries, found, True)
+        cfg, _, asked = self._run(entries, found, True, aliases=(self.ATA,))
         assert sorted(cfg.known_drives) == ["new"]
         assert any("Remove stale entries (old)" in q for q in asked)
+
+    def test_the_pool_of_another_disk_is_not_evidence_about_the_duplicated_name(self):
+        """M16R-6: cloned serials; the scanned pool sits on a disk that lacks the name."""
+        entries = {
+            "old": DriveInfo("old", "1", self.ATA),
+            "new": DriveInfo("new", "2", self.ATA),
+        }
+        found = [
+            ConnectedDrive("new", "2", "usb-X-0:0", "/dev/sdc1", True, False, False, "exported")
+        ]
+        cfg, _, asked = self._run(entries, found, True, aliases=("usb-X-0:0",))
+        assert sorted(cfg.known_drives) == ["new", "old"]
+        assert not any("stale" in q for q in asked)
+
+    def test_names_that_say_nothing_about_a_disk_are_not_called_an_enclosure(self):
+        entries = {
+            "a": DriveInfo("a", "1", "<unknown>"),
+            "b": DriveInfo("b", "2", "<unknown>"),
+            "c": DriveInfo("c", "3", "wwn-0x5000000000000001"),
+            "d": DriveInfo("d", "4", "wwn-0x5000000000000001"),
+        }
+        other = [
+            ConnectedDrive("z", "9", "usb-Z-0:0", "/dev/sdz1", False, False, False, "exported")
+        ]
+        _, out, _ = self._run(entries, other)
+        assert "share the name <unknown>" in out and "share the name wwn-0x5000000000000001" in out
+        assert "enclosure name <unknown>" not in out and "enclosure name wwn-" not in out
+        assert "Duplicate drive_id" not in out
 
     def test_a_closed_stdin_removes_no_entry(self):
         """M16R-4: the default of the question is yes; at EOF nobody answered."""
@@ -10509,7 +10547,7 @@ class TestExplore:  # pylint: disable=missing-function-docstring
             "new": DriveInfo("new", "2", self.ATA),
         }
         found = [ConnectedDrive("old", "1", self.ATA, "/dev/sdc1", True, False, False, "exported")]
-        cfg, _, _ = self._run(entries, found, True)
+        cfg, _, _ = self._run(entries, found, True, aliases=(self.ATA,))
         assert sorted(cfg.known_drives) == ["old"]
 
     def test_auto_registration_uses_the_disk_name_and_the_enclosure_name(self):

@@ -38,6 +38,12 @@ def _registry_names(d: ConnectedDrive) -> tuple[str, str]:
     return registry_names(names_of(disk)) if disk else (d.drive_id, "")
 
 
+def _carries(d: ConnectedDrive, did: str) -> bool:
+    """Whether the disk the scan found ``d`` on has ``did`` among its by-id names."""
+    disk = whole_disk(d.dev_path) if d.dev_path else ""
+    return bool(disk) and did in names_of(disk).aliases
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-branches,too-many-statements,too-many-locals
@@ -140,18 +146,22 @@ def run(
             log.blank()
             if classify(did) is not Kind.DISK:
                 # An enclosure's name is shared by every disk that goes through
-                # it: several drives under one is not a duplicate (M16-2).
+                # it: several drives under one is not a duplicate (M16-2). A name
+                # that is neither (<unknown>, wwn-) says nothing about the disk.
+                what = "the enclosure name" if classify(did) is Kind.BUS else "the name"
                 log.info(
-                    f"{len(names)} registered drives share the enclosure name {did}: "
-                    + f"{', '.join(names)} (different disks)"
+                    f"{len(names)} registered drives share {what} {did}: "
+                    + f"{', '.join(names)} (they are not known to be the same disk)"
                 )
                 continue
             log.warn(f"Duplicate drive_id detected: {did}")
             log.info(f"  These entries share the same physical drive: {', '.join(names)}")
-            # Find which name actually exists as a pool, by its GUID
+            # Find which name actually exists as a pool, by its GUID, on the disk
+            # that carries the duplicated name (M16R-6): with cloned serials the
+            # pool of the other disk is not evidence about this one.
             real_name = None
             for d in drives:
-                if d.name in names and cfg.known_drives[d.name].guid == d.guid:
+                if d.name in names and cfg.known_drives[d.name].guid == d.guid and _carries(d, did):
                     real_name = d.name
                     break
             if real_name:
