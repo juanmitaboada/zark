@@ -90,7 +90,7 @@ def _state_text(found: Location, log: Log) -> str:
         return f"{log.G}connected, GUID matches{log.N}"
     if found.presence is Presence.OTHER_POOL and found.label is not None:
         return (
-            f"{log.R}another disk is at {found.name}: pool {found.label.name} "
+            f"{log.R}a different pool is at {found.name}: {found.label.name} "
             + f"(GUID {found.label.guid}), not this drive{log.N}"
         )
     if found.presence is Presence.NO_LABEL:

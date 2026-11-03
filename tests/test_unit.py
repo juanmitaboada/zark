@@ -10736,6 +10736,26 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
         assert (d / "known_drives.json").read_text() == first
         assert "1 drive_id change(s)" in out.getvalue() and "0 drive_id change(s)" in out.getvalue()
 
+    def test_list_says_a_different_pool_is_at_the_name_not_another_disk(self):
+        """M16R-7: after a re-prepare it is the same disk with another pool."""
+        case = "usb-Seagate_USB_07BB24735163-0:0"
+        d = self._cfg_dir({"backup": {"guid": "18", "drive_id": case}})
+        out = StringIO()
+        found = Location(
+            Presence.OTHER_POOL, case, "/dev/disk/by-id/x-part1", PoolLabel("backup2", "77")
+        )
+        with (
+            patch_sh(MockShell()),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch.object(registry_mod, "locate_registered", return_value=found),
+            patch.object(registry_mod.survey, "source_pools", return_value=[]),
+            redirect_stdout(out),
+        ):
+            registry_mod.run(["list"])
+        text = out.getvalue()
+        assert f"a different pool is at {case}: backup2 (GUID 77), not this drive" in text
+        assert "another disk" not in text
+
     def test_retention_settings_are_validated_written_and_read(self):
         """M3 decision 2b: per-drive retention in the registry; the rest of the
         entry is untouched, and a bad value is refused without writing."""

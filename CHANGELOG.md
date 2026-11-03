@@ -231,7 +231,7 @@ PPA until the final 2.2.0.
   and the enclosure's as the new optional `enclosure_id`, corrected at a drive's first verified
   connection by `backup` or `zark registry fix` (see `docs/UPGRADING.md`). A registered drive is
   found by its label: the scan no longer lists it as connected because a link of its name exists
-  and `zark registry list` says when another disk is at that name.
+  and `zark registry list` says when a different pool, or a disk with no label, is at that name.
   - `purge` and `prepare` remove a registry entry (and drop its anchors in origin) only when
     the pool label or the disk's own name says it is this disk; an entry that shares only the
     enclosure's name is asked about, default no (2.1.1 removed it, `prepare` with default yes).

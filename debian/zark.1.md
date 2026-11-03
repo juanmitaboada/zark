@@ -531,8 +531,8 @@ end-to-end sequences.
     GUID (the disk's own name and the enclosure it is seen under) and writes
     every missing key; **backup** does the same once the GUID is verified.
     A registered drive is found by its pool label, never because a by-id
-    link of its name exists: **list** says when another disk is at that
-    name. A name made by an enclosure proves the enclosure, not the disk in
+    link of its name exists: **list** says when a different pool, or a disk with no
+    label, is at that name. A name made by an enclosure proves the enclosure, not the disk in
     it, so an entry that names only the enclosure (what 2.1 wrote) is asked
     about by **purge** and **prepare**, and kept by default. **retention** shows or changes a drive's retention: the
     window in days (1-3650), the maximum age in days (**off**, or more than
