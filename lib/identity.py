@@ -321,6 +321,52 @@ def match_registry(ident: DiskIdentity, drives: dict[str, DriveInfo]) -> list[st
     return list(dict.fromkeys(names))
 
 
+class Evidence(Enum):
+    """What makes a registry entry describe a disk, strongest first (M16-2)."""
+
+    LABEL = "label"  # the pool GUID on the disk is the entry's
+    DISK = "disk"  # the entry's drive_id is the disk's own name
+    BUS = "bus"  # only the enclosure's name matches: not proof of the disk
+
+
+@dataclass(frozen=True)
+class Match:
+    """A registry entry that describes a disk, and why."""
+
+    name: str
+    evidence: Evidence
+
+
+def _evidence(info: DriveInfo, ident: DiskIdentity, aliases: set[str]) -> Evidence | None:
+    """Why ``info`` describes ``ident``, or None. The pool label is the
+    authority; a disk's own name proves the same disk, or another one when
+    both sides have one; an enclosure's name proves only the enclosure; a
+    weak name (``wwn-``) proves nothing."""
+    if ident.label and info.guid == ident.label.guid:
+        return Evidence.LABEL
+    own = classify(info.drive_id) is Kind.DISK
+    if own and info.drive_id in aliases:
+        return Evidence.DISK
+    if own and ident.disk_id:
+        return None  # two disk names that differ: another disk in the same enclosure
+    for name in (info.drive_id, info.enclosure_id):
+        if name in aliases and classify(name) is Kind.BUS:
+            return Evidence.BUS
+    return None
+
+
+def recognise(ident: DiskIdentity, drives: dict[str, DriveInfo]) -> list[Match]:
+    """Registry entries that describe ``ident``, in registry order, each with
+    its evidence. Callers act on :class:`Evidence`: ``BUS`` is asked about."""
+    aliases = set(ident.aliases) | ({ident.by_id} if ident.by_id else set())
+    found: list[Match] = []
+    for name, info in drives.items():
+        evidence = _evidence(info, ident, aliases)
+        if evidence is not None:
+            found.append(Match(name, evidence))
+    return found
+
+
 def disks_under(device: str) -> set[str]:
     """Whole disks beneath a device (partition, dm/LUKS, md), via ``lsblk -s``."""
     r = run(f"lsblk -nrs -o NAME,TYPE {shlex.quote(device)}")

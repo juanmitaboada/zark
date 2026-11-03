@@ -238,6 +238,7 @@ from lib.health import (  # pylint: disable=wrong-import-position # noqa: E402
 )
 from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
     DiskIdentity,
+    Evidence,
     IdentityError,
     Kind,
     PoolLabel,
@@ -247,6 +248,7 @@ from lib.identity import (  # pylint: disable=wrong-import-position # noqa: E402
     preferred_by_id,
     protected_disks,
     read_pool_label,
+    recognise,
     registry_names,
     resolve_disk,
 )
@@ -8400,6 +8402,85 @@ class TestIdentityKinds:  # pylint: disable=missing-function-docstring
 
     def test_preferred_by_id_still_names_the_vdev_by_the_enclosure(self):
         assert preferred_by_id([self.WWN, self.ATA, self.USB]) == self.USB
+
+
+class TestRecognise:  # pylint: disable=missing-function-docstring
+    """Which registry entries describe a disk, and on what evidence (M16-2)."""
+
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    ATA_B = "ata-SAMSUNG_HM501II_S24QJ90B100169"
+    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    WWN = "wwn-0x5000000000000001"
+
+    def disk(self, own: str, label: PoolLabel | None = None, bus: str = "") -> DiskIdentity:
+        bus = bus or self.CASE
+        names = tuple(n for n in (own, bus, self.WWN) if n)
+        return DiskIdentity("/dev/sdc", own or bus, aliases=names, label=label)
+
+    def test_two_disks_through_one_case_are_not_each_other(self):
+        """M12P.1: the Fujitsu is registered; the SAMSUNG sits in the same case."""
+        drives = {"fugitsu": DriveInfo("fugitsu", "18", self.ATA_A, enclosure_id=self.CASE)}
+        assert not recognise(self.disk(self.ATA_B), drives)
+        assert [m.evidence for m in recognise(self.disk(self.ATA_A), drives)] == [Evidence.DISK]
+
+    def test_an_entry_of_2_1_1_names_the_case_and_proves_only_the_case(self):
+        drives = {"fugitsu": DriveInfo("fugitsu", "18", self.CASE)}
+        for own in (self.ATA_A, self.ATA_B, ""):
+            found = recognise(self.disk(own), drives)
+            assert found == [type(found[0])("fugitsu", Evidence.BUS)]
+
+    def test_the_label_decides_whatever_the_names_say(self):
+        drives = {"fugitsu": DriveInfo("fugitsu", "18", self.CASE)}
+        ident = self.disk(self.ATA_A, PoolLabel("fugitsu", "18"))
+        assert [m.evidence for m in recognise(ident, drives)] == [Evidence.LABEL]
+        other = self.disk(self.ATA_A, PoolLabel("fugitsu", "99"))
+        assert [m.evidence for m in recognise(other, drives)] == [Evidence.BUS]
+
+    def test_a_label_of_the_entry_matches_a_disk_with_no_name_in_common(self):
+        drives = {"a": DriveInfo("a", "18", "usb-Gone-0:0")}
+        ident = self.disk(self.ATA_A, PoolLabel("a", "18"), bus="usb-New-0:0")
+        assert [m.evidence for m in recognise(ident, drives)] == [Evidence.LABEL]
+
+    def test_an_old_entry_of_the_same_disk_with_another_guid_goes_with_it(self):
+        """M2V-7a: the disk was prepared again; the first entry is stale."""
+        drives = {"old": DriveInfo("old", "1", self.ATA_A, enclosure_id=self.CASE)}
+        ident = self.disk(self.ATA_A, PoolLabel("new", "2"))
+        assert [m.evidence for m in recognise(ident, drives)] == [Evidence.DISK]
+
+    def test_an_enclosure_name_in_the_entry_cannot_tell_a_disk_it_cannot_see(self):
+        """The case hides the disk's name, so the enclosure_id is all there is."""
+        drives = {"a": DriveInfo("a", "18", self.ATA_A, enclosure_id=self.CASE)}
+        found = recognise(self.disk(""), drives)
+        assert [m.evidence for m in found] == [Evidence.BUS]
+
+    def test_a_weak_name_proves_nothing(self):
+        """black and blue share wwn-0x5000000000000001."""
+        drives = {
+            "blue": DriveInfo("blue", "1", self.WWN),
+            "black": DriveInfo("black", "2", self.WWN),
+        }
+        assert not recognise(self.disk("", bus="usb-Micron_A-0:0"), drives)
+
+    def test_bus_names_of_two_bridges_do_not_collide(self):
+        drives = {
+            "black": DriveInfo("black", "1", "usb-Micron_CT2000X10PROSSD9_A1B2C3D4E5F6-0:0"),
+            "blue": DriveInfo("blue", "2", "usb-Micron_CT2000X10SSD9_F6E5D4C3B2A1-0:0"),
+        }
+        ident = self.disk("", bus="usb-Micron_CT2000X10SSD9_F6E5D4C3B2A1-0:0")
+        assert [m.name for m in recognise(ident, drives)] == ["blue"]
+
+    def test_unknown_drive_id_matches_only_by_label(self):
+        drives = {"a": DriveInfo("a", "18", "<unknown>")}
+        assert not recognise(self.disk(self.ATA_A), drives)
+        ident = self.disk(self.ATA_A, PoolLabel("a", "18"))
+        assert [m.evidence for m in recognise(ident, drives)] == [Evidence.LABEL]
+
+    def test_registry_order_is_kept(self):
+        drives = {
+            "z": DriveInfo("z", "1", self.CASE),
+            "a": DriveInfo("a", "2", self.ATA_A),
+        }
+        assert [m.name for m in recognise(self.disk(self.ATA_A), drives)] == ["z", "a"]
 
 
 class TestRegistry:  # pylint: disable=missing-function-docstring
