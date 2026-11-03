@@ -10522,7 +10522,11 @@ class TestExplore:  # pylint: disable=missing-function-docstring
         assert "Duplicate drive_id" not in out
 
     def test_a_closed_stdin_removes_no_entry(self):
-        """M16R-4: the default of the question is yes; at EOF nobody answered."""
+        """M16R-4, M16R-8: the default of the question is yes; at EOF nobody answered.
+
+        The scanned pool's disk carries the duplicated name (the same patches as
+        _run), so the stale question is reached; a spy on Log.ask proves it was
+        asked, and the real ask meets the closed stdin."""
         entries = {
             "old": DriveInfo("old", "1", self.ATA),
             "new": DriveInfo("new", "2", self.ATA),
@@ -10530,13 +10534,28 @@ class TestExplore:  # pylint: disable=missing-function-docstring
         found = [ConnectedDrive("new", "2", self.ATA, "/dev/sdc1", True, False, False, "exported")]
         cfg = make_config()
         cfg.known_drives = entries
+        asked: list[str] = []
+        real_ask = Log.ask
+
+        def spy(log: Log, question: str, *args: Any, **kwargs: Any) -> bool:
+            asked.append(question)
+            return real_ask(log, question, *args, **kwargs)
+
         with (
             patch.object(Config, "load", return_value=cfg),
             patch.object(explore_mod, "scan_connected_drives", return_value=found),
+            patch.object(explore_mod, "whole_disk", return_value="/dev/sdc"),
+            patch.object(
+                explore_mod,
+                "names_of",
+                return_value=DiskIdentity("/dev/sdc", "", aliases=(self.ATA,)),
+            ),
+            patch("lib.log.Log.ask", spy),
             patch("builtins.input", side_effect=EOFError),
             redirect_stdout(StringIO()),
         ):
             explore_mod.run([])
+        assert any("Remove stale entries (old)" in q for q in asked)
         assert sorted(cfg.known_drives) == ["new", "old"]
 
     def test_a_registered_drive_is_never_called_stale_because_of_a_name(self):
