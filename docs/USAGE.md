@@ -74,6 +74,8 @@ zark detects the backup drive by GUID, takes one backup point `zark_<UTC>` of ev
 
 To watch it, run `zark monitor` in another terminal, as any user: it shows the running command's step, the bytes sent, the rate and the time left, says when zark is waiting for an answer, and below that the pools, the drives and their last backups. It only reads zark's status files (`docs/STATUS-FILES.md`) and lists the pools with `zfs list` and `zpool list`; it never takes the lock or imports a pool. `zark monitor --once` prints one screen, and `--once --state` only the state word, for scripts.
 
+**Unplug the drive before any system update.** While a backup drive is connected, zark's guards refuse changes to the boot ([The apt guard](DESIGN.md#the-apt-guard)). Usually apt then stops before it changes anything, but if a kernel is removed while the drive is visible (for example by `apt autoremove`, or by unattended-upgrades removing an old kernel), the kernel's `update-grub` is refused and dpkg is left half-done. To finish, unplug the drive and run `sudo apt full-upgrade` again (or the apt command you ran); `sudo dpkg --configure -a` alone does not finish a pending removal.
+
 ### Recover from scratch
 
 Boot from an Ubuntu live USB with the backup drive connected:
