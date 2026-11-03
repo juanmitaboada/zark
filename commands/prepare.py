@@ -373,7 +373,8 @@ def _stale_entries(ident: DiskIdentity, cfg: Config, log: Log) -> set[str]:
             f"Remove {', '.join(own)} from the registry (and their anchors in origin) "
             + "when preparing?"
         )
-        if log.ask(question, default=True):
+        # on_eof=False: this removes an entry and its anchors, and nobody pressed Enter.
+        if log.ask(question, default=True, on_eof=False):
             replace |= set(own)
     for m in matches:
         if m.evidence is not Evidence.BUS:

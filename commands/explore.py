@@ -161,7 +161,10 @@ def run(
                         f"  Pool on disk is '{real_name}' - "
                         + f"'{', '.join(stale)}' appear to be stale entries",
                     )
-                    if log.ask(f"Remove stale entries ({', '.join(stale)})?", default=True):
+                    # on_eof=False: this removes entries, and nobody pressed Enter.
+                    if log.ask(
+                        f"Remove stale entries ({', '.join(stale)})?", default=True, on_eof=False
+                    ):
                         for s in stale:
                             del cfg.known_drives[s]
                         cfg.save_drives()

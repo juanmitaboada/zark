@@ -9899,6 +9899,18 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert data["fuji"]["guid"] == "18" and data["fuji"]["drive_id"] == self.CASE
         assert data["blue"]["guid"] == "777"
 
+    def test_prepare_with_a_closed_stdin_keeps_the_entry_of_this_very_disk(self):
+        """M16R-4: the stale question defaults to yes, and drops anchors; at EOF it is no."""
+        cfg = make_config()
+        cfg.known_drives = {
+            "old": DriveInfo("old", "5", self.ATA_B, enclosure_id=self.CASE),
+        }
+        with patch("builtins.input", side_effect=EOFError), redirect_stdout(StringIO()):
+            replace = prepare_mod._stale_entries(  # pylint: disable=protected-access
+                self._samsung(), cfg, make_log()
+            )
+        assert replace == set()
+
     def test_prepare_replaces_an_entry_that_names_this_very_disk(self):
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(
@@ -10439,6 +10451,24 @@ class TestExplore:  # pylint: disable=missing-function-docstring
         cfg, _, asked = self._run(entries, found, True)
         assert sorted(cfg.known_drives) == ["new"]
         assert any("Remove stale entries (old)" in q for q in asked)
+
+    def test_a_closed_stdin_removes_no_entry(self):
+        """M16R-4: the default of the question is yes; at EOF nobody answered."""
+        entries = {
+            "old": DriveInfo("old", "1", self.ATA),
+            "new": DriveInfo("new", "2", self.ATA),
+        }
+        found = [ConnectedDrive("new", "2", self.ATA, "/dev/sdc1", True, False, False, "exported")]
+        cfg = make_config()
+        cfg.known_drives = entries
+        with (
+            patch.object(Config, "load", return_value=cfg),
+            patch.object(explore_mod, "scan_connected_drives", return_value=found),
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(StringIO()),
+        ):
+            explore_mod.run([])
+        assert sorted(cfg.known_drives) == ["new", "old"]
 
     def test_a_registered_drive_is_never_called_stale_because_of_a_name(self):
         """The scan found the pool 'new'; 'old' shares only the disk name of a
