@@ -1175,7 +1175,7 @@ they are. Then, once per system:
 Until then the timer 2.0 installed keeps running the new code every hour of
 uptime. *status.json* is first written by the next command that changes
 state, by **sudo zark status** or by the timer; **zark monitor** reads it
-without root. The GNOME Shell extension (Ubuntu 26.04) is the package
+without root. The GNOME Shell extension (Ubuntu 26.04 and 26.10) is the package
 *gnome-shell-extension-zark* in the same PPA, suggested and not installed by
 default. **recover** creates only the top of a subtree excluded from backups;
 **backup** and **prepare** refuse a system with neither its own **bpool** nor
