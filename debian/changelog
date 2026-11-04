@@ -1,66 +1,37 @@
-zark (2.2.0~rc4-1) UNRELEASED; urgency=medium
+zark (2.2.0-1) stable; urgency=medium
 
-  * Milestone M15 of zark 2.2 (the release). Not for release: the
-    candidate that the acceptance on eli runs on. 2.2.0 differs from it
-    only in the version and the changelogs.
-  * The PPA builds for Ubuntu 26.10 (stonking) too; CI installs the .deb
-    on 26.10 as well.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Wed, 04 Nov 2026 16:32:30 +0100
-
-zark (2.2.0~rc3-1) UNRELEASED; urgency=medium
-
-  * Milestone M16 of zark 2.2 (drive identity). Not for release: nothing
-    is published until the final 2.2.0.
-  * A drive is recognised by its pool label or its own by-id name, never
-    by its enclosure's usb- name, which every disk that goes through the
-    enclosure shares. known_drives.json entries may carry enclosure_id;
-    an entry is corrected the first time its drive is verified by backup or
-    zark registry fix.
-  * purge and prepare no longer remove another drive's registry entry and
-    anchors because it shares the enclosure's name; they ask, default no.
-  * The scan lists a registered drive only when its label is found.
-  * import_backup_pool refuses a pool of another GUID after the import.
-  * umount ejects the device the pool is on.
-  * The self-test gains DSK-09, DSK-10 and POOL-16.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 03 Nov 2026 23:50:00 +0100
-
-zark (2.2.0~rc2-1) UNRELEASED; urgency=medium
-
-  * Milestone M13 of zark 2.2 (/boot on ext4, Ubuntu 26.10 and later on
-    UEFI). Not for release: nothing is published until the final 2.2.0.
-  * backup, prepare and recover support the layout with /boot on an ext4
-    partition and no bpool. setup creates rpool/ROOT/<be>/zark-boot, the
-    copy of /boot that every point holds; recover lays the disk out as the
-    point records it and rewrites /boot's UUID in grub.cfg, fstab and
-    crypttab.
+  * zark 2.2. Ubuntu 26.10's layout on UEFI, /boot on an ext4 partition
+    with no bpool: backup, prepare and recover support it. setup creates
+    rpool/ROOT/<be>/zark-boot, the copy of /boot every point holds;
+    recover lays the disk out as the point records it, writes /boot's new
+    UUID into grub.cfg and fstab and the new swap partition's PARTUUID
+    into crypttab.
   * Each point records the zark that wrote it and, for /boot on ext4, the
     oldest zark that recovers it; recover refuses before erasing a point
     it must not recover, one whose record cannot be read, and an ext4
     point without a record. zark 2.1.1 must not recover an ext4 point.
   * chroot, mount local, repair-boot, finish and zark mount handle an ext4
     /boot; /boot's space in zark status, the MOTD and status.json.
+  * A drive is registered under its own by-id name and found by its pool
+    label; its enclosure's usb- name, which every disk behind it shares,
+    goes into known_drives.json as enclosure_id, written by prepare and
+    added to an older entry by backup or zark registry fix. A drive whose
+    enclosure hides the disk's name keeps its usb- name and gets none.
+    purge and prepare ask before removing another drive's entry that
+    shares the enclosure's name, default no.
   * A warning on Ubuntu 24.04 hosts that the upgrade to 26.04 stops the
-    root pool's mounts. New self-test checks BOOT-01 to BOOT-10 and UPG-01.
-  * Depends on rsync and e2fsprogs.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 02 Nov 2026 12:51:11 +0100
-
-zark (2.2.0~rc1-1) UNRELEASED; urgency=medium
-
-  * Milestone M14 of zark 2.2 (the status readers' rows and the CLI). Not
-    for release: nothing is published until the final 2.2.0.
+    root pool's mounts.
   * Status files: orphan rule 4 is skipped when /proc hides root's
-    processes from the reader (hidepid), told by /proc/1; the reference
-    reader and zark monitor follow it. New self-test check RDR-02.
-  * zark monitor shows what removing a drive's oldest points frees.
-  * Self-test reports keep iso and the exact versions only in the shapes
-    Ubuntu writes.
-  * zark's help in four groups, sorted inside each; the manpage the same.
-  * bash completion for every command, its options and arguments.
+    processes from the reader (hidepid). zark monitor shows what removing
+    a drive's oldest points frees.
+  * zark's help in four groups and the manpage the same; bash completion
+    for every command, its options and arguments.
+  * Self-test checks BOOT-01 to BOOT-10, UPG-01, RDR-02, DSK-09, DSK-10
+    and POOL-16.
+  * Depends on rsync and e2fsprogs. The PPA builds for Ubuntu 26.10
+    (stonking) too.
 
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Sat, 31 Oct 2026 18:30:00 +0100
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Thu, 05 Nov 2026 00:30:00 +0100
 
 zark (2.1.1-1) stable; urgency=medium
 

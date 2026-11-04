@@ -5,7 +5,7 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.2.0] - 2026-11-05
 
 ### For zark 2.1 users
 
@@ -14,8 +14,9 @@ point of a system with `/boot` on ext4 is recovered with zark 2.2.0 or
 later only: zark 2.1.1 would take it for a bpool point, erase the target
 disk and leave the restored system without `/boot`. Points of 24.04 and
 26.04 systems are recovered by either version. The drives' registry gains
-`enclosure_id`, written the first time each drive is verified, and nothing
-on the drives changes. No `zark setup` run is needed after the package
+`enclosure_id`: `prepare` writes it, `backup` and `zark registry fix` add
+it to an older entry, and a drive whose enclosure hides the disk's name
+gets none; nothing on the drives changes. No `zark setup` run is needed after the package
 upgrade on 24.04 and 26.04; on 26.10, `sudo zark setup` once creates
 `zark-boot`. See [docs/UPGRADING.md](docs/UPGRADING.md).
 
@@ -28,10 +29,7 @@ upgrade on 24.04 and 26.04; on 26.10, `sudo zark setup` once creates
   each row comes from. `.github/workflows/pages.yml` builds it and publishes it to GitHub
   Pages once `PAGES_ENABLED` is set. Nothing that could name a machine is published.
 
-### M13 - /boot on ext4
-
-zark 2.2 is built on `main` as `2.2.0-rc2` (`lib/config.py`) and
-`2.2.0~rc2-1` UNRELEASED (`debian/changelog`).
+### M13 - /boot on ext4 (2.2.0-rc2)
 
 #### Added
 
@@ -168,11 +166,7 @@ zark 2.2 is built on `main` as `2.2.0-rc2` (`lib/config.py`) and
 - A 2.1.x release that refuses a record carrying `boot` (M12-8 8b), or
   documentation alone (8c).
 
-### M14 - the status readers' rows and the CLI
-
-zark 2.2 is being built on `main` as `2.2.0-rc1` (`lib/config.py`) and
-`2.2.0~rc1-1` UNRELEASED (`debian/changelog`). Nothing is uploaded to the
-PPA until the final 2.2.0.
+### M14 - the status readers' rows and the CLI (2.2.0-rc1)
 
 #### Added
 
@@ -193,7 +187,7 @@ PPA until the final 2.2.0.
   own in a private mount namespace, `hidepid=invisible` and `ptraceable`
   hide `/proc/1` and the run's own pid, `noaccess` closes their files and
   `off` shows everything; nothing reaches the host's mounts. Level 1 now
-  has 61 checks.
+  has 61 checks (73 in 2.2.0).
 
 #### Changed
 
@@ -233,7 +227,7 @@ PPA until the final 2.2.0.
 - `sanitize` on `iso` and the exact versions: its long-number rule turns
   an official image's date into `<n>`; refusing a FAIL in a certificate.
 
-### M16 - drive identity
+### M16 - drive identity (2.2.0-rc3)
 
 #### Changed
 
@@ -269,13 +263,12 @@ PPA until the final 2.2.0.
 - Readers also testing `enclosure_id` (M16-8b): the enclosure's link exists with any disk in it.
 - Upgrading the registry on load (M16-5c): it would write from read-only commands.
 
-### M15 - the release
+### M15 - the release (2.2.0-rc4)
 
-The candidate is `2.2.0-rc4` (`lib/config.py`) and `2.2.0~rc4-1`
-UNRELEASED (`debian/changelog`); the acceptance on eli runs on it. What
-2.2.0 adds after it changes nothing zark does: the tests' disk names, the
-package's description, the CI smoke's checks, the certificates, the
-version and the changelogs.
+2.2.0 was accepted on eli as `2.2.0-rc4`. What it adds to that candidate
+changes nothing zark does: the tests' disk names, the package's
+description, the CI smoke's checks, the certificates, the version and the
+changelogs.
 
 #### Changed
 
@@ -288,6 +281,9 @@ version and the changelogs.
   bpool, or rpool with `/boot` on ext4, and the LUKS keystore; and how long
   a recover takes as the README says it. The CI smoke checks that the
   `.deb` depends on `rsync` and `e2fsprogs` too (M15R-4).
+- **The self-test's certificates for 2.2.0**: five from eli, run on
+  `2.2.0-rc4`: Ubuntu 26.10 installed with `/boot` on ext4 (levels 1 and
+  2), and the Ubuntu 26.10, 26.04 and 24.04.5 lives (level 1).
 - **Made-up serials in the tests** (M15R-1): the by-id names of the test
   bench's disks in `tests/test_unit.py` carry made-up serials of the same
   shape, as the Micron pair's already did (M15-8).
