@@ -4,7 +4,7 @@ What changes when a system and its drives move from zark 2.1 to 2.2, from zark 2
 
 ## Upgrading from zark 2.1
 
-zark 2.2 changes one thing in `/etc/zark/known_drives.json`: an entry may carry `enclosure_id`, and `drive_id` may be the disk's own `ata-` name instead of the enclosure's `usb-` name. Nothing on a drive changes, and no `zark setup` run is needed after the package upgrade.
+zark 2.2 changes one thing in `/etc/zark/known_drives.json`: an entry may carry `enclosure_id`, and `drive_id` may be the disk's own `ata-` name instead of the enclosure's `usb-` name. Nothing on a drive changes. On Ubuntu 24.04 and 26.04 no `zark setup` run is needed after the package upgrade; on a 26.10 system with `/boot` on ext4, run `sudo zark setup` once to create `rpool/ROOT/<be>/zark-boot` (see **Ubuntu 26.10.** below).
 
 **Why.** A `usb-` name is made by the enclosure's bridge. Two disks that go through one enclosure share it, and 2.1 took the second for the first: `purge` and `prepare` could remove the other drive's entry and its anchors in the source. 2.2 recognises a drive by the pool label on the disk, or by the disk's own name, and treats an enclosure's name as evidence about the enclosure only.
 
@@ -33,7 +33,7 @@ zark 2.1 keeps 2.0's drives, registry and backup points as they are: no format o
 **What behaves differently:**
 
 - `recover` creates only the top of a subtree excluded from backups at the point it restores (empty, with its properties); the datasets below it are not created.
-- `backup` and `prepare` refuse a system without a bpool of its own, naming where `/boot` is (Ubuntu 26.10 and later put it on ext4 on UEFI machines, Secure Boot on or off; support is planned for 2.2, [#5](https://github.com/juanmitaboada/zark/issues/5)); 24.04 and 26.04 LTS, as their installers lay out ZFS, are the supported series.
+- `backup` and `prepare` refuse a system without a bpool of its own, naming where `/boot` is (Ubuntu 26.10 and later put it on ext4 on UEFI machines, Secure Boot on or off; support is planned for 2.2, [#5](https://github.com/juanmitaboada/zark/issues/5)); 24.04 and 26.04 LTS, as their installers lay out ZFS, are the supported series. zark 2.2 added that layout: see **Ubuntu 26.10.** under [Upgrading from zark 2.1](#upgrading-from-zark-21).
 - For contributors: `make test-real` and 1.x's QEMU harness are gone; validation is the self-test and a checklist on real hardware.
 
 **The way back.** 2.0.0 reads everything 2.1 writes on drives and in the registry. Going back is installing 2.0.0's package with `sudo apt install --allow-downgrades ./<its .deb>`, never `apt remove zark` (it removes the guards and alerts); the status files are then left as they are and no longer updated.
