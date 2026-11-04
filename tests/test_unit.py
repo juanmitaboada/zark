@@ -8215,7 +8215,7 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
 #  lib/identity.py and lib/registry.py (M1: I20-I25, hallazgo 7)
 # ═════════════════════════════════════════════════════════════════════════
 
-_KINGSTON_ID = "usb-Kingston_DT_microDuo_3C_408D5C15CFA5E961091D0CCA-0:0"
+_KINGSTON_ID = "usb-Kingston_DT_microDuo_3C_A0B1C2D3E4F5A6B7C8D9E0F1-0:0"
 _LSBLK_SDB = (
     'NAME="sdb" TYPE="disk" PKNAME="" MODEL="DT microDuo 3C" '
     'SERIAL="408D5C15CFA5E9610" SIZE="115.5G" TRAN="usb"'
@@ -8225,7 +8225,7 @@ _BY_ID_LISTING = (
     f"{_KINGSTON_ID}\t../../sdb\n"
     f"{_KINGSTON_ID}-part1\t../../sdb1\n"
     "wwn-0x5000000000000001\t../../sdb\n"
-    "ata-KINGSTON_SKC600MS512G_50026B7784FC3319\t../../sda\n"
+    "ata-KINGSTON_SKC600MS512G_50012A3B4C5D6E7F\t../../sda\n"
 )
 _ZDB_LABEL = (
     "------------------------------------\n"
@@ -8382,8 +8382,8 @@ class TestIdentity:  # pylint: disable=missing-function-docstring
 class TestIdentityKinds:  # pylint: disable=missing-function-docstring
     """What a by-id name identifies: the disk, its enclosure, or nothing sure (M16-1)."""
 
-    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
-    USB = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
+    USB = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
     WWN = "wwn-0x5000000000000001"
 
     def test_each_prefix_has_its_kind(self):
@@ -8437,9 +8437,9 @@ class TestIdentityKinds:  # pylint: disable=missing-function-docstring
 class TestRecognise:  # pylint: disable=missing-function-docstring
     """Which registry entries describe a disk, and on what evidence (M16-2)."""
 
-    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
-    ATA_B = "ata-SAMSUNG_HM501II_S24QJ90B100169"
-    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
+    ATA_B = "ata-SAMSUNG_HM501II_S12AB34C567890"
+    CASE = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
     WWN = "wwn-0x5000000000000001"
 
     def disk(self, own: str, label: PoolLabel | None = None, bus: str = "") -> DiskIdentity:
@@ -8950,7 +8950,7 @@ def _purge_ident(label: PoolLabel | None, aliases: tuple[str, ...] = ()) -> Disk
     )
 
 
-_KINGSTON_ATA = "ata-Kingston_DT_microDuo_3C_408D5C15CFA5E961091D0CCA"
+_KINGSTON_ATA = "ata-Kingston_DT_microDuo_3C_A0B1C2D3E4F5A6B7C8D9E0F1"
 _PURGE_LABEL = PoolLabel("backup", "3446866051930726346")
 
 
@@ -9335,9 +9335,9 @@ class TestPurgeIncomplete:  # pylint: disable=missing-function-docstring,too-man
         assert rc == 0 and not data
         assert self.dropped == ["3446866051930726346", "222"], self.dropped
 
-    CASE = "usb-Seagate_USB_07BB24735163-0:0"
-    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
-    ATA_B = "ata-SAMSUNG_HM501II_S24QJ90B100169"
+    CASE = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
+    ATA_B = "ata-SAMSUNG_HM501II_S12AB34C567890"
 
     def test_a_disk_that_shared_the_case_does_not_take_the_other_drives_entry(self):
         """M12P.1: purging the SAMSUNG in the Fujitsu's case leaves the Fujitsu's
@@ -9986,13 +9986,13 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert data["blue"]["last_backup_at"]  # I13
         assert data["black"]["guid"] == "2"
 
-    CASE = "usb-Seagate_USB_07BB24735163-0:0"
-    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
-    ATA_B = "ata-SAMSUNG_HM501II_S24QJ90B100169"
+    CASE = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
+    ATA_B = "ata-SAMSUNG_HM501II_S12AB34C567890"
 
     def _samsung(self) -> DiskIdentity:
         return DiskIdentity(
-            "/dev/sdb", self.CASE, "HM501II", "S24QJ90B100169", "465G", "usb",
+            "/dev/sdb", self.CASE, "HM501II", "S12AB34C567890", "465G", "usb",
             aliases=(self.ATA_B, self.CASE),
         )  # fmt: skip
 
@@ -10294,8 +10294,8 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
 class TestLocateRegistered:  # pylint: disable=missing-function-docstring
     """A registered drive is where its label is, not where a name leads (M16-4)."""
 
-    CASE = "usb-Seagate_USB_07BB24735163-0:0"
-    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    CASE = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
+    ATA_A = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
 
     def by_id(self, *names: str) -> Path:
         """A by-id directory with a disk link and a part1 link per name."""
@@ -10487,8 +10487,8 @@ class TestSelftestIdentityChecks:  # pylint: disable=missing-function-docstring
     """The logic of DSK-09 and DSK-10 (M16-10), on synthetic disks; the checks
     themselves run on a stick."""
 
-    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
-    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
+    CASE = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
 
     def usb_disk(self, *names: str, label: PoolLabel | None = None) -> DiskIdentity:
         return DiskIdentity(
@@ -10545,8 +10545,8 @@ class TestSelftestIdentityChecks:  # pylint: disable=missing-function-docstring
 class TestExplore:  # pylint: disable=missing-function-docstring
     """explore and drives that share an enclosure's name (M16-2)."""
 
-    CASE = "usb-Seagate_USB_07BB24735163-0:0"
-    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+    CASE = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
 
     def _run(
         self,
@@ -10697,8 +10697,8 @@ class TestExplore:  # pylint: disable=missing-function-docstring
 class TestReconcile:  # pylint: disable=missing-function-docstring
     """The registry's names follow the disk once its GUID is verified (M16-5)."""
 
-    ATA = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
-    CASE = "usb-Seagate_USB_07BB24735163-0:0"
+    ATA = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
+    CASE = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
     WWN = "wwn-0x5000000000000001"
 
     def ident(self, *names: str) -> DiskIdentity:
@@ -10738,7 +10738,7 @@ class TestReconcile:  # pylint: disable=missing-function-docstring
 
     def test_a_disk_copied_to_another_takes_the_new_disk_name(self):
         info = DriveInfo("f", "18", self.ATA, enclosure_id=self.CASE)
-        new = "ata-SAMSUNG_HM501II_S24QJ90B100169"
+        new = "ata-SAMSUNG_HM501II_S12AB34C567890"
         with redirect_stdout(StringIO()):
             assert reconcile(info, self.ident(self.CASE, new), make_log())
         assert info.drive_id == new
@@ -10898,7 +10898,7 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
 
     def test_list_says_another_disk_is_in_the_case_not_that_the_drive_is(self):
         """M12P.1: the registered Fujitsu is in a drawer, the SAMSUNG is in its case."""
-        case = "usb-Seagate_USB_07BB24735163-0:0"
+        case = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
         d = self._cfg_dir({"f": {"guid": "18", "drive_id": "ata-FUJITSU_X", "enclosure_id": case}})
         out = StringIO()
         found = Location(Presence.NO_LABEL, case, "/dev/disk/by-id/x-part1", None)
@@ -10917,8 +10917,8 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
 
     def test_fix_upgrades_a_2_1_1_entry_to_the_disk_name_and_the_case_name(self):
         """M16-5: a second `fix` changes nothing."""
-        case = "usb-Seagate_USB_07BB24735163-0:0"
-        ata = "ata-FUJITSU_MHW2160BJ_G2_K30VT7C27KF1"
+        case = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
+        ata = "ata-FUJITSU_MHW2160BJ_G2_A12BC3D45EF6"
         d = self._cfg_dir({"fuji": {"guid": "777", "drive_id": case}})
         mock = MockShell()
         mock.on("blkid -t TYPE=zfs_member -o export").succeeds(
@@ -10951,7 +10951,7 @@ class TestRegistryCommand:  # pylint: disable=missing-function-docstring
 
     def test_list_says_a_different_pool_is_at_the_name_not_another_disk(self):
         """M16R-7: after a re-prepare it is the same disk with another pool."""
-        case = "usb-Seagate_USB_07BB24735163-0:0"
+        case = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
         d = self._cfg_dir({"backup": {"guid": "18", "drive_id": case}})
         out = StringIO()
         found = Location(
@@ -11955,7 +11955,7 @@ class TestRecoverTargetDisks:  # pylint: disable=missing-function-docstring,too-
         mock = MockShell()
         mock.on("lsblk -dn -P -o NAME,TYPE,SIZE,MODEL,SERIAL,TRAN").succeeds(
             'NAME="sda" TYPE="disk" SIZE="476.9G" MODEL="KINGSTON SKC600MS512G" '
-            'SERIAL="50026B7784FC3319" TRAN="sata"\n'
+            'SERIAL="50012A3B4C5D6E7F" TRAN="sata"\n'
             'NAME="sdb" TYPE="disk" SIZE="115.5G" MODEL="DT microDuo 3C" SERIAL="408D" TRAN="usb"\n'
             'NAME="sdc" TYPE="disk" SIZE="231G" MODEL="DT microDuo 3C" SERIAL="1C1B" TRAN="usb"\n'
             'NAME="zd0" TYPE="disk" SIZE="16M" MODEL="" SERIAL="" TRAN=""\n'
@@ -11967,7 +11967,7 @@ class TestRecoverTargetDisks:  # pylint: disable=missing-function-docstring,too-
         ):
             cands = _target_candidates("/dev/sdb")
         assert [c[0] for c in cands] == ["/dev/sda"]
-        assert "50026B7784FC3319" in cands[0][1]
+        assert "50012A3B4C5D6E7F" in cands[0][1]
 
 
 def _marks_unreadable(snaps: list[Snap]) -> Callable[..., list[Snap]]:
@@ -12212,7 +12212,7 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             assert copy.stat().st_mode & 0o777 == 0o600
             assert mock.was_called(f"rm -rf {copy.parent}")
 
-    _DISK_ID = "ata-KINGSTON_SKC600MS512G_50026B7784FC3319"
+    _DISK_ID = "ata-KINGSTON_SKC600MS512G_50012A3B4C5D6E7F"
 
     def _run_to_create(
         self,
@@ -15332,14 +15332,14 @@ class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
     def test_umount_ejects_the_disk_the_pool_is_on_not_the_one_the_registry_names(self):
         """M16-9: another disk may sit now in the enclosure the entry names."""
         status = "  pool: backup\n  NAME\n  backup\n    /dev/disk/by-id/ata-X-part1  ONLINE\n"
-        case = "usb-Seagate_USB_07BB24735163-0:0"
+        case = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
         known = {"backup": DriveInfo("backup", "1", case)}
         d = Path(tempfile.mkdtemp())
         (d / case).write_text("")  # the registry's name leads somewhere, to another disk
         assert self._umount_ejects(status, known, str(d)) == "/dev/sdc"
 
     def test_umount_falls_back_on_the_registry_name_when_the_pool_names_no_device(self):
-        case = "usb-Seagate_USB_07BB24735163-0:0"
+        case = "usb-Seagate_USB_0A1B2C3D4E5F-0:0"
         d = Path(tempfile.mkdtemp())
         (d / case).write_text("")
         got = self._umount_ejects(
@@ -15646,12 +15646,12 @@ class TestStableVdevs:  # pylint: disable=missing-function-docstring
 
     def test_pools_are_created_on_the_by_id_partition(self):
         links = (
-            "ata-KINGSTON_SKC600MS512G_50026B7784FC3319\t../../sda\n"
+            "ata-KINGSTON_SKC600MS512G_50012A3B4C5D6E7F\t../../sda\n"
             "wwn-0x50026b7784fc3319\t../../sda\n"
-            "ata-KINGSTON_SKC600MS512G_50026B7784FC3319-part4\t../../sda4\n"
+            "ata-KINGSTON_SKC600MS512G_50012A3B4C5D6E7F-part4\t../../sda4\n"
         )
         path, _ = self._vdev(links, exists=True)
-        assert path == "/dev/disk/by-id/ata-KINGSTON_SKC600MS512G_50026B7784FC3319-part4"
+        assert path == "/dev/disk/by-id/ata-KINGSTON_SKC600MS512G_50012A3B4C5D6E7F-part4"
 
     def test_falls_back_to_the_kernel_name_with_a_warning(self):
         path, out = self._vdev("", exists=False)
@@ -26139,7 +26139,7 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
         host = socket.gethostname()
         planted = (
             f"zdb: name: 'zstdeadbeefa' hostname: '{host}' pool_guid: 16224517364757996670 "
-            + "serial 408D5C15CFA5E961091D0CCA /dev/disk/by-id/usb-Kingston_DT_408D5C15-0:0 "
+            + "serial A0B1C2D3E4F5A6B7C8D9E0F1 /dev/disk/by-id/usb-Kingston_DT_408D5C15-0:0 "
             + "machine 7e57000000000000000000000000beef in /dev/shm/zark-selftest-x"
         )
         res = [stest.Result("POOL-07.1", "FAIL", expected=planted, came=planted, depends=("x",))]
@@ -26148,7 +26148,7 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
         for secret in (
             host,
             "16224517364757996670",
-            "408D5C15CFA5E961091D0CCA",
+            "A0B1C2D3E4F5A6B7C8D9E0F1",
             "usb-Kingston",
             "7e57000000000000000000000000beef",
             "zstdeadbeefa",
@@ -26827,8 +26827,8 @@ class TestSelftestCommand:  # pylint: disable=missing-function-docstring,protect
     def test_a_stopped_level_2_run_masks_the_stick_in_its_report(self):
         # M4sR-1: the stick's bare by-id alias and its serial (no word
         # boundary before it) are masked only by the bench's masks.
-        alias = "usb-Kingston_DT_microDuo_3C_408D5C15CFA5E961091D0CCA-0:0"
-        serial = "408D5C15CFA5E961091D0CCA"
+        alias = "usb-Kingston_DT_microDuo_3C_A0B1C2D3E4F5A6B7C8D9E0F1-0:0"
+        serial = "A0B1C2D3E4F5A6B7C8D9E0F1"
         ident = DiskIdentity(disk="/dev/sdz", by_id=alias, serial=serial, aliases=(alias,))
 
         def fail(_b: stest.Bench) -> None:

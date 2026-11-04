@@ -31,13 +31,16 @@ Suggests: gnome-shell-extension-zark,
           ovmf
 Description: ZFS bare-metal backup and recovery suite for Ubuntu
  zark provides full bare-metal backup and disaster recovery for Ubuntu
- systems running on encrypted ZFS root pools (rpool/bpool with a LUKS
- keystore zvol). Backups are written to external drives with zark's own
- raw zfs send/receive, preserving native ZFS encryption end-to-end.
+ systems installed on encrypted ZFS as Ubuntu's installer lays them out:
+ rpool with a LUKS keystore zvol, and /boot on a bpool or on ext4.
+ Backups are written to external drives with zark's own raw zfs
+ send/receive, preserving native ZFS encryption end-to-end.
  .
- The recover command performs a full system restoration from a live USB
- in approximately one minute, reconstructing rpool, bpool, the LUKS
- keystore, GRUB and initramfs without touching the source system.
+ The recover command performs a full system restoration from a live USB:
+ it partitions the new disk, recreates the pools, restores every dataset,
+ the boot pool or the ext4 /boot, the LUKS keystore, GRUB and initramfs,
+ without touching the source system. The steps around the transfer take
+ about a minute; the rest is copying the data.
  .
  zark is portable: it can also be run directly from a USB pendrive
  without installation, which is the recommended workflow for disaster

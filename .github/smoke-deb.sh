@@ -37,6 +37,9 @@ dpkg-deb -f "$DEB" Depends | grep -q 'zfsutils-linux'
 dpkg-deb -f "$DEB" Depends | grep -q 'sanoid'
 dpkg-deb -f "$DEB" Depends | grep -q 'cryptsetup-bin'
 dpkg-deb -f "$DEB" Depends | grep -q 'gdisk'
+# M12R-10: /boot on ext4 needs rsync (the zark-boot copy) and e2fsprogs (mkfs.ext4).
+dpkg-deb -f "$DEB" Depends | grep -q 'rsync'
+dpkg-deb -f "$DEB" Depends | grep -q 'e2fsprogs'
 
 # Install with apt (resolves Depends from the Ubuntu archive). A relative
 # path must start with ./ or apt takes it for a package name.

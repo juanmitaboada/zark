@@ -272,8 +272,10 @@ PPA until the final 2.2.0.
 ### M15 - the release
 
 The candidate is `2.2.0-rc4` (`lib/config.py`) and `2.2.0~rc4-1`
-UNRELEASED (`debian/changelog`); the acceptance on eli runs on it, and
-2.2.0 differs from it only in the version and the changelogs.
+UNRELEASED (`debian/changelog`); the acceptance on eli runs on it. What
+2.2.0 adds after it changes nothing zark does: the tests' disk names, the
+package's description, the CI smoke's checks, the certificates, the
+version and the changelogs.
 
 #### Changed
 
@@ -282,6 +284,13 @@ UNRELEASED (`debian/changelog`); the acceptance on eli runs on it, and
   dependency is in stonking's archive. CI installs the `.deb` built on
   24.04 on 26.10 too, in an `ubuntu:26.10` container, since GitHub has no
   26.10 runner.
+- **The package's description names both layouts** (M15R-3): rpool with a
+  bpool, or rpool with `/boot` on ext4, and the LUKS keystore; and how long
+  a recover takes as the README says it. The CI smoke checks that the
+  `.deb` depends on `rsync` and `e2fsprogs` too (M15R-4).
+- **Made-up serials in the tests** (M15R-1): the by-id names of the test
+  bench's disks in `tests/test_unit.py` carry made-up serials of the same
+  shape, as the Micron pair's already did (M15-8).
 
 ## [2.1.1] - 2026-10-30
 
