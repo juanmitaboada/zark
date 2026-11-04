@@ -14,6 +14,8 @@ zark 2.2 changes one thing in `/etc/zark/known_drives.json`: an entry may carry 
 
 **The way back.** 2.1.1 reads and rewrites a registry that has `enclosure_id` and keeps the field. On its next backup it sets `drive_id` back to the enclosure's name, as it does for any entry; 2.2 corrects it again at the next verified connection.
 
+**Ubuntu 26.10.** zark 2.2 also adds Ubuntu 26.10's layout, `/boot` on ext4 with no bpool. A point of a 26.10 system is recovered with zark 2.2.0 or later only: zark 2.1.1 and earlier take it for a bpool point, erase the target disk and leave the restored system without `/boot`. Recover a 26.10 system from a live USB with a 2.2 portable tree, or with the 2.2 package installed in the live session. Points of 24.04 and 26.04 systems are recovered by either version.
+
 ## Upgrading from zark 2.0
 
 zark 2.1 keeps 2.0's drives, registry and backup points as they are: no format on a drive or in `/etc/zark/known_drives.json` changed, and every 2.0 drive goes on with its next backup as before.
