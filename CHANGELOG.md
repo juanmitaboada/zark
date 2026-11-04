@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### For zark 2.1 users
+
+zark 2.2 adds Ubuntu 26.10's layout, `/boot` on ext4 with no bpool. A
+point of a system with `/boot` on ext4 is recovered with zark 2.2.0 or
+later only: zark 2.1.1 would take it for a bpool point, erase the target
+disk and leave the restored system without `/boot`. Points of 24.04 and
+26.04 systems are recovered by either version. The drives' registry gains
+`enclosure_id`, written the first time each drive is verified, and nothing
+on the drives changes. No `zark setup` run is needed after the package
+upgrade on 24.04 and 26.04; on 26.10, `sudo zark setup` once creates
+`zark-boot`. See [docs/UPGRADING.md](docs/UPGRADING.md).
+
 ### Added
 
 - **A public page of the platforms where the self-test has passed**: `pages/matrix.py`
@@ -258,6 +270,10 @@ PPA until the final 2.2.0.
 - Upgrading the registry on load (M16-5c): it would write from read-only commands.
 
 ### M15 - the release
+
+The candidate is `2.2.0-rc4` (`lib/config.py`) and `2.2.0~rc4-1`
+UNRELEASED (`debian/changelog`); the acceptance on eli runs on it, and
+2.2.0 differs from it only in the version and the changelogs.
 
 #### Changed
 

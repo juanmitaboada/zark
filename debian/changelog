@@ -1,3 +1,13 @@
+zark (2.2.0~rc4-1) UNRELEASED; urgency=medium
+
+  * Milestone M15 of zark 2.2 (the release). Not for release: the
+    candidate that the acceptance on eli runs on. 2.2.0 differs from it
+    only in the version and the changelogs.
+  * The PPA builds for Ubuntu 26.10 (stonking) too; CI installs the .deb
+    on 26.10 as well.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Wed, 04 Nov 2026 16:32:30 +0100
+
 zark (2.2.0~rc3-1) UNRELEASED; urgency=medium
 
   * Milestone M16 of zark 2.2 (drive identity). Not for release: nothing
