@@ -61,6 +61,8 @@ sudo ./zark setup     # install sanoid + zfs tooling, configure snapshots
 sudo ./zark prepare   # initialize a blank drive as a backup target
 ```
 
+On Ubuntu 26.10, where `/boot` is on ext4 and there is no bpool, `setup` asks to create `rpool/ROOT/<be>/zark-boot`: a copy of `/boot` inside rpool that every backup refreshes before it takes its point, so each restore point holds the root and its `/boot` together. `backup` and `prepare` refuse until it exists.
+
 `prepare` asks its questions, creates the backup pool, sends the first backup point, reads the pool back and only then registers the drive's GUID in `etc/known_drives.json`. After this, `zark backup` finds the drive automatically every time you connect it.
 
 ### Back up your system
@@ -130,6 +132,7 @@ Useful as a coherence check after `recover` (or any boot-chain change) without c
 
 ## Requirements
 
+- A supported system: Ubuntu 24.04 or 26.04 LTS as their installers lay out encrypted ZFS (rpool, bpool and the keystore), or Ubuntu 26.10 with `/boot` on ext4 (rpool and the keystore, no bpool); Secure Boot on
 - Ubuntu live USB (for recovery operations)
 - Python 3 (included in Ubuntu live environment)
 - ZFS utilities (`zfsutils-linux`, included in Ubuntu desktop)

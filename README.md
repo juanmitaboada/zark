@@ -16,7 +16,7 @@ Ubuntu's installer can put the whole system on ZFS with native encryption, and Z
 - `sudo zark backup` copies the system to an external drive, encrypted as it is, and adds a restore point each time;
 - `sudo zark recover`, from an Ubuntu live USB, rebuilds the system on a new disk, still encrypted, and it boots with Secure Boot on the stock Ubuntu boot chain.
 
-zark is for Ubuntu 24.04 LTS and 26.04 LTS, installed with the installer's encrypted ZFS layout (rpool, bpool and the keystore), with Secure Boot on. It is free software under the Apache License 2.0.
+zark is for Ubuntu 24.04 LTS and 26.04 LTS, installed with the installer's encrypted ZFS layout (rpool, bpool and the keystore), and for Ubuntu 26.10, whose installer puts `/boot` on ext4 (rpool and the keystore, no bpool), with Secure Boot on. It is free software under the Apache License 2.0.
 
 <p align="center">
   <img alt="zark monitor following a backup to a drive: the step, a progress bar with the rate and the time left, the pools and the backup drives" src="docs/images/screenshots/zark-monitor-backup.png" width="760">
@@ -28,11 +28,11 @@ zark is for Ubuntu 24.04 LTS and 26.04 LTS, installed with the installer's encry
 
 A ZFS snapshot is an instant, read-only copy of a dataset that costs nothing until data changes. Every block carries a checksum, so silent corruption is found, not copied. Encryption is part of the file system, and `zfs send` can move an encrypted dataset without ever decrypting it.
 
-That is everything a backup needs, but not a backup by itself: snapshots live on the same disk as the data. Getting an encrypted ZFS root back onto a new disk means the partitions, both pools, the keystore, the EFI partition, the initramfs and a signed GRUB chain, all in agreement. One step out of place and the machine stops at an emergency shell. zark does those steps, in order, and checks them.
+That is everything a backup needs, but not a backup by itself: snapshots live on the same disk as the data. Getting an encrypted ZFS root back onto a new disk means the partitions, the pools and `/boot`, the keystore, the EFI partition, the initramfs and a signed GRUB chain, all in agreement. One step out of place and the machine stops at an emergency shell. zark does those steps, in order, and checks them.
 
 ## Why zark
 
-- **Bare-metal recovery** from a live USB: zark partitions the new disk, creates the pools with the features the old ones had, restores every dataset, the boot pool, the keystore and the EFI binaries, and leaves a system that boots. The steps around the transfer take about a minute; the rest is copying your data.
+- **Bare-metal recovery** from a live USB: zark partitions the new disk, creates the pools with the features the old ones had, restores every dataset, the boot pool or the ext4 `/boot`, the keystore and the EFI binaries, and leaves a system that boots. The steps around the transfer take about a minute; the rest is copying your data.
 - **The stock Ubuntu boot chain**: the signed shim and GRUB from Ubuntu's packages, the system's own initramfs. No custom binaries or patched configuration, so the recovered system takes `apt upgrade` like a fresh install.
 - **Encrypted end to end**: backups are raw `zfs send` streams, so the drive holds ciphertext and the keys never travel in the clear.
 - **A history on every drive**: each backup adds a restore point. After each complete backup the drive keeps every snapshot of its window (the last 30 days by default) and, before that, the newest point of each month, with no limit in time; the window is set per drive, and when space runs short zark lists the oldest monthly points and removes them only if you say yes ([retention](docs/RETENTION.md#retention-on-the-drive)). Each drive is anchored by its own ZFS bookmarks, so drives can rotate and stay unplugged for months.
@@ -47,6 +47,8 @@ Once per system, with a blank backup drive connected:
 sudo zark setup      # snapshot policy (sanoid), guards, status alerts
 sudo zark prepare    # turn the blank drive into a registered backup drive
 ```
+
+On Ubuntu 26.10, `setup` also asks to create `rpool/ROOT/<be>/zark-boot`, a copy of `/boot` that every backup refreshes before its point; `backup` and `prepare` refuse until it exists.
 
 Then, whenever the drive is connected:
 
