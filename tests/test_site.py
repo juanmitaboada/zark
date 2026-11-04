@@ -21,6 +21,7 @@ finds them; run that file, not this one.
 """
 
 import copy
+import dataclasses
 import json
 import re
 import sys
@@ -116,6 +117,47 @@ class TestSiteCertificates:  # pylint: disable=missing-function-docstring
         cert = gen.validate_entry(raw, None)
         assert cert.count("FAIL") == 1
         assert "1 FAIL" in gen.render_page([cert], "abc1234", "9.9.9")
+
+    @staticmethod
+    def _with(results: dict[int, str]) -> Any:
+        """The shipped entry with its n-th checks set to the given results."""
+        raw = _entry()
+        keys = list(raw["checks"])
+        for i, result in results.items():
+            raw["checks"][keys[i]] = result
+        return gen.validate_entry(raw, None)
+
+    def test_a_skip_without_a_fail_is_not_red_and_names_the_skipped(self):
+        cert = self._with({0: "SKIP", 1: "SKIP"})
+        skipped = ", ".join(k for k, v in cert.checks.items() if v == "SKIP")
+        total, passed = len(cert.checks), len(cert.checks) - 2
+        html = gen._result_html(cert)  # pylint: disable=protected-access
+        assert html == (
+            f'<strong class="ok" title="SKIP: {skipped}">{passed} PASS, '
+            + f'<span class="skip">2 SKIP</span> of {total}</strong>'
+        )
+        page = gen.render_page([cert], "abc1234", "9.9.9")
+        assert 'class="bad"' not in page
+        assert re.sub(r"<[^>]+>", "", html) == gen._result_text(cert)  # pylint: disable=protected-access
+
+    def test_a_fail_keeps_the_whole_result_red(self):
+        cert = self._with({0: "SKIP", 1: "FAIL"})
+        html = gen._result_html(cert)  # pylint: disable=protected-access
+        assert html.startswith('<strong class="bad">') and "title=" not in html
+        assert "skip" not in html
+
+    def test_all_pass_is_green_with_no_title(self):
+        cert = self._with({})
+        total = len(cert.checks)
+        html = gen._result_html(cert)  # pylint: disable=protected-access
+        assert html == f'<strong class="ok">{total} of {total} PASS</strong>'
+
+    def test_the_skipped_ids_in_the_title_are_escaped(self):
+        cert = self._with({0: "SKIP"})
+        rest = dict(list(cert.checks.items())[1:])
+        odd = dataclasses.replace(cert, checks={'X"<&>.1': "SKIP", **rest})
+        html = gen._result_html(odd)  # pylint: disable=protected-access
+        assert 'title="SKIP: X&quot;&lt;&amp;&gt;.1"' in html
 
 
 class TestSitePrivacy:  # pylint: disable=missing-function-docstring

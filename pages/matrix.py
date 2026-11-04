@@ -290,8 +290,22 @@ def _result_text(cert: Cert) -> str:
     return f"{', '.join(parts)} of {total}"
 
 
-def _result_class(cert: Cert) -> str:
-    return "ok" if cert.count("PASS") == len(cert.checks) else "bad"
+def _result_html(cert: Cert) -> str:
+    """The result, red only when a check failed: a SKIP is a check that does
+    not apply on that platform or lacks its tool, not a failure."""
+    text = esc(_result_text(cert))
+    if cert.count("FAIL"):
+        return f'<strong class="bad">{text}</strong>'
+    skipped = [k for k, v in cert.checks.items() if v == "SKIP"]
+    if not skipped:
+        return f'<strong class="ok">{text}</strong>'
+    passed = cert.count("PASS")
+    head = f"{passed} PASS, " if passed else ""
+    # Same words as _result_text; only the SKIP part is muted, and the title names them.
+    return (
+        f'<strong class="ok" title="{esc("SKIP: " + ", ".join(skipped))}">{head}'
+        + f'<span class="skip">{len(skipped)} SKIP</span> of {len(cert.checks)}</strong>'
+    )
 
 
 def _newest(certs: list[Cert]) -> Cert:
@@ -317,7 +331,7 @@ def _card(platform: tuple[str, ...], certs: list[Cert]) -> str:
             items.append(
                 f'<li><span class="lv">Level {level}</span> zark {esc(c.zark)}, '
                 + f"<time>{esc(c.date)}</time>: "
-                + f'<strong class="{_result_class(c)}">{esc(_result_text(c))}</strong> '
+                + f"{_result_html(c)} "
                 + f'<span class="src">{_source_html(c)}</span></li>'
             )
         body = "".join(items) if items else '<li class="none">No certificate yet.</li>'
@@ -352,7 +366,7 @@ def _history_row(cert: Cert) -> str:
         ("Ubuntu", esc(cert.series["ubuntu"])),
         ("Where", esc(cert.where) + live),
         ("Level", str(cert.level)),
-        ("Result", f'<strong class="{_result_class(cert)}">{esc(_result_text(cert))}</strong>'),
+        ("Result", _result_html(cert)),
         ("Kernel", esc(kernel)),
         ("OpenZFS", esc(f"{cert.series['zfs']} / {cert.series['zfs_kmod']}")),
         ("Source", _source_html(cert)),
@@ -430,6 +444,7 @@ h4{margin:.8rem 0 .2rem;font-size:.95rem}
 .where li{padding:.2rem 0;border-top:1px solid var(--border)}
 .lv{font-weight:600}
 .src,.none{color:var(--muted);font-size:.85rem}
+.skip{color:var(--muted)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}
 dl.legend{display:grid;grid-template-columns:max-content 1fr;gap:.2rem 1rem}
 dl.legend dt{font-weight:600}dl.legend dd{margin:0}
