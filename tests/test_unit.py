@@ -8218,7 +8218,7 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
 _KINGSTON_ID = "usb-Kingston_DT_microDuo_3C_A0B1C2D3E4F5A6B7C8D9E0F1-0:0"
 _LSBLK_SDB = (
     'NAME="sdb" TYPE="disk" PKNAME="" MODEL="DT microDuo 3C" '
-    'SERIAL="408D5C15CFA5E9610" SIZE="115.5G" TRAN="usb"'
+    'SERIAL="A0B1C2D3E4F5A6B7C" SIZE="115.5G" TRAN="usb"'
 )
 _LSBLK_SDB1 = 'NAME="sdb1" TYPE="part" PKNAME="sdb" MODEL="" SERIAL="" SIZE="115.5G" TRAN=""'
 _BY_ID_LISTING = (
@@ -26139,7 +26139,7 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
         host = socket.gethostname()
         planted = (
             f"zdb: name: 'zstdeadbeefa' hostname: '{host}' pool_guid: 16224517364757996670 "
-            + "serial A0B1C2D3E4F5A6B7C8D9E0F1 /dev/disk/by-id/usb-Kingston_DT_408D5C15-0:0 "
+            + "serial A0B1C2D3E4F5A6B7C8D9E0F1 /dev/disk/by-id/usb-Kingston_DT_5E1F07A3-0:0 "
             + "machine 7e57000000000000000000000000beef in /dev/shm/zark-selftest-x"
         )
         res = [stest.Result("POOL-07.1", "FAIL", expected=planted, came=planted, depends=("x",))]
@@ -26164,9 +26164,9 @@ class TestCertificates:  # pylint: disable=missing-function-docstring
         assert certs.sanitize("SND-01 a1b exit 1", masks) == "SND-01 a1b exit <serial>"
         assert certs.sanitize("zstdeadbeefa/SND-01@s1", masks) == "<pool-a>/SND-01@s1"
         assert certs.sanitize("zstdeadbeefab", masks) == "zstdeadbeefab"
-        serial = {"408D5C15CFA5": "<serial>"}
-        assert certs.sanitize("x_408D5C15CFA5-0:0 408D5C15CFA5Z", serial) == (
-            "x_<serial>-0:0 408D5C15CFA5Z"
+        serial = {"7C3B9E21D4F6": "<serial>"}
+        assert certs.sanitize("x_7C3B9E21D4F6-0:0 7C3B9E21D4F6Z", serial) == (
+            "x_<serial>-0:0 7C3B9E21D4F6Z"
         )
         host = socket.gethostname()
         if len(host) > 1:
