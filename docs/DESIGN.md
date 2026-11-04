@@ -159,6 +159,7 @@ This produces a boot chain identical to a fresh Ubuntu installation.
 - **Drives readable by older live sessions** - `prepare` creates new drives with `compatibility=openzfs-2.2`, so an Ubuntu 24.04 live (OpenZFS 2.2) can read them; `recover` names, before importing anything, any feature of a drive the live's ZFS cannot read.
 - **Secure Boot** - full compliance via signed GRUB chain (shimx64 → grubx64.signed → kernel).
 - **Hardware tested:**
+  - zark 2.2.0: Dell XPS 13 9333, with Ubuntu 26.10 installed (`/boot` on ext4), backed up and recovered from an Ubuntu 26.10 live; its self-test certificates in `certificates/selftest.json` come from that system and from the Ubuntu 26.10, 26.04 and 24.04.5 lives.
   - zark 2.0.0: Dell XPS 13 9333, with Ubuntu 24.04 and 26.04 installed on the installer's encrypted ZFS layout, and recovered from an Ubuntu 26.04 live; the self-test's certificates in `certificates/selftest.json` come from it.
   - zark 1.x: MINISFORUM UM890 (Ubuntu 24.04, 25.04, 25.10, 26.04), Dell XPS 13 9315 (the maintainer's laptop, Ubuntu 25.10), and Dell XPS 13 9333 (while the 9315 was away for repairs).
 - **CI/test:** GitHub Actions runs the unit suite and the static analysis; validation on hardware is the self-test and a checklist on the machine above for each release. The QEMU/OVMF integration harness 1.x had (`make test-real`) was retired in 2.1.0.
