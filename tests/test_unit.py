@@ -6071,14 +6071,14 @@ class TestHealthDestructive:  # pylint: disable=missing-function-docstring,too-m
         mock.on("zfs version").succeeds("zfs-2.2.6")
         mock.on("uname").succeeds("Linux carmen")
         mock.on("lsblk").succeeds("CT2000X10PROSSD9")
-        mock.on("dmesg").succeeds("serial 2449E8CD1F15 attached")
+        mock.on("dmesg").succeeds("serial A1B2C3D4E5F6 attached")
         with patch_sh(mock):
             report = HealthReport(device="/dev/sda")
             clean = generate_report("/dev/sda", report, None, obfuscate=True)
             raw = generate_report("/dev/sda", report, None, obfuscate=False)
-        assert "2449E8CD1F15" not in clean
+        assert "A1B2C3D4E5F6" not in clean
         assert "<redacted>" in clean
-        assert "2449E8CD1F15" in raw
+        assert "A1B2C3D4E5F6" in raw
 
     @staticmethod
     def _cold_mock(

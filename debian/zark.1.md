@@ -1492,7 +1492,7 @@ Show what is plugged in:
 
 Prepare a new external SSD as a backup target:
 
-    sudo zark prepare /dev/disk/by-id/usb-Micron_CT2000X10PROSSD9_2449E8CD1F15-0:0
+    sudo zark prepare /dev/disk/by-id/usb-Micron_CT2000X10PROSSD9_A1B2C3D4E5F6-0:0
 
 Run the routine nightly backup:
 
