@@ -5,6 +5,26 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### M21 - packaging
+
+#### Changed
+
+- **`debian/watch` in format version 5** (deb822 fields, `Source` and
+  `Matching-Pattern`): the same rule as before, the `vX.Y.Z` tags on
+  GitHub, final versions only. The `.deb` built on 24.04, 26.04 and 26.10
+  has the same files, modes, owners and control data as before; lintian
+  on 26.04 and 26.10 no longer reports `older-debian-watch-file-standard`.
+  24.04's uscan does not read version 5, and its lintian reports
+  `missing-debian-watch-file-standard`.
+- **debhelper compat stays at 13**: `debhelper-compat (= 14)` is provided
+  only by 26.10's debhelper (14.5), not by 24.04's (13.14.1) or 26.04's
+  (13.31), so the PPA's builds for noble and resolute could not start; and
+  compat 14 itself adds a `postrm` (`dh_installtmpfiles` runs
+  `systemd-tmpfiles --remove` and `--purge` on `/run/zark`) and a
+  `Commands: zark` field to the package.
+
 ## [2.2.0] - 2026-11-05
 
 ### For zark 2.1 users
