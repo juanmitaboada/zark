@@ -11,7 +11,7 @@ The commands, a first backup and a recovery step by step, what zark needs, and i
 | Command    | Description |
 |------------|-------------|
 | `backup`   | Incremental encrypted backup: one restore point per run |
-| `exclude`  | Leave datasets out of backups, of sanoid's snapshots, or both |
+| `exclude`  | Leave datasets out of backups, of sanoid's snapshots, or both ([example](#example-a-downloads-folder-out-of-snapshots-and-backups)) |
 | `prepare`  | Initialize a new blank drive as a backup target |
 | `prune`    | Reclaim space in the source or on a backup drive (interactive) |
 | `purge`    | Securely wipe a managed backup drive |
@@ -129,6 +129,101 @@ sudo ./zark simulate --display 1920x1080      # override the default 2560×1440 
 ```
 
 Useful as a coherence check after `recover` (or any boot-chain change) without committing to a real reboot. By default, QEMU is started with `-snapshot` so any writes are discarded at shutdown and the underlying disk is never modified. Pass `--rw` (with explicit confirmation) if you actually want changes to persist.
+
+## Example: a downloads folder out of snapshots and backups
+
+Downloads, caches, build trees and VM images churn. On rpool, sanoid's snapshots keep every file deleted there until they expire, and every backup copies them to the drives. `zark exclude add <dataset> both` leaves a dataset out of both, but not a directory: the directory has to become a dataset of its own first, by hand, since zark does not move data on a running system. Once that is done, whatever is deleted there is freed at once and never reaches a drive. This example does it for `~/Downloads`; the same steps fit any folder of the home.
+
+**The layout it assumes.** Ubuntu 26.04's installer makes one dataset for all of `/home`:
+
+```
+rpool/USERDATA              mountpoint none
+rpool/USERDATA/home_<id>    mountpoint /home
+rpool/USERDATA/root_<id>    mountpoint /root
+```
+
+`<id>` is the suffix the installer gave it, and `<user>` below is your login. Check yours with the first block; on another layout (a dataset per user) the names change accordingly. Two datasets are created:
+
+- `rpool/USERDATA/home_<id>/<user>` with `canmount=off`: never mounted, so it does not cover your home (which stays a directory of `home_<id>`); it only gives the next one a parent.
+- `rpool/USERDATA/home_<id>/<user>/downloads`, mounted at `/home/<user>/.downloads`, encrypted with rpool's key (nothing more to unlock). `~/Downloads` then becomes a symbolic link to `.downloads`. A mount under the home whose path has no hidden component is shown by GNOME Files and the top bar as a drive with an eject button; under `.downloads` it is not, and Files shows `Downloads` as a folder.
+
+Mount properties are given when the dataset is created and never changed afterwards with `zfs set`.
+
+Each block below starts and ends with `date`, stops before changing anything when a check fails, and ends with `rc=0` when it went through. Replace `<user>` and `<id>` first.
+
+**1. Look first (read-only).** Close the browser and anything that writes to `~/Downloads`:
+
+```bash
+date
+zfs list -H -o name,mountpoint,encryptionroot -r rpool/USERDATA
+systemctl is-active zfs-zed
+du -sh /home/<user>/Downloads
+zfs list -H -o name,avail rpool
+sudo lsof +D /home/<user>/Downloads
+date
+```
+
+rpool needs at least the folder's size free, since the copy doubles it for a while. `zfs-zed` must be `active`: zed adds new datasets to `/etc/zfs/zfs-list.cache/rpool`, which the boot mounts from. `lsof` printing nothing means nothing is open there.
+
+**2. Create the datasets, copy and compare.** Nothing is deleted:
+
+```bash
+date
+( set -eo pipefail
+  U=<user>; H=/home/$U; P=rpool/USERDATA/home_<id>
+  [ "$(zfs get -H -o value mountpoint "$P")" = /home ] || { echo "$P is not /home: nothing done"; exit 1; }
+  [ -d "$H/Downloads" ] && [ ! -L "$H/Downloads" ] && [ ! -e "$H/.downloads" ] || { echo "Downloads is not a folder, or .downloads exists: nothing done"; exit 1; }
+  ! zfs list -H "$P/$U" >/dev/null 2>&1 || { echo "$P/$U exists: nothing done"; exit 1; }
+  sudo zfs create -o canmount=off "$P/$U"
+  sudo zfs create -o mountpoint="$H/.downloads" "$P/$U/downloads"
+  zfs get -H -o name,property,value mountpoint,canmount,mounted,encryptionroot "$P/$U" "$P/$U/downloads"
+  sudo chown --reference="$H/Downloads" "$H/.downloads"
+  sudo chmod --reference="$H/Downloads" "$H/.downloads"
+  sudo cp -a --preserve=all "$H/Downloads/." "$H/.downloads/"
+  sudo diff -rq --no-dereference "$H/Downloads" "$H/.downloads" || { echo "COPY DIFFERS: stopped, Downloads kept"; exit 1; }
+  echo "copy identical"
+  grep -n "^$P/$U/downloads" /etc/zfs/zfs-list.cache/rpool || echo "not in zfs-list.cache yet"
+)
+echo "rc=$?"
+date
+```
+
+Expected: `<user>` with `canmount off` and `mounted no`; `downloads` with `/home/<user>/.downloads`, `canmount on` and `mounted yes`; both with `encryptionroot rpool`; `copy identical`; the new dataset in `zfs-list.cache` (zed may take a second: run the `grep` again before worrying). Do not reboot while it is missing from the cache: the boot would not mount it. The `diff` stops the block by itself; written as `diff ... && echo` it would not, since bash ignores `set -e` inside an `&&` list.
+
+**3. Exclude it from backups and snapshots:**
+
+```bash
+sudo zark exclude add rpool/USERDATA/home_<id>/<user>/downloads both
+sudo zark exclude list
+```
+
+`both` sets `org.zark:replicate=no` (left out of every backup) and `org.zark:snapshot=no` (sanoid takes no more snapshots of it and removes the ones it took). zark asks twice, default no: for the exclusion, and for rewriting `/etc/sanoid/sanoid.conf`. sanoid does not honour a child's `autosnap = no` under a recursive rule, so the recursive rule on `rpool/USERDATA` becomes one rule per level: `rpool/USERDATA`, `home_<id>` and `<user>` keep `production` without recursion, `root_<id>` keeps `production (recursive)`, and `downloads` takes no snapshots. Your home and `/root` are snapshotted as before. zark 2.2.0 may also warn that a registered drive has no zark 2 anchor and should be backed up first; for a new dataset, which has no snapshot to drain and is on no drive, it does not apply.
+
+**4. Replace the folder by the link,** once you have looked at the files. The copies are compared again first; a file downloaded since step 2 makes them differ, and then nothing is removed:
+
+```bash
+date
+( set -eo pipefail
+  U=<user>; H=/home/$U; P=rpool/USERDATA/home_<id>
+  [ "$(findmnt -n -o SOURCE "$H/.downloads")" = "$P/$U/downloads" ] || { echo ".downloads is not the new dataset: nothing removed"; exit 1; }
+  sudo diff -rq --no-dereference "$H/Downloads" "$H/.downloads" || { echo "copies differ: nothing removed"; exit 1; }
+  sudo rm -rf -- "$H/Downloads"
+  ln -s .downloads "$H/Downloads"
+  ls -ld "$H/Downloads"
+)
+echo "rc=$?"
+date
+```
+
+**5. After the next reboot,** `findmnt /home/<user>/.downloads` shows `rpool/USERDATA/home_<id>/<user>/downloads`, and `~/Downloads` still points to it.
+
+**What to expect afterwards:**
+
+- The old folder's space comes back only as the snapshots of `home_<id>` that hold it expire; what you download from now on is freed when you delete it.
+- The next backup sends `rpool/USERDATA/home_<id>/<user>` (empty, a few KiB) as new and leaves `downloads` out.
+- A dataset you create later under `home_<id>` is no longer under a recursive sanoid rule: `zark backup` and `zark status` say when sanoid.conf is not what `setup` would write, and `sudo zark setup` brings it in.
+- If you destroy the dataset one day, its exclusion goes with it (it is a property of the dataset); run `sudo zark setup` afterwards to rewrite sanoid.conf, since zark warns about it only while another dataset stays excluded from snapshots.
+- To include it again: `sudo zark exclude remove rpool/USERDATA/home_<id>/<user>/downloads both` (snapshots and backups again; the next backup is a full send of it).
 
 ## Requirements
 

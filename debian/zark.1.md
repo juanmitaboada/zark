@@ -401,7 +401,8 @@ end-to-end sequences.
     **zfs create rpool/var/lib/docker**, copy with **cp -a --preserve=all**
     */var/lib/docker.old/.* */var/lib/docker/*, check the copy, remove the
     old directory, then **zark exclude add rpool/var/lib/docker backups**.
-    No mount property is set with **zfs set**.
+    No mount property is set with **zfs set**. *docs/USAGE.md* in **zark**'s
+    source has a worked example for a folder of the home.
 
 **prepare** \[*device*\]
 :   Initialise a brand-new external drive as a **zark** backup target. The
