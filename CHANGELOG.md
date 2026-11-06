@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### M23 - code analysis
+
+#### Added
+
+- **SonarQube Cloud analysis in CI**, with coverage: the 3.12 tests job
+  also runs the unit tests under pytest-cov (`tox -e cov`, not a gate) and
+  a new `analysis` job hands its `coverage.xml` to the scan
+  (`sonar-project.properties`). A red quality gate does not fail CI yet.
+  Nothing in the package changes.
+
 ### M21 - packaging
 
 #### Changed

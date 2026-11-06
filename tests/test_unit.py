@@ -27197,12 +27197,20 @@ class TestCiWorkflow:  # pylint: disable=missing-function-docstring
 
     def test_no_job_follows_ubuntu_latest(self):
         jobs = self._jobs()
-        assert set(jobs) == {"tests", "lint", "package", "smoke-2604", "smoke-2610"}, sorted(jobs)
+        assert set(jobs) == {
+            "tests",
+            "lint",
+            "analysis",
+            "package",
+            "smoke-2604",
+            "smoke-2610",
+        }, sorted(jobs)
         runs_on = re.compile(r"^    runs-on: (\S+)$", re.M)
         runners = {job: runs_on.findall(body) for job, body in jobs.items()}
         assert runners == {
             "tests": ["ubuntu-24.04"],
             "lint": ["ubuntu-24.04"],
+            "analysis": ["ubuntu-24.04"],
             "package": ["ubuntu-24.04"],
             "smoke-2604": ["ubuntu-26.04"],
             "smoke-2610": ["ubuntu-26.04"],
@@ -27236,6 +27244,29 @@ class TestCiWorkflow:  # pylint: disable=missing-function-docstring
         step = package.split("- name: Attach release assets to GitHub Release\n", 1)[1]
         first = step.split("\n", 1)[0].strip()
         assert first == "if: startsWith(github.ref, 'refs/tags/v')", first
+
+    def test_the_analysis_takes_the_3_12_coverage_and_never_waits_for_the_gate(self):
+        # M23: SonarQube Cloud from CI, with tox -e cov's report; a red gate fails nothing.
+        jobs = self._jobs()
+        tests, analysis = jobs["tests"], jobs["analysis"]
+        assert "if: matrix.python == '3.12'\n        run: tox -e cov\n" in tests, tests
+        assert "path: .tox/coverage.xml\n" in tests and "include-hidden-files: true\n" in tests
+        assert "needs: [tests]\n" in analysis and "fetch-depth: 0\n" in analysis, analysis
+        assert "name: zark-coverage\n" in tests and "name: zark-coverage\n" in analysis
+        # A third-party action handed a secret is pinned by commit, not by a moving tag.
+        uses = re.findall(r"uses: SonarSource/sonarqube-scan-action@(\S+)", analysis)
+        assert len(uses) == 1 and re.fullmatch(r"[0-9a-f]{40}", uses[0]), uses
+        assert "if: steps.token.outputs.present == 'true'\n" in analysis, analysis
+        tox = (self._REPO / "tox.ini").read_text("utf-8")
+        assert "--cov-report=xml:{toxworkdir}/coverage.xml" in tox, tox
+        props = dict(
+            ln.split("=", 1)
+            for ln in (self._REPO / "sonar-project.properties").read_text("utf-8").splitlines()
+            if ln and not ln.startswith("#")
+        )
+        assert props["sonar.python.coverage.reportPaths"] == "coverage.xml", props
+        assert props["sonar.qualitygate.wait"] == "false", props
+        assert props["sonar.projectKey"] == "juanmitaboada_zark", props
 
 
 class TestTypography:  # pylint: disable=missing-function-docstring

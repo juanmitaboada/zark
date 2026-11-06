@@ -59,6 +59,13 @@ ruff = [
 types = [
     "basedpyright==1.40.1",
 ]
+# The unit tests under pytest-cov (`tox -e cov`), for the coverage CI hands
+# to SonarQube Cloud. Not a gate: tests/test_unit.py's own runner is.
+cov = [
+    "pytest==9.2.0",
+    "pytest-cov==7.1.0",
+    "coverage==7.17.2",
+]
 
 # ── Ruff - linter and formatter ──────────────────────────────────────────
 [tool.ruff]
@@ -104,6 +111,17 @@ quote-style           = "double"
 indent-style          = "space"
 docstring-code-format = false
 line-ending           = "auto"
+
+# ── coverage.py (`tox -e cov`) ───────────────────────────────────────────
+#
+# coverage.xml must name lib/x.py from the tree's root, the path SonarQube
+# Cloud resolves: relative_files drops the runner's absolute path, and
+# source_dirs (not source) keeps the directory in each name, so lib/ and
+# commands/ do not collapse into one __init__.py.
+[tool.coverage.run]
+branch         = true
+relative_files = true
+source_dirs    = ["lib", "commands", "pages"]
 
 # ── Mypy ─────────────────────────────────────────────────────────────────
 [tool.mypy]

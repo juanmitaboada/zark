@@ -12,6 +12,13 @@
 #            Versions come from pyproject.toml under [dependency-groups]
 #            (PEP 735), so tox and CI share a single source of truth.
 #
+#   analysis - SonarQube Cloud: the 3.12 tests job also runs `tox -e cov`
+#              (the same suite under pytest-cov) and hands coverage.xml to
+#              the scan (sonar-project.properties). It does not wait for
+#              the quality gate, so a red gate fails nothing; with no
+#              SONAR_TOKEN (a fork's pull request) it skips the scan.
+#              Not on tags: a tag's commit was analysed on its branch.
+#
 #   package     - builds the .deb on Ubuntu 24.04 and smoke-tests it there;
 #                 on a release tag it also attaches it to the GitHub Release.
 #   smoke-2604  - installs that same .deb on Ubuntu 26.04 and smoke-tests it.
@@ -83,6 +90,20 @@ jobs:
         # tox env name has no dot: 3.12 → py312
         run: tox -e py$(echo "${{ matrix.python }}" | tr -d .)
 
+      - name: Coverage for SonarQube Cloud (3.12)
+        if: matrix.python == '3.12'
+        run: tox -e cov
+
+      - name: Keep coverage.xml for the analysis job
+        if: matrix.python == '3.12'
+        uses: actions/upload-artifact@v6
+        with:
+          name: zark-coverage
+          path: .tox/coverage.xml
+          # .tox/ is a hidden directory, which upload-artifact skips by default.
+          include-hidden-files: true
+          if-no-files-found: error
+
   # ── Static analysis (mypy + pylint + ruff + basedpyright) ────────────
   lint:
     name: lint
@@ -107,6 +128,43 @@ jobs:
         # job log from a mypy/pylint/ruff failure, and so the lint env
         # stays free of the npm-backed package.
         run: tox -e types
+
+  # ── SonarQube Cloud (CI-based analysis, with coverage) ───────────────
+  analysis:
+    name: analysis (SonarQube Cloud)
+    runs-on: ubuntu-24.04
+    needs: [tests]
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The whole history: new code and blame come from git.
+          fetch-depth: 0
+
+      - name: Fetch coverage.xml from the 3.12 tests job
+        uses: actions/download-artifact@v8
+        with:
+          name: zark-coverage
+
+      - name: Is SONAR_TOKEN available?
+        # A fork's pull request gets no secrets: skip the scan, do not fail.
+        id: token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -n "$SONAR_TOKEN" ]; then
+              echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+              echo "::notice::SONAR_TOKEN is not available to this run: no analysis"
+              echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SonarQube Cloud scan
+        if: steps.token.outputs.present == 'true'
+        # Pinned by commit: a third-party action that is handed a secret.
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # ── Debian packaging smoke build (tags and manual runs) ──────────────
   #
