@@ -9143,7 +9143,14 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
         self._table(self._v3(purge), {"system": 0, "plugged": 0, "imported": 1})
 
     def test_a_malformed_line_counts_as_a_removal(self):
-        for line in (self._K, f"{self._K} 7.3.0-9.9 amd64 same > - - none **SOMETHING**"):
+        # M18R-22: a short line's remainder is not an action, even when it reads
+        # like one (**CONFIGURE** or a .deb path): the line is a removal.
+        for line in (
+            self._K,
+            f"{self._K} 7.3.0-9.9 amd64 same > - - none **SOMETHING**",
+            f"{self._K} **CONFIGURE**",
+            f"{self._K} /x.deb",
+        ):
             self._table(self._v3(line), {"system": 0, "plugged": 0, "imported": 1})
 
     def test_configure_and_error_lines_are_never_refused(self):
