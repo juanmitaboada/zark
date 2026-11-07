@@ -52,7 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from lib import sh
+from lib import dpkg_lock, sh
 from lib.cleanup import Cleanup
 from lib.log import Log
 from lib.zfs import BACKUP_ALTROOT_BASE, remove_altroot_base
@@ -595,6 +595,8 @@ def run_one(c: Check, bench: "Bench") -> Result:
         return Result(
             c.key, "FAIL", expected=e.expected, came=e.came, depends=c.depends, output=e.output
         )
+    except dpkg_lock.DpkgBusy:
+        raise  # apt is running: the run stops and says so (exit 75), no check fails for it
     except Exception as e:  # pylint: disable=broad-exception-caught
         # Its text can quote a command's output: only the type is reported.
         return Result(

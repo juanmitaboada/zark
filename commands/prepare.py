@@ -26,7 +26,17 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from lib import anchors, drive_marks, engine, exclusions, pool_record, registry, sh, survey
+from lib import (
+    anchors,
+    dpkg_lock,
+    drive_marks,
+    engine,
+    exclusions,
+    pool_record,
+    registry,
+    sh,
+    survey,
+)
 from lib.boot_layout import BootRefresh, require_boot_copy
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
 from lib.config import VERSION, Config, DriveInfo, now_utc_iso, zark_command
@@ -88,6 +98,9 @@ def run(
                 "Check: ls -l /dev/disk/by-id/",
             ],
         )
+
+    # Before any question: an apt run now would refuse the create at its end.
+    dpkg_lock.refuse_if_busy()
 
     # ── Non-destructive risk check ───────────────────────────────────────
     # Flag bridges/transports correlated with the FUA cache-flush lie BEFORE
@@ -171,10 +184,12 @@ def run(
     log.step(1, 4, f"Creating ZFS pool '{new_pool}'...")
 
     altroot = backup_altroot(new_pool)
-    _ = sh.run(f"mkdir -p {altroot}")
     compat = drive_compatibility(pool_record.pools_for(layout), log)
     marks = pool_record.origin_layout_fields(layout)
-    r = sh.run(create_command(new_pool, ident.by_id_path, altroot, compat, marks), log=log)
+    # The create leaves the pool imported: not while apt or dpkg runs (M18-10).
+    with dpkg_lock.hold(log):
+        _ = sh.run(f"mkdir -p {altroot}")
+        r = sh.run(create_command(new_pool, ident.by_id_path, altroot, compat, marks), log=log)
     if not r.ok:
         log.fatal(f"Failed to create pool: {r.stderr.strip()}")
     cleanup.track_pool(new_pool)

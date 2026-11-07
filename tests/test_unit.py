@@ -29,6 +29,7 @@ Tests run WITHOUT root, ZFS, or real disks. All shell commands are mocked.
 
 import ast
 import atexit
+import errno
 import fcntl
 import functools
 import hashlib
@@ -178,6 +179,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     backup_layout,
     boot_chain,
     boot_layout,
+    dpkg_lock,
     drive_contents,
     drive_marks,
     engine,
@@ -512,6 +514,15 @@ Path(_TEST_LOG_DIR, "machine-id").write_text(TEST_MACHINE_ID + "\n", encoding="a
 _MACHINE_ID = patch(
     "lib.drive_marks.MACHINE_ID_PATH", os.path.join(_TEST_LOG_DIR, "machine-id")
 ).start()
+# Nor the machine's dpkg locks whether an import is refused (M18-9): files
+# that do not exist are not held and hold() takes nothing; the tests of
+# lib/dpkg_lock.py point them at locks of their own.
+_DPKG_LOCKS = (
+    patch(
+        "lib.dpkg_lock.LOCK_FRONTEND", os.path.join(_TEST_LOG_DIR, "dpkg", "lock-frontend")
+    ).start(),
+    patch("lib.dpkg_lock.LOCK", os.path.join(_TEST_LOG_DIR, "dpkg", "lock")).start(),
+)
 
 
 def _real_log_state() -> dict[str, tuple[int, int] | None]:
@@ -5208,6 +5219,385 @@ class TestSystemPoolImportOrder:  # pylint: disable=missing-function-docstring
         with patch_sh(mock), redirect_stdout(StringIO()):
             assert not ZFS(make_log()).pool_import("rpool", device="/dev/disk/by-id")
         assert sum("by-id" in c for c in self._imports(mock)) == 2  # with and without -f
+
+
+# A child process holding an fcntl whole-file write lock, as dpkg and APT
+# do; its struct flock is packed here, apart from lib/dpkg_lock.py's.
+_DPKG_HOLDER = (
+    "import fcntl, os, struct, sys\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)\n"
+    "fcntl.fcntl(fd, fcntl.F_SETLK, struct.pack('hhqqi4x', fcntl.F_WRLCK, 0, 0, 0, 0))\n"
+    "print('ready', flush=True)\n"
+    "sys.stdin.read()\n"
+)
+# What another process sees: "held <pid>", or "free"; "took" when it could take it.
+_DPKG_PROBE = (
+    "import fcntl, os, struct, sys\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "got = fcntl.fcntl(fd, fcntl.F_GETLK, struct.pack('hhqqi4x', fcntl.F_WRLCK, 0, 0, 0, 0))\n"
+    "t, _, _, _, pid = struct.unpack('hhqqi4x', got)\n"
+    "print('free' if t == fcntl.F_UNLCK else f'held {pid}')\n"
+)
+
+
+@contextmanager
+def _dpkg_lock_held(path: str) -> Iterator[int]:
+    """A child process holding ``path``'s lock for the block; yields its pid."""
+    with subprocess.Popen(
+        [sys.executable, "-I", "-c", _DPKG_HOLDER, path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as proc:
+        assert proc.stdout is not None and proc.stdin is not None
+        assert proc.stdout.readline() == "ready\n"
+        try:
+            yield proc.pid
+        finally:
+            proc.stdin.close()
+            _ = proc.wait(10)
+
+
+def _dpkg_lock_seen(path: str) -> str:
+    """``held <pid>`` or ``free``, as another process sees ``path``."""
+    return subprocess.run(
+        [sys.executable, "-I", "-c", _DPKG_PROBE, path],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+@contextmanager
+def _dpkg_locks(*, frontend: bool = True, inner: bool = True) -> Iterator[tuple[str, str]]:
+    """lib/dpkg_lock.py pointed at a temporary pair of lock files (each
+    created only when asked), and not on a live."""
+    with tempfile.TemporaryDirectory() as td:
+        fe, lk = os.path.join(td, "lock-frontend"), os.path.join(td, "lock")
+        for path, make in ((fe, frontend), (lk, inner)):
+            if make:
+                Path(path).touch()
+        with (
+            patch.object(dpkg_lock, "LOCK_FRONTEND", fe),
+            patch.object(dpkg_lock, "LOCK", lk),
+            patch.object(dpkg_lock.sh, "is_live_usb", return_value=False),
+        ):
+            yield fe, lk
+
+
+class TestDpkgLock:  # pylint: disable=missing-function-docstring,used-before-assignment
+    """M18-9 9a, M18-12 12b (M18R-5, M18R-15, M18R-16): dpkg's locks read
+    with F_GETLK, lock-frontend held around an import, released on every
+    way out, one descriptor, nothing created, nothing on a live."""
+
+    def test_holders_names_a_child_holding_lock_frontend(self):
+        with _dpkg_locks() as (fe, _), _dpkg_lock_held(fe) as pid:
+            held = dpkg_lock.holders()
+        assert [(h.path, h.pid) for h in held] == [(fe, pid)], held
+        assert held[0].comm.startswith("python"), held  # /proc/<pid>/comm
+
+    def test_holders_names_a_child_holding_lock_only(self):
+        with _dpkg_locks() as (_, lk), _dpkg_lock_held(lk) as pid:
+            held = dpkg_lock.holders()
+        assert [(h.path, h.pid) for h in held] == [(lk, pid)], held
+
+    def test_holders_is_empty_when_nobody_holds_them(self):
+        with _dpkg_locks():
+            assert not dpkg_lock.holders()
+
+    def test_missing_files_are_free_and_stay_missing(self):
+        with _dpkg_locks(frontend=False, inner=False) as (fe, lk):
+            assert not dpkg_lock.holders()
+            with dpkg_lock.hold(make_log()):
+                pass
+            assert not os.path.exists(fe) and not os.path.exists(lk)
+
+    def test_an_unreadable_lock_counts_as_held(self):
+        # Fail closed: an error opening or querying is not "free".
+        real_open = os.open
+
+        def refuse(path: str, flags: int, *a: Any) -> int:
+            if path == dpkg_lock.LOCK:
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_open(path, flags, *a)
+
+        with _dpkg_locks() as (_, lk), patch.object(dpkg_lock.os, "open", side_effect=refuse):
+            held = dpkg_lock.holders()
+        assert [h.path for h in held] == [lk] and held[0].error == "Permission denied", held
+
+    def test_a_holder_whose_comm_cannot_be_read_is_still_held(self):
+        with _dpkg_locks() as (fe, _), _dpkg_lock_held(fe) as pid:
+            with patch.object(dpkg_lock, "_comm", side_effect=lambda _pid: ""):
+                held = dpkg_lock.holders()
+            unreadable = dpkg_lock._comm(2**22 + 7)  # pylint: disable=protected-access
+        assert [(h.pid, h.comm) for h in held] == [(pid, "")], held
+        assert held[0].held_by() == f"{fe} held by {pid}"
+        assert unreadable == ""
+
+    def test_hold_takes_lock_frontend_for_the_block_only(self):
+        with _dpkg_locks() as (fe, _):
+            assert _dpkg_lock_seen(fe) == "free"
+            with dpkg_lock.hold(make_log()):
+                # A child sees zark's lock: one descriptor, nothing dropped it.
+                assert _dpkg_lock_seen(fe) == f"held {os.getpid()}"
+                assert dpkg_lock.is_held()
+            assert _dpkg_lock_seen(fe) == "free" and not dpkg_lock.is_held()
+
+    def test_hold_refuses_while_a_child_holds_lock_frontend(self):
+        ran = []
+        with _dpkg_locks() as (fe, _), _dpkg_lock_held(fe) as pid:
+            try:
+                with dpkg_lock.hold(make_log()):
+                    ran.append(1)
+            except dpkg_lock.DpkgBusy as e:
+                assert [h.pid for h in e.holders] == [pid], e.holders
+            else:
+                raise AssertionError("not refused")
+        assert not ran
+
+    def test_hold_refuses_while_lock_is_held_and_frees_lock_frontend(self):
+        ran = []
+        with _dpkg_locks() as (fe, lk), _dpkg_lock_held(lk) as pid:
+            try:
+                with dpkg_lock.hold(make_log()):
+                    ran.append(1)
+            except dpkg_lock.DpkgBusy as e:
+                assert [(h.path, h.pid) for h in e.holders] == [(lk, pid)], e.holders
+            else:
+                raise AssertionError("not refused")
+            assert _dpkg_lock_seen(fe) == "free"
+        assert not ran
+
+    def test_hold_releases_after_an_exception_in_the_block(self):
+        with _dpkg_locks() as (fe, _):
+            try:
+                with dpkg_lock.hold(make_log()):
+                    raise RuntimeError("the import failed")
+            except RuntimeError:
+                pass
+            assert _dpkg_lock_seen(fe) == "free"
+
+    def test_hold_releases_when_raised_between_the_take_and_the_block(self):
+        # M18R-15: the take sits inside the try.
+        with _dpkg_locks() as (fe, _):
+            with patch.object(dpkg_lock, "holders", side_effect=KeyboardInterrupt):
+                try:
+                    with dpkg_lock.hold(make_log()):
+                        raise AssertionError("the block ran")
+                except KeyboardInterrupt:
+                    pass
+            assert _dpkg_lock_seen(fe) == "free"
+
+    def test_hold_without_lock_frontend_checks_lock_and_takes_nothing(self):
+        with _dpkg_locks(frontend=False) as (fe, lk):
+            with dpkg_lock.hold(make_log()):
+                assert not os.path.exists(fe)
+            with _dpkg_lock_held(lk):
+                try:
+                    with dpkg_lock.hold(make_log()):
+                        raise AssertionError("the block ran")
+                except dpkg_lock.DpkgBusy:
+                    pass
+            assert not os.path.exists(fe)
+
+    def test_hold_on_a_live_reads_and_takes_nothing(self):
+        with _dpkg_locks() as (fe, _), _dpkg_lock_held(fe) as pid:
+            with patch.object(dpkg_lock.sh, "is_live_usb", return_value=True):
+                with dpkg_lock.hold(make_log()):
+                    assert _dpkg_lock_seen(fe) == f"held {pid}"  # the child's, not zark's
+                dpkg_lock.refuse_if_busy()  # nothing raised on a live
+
+    def test_eagain_and_eacces_from_the_take_are_busy(self):
+        real = fcntl.fcntl
+        for err in (errno.EAGAIN, errno.EACCES):
+
+            def take(fd: int, cmd: int, arg: Any = 0, err: int = err) -> Any:
+                if cmd == fcntl.F_SETLK and struct.unpack("hhqqi4x", arg)[0] == fcntl.F_WRLCK:
+                    raise OSError(err, os.strerror(err))
+                return real(fd, cmd, arg)
+
+            # A child holds it, so the refusal can name it whichever errno came.
+            with _dpkg_locks() as (fe, _), _dpkg_lock_held(fe) as pid:
+                with patch.object(dpkg_lock.fcntl, "fcntl", side_effect=take):
+                    try:
+                        with dpkg_lock.hold(make_log()):
+                            raise AssertionError("the block ran")
+                    except dpkg_lock.DpkgBusy as e:
+                        assert [h.pid for h in e.holders] == [pid], (err, e.holders)
+
+    def test_hold_logs_the_take_and_the_release(self):
+        # M18R-16: the eli checklist correlates zark's log with its loop.
+        out = StringIO()
+        with _dpkg_locks() as (fe, _), redirect_stdout(out):
+            with dpkg_lock.hold(Log()):
+                pass
+        text = out.getvalue()
+        assert re.search(rf"{re.escape(fe)} taken at \d+\.\d{{3}} by pid {os.getpid()}", text), text
+        assert re.search(rf"{re.escape(fe)} released at \d+\.\d{{3}} by pid {os.getpid()}", text)
+
+    def test_refuse_if_busy(self):
+        with _dpkg_locks() as (fe, _):
+            dpkg_lock.refuse_if_busy()
+            with _dpkg_lock_held(fe):
+                try:
+                    dpkg_lock.refuse_if_busy()
+                except dpkg_lock.DpkgBusy:
+                    pass
+                else:
+                    raise AssertionError("not refused")
+
+    def test_the_refusal_names_the_holder_and_the_command(self):
+        held = [dpkg_lock.Holder("/var/lib/dpkg/lock-frontend", 1234, "unattended-upgr")]
+        with patch.object(dpkg_lock, "zark_command", return_value="sudo zark"):
+            text = dpkg_lock.DpkgBusy(held).message("backup")
+        assert text == (
+            "apt or dpkg is running (/var/lib/dpkg/lock-frontend held by 1234 unattended-upgr): "
+            "zark does not import a backup pool while packages are being installed or removed. "
+            "Wait for it to end, then run `sudo zark backup` again."
+        ), text
+
+    # ── the import points ────────────────────────────────────────────────
+
+    @staticmethod
+    def _spy(mock: MockShell) -> tuple[list[str], AbstractContextManager[Any]]:
+        """Record each command run while the hold is active."""
+        under: list[str] = []
+        real = mock.mock_run
+
+        def spy(cmd: str, **kw: Any) -> RunResult:
+            if dpkg_lock.is_held():
+                under.append(cmd)
+            return real(cmd, **kw)
+
+        return under, patch.object(mock, "mock_run", side_effect=spy)
+
+    DEV = "/dev/disk/by-id/usb-Made_Up_Disk_0123456789AB-0:0-part1"
+
+    def test_import_backup_pool_runs_only_mkdir_and_the_import_under_the_hold(self):
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on("mkdir -p /run/zark/altroot/backup").succeeds()
+        first = f"zpool import -N -R /run/zark/altroot/backup -d {self.DEV} backup"
+        forced = f"zpool import -N -R /run/zark/altroot/backup -f -d {self.DEV} backup"
+        mock.on(first).fails("in use")
+        mock.on(forced).succeeds()
+        mock.on("zpool get -H -o value guid backup").succeeds("111")
+        under, spying = self._spy(mock)
+        with _dpkg_locks() as (fe, _), spying, patch_sh(mock), redirect_stdout(StringIO()):
+            assert ZFS(make_log()).import_backup_pool("backup", self.DEV, guid="111")
+            assert _dpkg_lock_seen(fe) == "free"
+        assert under == ["mkdir -p /run/zark/altroot/backup", first, forced], under
+        assert mock.was_called("zpool get -H -o value guid backup")  # after the release
+
+    def test_import_backup_pool_refuses_before_the_import_and_releases_after_a_failure(self):
+        mock = MockShell()
+        mock.on("zpool list backup").fails()
+        mock.on_prefix("mkdir -p").succeeds()
+        mock.on_prefix("zpool import").fails("no such pool")
+        with _dpkg_locks() as (fe, _), patch_sh(mock), redirect_stdout(StringIO()):
+            with _dpkg_lock_held(fe):
+                try:
+                    ZFS(make_log()).import_backup_pool("backup", self.DEV)
+                except dpkg_lock.DpkgBusy:
+                    pass
+                else:
+                    raise AssertionError("not refused")
+            assert mock.was_not_called("zpool import")
+            assert not ZFS(make_log()).import_backup_pool("backup", self.DEV)
+            assert _dpkg_lock_seen(fe) == "free"
+
+    def test_import_backup_pool_takes_no_hold_for_a_pool_already_imported(self):
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds("backup")
+        mock.on("zpool get -H -o value altroot backup").succeeds("/run/zark/altroot/backup")
+        mock.on("zpool get -H -o value readonly backup").succeeds("off")
+        mock.on("zpool get -H -o value guid backup").succeeds("111")
+        with _dpkg_locks() as (fe, _), patch_sh(mock), redirect_stdout(StringIO()):
+            with _dpkg_lock_held(fe):  # apt running: the shortcut does not care
+                assert ZFS(make_log()).import_backup_pool("backup", self.DEV, guid="111")
+
+    def test_readback_imports_under_the_hold_and_exports_after_it(self):
+        imp = f"zpool import -o readonly=on -N -R /run/zark/altroot/black -d {self.DEV} black"
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on(imp).succeeds()
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("zpool export black").succeeds()
+        under, spying = self._spy(mock)
+        with _dpkg_locks(), spying, patch_sh(mock), redirect_stdout(StringIO()):
+            assert ZFS(make_log()).verify_exported_pool_readback("black", device=self.DEV).ok
+        assert under == ["mkdir -p /run/zark/altroot/black", imp], under
+
+    def test_readback_import_is_refused_while_apt_runs(self):
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        cleanup = MagicMock()
+        with _dpkg_locks() as (fe, _), patch_sh(mock), redirect_stdout(StringIO()):
+            with _dpkg_lock_held(fe):
+                try:
+                    ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, cleanup)
+                except dpkg_lock.DpkgBusy:
+                    pass
+                else:
+                    raise AssertionError("not refused")
+        assert mock.was_not_called("zpool import")
+        cleanup.untrack_pool.assert_called_once_with("black")
+
+    def test_prepare_creates_the_pool_under_the_hold(self):
+        source = inspect.getsource(prepare_mod.run)
+        block = source.split("with dpkg_lock.hold(log):", 1)[1].split("\n    if not r.ok", 1)[0]
+        assert "mkdir -p {altroot}" in block and "create_command(" in block, block
+        assert block.count("sh.run(") == 2, block
+        early = source.index("dpkg_lock.refuse_if_busy()")
+        assert early < source.index("log.ask(") and early < source.index("log.ask_input("), early
+
+    def test_a_check_that_meets_apt_stops_the_self_test(self):
+        busy = dpkg_lock.DpkgBusy([dpkg_lock.Holder("/var/lib/dpkg/lock", 7, "dpkg")])
+
+        def fn(_bench: Any) -> None:
+            raise busy
+
+        check = stest.Check("POOL-99", 1, 2, "made up", (), False, fn)
+        try:
+            stest.run_one(check, MagicMock())
+        except dpkg_lock.DpkgBusy as e:
+            assert e is busy
+        else:
+            raise AssertionError("turned into a result")
+
+    def test_the_entry_point_exits_75_with_the_message(self):
+        path = str(Path(__file__).resolve().parent.parent / "zark")
+        loader = importlib.machinery.SourceFileLoader("zark_entry", path)
+        spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
+        assert spec is not None
+        entry = importlib.util.module_from_spec(spec)
+        loader.exec_module(entry)
+        busy = dpkg_lock.DpkgBusy([dpkg_lock.Holder("/var/lib/dpkg/lock-frontend", 7, "apt")])
+        out = StringIO()
+        with (
+            patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.geteuid", return_value=0),
+            patch("lib.progress.start"),
+            patch("lib.progress.note_error") as noted,
+            patch("lib.signals.guard_output"),
+            patch.object(lock_mod, "guard"),
+            patch("lib.signals.install"),
+            patch.object(live_mod, "stop_installer_probe"),
+            patch.object(prune_mod, "run", side_effect=busy),
+            redirect_stdout(out),
+        ):
+            try:
+                entry.main()
+            except SystemExit as e:
+                assert e.code == 75, e.code
+            else:
+                raise AssertionError("no exit")
+        text = " ".join(out.getvalue().split())
+        assert "(/var/lib/dpkg/lock-frontend held by 7 apt)" in text, text
+        assert "zark prune` again." in text and "[FATAL]" not in text, text
+        noted.assert_called_once_with(str(busy))
 
 
 class TestReadbackVerification:  # pylint: disable=missing-function-docstring

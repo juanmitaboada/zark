@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from lib import forensics
+from lib import dpkg_lock, forensics
 from lib.config import now_utc_iso
 from lib.identity import BY_ID_DIR
 from lib.log import Log
@@ -446,22 +446,28 @@ class ZFS:
             return False
 
         root = altroot or backup_altroot(name)
-        run(f"mkdir -p {root}")
         base = f"zpool import -N -R {root}"
         if readonly:
             base += " -o readonly=on"
         last_err = ""
-        for force in ("", " -f"):
-            r = run(f"{base}{force} -d {device} {name}", log=self.log)
-            if r.ok:
-                mode = "read-only" if readonly else "read-write"
-                self.log.ok(f"Pool {name} imported ({mode}, altroot={root})")
-                if guid and not self._is_expected(name, guid, device, root):
-                    return False
-                return True
-            last_err = r.stderr.strip()
-        self.log.error(f"Cannot import pool {name} from {device}: {last_err}")
-        return False
+        imported = False
+        # No apt or dpkg run meets the import: refused (DpkgBusy) while one
+        # runs, and none can start until it has ended (M18-9, M18-12).
+        with dpkg_lock.hold(self.log):
+            run(f"mkdir -p {root}")
+            for force in ("", " -f"):
+                r = run(f"{base}{force} -d {device} {name}", log=self.log)
+                if r.ok:
+                    imported = True
+                    break
+                last_err = r.stderr.strip()
+        if not imported:
+            self.log.error(f"Cannot import pool {name} from {device}: {last_err}")
+            return False
+        mode = "read-only" if readonly else "read-write"
+        self.log.ok(f"Pool {name} imported ({mode}, altroot={root})")
+        # After the release: it may export the pool, which is imported by now.
+        return not guid or self._is_expected(name, guid, device, root)
 
     def _is_expected(self, name: str, guid: str, device: str, root: str) -> bool:
         """After an import: the pool is the one expected (M16-7). A pool of
@@ -573,14 +579,21 @@ class ZFS:
         run("sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
 
         root = backup_altroot(name)
-        run(f"mkdir -p {root}")
         cmd = f"zpool import -o readonly=on -N -R {root}"
         if device:
             cmd += f" -d {device}"
         cmd += f" {name}"
         if cleanup is not None:
             cleanup.track_pool(name)
-        r = run(cmd, log=self.log)
+        try:
+            # The import alone under the hold; health and export after it.
+            with dpkg_lock.hold(self.log):
+                run(f"mkdir -p {root}")
+                r = run(cmd, log=self.log)
+        except dpkg_lock.DpkgBusy:
+            if cleanup is not None:
+                cleanup.untrack_pool(name)  # not imported: nothing to export
+            raise
         if not r.ok:
             if cleanup is not None:
                 cleanup.untrack_pool(name)  # not imported: nothing to export

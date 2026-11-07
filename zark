@@ -23,7 +23,7 @@ Usage:    sudo ./zark <command> [options]
 import os
 import sys
 
-from lib import cli_spec, live, lock, progress, signals
+from lib import cli_spec, dpkg_lock, live, lock, progress, signals
 from lib.config import VERSION, Config
 from lib.log import Log
 
@@ -79,7 +79,7 @@ def print_help():
     print()
 
 
-def main():
+def main():  # pylint: disable=too-many-branches
     """
     Main entry point: parse command and dispatch to appropriate module
     """
@@ -151,6 +151,12 @@ def main():
         mod_name = cmd_name.replace("-", "_")
         mod = __import__(f"commands.{mod_name}", fromlist=[mod_name])
         mod.run(cmd_args)
+    except dpkg_lock.DpkgBusy as e:
+        # apt or dpkg was running at an import: try again later, as for a
+        # held zark lock (M18-9); the command's cleanup runs from atexit.
+        progress.note_error(str(e))
+        Log().error(e.message(cmd_name))
+        sys.exit(lock.EX_TEMPFAIL)
     except KeyboardInterrupt:
         # Through the log so zark.log records why the run stopped (I19);
         # a Ctrl-C caught by lib.signals has said so already.

@@ -21,6 +21,7 @@ zark/
 │   ├── completion.py          # The shell completion's engine, from cli_spec (any user)
 │   ├── config.py              # Version, paths and configuration
 │   ├── dependents.py          # What a destroy on a drive must take first, and in which order
+│   ├── dpkg_lock.py           # dpkg's locks: no backup pool imported while apt or dpkg runs
 │   ├── drive_contents.py      # What a backup drive holds, for status.json (read-only)
 │   ├── drive_marks.py         # What zark records on a backup drive and reads back
 │   ├── drives.py              # Drive detection and identification
