@@ -8211,6 +8211,324 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
             assert "zpool export" not in out, out
 
 
+class TestGrubScanFile:  # pylint: disable=missing-function-docstring
+    """M18 option C (M18-5 5b, M18-8 8a, M18R-3, M18R-4): the file
+    grub-mkconfig sources keeps importable pools out of 10_linux_zfs's scan.
+
+    The file is sourced by dash, as grub-mkconfig does under ``set -e`` and
+    as grub-install's loader does with ``sh -c`` and a printf; ``zpool`` is a
+    stub that lists the importable pools only while ZPOOL_IMPORT_PATH is
+    unset (as the real scan does with a missing search directory) and
+    records each call.
+    """
+
+    @staticmethod
+    def _stub(td: str, importable: str, *, fail: bool = False) -> str:
+        stub = Path(td, "stub")
+        stub.mkdir()
+        body = (
+            "#!/bin/sh\n"
+            f'echo "$*" >> {td}/calls\n'
+            + ("exit 1\n" if fail else "")
+            + 'if [ "$1" = import ] && [ -z "${ZPOOL_IMPORT_PATH:-}" ]; then\n'
+            + f"  printf '{importable}'\n"
+            + "fi\n"
+        )
+        Path(stub, "zpool").write_text(body, encoding="ascii")
+        Path(stub, "zpool").chmod(0o755)
+        return str(stub)
+
+    @staticmethod
+    def _pools(*names: str) -> str:
+        return "".join(f"   pool: {n}\\n     id: 1\\n  state: ONLINE\\n" for n in names)
+
+    def _source(
+        self,
+        importable: str,
+        *,
+        self_name: str = "grub-mkconfig",
+        fail: bool = False,
+        text: str = grub_guard.CFG_TEXT,
+    ) -> tuple[int, str, str, str]:
+        """Source the file under ``set -e`` the way grub-mkconfig does, then
+        run a child that prints what it inherited. Returns the status, the
+        stdout, the stderr and the zpool calls."""
+        with tempfile.TemporaryDirectory() as td:
+            stub = self._stub(td, importable, fail=fail)
+            cfg = Path(td, "zark-backup-guard.cfg")
+            cfg.write_text(text, encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if k != "ZPOOL_IMPORT_PATH"}
+            env["PATH"] = f"{stub}:/usr/bin:/bin"
+            proc = subprocess.run(
+                [
+                    "dash",
+                    "-c",
+                    'set -e; self="$1"; . "$2"; echo after; '
+                    "sh -c 'echo \"child=${ZPOOL_IMPORT_PATH-unset}\"'",
+                    "sh",
+                    self_name,
+                    str(cfg),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            calls = (
+                Path(td, "calls").read_text(encoding="utf-8") if Path(td, "calls").exists() else ""
+            )
+        return proc.returncode, proc.stdout, proc.stderr, calls
+
+    def test_exports_and_names_an_importable_backup(self):
+        rc, out, err, _ = self._source(self._pools("backup2"))
+        assert rc == 0, err
+        assert out == f"after\nchild={grub_guard.NO_IMPORT_PATH}\n", out
+        assert err == "zark: left out of the boot menu scan: backup2\n", err
+
+    def test_names_every_hidden_pool_once(self):
+        _, _, err, _ = self._source(self._pools("b", "a", "b"))
+        assert err == "zark: left out of the boot menu scan: a b\n", err
+
+    def test_exports_with_nothing_importable_and_says_nothing(self):
+        # 8a: a drive plugged in after the file ran is not scanned either.
+        rc, out, err, _ = self._source("")
+        assert rc == 0, err
+        assert out == f"after\nchild={grub_guard.NO_IMPORT_PATH}\n", out
+        assert err == "", err
+
+    def test_exports_nothing_with_an_importable_rpool_or_bpool(self):
+        for name in ("rpool", "bpool"):
+            rc, out, err, _ = self._source(self._pools(name, "backup2"))
+            assert rc == 0, err
+            assert out == "after\nchild=unset\n", (name, out)
+            assert err == "", (name, err)
+
+    def test_does_nothing_unless_grub_mkconfig_sources_it(self):
+        for name in ("", "grub-install", "postinst"):
+            rc, out, err, calls = self._source(self._pools("backup2"), self_name=name)
+            assert rc == 0, err
+            assert out == "after\nchild=unset\n", (name, out)
+            assert calls == "" and err == "", (name, calls, err)
+
+    def test_a_failing_zpool_exports_nothing_and_the_shell_goes_on(self):
+        rc, out, err, calls = self._source(self._pools("backup2"), fail=True)
+        assert rc == 0, err
+        assert out == "after\nchild=unset\n", out
+        assert calls == "import\n" and err == "", (calls, err)
+
+    def test_the_value_is_a_non_empty_absolute_path_that_does_not_exist(self):
+        # M18R-4: an empty or ':'-only value is the full scan.
+        value = grub_guard.NO_IMPORT_PATH
+        assert value.startswith("/") and value.strip(":") == value and ":" not in value
+        assert not Path(value).exists()
+        assert f"ZPOOL_IMPORT_PATH={value}\n" in grub_guard.CFG_TEXT
+
+    def test_the_rules_of_a_sourced_file(self):
+        # No exit anywhere; ':' last, so a false last test cannot end grub-mkconfig.
+        code = [
+            ln.split("#", 1)[0].strip()
+            for ln in grub_guard.CFG_TEXT.splitlines()
+            if ln.split("#", 1)[0].strip()
+        ]
+        assert code[-1] == ":", code[-1]
+        assert not any(re.search(r"(^|[;&| ])exit\b", ln) for ln in code), code
+        assert grub_guard.CFG_TEXT.isascii()
+
+    def test_grub_installs_loader_reads_its_printf_intact(self):
+        # grub-core/osdep/unix/config.c: sh -c ". grub; . cfg; printf ..." without set -e.
+        with tempfile.TemporaryDirectory() as td:
+            stub = self._stub(td, self._pools("backup2"))
+            cfg = Path(td, "zark-backup-guard.cfg")
+            cfg.write_text(grub_guard.CFG_TEXT, encoding="utf-8")
+            grub = Path(td, "grub")
+            grub.write_text("GRUB_DISTRIBUTOR=Ubuntu\nGRUB_ENABLE_CRYPTODISK=\n", encoding="ascii")
+            env = {k: v for k, v in os.environ.items() if k not in ("ZPOOL_IMPORT_PATH", "self")}
+            env["PATH"] = f"{stub}:/usr/bin:/bin"
+            for self_name in ("", "grub-mkconfig"):
+                proc = subprocess.run(
+                    [
+                        "sh",
+                        "-c",
+                        f'self="{self_name}"; . "{grub}"; . "{cfg}"; '
+                        "printf 'GRUB_ENABLE_CRYPTODISK=%s\\nGRUB_DISTRIBUTOR=%s\\n' "
+                        '"$GRUB_ENABLE_CRYPTODISK" "$GRUB_DISTRIBUTOR"',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False,
+                )
+                assert proc.returncode == 0, proc.stderr
+                assert proc.stdout == "GRUB_ENABLE_CRYPTODISK=\nGRUB_DISTRIBUTOR=Ubuntu\n", (
+                    self_name,
+                    proc.stdout,
+                )
+
+    def test_a_false_last_command_would_end_grub_mkconfig(self):
+        # The harness sees the M18R-4 failure: the mutation that drops the final ':'.
+        text = grub_guard.CFG_TEXT.rstrip("\n")
+        assert text.endswith("\n:")
+        broken = text[: -len(":")] + '[ -n "" ] && export X=1\n'
+        rc, out, _, _ = self._source("", text=broken)
+        assert rc != 0 and "after" not in out, (rc, out)
+
+    # ── 09 with the variable, and its message ────────────────────────────
+
+    @staticmethod
+    def _guard(
+        importable: str, imported: str, *, fmt: str = "-", env_add: dict[str, str] | None = None
+    ) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory() as td:
+            stub = Path(td, "stub")
+            stub.mkdir()
+            Path(stub, "zpool").write_text(
+                "#!/bin/sh\n"
+                'case "$1" in\n'
+                '  import) [ -n "${ZPOOL_IMPORT_PATH:-}" ] || ' + f"printf '{importable}' ;;\n"
+                f"  list) printf '{imported}' ;;\n"
+                "esac\n",
+                encoding="ascii",
+            )
+            Path(stub, "zfs").write_text(f"#!/bin/sh\nprintf '{fmt}\\n'\n", encoding="ascii")
+            for name in ("zpool", "zfs"):
+                Path(stub, name).chmod(0o755)
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("ZPOOL_IMPORT_PATH", "DPKG_MAINTSCRIPT_NAME")
+            }
+            env["PATH"] = f"{stub}:/usr/bin:/bin"
+            env.update(env_add or {})
+            script = Path(td, "09")
+            script.write_text(grub_guard.GUARD_SCRIPT, encoding="utf-8")
+            proc = subprocess.run(
+                ["sh", str(script)], capture_output=True, text=True, env=env, check=False
+            )
+        return proc.returncode, proc.stdout + proc.stderr
+
+    _SYSTEM = "rpool\\t-\\nbpool\\t-\\n"
+    _BACKUP = "rpool\\t-\\nbpool\\t-\\nbackup2\\t/run/zark/altroot/backup2\\n"
+    _HIDE = {"ZPOOL_IMPORT_PATH": grub_guard.NO_IMPORT_PATH}
+
+    def test_guard_with_the_variable_lets_an_importable_pool_through(self):
+        pools = "   pool: backup2\\n"
+        assert self._guard(pools, self._SYSTEM)[0] == 1  # without the file: as today
+        rc, out = self._guard(pools, self._SYSTEM, env_add=self._HIDE)
+        assert rc == 0, out
+
+    def test_guard_with_the_variable_still_refuses_an_imported_backup(self):
+        rc, out = self._guard("", self._BACKUP, env_add=self._HIDE)
+        assert rc == 1 and "backup2" in out, out
+        rc, out = self._guard(
+            "", "rpool\\t-\\nbpool\\t-\\ntank\\t-\\n", fmt="2", env_add=self._HIDE
+        )
+        assert rc == 1 and "tank" in out, out
+
+    def test_guard_message_in_a_maintainer_script_names_apt_f_install(self):
+        rc, out = self._guard(
+            "", self._BACKUP, env_add={**self._HIDE, "DPKG_MAINTSCRIPT_NAME": "postrm"}
+        )
+        assert rc == 1, out
+        flat = " ".join(out.split())
+        assert (
+            "A package is being installed or removed: when backup2 is exported "
+            "(the backup ends, or `sudo zark umount`), run: sudo apt -f install"
+        ) in flat, flat
+        assert "sudo update-grub" not in flat, flat
+
+    def test_guard_message_by_hand_names_update_grub(self):
+        rc, out = self._guard("", self._BACKUP, env_add=self._HIDE)
+        assert rc == 1, out
+        flat = " ".join(out.split())
+        assert (
+            "When backup2 is exported (the backup ends, or `sudo zark umount`), "
+            "then run: sudo update-grub"
+        ) in flat, flat
+        assert "apt -f install" not in flat, flat
+        assert "ERROR: External ZFS pool(s) detected: backup2" in flat, flat
+
+    # ── install, remove, is_current ──────────────────────────────────────
+
+    def test_install_writes_both_files_and_is_current_checks_both(self):
+        with tempfile.TemporaryDirectory() as td:
+            assert grub_guard.install(td, make_log())
+            cfg = Path(td, grub_guard.CFG_RELATIVE_PATH)
+            assert cfg.read_text(encoding="utf-8") == grub_guard.CFG_TEXT
+            assert cfg.stat().st_mode & 0o777 == 0o644
+            assert grub_guard.is_current(td)
+            cfg.write_text(
+                "# zark-backup-guard.cfg - older\n# Installed by zark.\n:\n", encoding="utf-8"
+            )
+            assert not grub_guard.is_current(td)
+            assert grub_guard.install(td, make_log())  # brought up to date
+            cfg.unlink()
+            assert not grub_guard.is_current(td)
+            # finish's non-overwriting install still adds a missing file.
+            assert grub_guard.install(td, make_log(), overwrite=False)
+            assert cfg.exists() and grub_guard.is_current(td)
+
+    def test_remove_takes_zarks_cfg_and_leaves_anothers(self):
+        with tempfile.TemporaryDirectory() as td:
+            grub_guard.install(td, make_log())
+            cfg = Path(td, grub_guard.CFG_RELATIVE_PATH)
+            assert not grub_guard.remove(td, make_log())
+            assert not cfg.exists()
+            assert not Path(td, grub_guard.GUARD_RELATIVE_PATH).exists()
+            cfg.write_text(
+                "# zark-backup-guard.cfg - older\n# Installed by zark.\n:\n", encoding="utf-8"
+            )
+            assert not grub_guard.remove(td, make_log()) and not cfg.exists()
+            cfg.write_text("GRUB_TIMEOUT=3\n", encoding="utf-8")
+            assert grub_guard.remove(td, make_log()) == [str(cfg)] and cfg.exists()
+
+    def test_the_variable_hides_exported_pools_from_the_scan(self):
+        """Against the real zpool: two file-backed pools on loop devices under
+        /dev/shm, exported, are listed by `zpool import` without the variable
+        and not with it. Root and ZFS only; skipped otherwise."""
+        if os.geteuid() != 0 or not Path("/dev/zfs").exists() or not shutil.which("zpool"):
+            raise SkipTest("needs root and ZFS")
+        if not shutil.which("losetup"):
+            raise SkipTest("losetup(8) not found")
+        work = Path(tempfile.mkdtemp(prefix="zark-m18-", dir="/dev/shm"))
+        pools = [f"zarkm18a{os.getpid()}", f"zarkm18b{os.getpid()}"]
+        loops: list[str] = []
+        try:
+            for i, pool in enumerate(pools):
+                img = work / f"{i}.img"
+                img.touch()
+                os.truncate(img, 128 * 1024 * 1024)
+                loop = subprocess.run(
+                    ["losetup", "--find", "--show", str(img)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                ).stdout.strip()
+                loops.append(loop)
+                subprocess.run(
+                    ["zpool", "create", "-o", "cachefile=none", pool, loop],
+                    capture_output=True,
+                    check=True,
+                )
+                subprocess.run(["zpool", "export", pool], capture_output=True, check=True)
+            env = {k: v for k, v in os.environ.items() if k != "ZPOOL_IMPORT_PATH"}
+            seen = subprocess.run(
+                ["zpool", "import"], capture_output=True, text=True, env=env, check=False
+            ).stdout
+            assert all(f"pool: {p}" in seen for p in pools), seen
+            env["ZPOOL_IMPORT_PATH"] = grub_guard.NO_IMPORT_PATH
+            hidden = subprocess.run(
+                ["zpool", "import"], capture_output=True, text=True, env=env, check=False
+            ).stdout
+            assert not any(p in hidden for p in pools), hidden
+        finally:
+            for pool in pools:
+                subprocess.run(["zpool", "import", "-N", pool], capture_output=True, check=False)
+                subprocess.run(["zpool", "destroy", pool], capture_output=True, check=False)
+            for loop in loops:
+                subprocess.run(["losetup", "-d", loop], capture_output=True, check=False)
+            shutil.rmtree(work, ignore_errors=True)
+
+
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/identity.py and lib/registry.py (M1: I20-I25, hallazgo 7)
 # ═════════════════════════════════════════════════════════════════════════

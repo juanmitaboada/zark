@@ -24,6 +24,12 @@ This module centralises both the script body and the install logic so all
 three callers (`zark recover`, `zark repair-boot`, `zark finish`) deposit the same
 file. Previously each command duplicated the script in a heredoc, with the
 obvious risk that fixing a typo in one wouldn't reach the others.
+
+Beside the guard it installs /etc/default/grub.d/zark-backup-guard.cfg, which
+grub-mkconfig sources before it runs the grub.d scripts: it keeps pools that
+are only importable (a backup drive plugged in, not imported) out of
+10_linux_zfs's scan, so update-grub succeeds with the system's entries and the
+guard is left to refuse an imported backup only (M18, option C).
 """
 
 from pathlib import Path
@@ -75,18 +81,92 @@ if [ -n "$extra" ]; then
     echo "  The 10_linux_zfs script will try to mount their encrypted datasets," >&2
     echo "  fail, and generate a grub.cfg WITHOUT kernel entries." >&2
     echo "" >&2
-    echo "  Fix: let a running zark backup finish (or end a zark mount with" >&2
-    echo "  sudo zark umount), disconnect the drive(s), run update-grub again." >&2
+    # Name what finishes the job: dpkg is left half-done when a maintainer
+    # script runs update-grub (dpkg exports DPKG_MAINTSCRIPT_NAME to it).
+    if [ -n "${DPKG_MAINTSCRIPT_NAME:-}" ]; then
+        echo "  A package is being installed or removed: when$extra is exported" >&2
+        echo '  (the backup ends, or `sudo zark umount`), run: sudo apt -f install' >&2
+    else
+        echo "  When$extra is exported (the backup ends, or" >&2
+        echo '  `sudo zark umount`), then run: sudo update-grub' >&2
+    fi
     echo "" >&2
     exit 1
 fi
 """
 
+CFG_RELATIVE_PATH = "etc/default/grub.d/zark-backup-guard.cfg"
+
+# A path no package creates: with it as zpool's only search directory the
+# scan finds nothing (zpool_main.c splits the value on ':'; libzutil skips a
+# missing directory on ENOENT). Never empty: an empty value is the full scan.
+NO_IMPORT_PATH = "/nonexistent/zark-no-import"
+
+# Sourced, not run: by grub-mkconfig under `set -e`, by grub-install's config
+# loader (`sh -c ". cfg; printf ..."`, stdout parsed) and by grub's postinst
+# config_item(). Hence no exit, nothing on stdout, every status handled, and
+# `:` last so the `.` itself returns 0 (a false last test would end
+# grub-mkconfig). The zark_ prefix keeps clear of grub-mkconfig's variables.
+CFG_TEXT = """\
+# zark-backup-guard.cfg - Keep external ZFS pools out of update-grub's scan.
+#
+# 10_linux_zfs imports every pool it can find and mounts their root
+# datasets; a backup pool's locked dataset aborts it and grub.cfg loses its
+# kernel entries. When no importable pool is named rpool or bpool, zpool's
+# device search is pointed at a directory that does not exist: 10_linux_zfs
+# and 09_zfs_backup_guard then find no importable pool, while imported ones
+# (rpool, bpool, a backup zark holds) are listed as before.
+#
+# Acts only when grub-mkconfig sources it; grub-install and grub's postinst
+# also source this directory, so it never exits and writes nothing to stdout.
+#
+# Installed by zark.  Safe to remove if you don't use zark.
+if [ "${self:-}" = "grub-mkconfig" ]; then
+    if zark_pools="$(zpool import 2>/dev/null)"; then
+        zark_pools="$(printf '%s\\n' "$zark_pools" |
+            awk '$1 == "pool:" {print $2}' 2>/dev/null | sort -u 2>/dev/null)" || zark_pools=""
+        zark_hidden=""
+        zark_system=false
+        for zark_p in $zark_pools; do
+            case "$zark_p" in
+                rpool|bpool) zark_system=true ;;
+                *) zark_hidden="$zark_hidden $zark_p" ;;
+            esac
+        done
+        if [ "$zark_system" = false ]; then
+            ZPOOL_IMPORT_PATH=__NO_IMPORT_PATH__
+            export ZPOOL_IMPORT_PATH
+            if [ -n "$zark_hidden" ]; then
+                echo "zark: left out of the boot menu scan:$zark_hidden" >&2
+            fi
+        fi
+        unset zark_p zark_pools zark_hidden zark_system
+    fi
+fi
+:
+""".replace("__NO_IMPORT_PATH__", NO_IMPORT_PATH)
+
+
+def _path(target_root: str, rel: str) -> Path:
+    root = target_root.rstrip("/")
+    return Path(f"{root}/{rel}") if root else Path(f"/{rel}")
+
+
+def _holds(path: Path, text: str, *, executable: bool) -> bool:
+    """Whether ``path`` holds ``text`` (and is executable when asked)."""
+    try:
+        return path.read_text(encoding="utf-8") == text and (
+            not executable or bool(path.stat().st_mode & 0o111)
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
+
 
 def install(target_root: str, log: Log, *, overwrite: bool = True) -> bool:
     """
     Write the GRUB guard script to {target_root}/etc/grub.d/09_zfs_backup_guard
-    and make it executable.
+    (executable) and the scan file to
+    {target_root}/etc/default/grub.d/zark-backup-guard.cfg (0644, sourced).
 
     Args:
         target_root: filesystem root where the guard should be installed.
@@ -96,57 +176,66 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> bool:
         overwrite: if False, leave an existing file untouched. Defaults to
             True because every caller in zark wants the canonical version.
 
-    Returns True when it wrote the script, False when it was already there
-    (current, or kept because ``overwrite`` is False; M5a-24).
+    Returns True when it wrote either file, False when both were already
+    there (current, or kept because ``overwrite`` is False; M5a-24).
     """
-    root = target_root.rstrip("/")
-    guard_path = Path(f"{root}/{GUARD_RELATIVE_PATH}") if root else Path(f"/{GUARD_RELATIVE_PATH}")
-
-    if guard_path.exists() and not overwrite:
-        return False
-    try:
-        current = guard_path.read_text(encoding="utf-8") if guard_path.exists() else None
-    except (OSError, UnicodeDecodeError):
-        current = None
-    if current == GUARD_SCRIPT and guard_path.stat().st_mode & 0o111:
+    wrote = False
+    for rel, text, mode in (
+        (GUARD_RELATIVE_PATH, GUARD_SCRIPT, 0o755),
+        (CFG_RELATIVE_PATH, CFG_TEXT, 0o644),
+    ):
+        path = _path(target_root, rel)
+        if path.exists() and not overwrite:
+            continue
+        if _holds(path, text, executable=mode == 0o755):
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_text(text, encoding="utf-8")
+        path.chmod(mode)
+        wrote = True
+    if wrote:
+        log.ok("Grub guard installed (09_zfs_backup_guard, zark-backup-guard.cfg) ✓")
+    else:
         log.ok("Grub guard already current ✓")
-        return False
-
-    guard_path.parent.mkdir(parents=True, exist_ok=True)
-    _ = guard_path.write_text(GUARD_SCRIPT, encoding="utf-8")
-    guard_path.chmod(0o755)
-    log.ok("Grub guard installed (09_zfs_backup_guard) ✓")
-    return True
+    return wrote
 
 
-def remove(target_root: str, log: Log) -> list[str]:
-    """Remove the guard :func:`install` wrote under ``target_root``: this
-    zark's script, or an older zark's (its header and "Installed by zark");
-    return the path when it is left because it is not zark's (M3P.2)."""
-    root = target_root.rstrip("/")
-    path = Path(f"{root}/{GUARD_RELATIVE_PATH}") if root else Path(f"/{GUARD_RELATIVE_PATH}")
-    if not path.exists():
-        log.ok("Grub guard removed (0 file(s))")
-        return []
+def _zarks(path: Path, canonical: str, header: str) -> bool:
+    """This zark's file, or an older zark's (its header and "Installed by zark")."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         text = ""
-    if text == GUARD_SCRIPT or ("# 09_zfs_backup_guard -" in text and "Installed by zark" in text):
-        path.unlink()
-        log.ok("Grub guard removed (1 file(s))")
-        return []
-    return [str(path)]
+    return text == canonical or (header in text and "Installed by zark" in text)
+
+
+def remove(target_root: str, log: Log) -> list[str]:
+    """Remove the guard and the scan file :func:`install` wrote under
+    ``target_root``: this zark's, or an older zark's (its header and
+    "Installed by zark"); return the paths left because they are not zark's
+    (M3P.2)."""
+    left: list[str] = []
+    removed = 0
+    for rel, text, header in (
+        (GUARD_RELATIVE_PATH, GUARD_SCRIPT, "# 09_zfs_backup_guard -"),
+        (CFG_RELATIVE_PATH, CFG_TEXT, "# zark-backup-guard.cfg -"),
+    ):
+        path = _path(target_root, rel)
+        if not path.exists():
+            continue
+        if _zarks(path, text, header):
+            path.unlink()
+            removed += 1
+        else:
+            left.append(str(path))
+    log.ok(f"Grub guard removed ({removed} file(s))")
+    return left
 
 
 def is_current(target_root: str = "") -> bool:
     """True when the guard under ``target_root`` holds this zark's script and
-    is executable (what :func:`install` would leave; M4c-10)."""
-    root = target_root.rstrip("/")
-    path = Path(f"{root}/{GUARD_RELATIVE_PATH}") if root else Path(f"/{GUARD_RELATIVE_PATH}")
-    try:
-        return path.read_text(encoding="utf-8") == GUARD_SCRIPT and bool(
-            path.stat().st_mode & 0o111
-        )
-    except (OSError, UnicodeDecodeError):
-        return False
+    is executable, and the scan file holds this zark's text (what
+    :func:`install` would leave; M4c-10)."""
+    return _holds(
+        _path(target_root, GUARD_RELATIVE_PATH), GUARD_SCRIPT, executable=True
+    ) and _holds(_path(target_root, CFG_RELATIVE_PATH), CFG_TEXT, executable=False)
