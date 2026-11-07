@@ -26,6 +26,7 @@ import select
 import shutil
 import stat
 import sys
+import time
 import unicodedata
 from collections.abc import Callable, Collection, Sequence
 from types import TracebackType
@@ -493,6 +494,90 @@ class Log:
         self.info(f"No response - applying default ({default_word}).")
         self._answer_to_file(question, f"<timeout> ({default_word})")
         return default
+
+    def ask_wait(  # pylint: disable=too-many-arguments
+        self,
+        question: str,
+        timeout: float,
+        done: Callable[[], bool],
+        tail: str = "",
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        poll: float = 1.0,
+    ) -> str:
+        """Wait up to ``timeout`` seconds for ``done()``, offering to skip.
+
+        Returns ``"done"`` as soon as ``done()`` is true (polled every
+        ``poll`` seconds, also after an answer), ``"skip"`` when the
+        operator answers y, ``"timeout"`` at the end. Enter or n keeps
+        waiting; at end of input stdin is no longer read and the wait goes
+        on. The box shows ``question`` and ``tail``. With no terminal there
+        is no question and nothing is shown: ``done()`` is read every five
+        polls (5 s). Unlike :meth:`ask_timeout` nobody's silence decides
+        anything: the default is to keep waiting.
+        """
+        end = clock() + timeout
+        if not sys.stdin.isatty():
+            self._answer_to_file(question, "<no tty> (wait)")
+            while not done():
+                left = end - clock()
+                if left <= 0:
+                    self._answer_to_file(question, "<timeout>")
+                    return "timeout"
+                time.sleep(min(5 * poll, left))  # every 5 s by default
+            self._answer_to_file(question, "<freed>")
+            return "done"
+        rows = [f"{self.Y}?{self.N} {question}"] + ([f"  {tail}"] if tail else [])
+        self._show(self._box(*rows), after=False)
+        with _Reading(question):
+            return self._wait_on_terminal(question, end, done, clock, poll)
+
+    def _wait_on_terminal(
+        self,
+        question: str,
+        end: float,
+        done: Callable[[], bool],
+        clock: Callable[[], float],
+        poll: float,
+    ) -> str:
+        """:meth:`ask_wait`'s loop on a terminal."""
+        reading = True
+        while True:
+            if done():
+                self._clear_line()
+                self._answer_to_file(question, "<freed>")
+                return "done"
+            left = end - clock()
+            if left <= 0:
+                self._clear_line()
+                self._answer_to_file(question, "<timeout>")
+                return "timeout"
+            minutes, seconds = divmod(int(left), 60)
+            sys.stdout.write(
+                f"\r    [y/N] (waiting, {minutes}:{seconds:02d} left; "
+                + "y to skip now, Enter to keep waiting): "
+            )
+            sys.stdout.flush()
+            # The raw line: "" is end of input, "\n" is Enter (M18R-18).
+            ready, _, _ = select.select([sys.stdin] if reading else [], [], [], min(poll, left))
+            if not ready:
+                continue
+            line = sys.stdin.readline()
+            if not line:
+                reading = False  # stdin is not read again; the wait goes on
+                self._answer_to_file(question, "<eof> (wait)")
+                continue
+            answer = line.strip().lower()
+            if answer.startswith("y"):
+                self._answer_to_file(question, f"{self._loggable(answer, _YES_NO)} (skip)")
+                return "skip"
+            shown = self._loggable(answer, _YES_NO) if answer else "<enter>"
+            self._answer_to_file(question, f"{shown} (wait)")
+
+    @staticmethod
+    def _clear_line() -> None:
+        sys.stdout.write("\r" + " " * 78 + "\r")
+        sys.stdout.flush()
 
     def ask_input(
         self,

@@ -158,11 +158,14 @@ def holders(*, skip_frontend: bool = False) -> list[Holder]:
     return [h for path in paths if (h := _query(path)) is not None]
 
 
+def busy() -> list[Holder]:
+    """:func:`holders`, and nothing on a live: the read-back's wait."""
+    return [] if sh.is_live_usb() else holders()
+
+
 def refuse_if_busy() -> None:
     """Raise :class:`DpkgBusy` when either lock is held (nothing on a live)."""
-    if sh.is_live_usb():
-        return
-    if held := holders():
+    if held := busy():
         raise DpkgBusy(held)
 
 

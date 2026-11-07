@@ -295,14 +295,25 @@ def run(
         raise SystemExit(1)
 
     rb = (
-        zfs.verify_exported_pool_readback(new_pool, device=ident.part1, cleanup=cleanup)
+        zfs.verify_exported_pool_readback(
+            new_pool,
+            device=ident.part1,
+            cleanup=cleanup,
+            skip_note="It would be reported as not done, and the drive would not be registered.",
+        )
         if exported
         else None
     )
     if rb is None or not rb.ok:
         lines = (
-            rb.describe() if rb else [f"{new_pool} could not be exported, so it was not read back."]
+            rb.describe(again=False)
+            if rb
+            else [f"{new_pool} could not be exported, so it was not read back."]
         )
+        if rb is not None and rb.skipped:
+            lines.append(
+                f"Wipe and retry once apt has ended: {zark_command()} purge {ident.by_id_path}"
+            )
         left = anchors.drop_anchors_of(new_guid, log)
         log.banner_error(
             "DRIVE NOT VERIFIED",

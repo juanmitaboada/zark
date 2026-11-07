@@ -132,6 +132,7 @@ import lib.status as status_lib  # pylint: disable=wrong-import-position # noqa:
 import lib.status_file as status_file_lib  # pylint: disable=wrong-import-position # noqa: E402
 import lib.status_reader as sreader  # pylint: disable=wrong-import-position # noqa: E402
 import lib.transfer_eta as teta  # pylint: disable=wrong-import-position # noqa: E402
+import lib.zfs as zfs_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.zfs_features as zfeat  # pylint: disable=wrong-import-position # noqa: E402
 import tests.test_status_files as tsf  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -5530,19 +5531,31 @@ class TestDpkgLock:  # pylint: disable=missing-function-docstring,used-before-as
         assert under == ["mkdir -p /run/zark/altroot/black", imp], under
 
     def test_readback_import_is_refused_while_apt_runs(self):
+        # Taken between the check and the take: nothing imported, the pool
+        # not left tracked, and the read-back goes to its wait (M18-11).
         mock = MockShell()
         mock.on("sync").succeeds()
         mock.on("drop_caches").succeeds()
         cleanup = MagicMock()
-        with _dpkg_locks() as (fe, _), patch_sh(mock), redirect_stdout(StringIO()):
+        asked: list[str] = []
+
+        def ask_wait(question: str, *_a: Any, **_k: Any) -> str:
+            asked.append(question)
+            return "skip"
+
+        with (
+            _dpkg_locks() as (fe, _),
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+            patch.object(dpkg_lock, "busy", return_value=[]),
+            patch.object(Log, "ask_wait", side_effect=ask_wait),
+            patch.object(zfs_mod.time, "sleep"),
+        ):
             with _dpkg_lock_held(fe):
-                try:
-                    ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, cleanup)
-                except dpkg_lock.DpkgBusy:
-                    pass
-                else:
-                    raise AssertionError("not refused")
+                rb = ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, cleanup)
         assert mock.was_not_called("zpool import")
+        assert rb.skipped == "operator" and asked == ["Skip the read-back of black now?"], asked
+        cleanup.track_pool.assert_called_once_with("black")
         cleanup.untrack_pool.assert_called_once_with("black")
 
     def test_prepare_creates_the_pool_under_the_hold(self):
@@ -5598,6 +5611,348 @@ class TestDpkgLock:  # pylint: disable=missing-function-docstring,used-before-as
         assert "(/var/lib/dpkg/lock-frontend held by 7 apt)" in text, text
         assert "zark prune` again." in text and "[FATAL]" not in text, text
         noted.assert_called_once_with(str(busy))
+
+
+class _FakeTty:  # pylint: disable=missing-function-docstring
+    """A terminal for :meth:`Log.ask_wait`: a pipe whose writer the test
+    keeps; ``isatty`` is true, ``readline`` counts its calls."""
+
+    def __init__(self) -> None:
+        r, w = os.pipe()
+        self._r = os.fdopen(r, "r")
+        self._w: Any = os.fdopen(w, "w")
+        self.reads = 0
+
+    def type(self, text: str) -> None:
+        self._w.write(text)
+        self._w.flush()
+
+    def close(self) -> None:  # Ctrl-D: end of input
+        self._w.close()
+
+    def fileno(self) -> int:
+        return self._r.fileno()
+
+    def readline(self) -> str:
+        self.reads += 1
+        return self._r.readline()
+
+    @staticmethod
+    def isatty() -> bool:
+        return True
+
+    def done(self) -> None:
+        if not self._w.closed:
+            self._w.close()
+        self._r.close()
+
+
+class TestReadbackWaitsForApt:  # pylint: disable=missing-function-docstring,used-before-assignment
+    """M18-11 11a, M18-13 13a, M18-14 14a (M18R-14, M18R-18): the read-back
+    waits for apt or dpkg up to 15 minutes, holding nothing, with a choice
+    to skip; a skipped or timed-out read-back is not done, and is reported
+    as not read back."""
+
+    @staticmethod
+    def _wait(
+        tty: "_FakeTty | None",
+        done: Callable[[], bool],
+        timeout: float = 5.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> tuple[str, list[str], str]:
+        """Run ask_wait; the outcome, the logged answers, stdout."""
+        log = Log()
+        answers: list[str] = []
+        out = StringIO()
+        stdin = tty if tty is not None else StringIO()
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch.object(log, "_answer_to_file", side_effect=lambda _q, a: answers.append(a)),
+            redirect_stdout(out),
+        ):
+            got = log.ask_wait(
+                "Skip the read-back of backup2 now?",
+                timeout,
+                done,
+                "It would be reported as not done.",
+                clock=clock,
+                poll=0.01,
+            )
+        return got, answers, out.getvalue()
+
+    @staticmethod
+    def _after(n: int) -> Callable[[], bool]:
+        calls = [0]
+
+        def done() -> bool:
+            calls[0] += 1
+            return calls[0] > n
+
+        return done
+
+    def test_a_freed_lock_ends_the_wait_at_once(self):
+        tty = _FakeTty()
+        try:
+            got, answers, out = self._wait(tty, self._after(3))
+        finally:
+            tty.done()
+        assert got == "done" and answers == ["<freed>"], (got, answers)
+        assert "Skip the read-back of backup2 now?" in out
+        assert "It would be reported as not done." in out
+
+    def test_n_and_enter_keep_waiting_and_a_freed_lock_still_ends_it(self):
+        tty = _FakeTty()
+        tty.type("n\n")
+        state = {"n": 0}
+
+        def done() -> bool:
+            # One line at a time, as a terminal delivers them.
+            state["n"] += 1
+            if tty.reads == 1 and state.get("typed") is None:
+                state["typed"] = 1
+                tty.type("\n")
+            return tty.reads >= 2 and state["n"] > 5
+
+        try:
+            got, answers, _ = self._wait(tty, done)
+        finally:
+            tty.done()
+        assert got == "done", (got, answers)
+        assert answers == ["n (wait)", "<enter> (wait)", "<freed>"], answers
+
+    def test_y_skips(self):
+        tty = _FakeTty()
+        tty.type("y\n")
+        try:
+            got, answers, _ = self._wait(tty, lambda: False)
+        finally:
+            tty.done()
+        assert got == "skip" and answers == ["y (skip)"], (got, answers)
+
+    def test_end_of_input_keeps_waiting_and_stdin_is_not_read_again(self):
+        tty = _FakeTty()
+        tty.close()
+        try:
+            got, answers, _ = self._wait(tty, lambda: False, timeout=0.3)
+        finally:
+            tty.done()
+        assert got == "timeout", (got, answers)
+        assert answers == ["<eof> (wait)", "<timeout>"], answers
+        assert tty.reads == 1, tty.reads
+
+    def test_expiry_is_a_timeout_not_an_answer(self):
+        tty = _FakeTty()
+        try:
+            got, answers, _ = self._wait(tty, lambda: False, timeout=0.2)
+        finally:
+            tty.done()
+        assert got == "timeout" and answers == ["<timeout>"], (got, answers)
+
+    def test_the_countdown_shows_minutes_and_seconds_left(self):
+        tty = _FakeTty()
+        try:
+            ticks = itertools.count(100)  # a second a reading, so it always ends
+            _, _, out = self._wait(tty, self._after(1), timeout=900.5, clock=lambda: next(ticks))
+        finally:
+            tty.done()
+        assert "[y/N] (waiting, 14:59 left; y to skip now, Enter to keep waiting): " in out, out
+
+    def test_without_a_terminal_there_is_no_question(self):
+        got, answers, out = self._wait(None, self._after(2))
+        assert got == "done" and answers == ["<no tty> (wait)", "<freed>"], (got, answers)
+        assert out == "", out
+        got, answers, out = self._wait(None, lambda: False, timeout=0.2)
+        assert got == "timeout" and answers == ["<no tty> (wait)", "<timeout>"], answers
+        assert out == ""
+
+    # ── the read-back's flow ─────────────────────────────────────────────
+
+    DEV = "/dev/disk/by-id/usb-Made_Up_Disk_0123456789AB-0:0-part1"
+    IMPORT = f"zpool import -o readonly=on -N -R /run/zark/altroot/backup2 -d {DEV} backup2"
+    HELD = [dpkg_lock.Holder("/var/lib/dpkg/lock-frontend", 1234, "unattended-upgr")]
+
+    def _mock(self) -> MockShell:
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on_prefix("mkdir -p").succeeds()
+        mock.on(self.IMPORT).succeeds()
+        mock.on("zpool list -H -o health backup2").succeeds("ONLINE")
+        mock.on("zpool export backup2").succeeds()
+        return mock
+
+    def _readback(
+        self,
+        busy: list[list[dpkg_lock.Holder]],
+        waits: list[str],
+        ask: Callable[..., str] | None = None,
+        **kw: Any,
+    ) -> tuple[Readback, MockShell, list[float], str]:
+        """The read-back with busy() answering ``busy`` in turn (then free)
+        and ask_wait answering ``waits`` in turn; the timeouts it was given."""
+        mock = self._mock()
+        given: list[float] = []
+        answers = iter(waits)
+
+        def ask_wait(_self: Log, _q: str, timeout: float, *_a: Any, **_k: Any) -> str:
+            given.append(timeout)
+            return next(answers)
+
+        seq = iter(busy)
+        out = StringIO()
+        with (
+            _dpkg_locks(),
+            patch.object(dpkg_lock, "busy", side_effect=lambda: next(seq, [])),
+            patch.object(dpkg_lock, "holders", return_value=[]),
+            patch.object(Log, "ask_wait", ask or ask_wait),
+            patch.object(zfs_mod.time, "sleep"),
+            patch_sh(mock),
+            redirect_stdout(out),
+        ):
+            rb = ZFS(Log()).verify_exported_pool_readback("backup2", device=self.DEV, **kw)
+        return rb, mock, given, " ".join(out.getvalue().split())
+
+    def test_nobody_holding_no_wait(self):
+        rb, mock, given, _ = self._readback([[]], [])
+        assert rb.ok and not given and mock.was_called(self.IMPORT)
+
+    def test_held_then_freed_waits_then_reads_back(self):
+        rb, mock, given, out = self._readback([self.HELD], ["done"])
+        assert rb.ok and len(given) == 1 and mock.was_called(self.IMPORT), (rb, given)
+        assert abs(given[0] - zfs_mod.READBACK_DPKG_WAIT_S) < 5, given
+        assert (
+            "apt or dpkg is running: /var/lib/dpkg/lock-frontend is held by 1234 "
+            "(unattended-upgr). The read-back of backup2 waits for it to end, up to 15 minutes."
+        ) in out, out
+        assert "apt or dpkg has ended: reading backup2 back." in out, out
+
+    def test_taken_again_at_the_hold_goes_back_to_the_wait_with_the_time_left(self):
+        taken = [True]
+        real_hold = dpkg_lock.hold
+
+        @contextmanager
+        def hold(log: Log) -> Iterator[None]:
+            if taken and taken.pop():
+                raise dpkg_lock.DpkgBusy(self.HELD)
+            with real_hold(log):
+                yield
+
+        clock = [1000.0]
+
+        def tick() -> float:
+            clock[0] += 30.0
+            return clock[0]
+
+        with patch.object(dpkg_lock, "hold", hold), patch.object(zfs_mod.time, "monotonic", tick):
+            rb, mock, given, _ = self._readback([self.HELD], ["done", "done"])
+        assert rb.ok and mock.call_count(self.IMPORT) == 1, rb
+        assert len(given) == 2 and given[1] < given[0] <= zfs_mod.READBACK_DPKG_WAIT_S, given
+
+    def test_a_skip_imports_nothing_and_is_reported_as_not_done(self):
+        cleanup = MagicMock()
+        rb, mock, _, out = self._readback([self.HELD], ["skip"], cleanup=cleanup)
+        assert not rb.ok and rb.skipped == "operator" and not rb.imported, rb
+        assert mock.was_not_called("zpool import")
+        cleanup.track_pool.assert_not_called()
+        assert "Read-back of backup2 skipped: not done." in out, out
+        assert rb.describe() == [
+            "The read-back of backup2 was not done: apt or dpkg was running "
+            "(/var/lib/dpkg/lock-frontend held by 1234 unattended-upgr); skipped by the operator.",
+            "The backup's data is on the drive; it has not been read back.",
+            f"Run {zark_command()} backup again once apt has ended: "
+            "the next run reads the drive back.",
+        ]
+        assert rb.summary("backup2") == "backup2 was not read back (apt was running)"
+
+    def test_a_timeout_imports_nothing_and_is_reported_as_not_done(self):
+        rb, mock, _, out = self._readback([self.HELD], ["timeout"])
+        assert not rb.ok and rb.skipped == "timeout", rb
+        assert mock.was_not_called("zpool import")
+        assert (
+            "apt or dpkg is still running after 15 minutes: the read-back of backup2 is not done."
+        ) in out, out
+        assert rb.describe(again=False)[0].endswith("; still running after 15 minutes."), rb
+        assert len(rb.describe(again=False)) == 2
+
+    def test_prepare_passes_its_own_note(self):
+        note = "It would be reported as not done, and the drive would not be registered."
+        seen: list[str] = []
+
+        def ask_wait(_self: Log, _q: str, _t: float, _d: Any, tail: str = "", **_k: Any) -> str:
+            seen.append(tail)
+            return "skip"
+
+        self._readback([self.HELD], [], ask=ask_wait, skip_note=note)
+        assert seen == [note], seen
+        assert note in inspect.getsource(prepare_mod.run)
+
+    def test_nothing_is_held_while_the_read_back_waits(self):
+        # A child can take lock-frontend during the wait: zark holds nothing.
+        mock = self._mock()
+        with _dpkg_locks() as (fe, _), _dpkg_lock_held(fe) as pid:
+            seen: list[str] = []
+
+            def ask_wait(
+                _self: Log, _q: str, _t: float, done: Callable[[], bool], *_a: Any, **_k: Any
+            ) -> str:
+                seen.append(_dpkg_lock_seen(fe))
+                assert not done()  # the child still holds it
+                return "skip"
+
+            with (
+                patch.object(Log, "ask_wait", ask_wait),
+                patch_sh(mock),
+                redirect_stdout(StringIO()),
+            ):
+                rb = ZFS(Log()).verify_exported_pool_readback("backup2", device=self.DEV)
+        assert seen == [f"held {pid}"], seen  # the child's lock, not zark's
+        assert rb.skipped == "operator" and [h.pid for h in rb.holders] == [pid], rb
+
+    # ── what backup and prepare report ───────────────────────────────────
+
+    _SKIPPED = Readback(imported=False, skipped="operator", holders=HELD, pool="backup")
+
+    def test_backup_with_a_skipped_read_back(self):
+        sent: list[tuple[str, str]] = []
+        rc, drive, _ = TestBackupLastRun()._ending(  # pylint: disable=protected-access
+            _fresh_fake(),
+            patch.object(ZFS, "verify_exported_pool_readback", return_value=self._SKIPPED),
+            patch.object(backup_mod, "_notify", side_effect=lambda t, m: sent.append((t, m))),
+        )
+        lr = drive["last_run"]
+        assert rc == 1 and lr["result"] == "not_verified", lr
+        assert lr["message"] == "backup was not read back (apt was running)", lr
+        assert ("❌ Backup NOT verified", "backup was not read back (apt was running)") in sent
+        out = StringIO()
+        eject = MagicMock()
+        cfg, rc = TestBackupCommand()._run(  # pylint: disable=protected-access
+            _fresh_fake(),
+            patch.object(ZFS, "verify_exported_pool_readback", return_value=self._SKIPPED),
+            patch.object(backup_mod, "prompt_eject_or_attach", eject),
+            redirect_stdout(out),
+        )
+        text = " ".join(unframed(out.getvalue()).split())
+        assert rc == 1 and "BACKUP NOT VERIFIED" in text, text
+        assert "Do NOT rely on this backup until a run has read it back." in text, text
+        assert "failed its read-back" not in text and "BACKUP COMPLETED" not in text
+        assert not cfg.known_drives["backup"].last_backup_at
+        eject.assert_not_called()
+
+    def test_prepare_with_a_skipped_read_back_does_not_register_the_drive(self):
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        skipped = Readback(imported=False, skipped="timeout", holders=self.HELD, pool="blue")
+        rc = TestPrepareIdentity()._prepare(  # pylint: disable=protected-access
+            fake, cfg_dir, readback=skipped, out=out
+        )
+        text = " ".join(unframed(out.getvalue()).split())
+        assert rc == 1 and "DRIVE NOT VERIFIED" in text, text
+        assert "The read-back of blue was not done" in text and "still running after 15" in text
+        assert "The drive has NOT been registered." in text and "backup again" not in text, text
+        assert "Wipe and retry once apt has ended:" in text, text
+        assert json.loads((cfg_dir / "known_drives.json").read_text(encoding="utf-8")) == {}
 
 
 class TestReadbackVerification:  # pylint: disable=missing-function-docstring

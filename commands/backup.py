@@ -1407,11 +1407,16 @@ def run(
         raise SystemExit(1)
     rb = zfs.verify_exported_pool_readback(pool_name, device=device, cleanup=cleanup)
     if not rb.ok:
-        log.banner_error(
-            "BACKUP NOT VERIFIED", [*rb.describe(), "", "Do NOT rely on this backup.", *marked]
+        # Skipped or timed out while apt ran: the same outcome, words that do
+        # not call the drive faulty (M18-13 13a, M18R-14).
+        rely = (
+            "Do NOT rely on this backup until a run has read it back."
+            if rb.skipped
+            else "Do NOT rely on this backup."
         )
-        _notify("❌ Backup NOT verified", f"{pool_name} failed its read-back")
-        record.result("not_verified", message=f"{pool_name} failed its read-back")
+        log.banner_error("BACKUP NOT VERIFIED", [*rb.describe(), "", rely, *marked])
+        _notify("❌ Backup NOT verified", rb.summary(pool_name))
+        record.result("not_verified", message=rb.summary(pool_name))
         raise SystemExit(1)
     log.ok(f"{pool_name} verified reimportable (ONLINE)")
 

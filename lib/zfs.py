@@ -25,10 +25,10 @@ from pathlib import Path
 from typing import Protocol
 
 from lib import dpkg_lock, forensics
-from lib.config import now_utc_iso
+from lib.config import now_utc_iso, zark_command
 from lib.identity import BY_ID_DIR
 from lib.log import Log
-from lib.sh import run
+from lib.sh import RunResult, run
 from lib.zfs_features import BEYOND_2_2_STREAM
 
 
@@ -118,6 +118,9 @@ DATASET_USAGE = "name,type,used,usedbydataset,usedbysnapshots,usedbychildren,use
 # Exports the read-back and prepare's first export try, each after udevadm
 # settle, before -f (eli A5, M13R-15).
 READBACK_EXPORT_TRIES = 3
+# How long the read-back waits for an apt or dpkg run, from the first wait,
+# never extended (M18-11 11a, M18-14 14a): then it is reported as not done.
+READBACK_DPKG_WAIT_S = 15 * 60
 
 
 @dataclass(frozen=True)
@@ -204,7 +207,7 @@ def parse_damage(text: str) -> Damage:
 
 
 @dataclass
-class Readback:
+class Readback:  # pylint: disable=too-many-instance-attributes
     """Outcome of :meth:`ZFS.verify_exported_pool_readback`."""
 
     imported: bool
@@ -212,14 +215,46 @@ class Readback:
     status: str = ""  # `zpool status -v` when health is not ONLINE
     reexported: bool = False
     error: str = ""  # the import's stderr when it failed
+    # Not done because apt or dpkg was running (M18-11): "operator" when
+    # skipped at the question, "timeout" after the wait; who held the lock.
+    skipped: str = ""
+    holders: list[dpkg_lock.Holder] = field(default_factory=list)
+    pool: str = ""
 
     @property
     def ok(self) -> bool:
         """Re-imported, ONLINE and exported again."""
         return self.imported and self.health == "ONLINE" and self.reexported
 
-    def describe(self) -> list[str]:
-        """What happened, without guessing a cause (I6)."""
+    def summary(self, pool: str) -> str:
+        """One line for a notification and status.json: a read-back that was
+        not run is not one that failed (M18R-14)."""
+        if self.skipped:
+            return f"{pool} was not read back (apt was running)"
+        return f"{pool} failed its read-back"
+
+    def describe(self, *, again: bool = True) -> list[str]:
+        """What happened, without guessing a cause (I6). ``again``: say that
+        the next backup reads a skipped read-back's drive back."""
+        if self.skipped:
+            why = (
+                "skipped by the operator"
+                if self.skipped == "operator"
+                else f"still running after {READBACK_DPKG_WAIT_S // 60} minutes"
+            )
+            return [
+                f"The read-back of {self.pool} was not done: apt or dpkg was running "
+                + f"({dpkg_lock.describe(self.holders)}); {why}.",
+                "The backup's data is on the drive; it has not been read back.",
+                *(
+                    [
+                        f"Run {zark_command()} backup again once apt has ended: "
+                        + "the next run reads the drive back."
+                    ]
+                    if again
+                    else []
+                ),
+            ]
         if not self.imported:
             return [
                 "The pool exported but could NOT be re-imported:",
@@ -532,6 +567,8 @@ class ZFS:
         name: str,
         device: str | None = None,
         cleanup: PoolTracker | None = None,
+        *,
+        skip_note: str = "It would be reported as not done.",
     ) -> "Readback":
         """Confirm an already-exported pool can be re-imported and reads clean.
 
@@ -554,7 +591,11 @@ class ZFS:
              we just wrote - without this we would "verify" against cache and
              a silently-corrupt pool would pass.
           2. Re-import read-only, no-mount, by the exact device, under an
-             altroot (I-G).
+             altroot (I-G), holding dpkg's lock-frontend for the import
+             alone. While apt or dpkg runs it first waits for it to end, up
+             to :data:`READBACK_DPKG_WAIT_S`, holding nothing, and the
+             operator may skip; a skipped or timed-out read-back imports
+             nothing and is reported as not done (``skipped``, M18-11).
           3. Read its health; when it is not ONLINE, keep ``zpool status -v``.
           4. Re-export, checked and logged: a pool left imported is a failed
              verification too (I12). Each try waits for udev first: the
@@ -583,17 +624,10 @@ class ZFS:
         if device:
             cmd += f" -d {device}"
         cmd += f" {name}"
-        if cleanup is not None:
-            cleanup.track_pool(name)
-        try:
-            # The import alone under the hold; health and export after it.
-            with dpkg_lock.hold(self.log):
-                run(f"mkdir -p {root}")
-                r = run(cmd, log=self.log)
-        except dpkg_lock.DpkgBusy:
-            if cleanup is not None:
-                cleanup.untrack_pool(name)  # not imported: nothing to export
-            raise
+        got = self._import_for_readback(name, root, cmd, cleanup, skip_note)
+        if isinstance(got, Readback):
+            return got  # not done: apt or dpkg was running
+        r = got
         if not r.ok:
             if cleanup is not None:
                 cleanup.untrack_pool(name)  # not imported: nothing to export
@@ -621,6 +655,75 @@ class ZFS:
         else:
             self.log.error(f"Read-back of {name}: could NOT export it again - still imported")
         return Readback(imported=True, health=health, status=status, reexported=reexported)
+
+    def _import_for_readback(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        name: str,
+        root: str,
+        cmd: str,
+        cleanup: PoolTracker | None,
+        skip_note: str,
+    ) -> RunResult | Readback:
+        """The read-back's import under the hold, after waiting for apt or
+        dpkg when one runs (M18-11): the import's result, or the Readback
+        of a read-back that was skipped or timed out (nothing imported)."""
+        deadline: float | None = None
+        held = dpkg_lock.busy()
+        while True:
+            if held:
+                # Wait holding nothing; the 15 minutes count from the first wait.
+                if deadline is None:
+                    deadline = time.monotonic() + READBACK_DPKG_WAIT_S
+                outcome = self._wait_for_dpkg(name, held, deadline, skip_note)
+                if outcome != "done":
+                    return Readback(
+                        imported=False,
+                        skipped=outcome,
+                        holders=dpkg_lock.holders() or held,
+                        pool=name,
+                    )
+            if cleanup is not None:
+                cleanup.track_pool(name)
+            try:
+                # The import alone under the hold; health and export after it.
+                with dpkg_lock.hold(self.log):
+                    run(f"mkdir -p {root}")
+                    r = run(cmd, log=self.log)
+                return r
+            except dpkg_lock.DpkgBusy as e:
+                if cleanup is not None:
+                    cleanup.untrack_pool(name)  # not imported: nothing to export
+                held = e.holders or dpkg_lock.holders()  # taken in between: wait again
+                time.sleep(1)
+
+    def _wait_for_dpkg(
+        self, name: str, held: list[dpkg_lock.Holder], deadline: float, skip_note: str
+    ) -> str:
+        """The read-back's wait for apt or dpkg (M18-11 11a): ``"done"``,
+        ``"operator"`` (skipped) or ``"timeout"``; nothing is held."""
+        self.log.warn(
+            "apt or dpkg is running: "
+            + "; ".join(h.is_held_by() for h in held)
+            + f". The read-back of {name} waits for it to end, "
+            + f"up to {READBACK_DPKG_WAIT_S // 60} minutes."
+        )
+        outcome = self.log.ask_wait(
+            f"Skip the read-back of {name} now?",
+            max(0.0, deadline - time.monotonic()),
+            lambda: not dpkg_lock.holders(),  # read only: nothing is held while waiting
+            skip_note,
+        )
+        if outcome == "done":
+            self.log.info(f"apt or dpkg has ended: reading {name} back.")
+            return "done"
+        if outcome == "skip":
+            self.log.warn(f"Read-back of {name} skipped: not done.")
+            return "operator"
+        self.log.warn(
+            f"apt or dpkg is still running after {READBACK_DPKG_WAIT_S // 60} minutes: "
+            + f"the read-back of {name} is not done."
+        )
+        return "timeout"
 
     def _export_after_udev(self, name: str, what: str = "Read-back") -> bool:
         """``zpool export`` of a pool whose zvols just appeared, each try
