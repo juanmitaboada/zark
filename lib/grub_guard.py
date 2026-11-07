@@ -122,26 +122,27 @@ CFG_TEXT = """\
 #
 # Installed by zark.  Safe to remove if you don't use zark.
 if [ "${self:-}" = "grub-mkconfig" ]; then
-    if zark_pools="$(zpool import 2>/dev/null)"; then
-        zark_pools="$(printf '%s\\n' "$zark_pools" |
-            awk '$1 == "pool:" {print $2}' 2>/dev/null | sort -u 2>/dev/null)" || zark_pools=""
-        zark_hidden=""
-        zark_system=false
-        for zark_p in $zark_pools; do
-            case "$zark_p" in
-                rpool|bpool) zark_system=true ;;
-                *) zark_hidden="$zark_hidden $zark_p" ;;
-            esac
-        done
-        if [ "$zark_system" = false ]; then
-            ZPOOL_IMPORT_PATH=__NO_IMPORT_PATH__
-            export ZPOOL_IMPORT_PATH
-            if [ -n "$zark_hidden" ]; then
-                echo "zark: left out of the boot menu scan:$zark_hidden" >&2
-            fi
+    # The listing decides, whatever the status (M18R-19): a status-1 listing
+    # that names a foreign rpool still keeps it in the menu.
+    zark_pools="$(zpool import 2>/dev/null)" || :
+    zark_pools="$(printf '%s\\n' "$zark_pools" |
+        awk '$1 == "pool:" {print $2}' 2>/dev/null | sort -u 2>/dev/null)" || zark_pools=""
+    zark_hidden=""
+    zark_system=false
+    for zark_p in $zark_pools; do
+        case "$zark_p" in
+            rpool|bpool) zark_system=true ;;
+            *) zark_hidden="$zark_hidden $zark_p" ;;
+        esac
+    done
+    if [ "$zark_system" = false ]; then
+        ZPOOL_IMPORT_PATH=__NO_IMPORT_PATH__
+        export ZPOOL_IMPORT_PATH
+        if [ -n "$zark_hidden" ]; then
+            echo "zark: left out of the boot menu scan:$zark_hidden" >&2
         fi
-        unset zark_p zark_pools zark_hidden zark_system
     fi
+    unset zark_p zark_pools zark_hidden zark_system
 fi
 :
 """.replace("__NO_IMPORT_PATH__", NO_IMPORT_PATH)

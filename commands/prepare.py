@@ -312,6 +312,10 @@ def run(
         )
         if rb is not None and rb.skipped:
             lines.append(
+                "The drive holds a first backup zark cannot verify without registering it; "
+                + "zark has no command to read an unregistered drive back."
+            )
+            lines.append(
                 f"Wipe and retry once apt has ended: {zark_command()} purge {ident.by_id_path}"
             )
         left = anchors.drop_anchors_of(new_guid, log)

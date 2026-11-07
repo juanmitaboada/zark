@@ -5848,6 +5848,78 @@ class TestReadbackWaitsForApt:  # pylint: disable=missing-function-docstring,use
         assert rb.ok and mock.call_count(self.IMPORT) == 1, rb
         assert len(given) == 2 and given[1] < given[0] <= zfs_mod.READBACK_DPKG_WAIT_S, given
 
+    def test_a_take_that_fails_without_a_holder_is_refused_not_retried(self):
+        # M18R-21: ENOLCK at the take, nobody holding: fail closed, exit 75's error.
+        real = fcntl.fcntl
+
+        def take(fd: int, cmd: int, arg: Any = 0) -> Any:
+            if cmd == fcntl.F_SETLK and struct.unpack("hhqqi4x", arg)[0] == fcntl.F_WRLCK:
+                raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+            return real(fd, cmd, arg)
+
+        mock = self._mock()
+        cleanup = MagicMock()
+        asked: list[str] = []
+
+        def ask_wait(question: str, *_a: Any, **_k: Any) -> str:
+            asked.append(question)
+            raise AssertionError("waited for a lock nobody holds")
+
+        with (
+            _dpkg_locks(),
+            patch.object(dpkg_lock.fcntl, "fcntl", side_effect=take),
+            patch.object(Log, "ask_wait", side_effect=ask_wait),
+            patch.object(zfs_mod.time, "sleep"),
+            patch_sh(mock),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                ZFS(Log()).verify_exported_pool_readback("backup2", self.DEV, cleanup)
+            except dpkg_lock.DpkgBusy as e:
+                assert [h.error for h in e.holders] == [os.strerror(errno.ENOLCK)], e.holders
+            else:
+                raise AssertionError("not refused")
+        assert not asked and mock.was_not_called("zpool import"), asked
+        cleanup.untrack_pool.assert_called_once_with("backup2")
+
+    def test_the_loop_ends_at_the_deadline_even_when_the_wait_says_done(self):
+        # M18R-21: done() true at once, the take always busy: a timeout, not a loop.
+        clock = [0.0]
+
+        def tick() -> float:
+            clock[0] += 100.0
+            return clock[0]
+
+        @contextmanager
+        def hold(_log: Log) -> Iterator[None]:
+            raise dpkg_lock.DpkgBusy(self.HELD)
+            yield  # pylint: disable=unreachable
+
+        waits: list[float] = []
+
+        def ask_wait(_q: str, timeout: float, *_a: Any, **_k: Any) -> str:
+            waits.append(timeout)
+            assert len(waits) < 50, "no end"
+            return "done"
+
+        mock = self._mock()
+        out = StringIO()
+        with (
+            _dpkg_locks(),
+            patch.object(dpkg_lock, "busy", return_value=self.HELD),
+            patch.object(dpkg_lock, "hold", hold),
+            patch.object(Log, "ask_wait", side_effect=ask_wait),
+            patch.object(zfs_mod.time, "monotonic", tick),
+            patch.object(zfs_mod.time, "sleep"),
+            patch_sh(mock),
+            redirect_stdout(out),
+        ):
+            rb = ZFS(Log()).verify_exported_pool_readback("backup2", device=self.DEV)
+        assert rb.skipped == "timeout" and not rb.imported, rb
+        assert 1 <= len(waits) <= zfs_mod.READBACK_DPKG_WAIT_S // 100 + 1, waits
+        assert mock.was_not_called("zpool import")
+        assert "still running after 15 minutes" in " ".join(out.getvalue().split())
+
     def test_a_skip_imports_nothing_and_is_reported_as_not_done(self):
         cleanup = MagicMock()
         rb, mock, _, out = self._readback([self.HELD], ["skip"], cleanup=cleanup)
@@ -5952,6 +6024,10 @@ class TestReadbackWaitsForApt:  # pylint: disable=missing-function-docstring,use
         assert "The read-back of blue was not done" in text and "still running after 15" in text
         assert "The drive has NOT been registered." in text and "backup again" not in text, text
         assert "Wipe and retry once apt has ended:" in text, text
+        assert (
+            "The drive holds a first backup zark cannot verify without registering it; "
+            "zark has no command to read an unregistered drive back."
+        ) in text, text
         assert json.loads((cfg_dir / "known_drives.json").read_text(encoding="utf-8")) == {}
 
 
@@ -9118,6 +9194,23 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
         rc, out = self._hook(both, "imported")
         assert rc == 1 and "install(s)" in out and f"removal(s): {self._K}:" in out, out
 
+    def test_a_deb_path_with_a_space_is_an_install(self):
+        # M18R-20: the action is the rest of the line, not its last field.
+        deb = "/home/u/my dir/linux-image-7.3.0-9-generic_7.3.0-9.9_amd64.deb"
+        v3 = self._v3(f"{self._K} - - none < 7.3.0-9.9 amd64 same {deb}")
+        self._table(v3, {"system": 0, "plugged": 1, "imported": 1})
+        v2 = self._CONFIG.replace("VERSION 3", "VERSION 2") + f"{self._K} - < 7.3.0-9.9 {deb}\n"
+        self._table(v2, {"system": 0, "plugged": 1, "imported": 1})
+        removal = f"{self._K} 7.3.0-9.9 amd64 same > - - none **REMOVE**"
+        rc, out = self._hook(self._v3(removal), "plugged")
+        assert rc == 0, out
+        both = self._v3(
+            removal, f"linux-image-7.3.0-11-generic - - none < 7.3.0-11.11 amd64 same {deb}"
+        )
+        rc, out = self._hook(both, "plugged")
+        assert rc == 1 and "install(s): linux-image-7.3.0-11-generic:" in out, out
+        assert "removal(s)" not in out, out
+
     def test_zark_internal_lets_everything_through(self):
         for stdin in (self._v3(self._remove()), self._v3(self._install())):
             rc, out = self._hook(stdin, "imported", env_add={"ZARK_INTERNAL": "1"})
@@ -9247,7 +9340,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
     """
 
     @staticmethod
-    def _stub(td: str, importable: str, *, fail: bool = False) -> str:
+    def _stub(td: str, importable: str, *, fail: bool = False, status: int = 0) -> str:
         stub = Path(td, "stub")
         stub.mkdir()
         body = (
@@ -9257,6 +9350,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
             + 'if [ "$1" = import ] && [ -z "${ZPOOL_IMPORT_PATH:-}" ]; then\n'
             + f"  printf '{importable}'\n"
             + "fi\n"
+            + f"exit {status}\n"
         )
         Path(stub, "zpool").write_text(body, encoding="ascii")
         Path(stub, "zpool").chmod(0o755)
@@ -9272,13 +9366,14 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
         *,
         self_name: str = "grub-mkconfig",
         fail: bool = False,
+        status: int = 0,
         text: str = grub_guard.CFG_TEXT,
     ) -> tuple[int, str, str, str]:
         """Source the file under ``set -e`` the way grub-mkconfig does, then
         run a child that prints what it inherited. Returns the status, the
         stdout, the stderr and the zpool calls."""
         with tempfile.TemporaryDirectory() as td:
-            stub = self._stub(td, importable, fail=fail)
+            stub = self._stub(td, importable, fail=fail, status=status)
             cfg = Path(td, "zark-backup-guard.cfg")
             cfg.write_text(text, encoding="utf-8")
             env = {k: v for k, v in os.environ.items() if k != "ZPOOL_IMPORT_PATH"}
@@ -9334,11 +9429,28 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
             assert out == "after\nchild=unset\n", (name, out)
             assert calls == "" and err == "", (name, calls, err)
 
-    def test_a_failing_zpool_exports_nothing_and_the_shell_goes_on(self):
+    # M18R-19: the listing decides, not zpool import's status; each case
+    # sourced by dash under set -e, the shell going on after the file.
+    def test_a_failing_zpool_with_no_output_exports_and_the_shell_goes_on(self):
         rc, out, err, calls = self._source(self._pools("backup2"), fail=True)
         assert rc == 0, err
-        assert out == "after\nchild=unset\n", out
+        assert out == f"after\nchild={grub_guard.NO_IMPORT_PATH}\n", out
         assert calls == "import\n" and err == "", (calls, err)
+
+    def test_status_0_listing_nothing_exports(self):
+        rc, out, err, _ = self._source("", status=0)
+        assert rc == 0 and out == f"after\nchild={grub_guard.NO_IMPORT_PATH}\n", out
+        assert err == "", err
+
+    def test_status_1_listing_a_backup_pool_exports_and_says_so(self):
+        rc, out, err, _ = self._source(self._pools("backup2"), status=1)
+        assert rc == 0 and out == f"after\nchild={grub_guard.NO_IMPORT_PATH}\n", out
+        assert err == "zark: left out of the boot menu scan: backup2\n", err
+
+    def test_status_1_listing_an_rpool_exports_nothing(self):
+        rc, out, err, _ = self._source(self._pools("rpool", "backup2"), status=1)
+        assert rc == 0 and out == "after\nchild=unset\n", out
+        assert err == "", err
 
     def test_the_value_is_a_non_empty_absolute_path_that_does_not_exist(self):
         # M18R-4: an empty or ':'-only value is the full scan.

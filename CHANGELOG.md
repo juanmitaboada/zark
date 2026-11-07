@@ -23,7 +23,8 @@ system 2.2 left half-done.
   sourced by `grub-mkconfig`, points `ZPOOL_IMPORT_PATH` at
   `/nonexistent/zark-no-import` unless an importable pool is named rpool or
   bpool, so `10_linux_zfs` imports nothing and imported pools are listed as
-  before. Kernel removals and the updates of other packages that run
+  before. It decides on the names `zpool import` lists, whatever its exit
+  status (M18R-19). Kernel removals and the updates of other packages that run
   `update-grub` complete with the drive plugged in, not imported.
   `09_zfs_backup_guard` still refuses while a backup pool is imported, and
   its message says what to run: `sudo apt -f install` from a maintainer
@@ -32,7 +33,9 @@ system 2.2 left half-done.
   for protocol version 3; the hook reads versions 3, 2 and 1. A boot-critical
   install is refused while a backup drive is plugged in or imported, as
   before (M18-3 3a); a boot-critical removal or purge only while one is
-  imported; an unreadable line counts as a removal; configures never.
+  imported; an unreadable line counts as a removal; configures never. The
+  action is the rest of the line after APT's fixed fields, so a `.deb` path
+  with a space is read as the install it is (M18R-20).
 - **A kernel prerm backstop** (B2, M18-2 2a): `/etc/kernel/prerm.d/00-zark-backup-guard`
   refuses a kernel removal while a backup pool is imported, before any
   file is deleted and before dkms removes the kernel's modules, for a
@@ -49,7 +52,10 @@ system 2.2 left half-done.
   terminal to skip it. A skipped or timed-out read-back is not done and is
   reported so (M18-13 13a): BACKUP NOT VERIFIED and exit 1 as before, with
   "was not read back (apt was running)" in the notification and
-  `status.json`; prepare leaves the drive unregistered.
+  `status.json`; prepare leaves the drive unregistered and says why. A
+  dpkg lock that cannot be taken while nobody holds it stops the command
+  with exit 75 rather than waiting, and the wait never runs past its 15
+  minutes (M18R-21).
 - `finish` names boot-critical packages dpkg left half-installed or
   half-configured, with `sudo apt -f install` (M18-4 4a).
 

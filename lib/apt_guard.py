@@ -128,7 +128,8 @@ export PATH
 
 # What APT sends. Version 2 or 3: "VERSION <n>", the configuration (one
 # key=value per line) up to the first empty line, then one line per action
-# whose first field is the package's name and last field the action: a .deb
+# whose first field is the package's name and whose action is the rest of
+# the line after the fixed fields (8 in version 3, 4 in version 2): a .deb
 # path (install or upgrade), **REMOVE** (removal or purge), **CONFIGURE** or
 # **ERROR**. Version 1 (no VERSION line): one .deb path per line. A line of
 # any other shape counts as a removal of its first field, so nothing slips
@@ -138,11 +139,12 @@ removals=""
 first=true
 in_config=false
 v1=true
+version=""
 while IFS= read -r line || [ -n "$line" ]; do
     if $first; then
         first=false
         case "$line" in
-            "VERSION "*) v1=false; in_config=true; continue ;;
+            "VERSION "*) v1=false; in_config=true; version="${line#VERSION }"; continue ;;
         esac
     fi
     if $in_config; then
@@ -159,22 +161,29 @@ while IFS= read -r line || [ -n "$line" ]; do
         name="${name%%_*}"
         kind=install
     else
-        name=""
-        last=""
-        n=0
-        for field in $line; do
-            [ -n "$name" ] || name="$field"
-            last="$field"
-            n=$((n + 1))
+        # The action is the rest of the line after the fixed fields (8 in
+        # version 3, 4 in version 2), so a .deb path may hold a space
+        # (M18R-20); a line with fewer fields is malformed: a removal.
+        case "$version" in
+            2) fixed=4 ;;
+            *) fixed=8 ;;
+        esac
+        name="${line%% *}"
+        action="$line"
+        i=0
+        while [ "$i" -lt "$fixed" ]; do
+            case "$action" in
+                *" "*) action="${action#* }" ;;
+                *) action=""; break ;;
+            esac
+            i=$((i + 1))
         done
         kind=remove
-        if [ "$n" -ge 2 ]; then
-            case "$last" in
-                "**CONFIGURE**"|"**ERROR**") continue ;;
-                "**REMOVE**") kind=remove ;;
-                /*) kind=install ;;
-            esac
-        fi
+        case "$action" in
+            "**CONFIGURE**"|"**ERROR**") continue ;;
+            "**REMOVE**") kind=remove ;;
+            /*) kind=install ;;
+        esac
     fi
     case "$name" in
         __SENSITIVE_CASE__)

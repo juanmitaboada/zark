@@ -682,6 +682,13 @@ class ZFS:
                         holders=dpkg_lock.holders() or held,
                         pool=name,
                     )
+            if deadline is not None and time.monotonic() >= deadline:
+                # Never past the deadline, whatever ended the wait (M18R-21).
+                self.log.warn(
+                    f"apt or dpkg is still running after {READBACK_DPKG_WAIT_S // 60} minutes: "
+                    + f"the read-back of {name} is not done."
+                )
+                return Readback(imported=False, skipped="timeout", holders=held, pool=name)
             if cleanup is not None:
                 cleanup.track_pool(name)
             try:
@@ -693,6 +700,8 @@ class ZFS:
             except dpkg_lock.DpkgBusy as e:
                 if cleanup is not None:
                     cleanup.untrack_pool(name)  # not imported: nothing to export
+                if e.holders and all(h.error for h in e.holders):
+                    raise  # the lock cannot be taken, nobody holds it: fail closed (M18R-21)
                 held = e.holders or dpkg_lock.holders()  # taken in between: wait again
                 time.sleep(1)
 
