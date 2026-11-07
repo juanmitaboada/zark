@@ -1,3 +1,25 @@
+zark (2.3.0~rc1-1) UNRELEASED; urgency=medium
+
+  * Milestone M18 of zark 2.3 (kernel updates with a backup drive
+    plugged in). Not for release: nothing is published until the final
+    2.3.0.
+  * /etc/default/grub.d/zark-backup-guard.cfg keeps a backup drive that
+    is only plugged in out of update-grub's scan: a kernel removed by
+    autoremove or unattended-upgrades no longer leaves dpkg half-done.
+  * The APT hook asks for protocol version 3 and refuses a boot-critical
+    removal while a backup pool is imported; installs are refused while a
+    drive is plugged in, as before. /etc/kernel/prerm.d/00-zark-backup-guard
+    refuses a kernel removal at dpkg's level while one is imported.
+  * zark does not import a backup pool while apt or dpkg runs (exit 75),
+    and holds dpkg's frontend lock for the import; the read-back waits for
+    apt up to 15 minutes and a skipped one is reported as not read back.
+  * finish names boot packages dpkg left half-done. Run sudo zark setup
+    after the upgrade; sudo apt -f install finishes a system 2.2 left
+    half-done.
+  * debian/watch in format version 5.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Sat, 07 Nov 2026 13:10:54 +0100
+
 zark (2.2.0-1) stable; urgency=medium
 
   * zark 2.2. Ubuntu 26.10's layout on UEFI, /boot on an ext4 partition

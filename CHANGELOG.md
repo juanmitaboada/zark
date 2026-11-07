@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### M18 - kernel updates with a backup drive plugged in
+### M18 - kernel updates with a backup drive plugged in (2.3.0-rc1)
 
 A kernel that unattended-upgrades removed while a backup drive was plugged
 in left dpkg half-done (`rH`) and an apport report: APT's hook saw only
