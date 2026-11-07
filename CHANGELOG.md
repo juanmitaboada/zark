@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`sonar-project.properties`). A red quality gate does not fail CI yet.
   Nothing in the package changes.
 
+#### Changed
+
+- **CI's third-party actions and tooling locked**: the release job's
+  `softprops/action-gh-release` is pinned by commit, and the tests and
+  lint jobs install pip, tox and tox-uv only from
+  `.github/requirements-ci.txt` (every package at one version with its
+  hashes, wheels only). Nothing in the package changes.
+
 ### M21 - packaging
 
 #### Changed

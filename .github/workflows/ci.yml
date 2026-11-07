@@ -82,9 +82,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: 'pip'
+          cache-dependency-path: .github/requirements-ci.txt
 
       - name: Install tox
-        run: python -m pip install --upgrade pip tox
+        # Locked: every package at one version with its hashes, wheels only.
+        run: |
+          python -m pip install --require-hashes --only-binary :all: -r .github/requirements-ci.txt
 
       - name: Run tests
         # tox env name has no dot: 3.12 → py312
@@ -116,9 +119,12 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: .github/requirements-ci.txt
 
       - name: Install tox
-        run: python -m pip install --upgrade pip tox
+        # Locked: every package at one version with its hashes, wheels only.
+        run: |
+          python -m pip install --require-hashes --only-binary :all: -r .github/requirements-ci.txt
 
       - name: Run lint suite (mypy + pylint + ruff)
         run: tox -e lint
@@ -242,7 +248,8 @@ jobs:
 
       - name: Attach release assets to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
+        # Pinned by commit: a third-party action run with contents: write.
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: |
             dist/zark_*_amd64.deb

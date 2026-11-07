@@ -27268,6 +27268,33 @@ class TestCiWorkflow:  # pylint: disable=missing-function-docstring
         assert props["sonar.qualitygate.wait"] == "false", props
         assert props["sonar.projectKey"] == "juanmitaboada_zark", props
 
+    def test_third_party_actions_by_commit_and_tox_from_the_lock(self):
+        # M23T-3, M23T-4: an action outside actions/ is pinned by a full
+        # commit; CI's tox comes only from the hash-locked file, wheels only.
+        text = (self._REPO / ".github" / "workflows" / "ci.yml").read_text("utf-8")
+        for uses in re.findall(r"uses: (\S+)", text):
+            if not uses.startswith("actions/"):
+                assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", uses), uses
+        locked = (
+            "python -m pip install --require-hashes --only-binary :all:"
+            " -r .github/requirements-ci.txt\n"
+        )
+        assert text.count(locked) == 2, text
+        assert "pip install --upgrade" not in text
+        # A plain scalar may not hold ": " (YAML reads a mapping): ":all:" needs a block.
+        plain = [
+            ln
+            for ln in text.splitlines()
+            if re.match(r"\s+run: [^|>\s]", ln) and ": " in ln.split("run: ", 1)[1]
+        ]
+        assert not plain, plain
+        req = (self._REPO / ".github" / "requirements-ci.txt").read_text("utf-8")
+        blocks = re.split(r"\n(?=[a-z])", req[req.index("\n\n") + 2 :].strip())
+        names = [b.split("==", 1)[0] for b in blocks]
+        assert {"pip", "tox", "tox-uv"} <= set(names), names
+        for block in blocks:
+            assert re.search(r"==\S+", block.splitlines()[0]) and "--hash=sha256:" in block, block
+
 
 class TestTypography:  # pylint: disable=missing-function-docstring
     """M4c-3: no em dash, en dash or U+2026 in any tracked text file."""
