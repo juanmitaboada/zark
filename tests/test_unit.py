@@ -15127,13 +15127,15 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         bpool_guid: str = "",
         ext4: bool = False,
         boot_mounts: bool = True,
+        dpkg: str = "",
     ) -> tuple[str, bool, list[str]]:
         order: list[str] = []
 
         def fake_run(cmd: str, **_kw: object) -> RunResult:
             order.append(cmd)
             down = not boot_mounts and cmd in ("findmnt -n /boot", "mount /boot")
-            return RunResult(returncode=int(down), stdout="", stderr="", command=cmd)
+            out = dpkg if cmd.startswith("dpkg-query -W") else ""
+            return RunResult(returncode=int(down), stdout=out, stderr="", command=cmd)
 
         def fake_grub(*a: object) -> str:
             order.append(f"regenerate_grub_cfg {a[1]} {a[3]}")
@@ -15228,6 +15230,32 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         grub = next(i for i, c in enumerate(order) if c.startswith("regenerate_grub_cfg"))
         fix = next(i for i, c in enumerate(order) if c.startswith("fix_grub_bpool_uuid"))
         assert grub < fix, order
+
+    _DPKG = (
+        "ii  linux-image-7.3.0-10-generic\n"
+        "rH  linux-image-7.3.0-9-generic\n"
+        "iF  grub-efi-amd64-signed\n"
+        "iF  cowsay\n"
+        "rc  linux-image-7.3.0-8-generic\n"
+        "iU  zfsutils-linux\n"
+    )
+
+    def test_half_done_boot_packages_are_named_with_what_finishes_them(self):
+        """M18-4 4a: a kernel zark 2.2 left rH (or iF) is named, with apt -f install."""
+        out, exited, order = self._run(dpkg=self._DPKG)
+        assert not exited and "FINISH COMPLETE" in out, out
+        assert (
+            "⚠ dpkg left half-done: linux-image-7.3.0-9-generic, grub-efi-amd64-signed: "
+            "run sudo apt -f install"
+        ) in out, out
+        assert "cowsay" not in out and "7.3.0-8" not in out and "zfsutils" not in out
+        assert any(c.startswith("dpkg-query -W -f '${db:Status-Abbrev} ${Package}") for c in order)
+        out, _, _ = self._run(grub_failure="update-grub failed: x", dpkg=self._DPKG)
+        assert "FINISH INCOMPLETE" in out and "dpkg left half-done" in out, out
+
+    def test_nothing_half_done_says_nothing(self):
+        out, _, _ = self._run(dpkg="ii  linux-image-7.3.0-10-generic\n")
+        assert "half-done" not in out, out
 
     def test_guard_refusal_is_incomplete(self):
         reason = "update-grub failed: ERROR: External ZFS pool(s) detected: backup"

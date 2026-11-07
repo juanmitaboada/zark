@@ -22,6 +22,7 @@ runs from rpool, and an export unmounts every dataset that is not busy
 before it fails (M4c-4).
 """
 
+import fnmatch
 import os
 import re
 from pathlib import Path
@@ -188,6 +189,23 @@ def ensure_ext4_boot(log: Log) -> str:
         return ""
     log.error("/boot (ext4) is not mounted and mount /boot failed")
     return "/boot (ext4) is not mounted: mount /boot, then run finish again"
+
+
+def half_done_boot_packages() -> list[str]:
+    """Boot-critical packages dpkg left half-installed or half-configured
+    (M18-4 4a): a kernel removed or installed while zark 2.2's grub guard
+    refused update-grub is left ``rH`` or ``iF``. ``sudo apt -f install``
+    finishes them now that the scan file keeps a plugged-in drive out of
+    update-grub. Read-only."""
+    r = sh.run("dpkg-query -W -f '${db:Status-Abbrev} ${Package}\\n'", timeout=60)
+    found: list[str] = []
+    for line in r.lines if r.ok else []:
+        fields = line.split()
+        if len(fields) != 2 or len(fields[0]) < 2 or fields[0][1] not in "HF":
+            continue
+        if any(fnmatch.fnmatchcase(fields[1], g) for g in apt_guard.SENSITIVE_GLOBS):
+            found.append(fields[1])
+    return found
 
 
 def setup_gaps(zfs: ZFS) -> list[str]:
@@ -359,6 +377,11 @@ def run(
         *(
             [f"⚠ not mounted: {', '.join(unmounted)}: reboot and run finish again"]
             if unmounted
+            else []
+        ),
+        *(
+            [f"⚠ dpkg left half-done: {', '.join(half_done)}: run sudo apt -f install"]
+            if (half_done := half_done_boot_packages())
             else []
         ),
         "",
