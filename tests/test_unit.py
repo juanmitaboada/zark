@@ -8211,6 +8211,285 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
             assert "zpool export" not in out, out
 
 
+class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
+    """M18-1 1a, B1 (M18R-1, M18R-7, M18R-11): the hook reads APT's
+    protocol versions 3, 2 and 1 and applies the table: an install of a
+    boot-critical package is refused while a backup pool is plugged in or
+    imported, a removal only while one is imported; a malformed line counts
+    as a removal; configures, errors and the configuration block never.
+
+    zpool and zfs are stubs; the hook's PATH line is pointed at them, so the
+    machine's own pools are never read. The stub records its calls."""
+
+    _CONFIG = (
+        "VERSION 3\n"
+        "APT::Architecture=amd64\n"
+        "APT::NeverAutoRemove::=^linux-image-7.3.0-10-generic$\n"
+        "Zark::Test=linux-image-7.3.0-9-generic - - none **REMOVE**\n"
+        "linux-image-7.3.0-9-generic::Made-Up=1 **REMOVE**\n"
+        "\n"
+    )
+    _K = "linux-image-7.3.0-9-generic"
+    _DEB = "/var/cache/apt/archives/linux-image-7.3.0-9-generic_7.3.0-9.9_amd64.deb"
+
+    @classmethod
+    def _v3(cls, *actions: str) -> str:
+        return cls._CONFIG + "".join(f"{a}\n" for a in actions)
+
+    @classmethod
+    def _install(cls, name: str = "") -> str:
+        name = name or cls._K
+        return f"{name} - - none < 7.3.0-9.9 amd64 same {cls._DEB}"
+
+    @classmethod
+    def _remove(cls, name: str = "") -> str:
+        name = name or cls._K
+        return f"{name} 7.3.0-9.9 amd64 same > - - none **REMOVE**"
+
+    _SYSTEM = "rpool\\t-\\nbpool\\t-\\n"
+    _IMPORTED = "rpool\\t-\\nbpool\\t-\\nbackup2\\t/run/zark/altroot/backup2\\n"
+    _PLUGGED = "   pool: backup2\\n     id: 1\\n"
+
+    def _run(  # pylint: disable=too-many-locals
+        self,
+        text: str,
+        stdin: str,
+        state: str,
+        *,
+        fmt: str = "-",
+        env_add: dict[str, str] | None = None,
+        args: Sequence[str] = (),
+        imported: str = "",
+    ) -> tuple[int, str, str]:
+        importable = self._PLUGGED if state == "plugged" else ""
+        imported = imported or (self._IMPORTED if state == "imported" else self._SYSTEM)
+        with tempfile.TemporaryDirectory() as td:
+            stub = Path(td, "stub")
+            stub.mkdir()
+            Path(stub, "zpool").write_text(
+                "#!/bin/sh\n"
+                f'echo "zpool $*" >> {td}/calls\n'
+                'case "$1" in\n'
+                f"  import) printf '{importable}' ;;\n"
+                f"  list) printf '{imported}' ;;\n"
+                "esac\n",
+                encoding="ascii",
+            )
+            Path(stub, "zfs").write_text(f"#!/bin/sh\nprintf '{fmt}\\n'\n", encoding="ascii")
+            for name in ("zpool", "zfs"):
+                Path(stub, name).chmod(0o755)
+            script = Path(td, "script")
+            script.write_text(
+                text.replace(
+                    "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"
+                ),
+                encoding="utf-8",
+            )
+            env = {k: v for k, v in os.environ.items() if k != "ZARK_INTERNAL"}
+            env["PATH"] = f"{stub}:/usr/bin:/bin"
+            env.update(env_add or {})
+            proc = subprocess.run(
+                ["sh", str(script), *args],
+                input=stdin,
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            calls = (
+                Path(td, "calls").read_text(encoding="utf-8") if Path(td, "calls").exists() else ""
+            )
+        return proc.returncode, " ".join((proc.stdout + proc.stderr).split()), calls
+
+    def _hook(self, stdin: str, state: str, **kw: Any) -> tuple[int, str]:
+        rc, out, _ = self._run(apt_guard.HOOK_SCRIPT, stdin, state, **kw)
+        return rc, out
+
+    def _table(self, stdin: str, want: dict[str, int]) -> None:
+        for state, rc_want in want.items():
+            rc, out = self._hook(stdin, state)
+            assert rc == rc_want, (state, stdin, out)
+
+    def test_an_install_is_refused_while_a_pool_is_plugged_in_or_imported(self):
+        self._table(self._v3(self._install()), {"system": 0, "plugged": 1, "imported": 1})
+
+    def test_a_removal_is_refused_only_while_a_pool_is_imported(self):
+        self._table(self._v3(self._remove()), {"system": 0, "plugged": 0, "imported": 1})
+
+    def test_a_purge_is_a_removal(self):
+        # M18R-11: dpkgpm.cc prints **REMOVE** for a purge too; no state field to tell them.
+        purge = f"{self._K} 7.3.0-9.9 amd64 same > - - none **REMOVE**"
+        self._table(self._v3(purge), {"system": 0, "plugged": 0, "imported": 1})
+
+    def test_a_malformed_line_counts_as_a_removal(self):
+        for line in (self._K, f"{self._K} 7.3.0-9.9 amd64 same > - - none **SOMETHING**"):
+            self._table(self._v3(line), {"system": 0, "plugged": 0, "imported": 1})
+
+    def test_configure_and_error_lines_are_never_refused(self):
+        for action in ("**CONFIGURE**", "**ERROR**"):
+            line = f"{self._K} 7.3.0-9.9 amd64 same = 7.3.0-9.9 amd64 same {action}"
+            self._table(self._v3(line), {"system": 0, "plugged": 0, "imported": 0})
+
+    def test_packages_that_are_not_boot_critical_are_never_refused(self):
+        lines = (
+            "cowsay - - none < 3.03 all foreign /var/cache/apt/archives/cowsay_3.03_all.deb",
+            "cowsay 3.03 all foreign > - - none **REMOVE**",
+        )
+        self._table(self._v3(*lines), {"system": 0, "plugged": 0, "imported": 0})
+
+    def test_the_configuration_block_is_not_read(self):
+        # Its lines name a kernel and **REMOVE**; only the action lines count.
+        cowsay = "cowsay 3.03 all foreign > - - none **REMOVE**"
+        self._table(self._v3(cowsay), {"system": 0, "plugged": 0, "imported": 0})
+        _, _, calls = self._run(apt_guard.HOOK_SCRIPT, self._v3(cowsay), "imported")
+        assert calls == "", calls  # nothing boot-critical: no pool scan
+
+    def test_an_empty_action_list_is_allowed(self):
+        self._table(self._CONFIG, {"system": 0, "plugged": 0, "imported": 0})
+
+    def test_version_2_lines_are_read_by_their_first_and_last_field(self):
+        # M18R-7: a local apt.conf may lower the version (apt-listchanges asks for 2).
+        head = self._CONFIG.replace("VERSION 3", "VERSION 2")
+        install = f"{head}{self._K} - < 7.3.0-9.9 {self._DEB}\n"
+        remove = f"{head}{self._K} 7.3.0-9.9 > - **REMOVE**\n"
+        self._table(install, {"system": 0, "plugged": 1, "imported": 1})
+        self._table(remove, {"system": 0, "plugged": 0, "imported": 1})
+
+    def test_version_1_reads_deb_paths(self):
+        self._table(f"{self._DEB}\n", {"system": 0, "plugged": 1, "imported": 1})
+        cowsay = "/var/cache/apt/archives/cowsay_3.03_all.deb\n"
+        self._table(cowsay, {"system": 0, "plugged": 0, "imported": 0})
+
+    def test_a_mixed_transaction_takes_each_lines_rule(self):
+        stdin = self._v3(
+            self._remove(),
+            "cowsay - - none < 3.03 all foreign /var/cache/apt/archives/cowsay_3.03_all.deb",
+        )
+        self._table(stdin, {"system": 0, "plugged": 0, "imported": 1})
+        both = self._v3(self._remove(), self._install("linux-image-7.3.0-11-generic"))
+        rc, out = self._hook(both, "plugged")
+        assert rc == 1 and "install(s): linux-image-7.3.0-11-generic:" in out, out
+        assert "removal(s)" not in out, out
+        rc, out = self._hook(both, "imported")
+        assert rc == 1 and "install(s)" in out and f"removal(s): {self._K}:" in out, out
+
+    def test_zark_internal_lets_everything_through(self):
+        for stdin in (self._v3(self._remove()), self._v3(self._install())):
+            rc, out = self._hook(stdin, "imported", env_add={"ZARK_INTERNAL": "1"})
+            assert rc == 0, out
+
+    def test_the_install_message(self):
+        rc, out = self._hook(self._v3(self._install()), "plugged")
+        assert rc == 1, out
+        assert (
+            f"Refusing boot-critical package install(s): {self._K}: backup pool backup2 is "
+            "plugged in. Unplug the drive (or let the backup end), then run apt again."
+        ) in out, out
+
+    def test_the_removal_message(self):
+        rc, out = self._hook(self._v3(self._remove()), "imported")
+        assert rc == 1, out
+        assert (
+            f"Refusing boot-critical package removal(s): {self._K}: backup pool backup2 is "
+            "imported (a zark backup or mount is running). When it ends (or after "
+            "`sudo zark umount`), run apt again."
+        ) in out, out
+
+    def test_the_conf_asks_for_version_3_by_the_hooks_path(self):
+        assert apt_guard.APT_CONF == (
+            'DPkg::Pre-Install-Pkgs { "/usr/local/lib/zark/apt-zfs-backup-guard"; };\n'
+            'DPkg::Tools::Options::/usr/local/lib/zark/apt-zfs-backup-guard::Version "3";\n'
+        )
+        assert "dpkg-deb" not in apt_guard.HOOK_SCRIPT
+
+    # ── the prerm.d backstop (B2, M18-2 2a, M18R-2) ──────────────────────
+
+    def _prerm(self, state: str, **kw: Any) -> tuple[int, str]:
+        rc, out, _ = self._run(
+            apt_guard.PRERM_SCRIPT,
+            "",
+            state,
+            args=("7.3.0-9-generic", "/boot/vmlinuz-7.3.0-9-generic"),
+            **kw,
+        )
+        return rc, out
+
+    def test_prerm_refuses_only_while_a_pool_is_imported(self):
+        assert self._prerm("system")[0] == 0
+        assert self._prerm("plugged")[0] == 0
+        assert self._prerm("imported")[0] == 1
+        tank = "rpool\\t-\\nbpool\\t-\\ntank\\t-\\n"
+        assert self._prerm("system", imported=tank)[0] == 0  # a data pool, not zark's
+        rc, out = self._prerm("system", imported=tank, fmt="2")  # a zark drive, no altroot
+        assert rc == 1 and "tank" in out, out
+
+    def test_prerm_honours_zark_internal(self):
+        assert self._prerm("imported", env_add={"ZARK_INTERNAL": "1"})[0] == 0
+
+    def test_prerm_message(self):
+        rc, out = self._prerm("imported")
+        assert rc == 1, out
+        assert (
+            "zark: not removing kernel 7.3.0-9-generic: backup pool backup2 is imported. "
+            "When the backup ends (or after `sudo zark umount`), run: sudo apt -f install"
+        ) in out, out
+
+    # What the archives ship in etc/kernel/prerm.d and usr/share/kernel/prerm.d
+    # (Contents-amd64.gz of noble, resolute and stonking, release and -updates,
+    # read for M18): dkms's dkms and linux-base 4.17ubuntu1's zz-legacy-boot.
+    _SHIPPED_PRERM_D = ("dkms", "zz-legacy-boot")
+
+    def test_prerm_name_runs_first_and_is_one_run_parts_takes(self):
+        name = Path(apt_guard.PRERM_RELATIVE_PATH).name
+        assert apt_guard.PRERM_RELATIVE_PATH.startswith("etc/kernel/prerm.d/")
+        assert re.fullmatch(r"[a-zA-Z0-9_-]+", name), name
+        assert all(name.encode() < other.encode() for other in self._SHIPPED_PRERM_D)
+        if shutil.which("run-parts"):
+            with tempfile.TemporaryDirectory() as td:
+                for f in (*self._SHIPPED_PRERM_D, name):
+                    Path(td, f).write_text("#!/bin/sh\n", encoding="ascii")
+                    Path(td, f).chmod(0o755)
+                listed = subprocess.run(
+                    ["run-parts", "--test", td],
+                    capture_output=True,
+                    text=True,
+                    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                    check=True,
+                ).stdout.split()
+                assert listed[0] == str(Path(td, name)), listed
+
+    def test_install_creates_prerm_d_and_is_current_needs_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            apt_guard.install(target_root=td, log=make_log())
+            prerm = Path(td, apt_guard.PRERM_RELATIVE_PATH)
+            assert prerm.read_text(encoding="utf-8") == apt_guard.PRERM_SCRIPT
+            assert prerm.stat().st_mode & 0o111
+            assert apt_guard.is_current(td)
+            prerm.unlink()
+            assert not apt_guard.is_current(td)
+
+    def test_remove_takes_both_conf_forms_and_the_prerm_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            apt_guard.install(target_root=td, log=make_log())
+            conf = Path(td, apt_guard.APT_CONF_RELATIVE_PATH)
+            hook = Path(td, apt_guard.HOOK_RELATIVE_PATH)
+            prerm = Path(td, apt_guard.PRERM_RELATIVE_PATH)
+            assert not apt_guard.remove(td, make_log())
+            assert not conf.exists() and not hook.exists() and not prerm.exists()
+            # zark 2.2's one-line file (finish's non-overwriting install left it).
+            apt_guard.install(target_root=td, log=make_log())
+            conf.write_text(
+                'DPkg::Pre-Install-Pkgs { "/usr/local/lib/zark/apt-zfs-backup-guard"; };\n',
+                encoding="utf-8",
+            )
+            assert not apt_guard.is_current(td)
+            assert not apt_guard.remove(td, make_log())
+            assert not conf.exists() and not hook.exists()
+            apt_guard.install(target_root=td, log=make_log())
+            prerm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            assert apt_guard.remove(td, make_log()) == [str(prerm)] and prerm.exists()
+
+
 class TestGrubScanFile:  # pylint: disable=missing-function-docstring
     """M18 option C (M18-5 5b, M18-8 8a, M18R-3, M18R-4): the file
     grub-mkconfig sources keeps importable pools out of 10_linux_zfs's scan.
