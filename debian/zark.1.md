@@ -305,6 +305,15 @@ end-to-end sequences.
     failed backup too. See the enclosure notes in the project's
     **docs/HARDWARE.md**.
 
+    When **apt**(8), **dpkg**(1) or **unattended-upgrades**(8) is running
+    at that point, the read-back waits for it to end (see **NOTES**, "apt
+    guard"), up to 15 minutes from the first wait, holding nothing. On a
+    terminal it asks whether to skip it (**y**; Enter or **n** keeps
+    waiting, and the end of the run ends the wait at once); without one it
+    waits without asking. A read-back that was skipped or timed out is not
+    done: **BACKUP NOT VERIFIED**, exit status 1, no *last_backup_at*, no
+    eject question; the next backup reads the drive back.
+
     **Drive metadata.** The drive's root dataset records
     **org.zark:format**, **org.zark:version**, **org.zark:origin-host**,
     **org.zark:origin-rpool-guid**, **org.zark:origin-machine-id** and, for
@@ -444,6 +453,10 @@ end-to-end sequences.
     real load. The drive is registered, with *last_backup_at* set, only
     when every dataset and the keystore landed and the read-back is
     **ONLINE**; otherwise it is **not** registered and **prepare** exits 1.
+    Its read-back waits for **apt** as **backup**'s does, and one that was
+    skipped or timed out leaves the drive unregistered. **prepare** checks
+    dpkg's locks before its first question, and creates the pool only
+    while neither is held.
 
 **prune**
 :   Reclaim space, interactively, in the source or on a connected registered
@@ -1097,8 +1110,9 @@ end-to-end sequences.
     timer so snapshots are taken automatically. Also installs the apt guard
     and the update-grub guard (see **NOTES**; a copy that differs is
     replaced, a current one left alone) on the running system, so a background kernel or GRUB
-    upgrade cannot half-apply while a backup drive is connected, and the
-    space and backup-age alerts (see **alerts**).
+    update cannot half-apply while a backup drive is connected, and the
+    space and backup-age alerts (see **alerts**). Run it again after
+    upgrading **zark**, so the guards are this version's.
 
     **setup** checks that **rpool** has **feature\@bookmark_v2** enabled:
     **backup** anchors each drive on a bookmark, and a raw incremental send
@@ -1120,7 +1134,8 @@ end-to-end sequences.
 
     **setup --remove** removes what **setup** installed besides **sanoid**'s
     configuration and timer: the status alerts, the apt guard (its hook,
-    its APT config and its MOTD reminder) and the update-grub guard. A file
+    its APT config, its kernel prerm script and its MOTD reminder) and the
+    update-grub guard (its grub.d script and its grub.d configuration). A file
     is removed only when it is **zark**'s (this **zark**'s content, or an
     older **zark**'s copy with its "Installed by zark" line), and the APT
     config before the hook it names; anything else is left, named, and the
@@ -1161,6 +1176,20 @@ into the recovered system and run:
 To verify a recovery without rebooting:
 
     sudo zark simulate
+
+## Upgrading from zark 2.2
+
+No format on a drive or in */etc/zark/known_drives.json* changed. The
+package upgrade leaves the installed guards as they are; then, once per
+system:
+
+    sudo zark setup          # the update-grub and apt guards of this version
+
+It adds */etc/default/grub.d/zark-backup-guard.cfg* and
+*/etc/kernel/prerm.d/00-zark-backup-guard* and asks the APT hook for
+protocol version 3 (see **NOTES**). A kernel that **unattended-upgrades**
+left half-installed (**rH**) with a backup drive plugged in is finished by
+**sudo apt -f install** after it, with the drive plugged in or not.
 
 ## Upgrading from zark 2.0
 
@@ -1366,7 +1395,11 @@ roll its backup points back).
 **75**
 :   Another **zark** run that changes state is in progress (it holds
     */run/zark/zark.lock*); the message names it. Run again once it ends.
-    Also when the lock file cannot be opened; the message says so.
+    Also when the lock file cannot be opened; the message says so. Also
+    when **apt**, **dpkg** or **unattended-upgrades** holds
+    */var/lib/dpkg/lock-frontend* or */var/lib/dpkg/lock* where **zark**
+    would import a backup pool (see **NOTES**, "apt guard"); the message
+    names the process.
 
 **130**, **143**, **129**, **141**
 :   The run was stopped by **Ctrl-C** (SIGINT), SIGTERM, SIGHUP (a closed
@@ -1450,40 +1483,78 @@ just **zark**-recovered systems; an upstream bug has been filed against
 ## update-grub guard
 
 The **setup**, **recover**, **repair-boot** and **finish** commands install
-*/etc/grub.d/09_zfs_backup_guard*, which aborts **update-grub**(8) while an
-external pool is connected: one **zpool import** lists, or one imported,
-other than **rpool** and **bpool**, with an alternate root or carrying
-**org.zark:format** (a **zark** drive imported by hand). A permanent data
-pool imported without an alternate root does not block it. This prevents the most
-common cause of post-update boot failure: **update-grub** picking up the
-backup pool and writing its UUIDs into **grub.cfg**. When the guard
+two files. */etc/default/grub.d/zark-backup-guard.cfg*, which
+**grub-mkconfig**(8) sources before it writes anything, keeps pools that
+are only importable (a backup drive plugged in, not imported) out of the
+boot menu's scan: unless an importable pool is named **rpool** or
+**bpool**, it sets **ZPOOL_IMPORT_PATH** to */nonexistent/zark-no-import*,
+a directory that does not exist, so the **zpool import** of
+*/etc/grub.d/10_linux_zfs* finds nothing to import; imported pools are
+listed as before. **update-grub**(8) then names the pools left out on
+stderr ("zark: left out of the boot menu scan: ..."). It acts only when
+**grub-mkconfig** sources it; **grub-install**(8) and grub's maintainer
+scripts read the same directory, and it changes nothing for them.
+
+*/etc/grub.d/09_zfs_backup_guard* aborts **update-grub** while an external
+pool is still visible: one imported, other than **rpool** and **bpool**,
+with an alternate root or carrying **org.zark:format** (a **zark** backup
+or mount running, or a **zark** drive imported by hand), or one **zpool
+import** lists where the file above did not hide it. A permanent data pool
+imported without an alternate root does not block it. This prevents the
+most common cause of post-update boot failure: **update-grub** picking up
+the backup pool and writing a **grub.cfg** without kernels. When the guard
 aborts it, **grub-mkconfig** (run under **set -e**) leaves the old
 **grub.cfg** in place and may leave a partial *grub.cfg.new* next to it,
-which the next successful run replaces.
+which the next successful run replaces. Its message says what to run once
+the pool is exported: **sudo apt -f install** when a package's maintainer
+script ran **update-grub**, **sudo update-grub** otherwise.
 
 ## apt guard
 
 **setup** (on the running system) and **recover**/**finish** (on a
 recovered system) install a complementary, earlier line of defence:
 */usr/local/lib/zark/apt-zfs-backup-guard*, wired in as a
-**DPkg::Pre-Install-Pkgs** hook via
-*/etc/apt/apt.conf.d/09zark-zfs-backup-guard*. APT runs it before
-**dpkg**(1) unpacks anything; if a boot-critical package (**linux-image**,
-**linux-headers**, **grub**, **shim**, **zfs**, ...) is being installed
-*while an external ZFS pool is connected*, the hook aborts the whole
-transaction. An external pool is one **zpool import** lists, or an imported
-one detected as the update-grub guard does. This stops a background **unattended-upgrades**(8) run from
-half-applying a kernel upgrade - new kernel unpacked, **update-grub**
-blocked by the guard above, old kernel autoremoved - which would leave
-**grub.cfg** pointing at a missing kernel and the system unbootable.
+**DPkg::Pre-Install-Pkgs** hook with protocol version 3 via
+*/etc/apt/apt.conf.d/09zark-zfs-backup-guard*, so APT sends it every
+action before **dpkg**(1) starts. For a boot-critical package
+(**linux-image**, **linux-modules**, **linux-headers**, **grub**,
+**shim**, **zfs**, ...) the hook aborts the whole transaction when the
+package is to be installed while an external ZFS pool is plugged in or
+imported, and when it is to be removed or purged while one is imported (a
+backup or a mount is running). With the drive only plugged in a kernel
+removal completes, since the file above keeps **update-grub** safe. A line
+the hook cannot read counts as a removal. An external pool is one
+**zpool import** lists, or an imported one detected as the update-grub
+guard does.
 
-The hook is standalone: it detects pools with **zpool**(8) directly and
-does not require **zark** to be installed, so it keeps protecting a
-recovered system after the live USB is gone. Bypass it once for a
-deliberate operation with **ZARK_INTERNAL=1**; remove
-*/etc/apt/apt.conf.d/09zark-zfs-backup-guard* to disable it entirely. A
+*/etc/kernel/prerm.d/00-zark-backup-guard* applies the removal rule at
+**dpkg**'s level: every kernel package's prerm runs it, first of the
+directory, before any file is deleted, so a **dpkg -r** by hand or a pool
+imported after the hook ran leaves the kernel installed instead of
+half-removed. Then, once the backup ends (or after **sudo zark umount**),
+**sudo apt -f install** finishes the removal. **finish** names any
+boot-critical package **dpkg** left half-installed or half-configured,
+with that command.
+
+The hook and the prerm script are standalone: they detect pools with
+**zpool**(8) directly and do not require **zark** to be installed, so they
+keep protecting a recovered system after the live USB is gone. Bypass them
+once for a deliberate operation with **ZARK_INTERNAL=1**; remove
+*/etc/apt/apt.conf.d/09zark-zfs-backup-guard* to disable the hook. A
 login-time reminder (*/etc/update-motd.d/99-zark-external-pool*) warns when
 an external pool is attached.
+
+**zark** does not import a backup pool while **apt**, **dpkg** or
+**unattended-upgrades** runs. Before every import of a backup pool on the
+installed system (**backup**, **mount**, **prune**, **purge**, **selftest**
+level 2, a read-back, **prepare**'s pool creation) it takes
+*/var/lib/dpkg/lock-frontend* as **apt** does (an **fcntl**(2) write lock,
+without waiting), checks */var/lib/dpkg/lock*, and holds the first for the
+import alone; with either held the command exits 75, naming the process.
+During those seconds **apt-get** and **dpkg** fail at their lock, **apt**
+waits for it, and the daily **apt-daily-upgrade.service** run is skipped
+to the next day. Nothing is checked or held on a live session, and nothing
+is created under */var/lib/dpkg*.
 
 # EXAMPLES
 

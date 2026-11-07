@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### M18 - kernel updates with a backup drive plugged in
+
+A kernel that unattended-upgrades removed while a backup drive was plugged
+in left dpkg half-done (`rH`) and an apport report: APT's hook saw only
+installs, and the kernel's postrm ran `update-grub` after the files were
+gone, which `09_zfs_backup_guard` refused. Run `sudo zark setup` after the
+upgrade (see `docs/UPGRADING.md`); `sudo apt -f install` then finishes a
+system 2.2 left half-done.
+
+#### Changed
+
+- **A plugged-in backup drive is left out of `update-grub`'s scan**
+  (M18-1 1a, option C; M18-5 5b; M18-8 8a): `/etc/default/grub.d/zark-backup-guard.cfg`,
+  sourced by `grub-mkconfig`, points `ZPOOL_IMPORT_PATH` at
+  `/nonexistent/zark-no-import` unless an importable pool is named rpool or
+  bpool, so `10_linux_zfs` imports nothing and imported pools are listed as
+  before. Kernel removals and the updates of other packages that run
+  `update-grub` complete with the drive plugged in, not imported.
+  `09_zfs_backup_guard` still refuses while a backup pool is imported, and
+  its message says what to run: `sudo apt -f install` from a maintainer
+  script, `sudo update-grub` otherwise.
+- **The APT hook sees removals** (option B, B1): its `apt.conf` file asks
+  for protocol version 3; the hook reads versions 3, 2 and 1. A boot-critical
+  install is refused while a backup drive is plugged in or imported, as
+  before (M18-3 3a); a boot-critical removal or purge only while one is
+  imported; an unreadable line counts as a removal; configures never.
+- **A kernel prerm backstop** (B2, M18-2 2a): `/etc/kernel/prerm.d/00-zark-backup-guard`
+  refuses a kernel removal while a backup pool is imported, before any
+  file is deleted and before dkms removes the kernel's modules, for a
+  `dpkg -r` by hand or a pool imported after the hook ran.
+- **No backup pool is imported while apt or dpkg runs** (M18-9 9a, M18-10
+  10a, M18-12 12b): every import of a backup pool on the installed system
+  holds `/var/lib/dpkg/lock-frontend` for the import alone, after checking
+  `/var/lib/dpkg/lock`; with either held the command exits 75, naming the
+  process. `apt-get`, dpkg and unattended-upgrades started during the import
+  fail at their lock, `apt` waits, the daily timer's run moves to the next
+  day. Nothing is held on a live session.
+- **The read-back waits for apt** (M18-11 11a, M18-14 14a): up to 15
+  minutes from the first wait, holding nothing, with a question on a
+  terminal to skip it. A skipped or timed-out read-back is not done and is
+  reported so (M18-13 13a): BACKUP NOT VERIFIED and exit 1 as before, with
+  "was not read back (apt was running)" in the notification and
+  `status.json`; prepare leaves the drive unregistered.
+- `finish` names boot-critical packages dpkg left half-installed or
+  half-configured, with `sudo apt -f install` (M18-4 4a).
+
+#### Rejected
+
+- Deferring `update-grub` to a later run (option A): `grub.cfg` would stay
+  stale by design, listing a deleted kernel after a removal, with units and
+  a state file to clear it.
+- Refusing every kernel removal while a drive is plugged in (B alone, M18-1
+  1b): a drive left plugged in would block every autoremove.
+- Naming dpkg in the guard's message only; editing or diverting grub2's
+  `zz-update-grub` or `update-grub`; a `DPkg::Pre-Invoke` hook (no package
+  list); a `DPkg::Post-Invoke` repair (it cannot finish with the drive
+  still plugged in); a zark `postrm.d` hook before `zz-update-grub` (it runs
+  after the files are deleted).
+- `flock(2)` to test dpkg's locks: dpkg and APT use `fcntl` record locks,
+  which `flock` does not see.
+- An empty search directory created for the variable (M18-5 5a): a file to
+  create and remove in four places for nothing a missing path does not do.
+- Testing dpkg's locks without taking one (M18-12 12a): an apt run could
+  still start between the test and zark's import.
+- The check in `backup`, `mount` and `prepare` only (M18-10 10b): `purge`,
+  `prune` and the self-test import backup pools too.
+- Refusing the read-back at once while apt runs (M18-11 11b): a backup that
+  ran would be reported not verified for an apt run of a minute.
+
 ### M23 - code analysis
 
 #### Added

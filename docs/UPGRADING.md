@@ -1,6 +1,18 @@
 # Upgrading zark
 
-What changes when a system and its drives move from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+What changes when a system and its drives move from zark 2.2 to 2.3, from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+
+## Upgrading from zark 2.2
+
+Nothing on a drive or in `/etc/zark/known_drives.json` changes. zark 2.3 changes the guards that keep kernel updates consistent while a backup drive is connected ([The GRUB guard](DESIGN.md#the-grub-guard), [The apt guard](DESIGN.md#the-apt-guard)), and the package upgrade leaves the installed guards as they are: run `sudo zark setup` once per system after it. Until then `zark finish` says "setup would: update the APT guard to this zark's" and the same for the grub guard.
+
+**What `setup` installs.** `/etc/default/grub.d/zark-backup-guard.cfg`, which keeps a backup drive that is only plugged in out of `update-grub`'s scan; `/etc/kernel/prerm.d/00-zark-backup-guard`, which refuses a kernel removal while a backup pool is imported (`/etc/kernel/prerm.d` is created where it is missing); one line more in `/etc/apt/apt.conf.d/09zark-zfs-backup-guard`, so the APT hook also sees removals; the hook itself and `09_zfs_backup_guard`'s message. `sudo zark setup --remove` and the package's removal take these too.
+
+**What behaves differently.** A kernel removal (`apt autoremove`, unattended-upgrades) completes with the drive plugged in; it is refused, before dpkg starts, while a backup or a `zark mount` runs. An install of a kernel, GRUB, shim or ZFS is still refused while the drive is plugged in. zark does not import a backup pool while apt, dpkg or unattended-upgrades runs: the command exits 75, naming the process; the read-back at the end of a backup waits for it up to 15 minutes (see [Back up your system](USAGE.md#back-up-your-system)).
+
+**A system zark 2.2 left half-done.** A kernel removed by unattended-upgrades while a backup drive was plugged in is left half-installed (`dpkg -l` shows `rH`) and the apport prompt may have appeared. After `sudo zark setup`, run `sudo apt -f install`: it finishes the removal even with the drive plugged in. `zark finish` names such packages.
+
+**The way back.** 2.2.0 reads everything 2.3 writes. Its `setup` rewrites the guards as 2.2's and removes neither the cfg file nor the prerm.d file: remove `/etc/default/grub.d/zark-backup-guard.cfg` and `/etc/kernel/prerm.d/00-zark-backup-guard` by hand, or run 2.3's `sudo zark setup --remove` before going back.
 
 ## Upgrading from zark 2.1
 
