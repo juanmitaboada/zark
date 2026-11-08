@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from lib import dpkg_lock, forensics
+from lib import dpkg_lock, forensics, scrub
 from lib.config import now_utc_iso, zark_command
 from lib.identity import BY_ID_DIR
 from lib.log import Log
@@ -439,6 +439,7 @@ class ZFS:
         altroot: str | None = None,
         readonly: bool = False,
         guid: str | None = None,
+        pause_scrub: bool = True,
     ) -> bool:
         """Import a backup pool under invariant I-G.
 
@@ -456,6 +457,11 @@ class ZFS:
         (when ``guid`` is given) is the expected pool; otherwise the caller
         is told to export it. A pool imported from ``device`` is checked against
         ``guid`` too, and exported when it is another one.
+
+        ``pause_scrub``: after a read-write import of the expected pool, a
+        scrub that an interrupted ``zark fullcheck`` left running (it resumed
+        with the import) is paused (M19-5 5a); ``fullcheck`` alone passes
+        False (M19R-10). A read-only import never reads the scan state.
         """
         if self.pool_exists(name):
             current = run(f"zpool get -H -o value altroot {name}").output
@@ -502,7 +508,11 @@ class ZFS:
         mode = "read-only" if readonly else "read-write"
         self.log.ok(f"Pool {name} imported ({mode}, altroot={root})")
         # After the release: it may export the pool, which is imported by now.
-        return not guid or self._is_expected(name, guid, device, root)
+        if guid and not self._is_expected(name, guid, device, root):
+            return False
+        if pause_scrub and not readonly:
+            scrub.pause_interrupted(name, self.log)
+        return True
 
     def _is_expected(self, name: str, guid: str, device: str, root: str) -> bool:
         """After an import: the pool is the one expected (M16-7). A pool of

@@ -24,9 +24,11 @@ import json
 from contextlib import redirect_stdout
 from io import StringIO
 from typing import Any
+from unittest.mock import patch
 
-from lib import scrub
+from lib import dpkg_lock, scrub
 from lib.log import Log
+from lib.zfs import ZFS
 from tests.mock_sh import MockShell, patch_sh
 
 POOL = "backup2"
@@ -265,3 +267,71 @@ class TestPauseInterrupted:  # pylint: disable=missing-function-docstring
         with patch_sh(mock), redirect_stdout(StringIO()):
             scrub.pause_interrupted(POOL, _log())
         assert mock.was_not_called("zpool scrub")
+
+
+DEV = "/dev/disk/by-id/usb-Made_Up_Disk_0123456789AB-0:0-part1"
+
+
+def import_mock(guid: str = "111", **r1: str | None) -> MockShell:
+    """A read-write import of POOL from DEV, its GUID, R1's reads, a running scrub."""
+    mock = r1_mock(**r1)
+    mock.on(f"zpool list {POOL}").fails()
+    mock.on_prefix("mkdir -p").succeeds()
+    mock.on_prefix("zpool import").succeeds()
+    mock.on(f"zpool get -H -o value guid {POOL}").succeeds(guid)
+    mock.on(f"zpool status -j --json-int {POOL}").succeeds(status_json(**scanning()))
+    mock.on_prefix("udevadm settle").succeeds()
+    mock.on(f"zpool export {POOL}").succeeds()
+    return mock
+
+
+class TestImportPausesScrub:  # pylint: disable=missing-function-docstring
+    """M19-5 5a, M19R-10: import_backup_pool(pause_scrub=True) after the GUID check."""
+
+    def _import(self, mock: MockShell, **kw: Any) -> bool:
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            return ZFS(_log()).import_backup_pool(POOL, DEV, guid="111", **kw)
+
+    def test_a_read_write_import_pauses_a_running_scrub_after_the_guid_check(self) -> None:
+        mock = import_mock()
+        assert self._import(mock)
+        calls = mock.calls
+        pause = calls.index(f"zpool scrub -p {POOL}")
+        assert calls.index(f"zpool get -H -o value guid {POOL}") < pause
+        assert max(i for i, c in enumerate(calls) if c.startswith("zpool import")) < pause
+
+    def test_fullcheck_passes_false_and_nothing_is_read(self) -> None:
+        mock = import_mock()
+        assert self._import(mock, pause_scrub=False)
+        assert mock.was_not_called("zpool status") and mock.was_not_called("zpool scrub")
+
+    def test_a_read_only_import_never_reads_the_scan(self) -> None:
+        mock = import_mock()
+        assert self._import(mock, readonly=True)
+        assert mock.was_not_called("zpool status") and mock.was_not_called("zpool scrub")
+
+    def test_another_disk_is_exported_before_anything_is_paused(self) -> None:
+        mock = import_mock(guid="999")
+        assert not self._import(mock)
+        assert mock.was_called(f"zpool export {POOL}")
+        assert mock.was_not_called("zpool status") and mock.was_not_called("zpool scrub")
+
+    def test_a_suspended_pool_is_left_as_it_is(self) -> None:
+        mock = import_mock(health="SUSPENDED")
+        assert self._import(mock)
+        assert mock.was_not_called("zpool scrub")
+
+    def test_the_pause_runs_outside_the_dpkg_hold(self) -> None:
+        mock = import_mock()
+        held: list[str] = []
+        real = mock.mock_run
+
+        def spy(cmd: str, **kw: Any) -> Any:
+            if dpkg_lock.is_held():
+                held.append(cmd)
+            return real(cmd, **kw)
+
+        with patch.object(mock, "mock_run", side_effect=spy):
+            assert self._import(mock)
+        assert any(c.startswith("zpool import") for c in held), held
+        assert not any("scrub" in c or "status" in c for c in held), held
