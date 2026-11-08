@@ -858,8 +858,8 @@ end-to-end sequences.
     **known_drives.json**, which **status**, the MOTD and *status.json*
     show; a check that found damage is a critical notice, one that did not
     finish a warning. A check that died (a power cut, SIGKILL) is recorded
-    as not finished by the next command. On a live session only the restore check runs
-    and nothing is recorded. Exit status 0 when every part asked for
+    as not finished by the next command. On a live session only the
+    restore check runs and nothing is recorded. Exit status 0 when every part asked for
     passed; 1 for damage found (a repair included), a part that could not
     run or did not finish, or a refused start; 75 as for any import while
     apt or dpkg runs.
@@ -1431,7 +1431,8 @@ roll its backup points back).
     exit explains the cause and lists likely remediations. With
     **--debug**, a Python traceback is also printed. Also when a command
     ends with a red banner that says what failed, such as **purge**'s
-    **PURGE INCOMPLETE** or **health**'s **DESTRUCTIVE TEST FAILED**.
+    **PURGE INCOMPLETE**, **health**'s **DESTRUCTIVE TEST FAILED** or
+    **fullcheck**'s **FULL CHECK FOUND DAMAGE** and **NOT FINISHED**.
 
 **75**
 :   Another **zark** run that changes state is in progress (it holds
@@ -1575,7 +1576,7 @@ action before **dpkg**(1) starts. For a boot-critical package
 **linux-headers**, **grub**, **shim**, **zfs**, ...) the hook aborts the whole transaction when the
 package is to be installed while an external ZFS pool is plugged in or
 imported, and when it is to be removed or purged while one is imported (a
-backup or a mount is running). With the drive only plugged in a kernel
+backup, a mount or a full check is running). With the drive only plugged in a kernel
 removal completes, since the file above keeps **update-grub** safe. A line
 the hook cannot read counts as a removal. An external pool is one
 **zpool import** lists, or an imported one detected as the update-grub
@@ -1585,8 +1586,8 @@ guard does.
 **dpkg**'s level: every kernel package's prerm runs it, first of the
 directory, before any file is deleted, so a **dpkg -r** by hand or a pool
 imported after the hook ran leaves the kernel installed instead of
-half-removed. Then, once the backup ends (or after **sudo zark umount**),
-**sudo apt -f install** finishes the removal. **finish** names any
+half-removed. Then, once the backup, mount or full check ends (or after
+**sudo zark umount**), **sudo apt -f install** finishes the removal. **finish** names any
 boot-critical package **dpkg** left half-installed or half-configured,
 with that command.
 

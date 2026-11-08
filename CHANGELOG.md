@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### M19 - `zark fullcheck`, a backup drive verified without altering it
+
+#### Added
+
+- **`zark fullcheck [scrub | restore]`** (M19-1 1a, M19-2 2a), in the
+  Inspection group: both parts with no word. The restore check (M19-3 3a,
+  M19-4 4a) imports the drive read-only, asks for a point (the newest
+  complete one by default, as `recover` offers them) and the passphrase,
+  opens the drive's keystore read-only from its head zvol, loads every key
+  (one that does not load is a failure), mounts each dataset `recover`
+  would restore from the point's snapshot with `mount -t zfs -o ro` and
+  reads every file once, every symlink and every directory, never a
+  device, fifo or socket; a failed read is named with its path and the
+  walk goes on. Nothing is written. The scrub then imports the drive
+  read-write and scrubs the whole pool (M19-10 10a), with the drive's last
+  measured rate as its estimate (M19R-9); then the drive is read back as
+  after a backup, with M18's wait for apt. The result is a banner (FULL
+  CHECK PASSED, FOUND DAMAGE, NOT FINISHED) and exit 0 only when every part
+  asked for passed (M19-9 9a); a repair counts as damage found.
+- **Rule R1 before every `zpool scrub`** (M19R-1): `readonly` must read
+  `off` and `health` must not read `SUSPENDED`, a read that fails being a
+  refusal. On OpenZFS 2.2 (noble) a scrub, a pause or a stop of a read-only
+  or suspended pool never returns (state D); 2.4 refuses it. zark's one
+  `zpool scrub` call is behind it (`lib/scrub.py`). A pool found suspended
+  during the scrub is neither paused nor exported, and the message says
+  how to bring it back (M19-13 13a). The scrub's writes are named in the
+  command's text and the manpage (R2).
+- **An interrupted scrub waits for `fullcheck`** (M19-5 5a, M19R-10):
+  Ctrl-C pauses it (the pause is a cleanup action of the scrub's step
+  only, M19R-5) and the next `fullcheck` resumes it, asking first whether
+  to repeat the restore check; a scrub a dead check left running, which
+  ZFS resumes at any read-write import, is paused by `backup`, `prune`, a
+  read-write `mount` and the rest, after the pool's GUID was checked, with
+  one line. A resilver is never paused.
+- **The drive must not be imported** (M19-11 11a, M19R-3): a pool of that
+  name imported by `zark mount` or anyone is refused before the first
+  question, with the command that exports it; every import of the check is
+  a fresh one under M18's dpkg lock.
+- **On a live session** (M19-6 6a) only the restore check runs, and
+  nothing is recorded.
+- **The result is recorded** (M19-7 7a, M19R-6): the drive's `last_check`
+  in `known_drives.json` (result, point, the scrub's and the walk's
+  counters and durations), copied into `status.json`'s drive entry at every
+  write, with a `drive_check` notice (critical for damage, warning for a
+  check that did not finish or failed) that `zark status` and the MOTD
+  show; `zark status` prints each drive's last check, and `zark monitor`
+  the part under way from `progress.json`'s new `check` object. A check
+  that died is recorded as not finished by the next command's orphan rule
+  (M19-12 12a, M19R-4). Both schemas stay at version 1.
+- **Self-test POOL-17** (M19R-2): a scrub of a file-backed pool with a
+  corrupted data block names the file; the same pool imported read-only is
+  refused by R1 and no `zpool scrub` runs (a regression fails the check, it
+  cannot hang it). Platforms are uncovered until they run it.
+
+#### Changed
+
+- The guards' messages name a full check next to the backup and the mount
+  (M19R-7): the APT hook's removal text, the kernel prerm backstop's and
+  `09_zfs_backup_guard`'s; `setup` rewrites the files 2.3.0-rc1 installed.
+  `docs/USAGE.md` says what a check's hours with the drive imported block.
+
+#### Rejected
+
+- The scrub alone or the restore check alone as the command (delivery 1's
+  Designs A and B): each proves what the other cannot, the scrub every
+  block without the key, the restore check the keys and the plaintext.
+- A content hash recorded at backup time (M19-8 8a): the send stream's
+  per-record checksum, the block checksums and the MACs already cover the
+  chain from source to plaintext; a hash would need the whole point read at
+  every backup, or zark parsing raw streams.
+- `zpool scrub -C` (blocks born since the last scrub): noble lacks it, and
+  a full check is meant to read everything.
+- A separate exit status for damage found: 1 with the banner
+  and `last_check.result` tells the cases apart.
+- `zfs send` as the restore check's reader: it would not walk
+  the files a recover gives back.
+- Lowering `zfs_scan_checkpoint_intval` during a check: a module-wide
+  tunable that changes rpool's scrubs too.
+
 ### M18 - kernel updates with a backup drive plugged in (2.3.0-rc1)
 
 A kernel that unattended-upgrades removed while a backup drive was plugged
