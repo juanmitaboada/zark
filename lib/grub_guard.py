@@ -90,9 +90,10 @@ if [ -n "$extra" ]; then
     # script runs update-grub (dpkg exports DPKG_MAINTSCRIPT_NAME to it).
     if [ -n "${DPKG_MAINTSCRIPT_NAME:-}" ]; then
         echo "  A package is being installed or removed: when$extra is exported" >&2
-        echo '  (the backup ends, or `sudo zark umount`), run: sudo apt -f install' >&2
+        echo '  (the backup or full check ends, or `sudo zark umount`), run:' >&2
+        echo '  sudo apt -f install' >&2
     else
-        echo "  When$extra is exported (the backup ends, or" >&2
+        echo "  When$extra is exported (the backup or full check ends, or" >&2
         echo '  `sudo zark umount`), then run: sudo update-grub' >&2
     fi
     echo "" >&2

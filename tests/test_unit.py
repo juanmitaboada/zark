@@ -9285,7 +9285,7 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
         assert rc == 1, out
         assert (
             f"Refusing boot-critical package removal(s): {self._K}: backup pool backup2 is "
-            "imported (a zark backup or mount is running). When it ends (or after "
+            "imported (a zark backup, mount or full check is running). When it ends (or after "
             "`sudo zark umount`), run apt again."
         ) in out, out
 
@@ -9325,7 +9325,8 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
         assert rc == 1, out
         assert (
             "zark: not removing kernel 7.3.0-9-generic: backup pool backup2 is imported. "
-            "When the backup ends (or after `sudo zark umount`), run: sudo apt -f install"
+            "When the backup, mount or full check ends (or after `sudo zark umount`), "
+            "run: sudo apt -f install"
         ) in out, out
 
     # What the archives ship in etc/kernel/prerm.d and usr/share/kernel/prerm.d
@@ -9361,6 +9362,27 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
             assert apt_guard.is_current(td)
             prerm.unlink()
             assert not apt_guard.is_current(td)
+
+    def test_the_rc1_texts_are_not_current(self):
+        """M19R-7: the files 2.3.0-rc1 wrote (no "full check") are rewritten."""
+        old = {
+            apt_guard.HOOK_RELATIVE_PATH: apt_guard.HOOK_SCRIPT.replace(
+                "a zark backup, mount or full check is", "a zark backup or mount is"
+            ),
+            apt_guard.PRERM_RELATIVE_PATH: apt_guard.PRERM_SCRIPT.replace(
+                "the backup, mount or full check ends", "the backup ends"
+            ),
+        }
+        assert old[apt_guard.HOOK_RELATIVE_PATH] != apt_guard.HOOK_SCRIPT
+        assert old[apt_guard.PRERM_RELATIVE_PATH] != apt_guard.PRERM_SCRIPT
+        for rel, text in old.items():
+            with tempfile.TemporaryDirectory() as td:
+                apt_guard.install(target_root=td, log=make_log())
+                path = Path(td, rel)
+                path.write_text(text, encoding="utf-8")
+                assert not apt_guard.is_current(td), rel
+                apt_guard.install(target_root=td, log=make_log())
+                assert apt_guard.is_current(td), rel
 
     def test_remove_takes_both_conf_forms_and_the_prerm_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -9624,7 +9646,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
         flat = " ".join(out.split())
         assert (
             "A package is being installed or removed: when backup2 is exported "
-            "(the backup ends, or `sudo zark umount`), run: sudo apt -f install"
+            "(the backup or full check ends, or `sudo zark umount`), run: sudo apt -f install"
         ) in flat, flat
         assert "sudo update-grub" not in flat, flat
 
@@ -9633,7 +9655,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
         assert rc == 1, out
         flat = " ".join(out.split())
         assert (
-            "When backup2 is exported (the backup ends, or `sudo zark umount`), "
+            "When backup2 is exported (the backup or full check ends, or `sudo zark umount`), "
             "then run: sudo update-grub"
         ) in flat, flat
         assert "apt -f install" not in flat, flat
@@ -9658,6 +9680,17 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
             # finish's non-overwriting install still adds a missing file.
             assert grub_guard.install(td, make_log(), overwrite=False)
             assert cfg.exists() and grub_guard.is_current(td)
+
+    def test_the_rc1_guard_is_not_current(self):
+        """M19R-7: 09 as 2.3.0-rc1 wrote it (no "full check") is rewritten."""
+        old = grub_guard.GUARD_SCRIPT.replace("the backup or full check ends", "the backup ends")
+        assert old != grub_guard.GUARD_SCRIPT
+        with tempfile.TemporaryDirectory() as td:
+            assert grub_guard.install(td, make_log())
+            Path(td, grub_guard.GUARD_RELATIVE_PATH).write_text(old, encoding="utf-8")
+            assert not grub_guard.is_current(td)
+            assert grub_guard.install(td, make_log())
+            assert grub_guard.is_current(td)
 
     def test_remove_takes_zarks_cfg_and_leaves_anothers(self):
         with tempfile.TemporaryDirectory() as td:

@@ -21,7 +21,8 @@ This module deposits four small, self-contained files onto a target system:
     or removes anything; a non-zero exit aborts the whole transaction. It
     refuses the install of a boot-critical package (kernel / GRUB / shim /
     ZFS) while an external (non rpool/bpool) ZFS pool is connected, and its
-    removal while one is imported (a zark backup or mount running): the
+    removal while one is imported (a zark backup, mount or full check
+    running): the
     situations that half-apply a kernel update and leave an unbootable
     system or dpkg half-done.
   * ``/etc/apt/apt.conf.d/09zark-zfs-backup-guard`` - the APT config that
@@ -233,8 +234,8 @@ if [ -n "$installs" ] && [ -n "$plugged" ]; then
 fi
 if [ -n "$removals" ] && [ -n "$held" ]; then
     echo "zark: Refusing boot-critical package removal(s):$removals:" >&2
-    echo "  backup pool$held is imported (a zark backup or mount is running)." >&2
-    echo '  When it ends (or after `sudo zark umount`), run apt again.' >&2
+    echo "  backup pool$held is imported (a zark backup, mount or full check is" >&2
+    echo '  running). When it ends (or after `sudo zark umount`), run apt again.' >&2
     refused=true
 fi
 $refused || exit 0
@@ -291,7 +292,8 @@ done || true)"
 pools=""
 for pool in $held; do pools="$pools $pool"; done
 echo "zark: not removing kernel ${1:-}: backup pool$pools is imported." >&2
-echo '  When the backup ends (or after `sudo zark umount`), run: sudo apt -f install' >&2
+echo '  When the backup, mount or full check ends (or after `sudo zark umount`),' >&2
+echo '  run: sudo apt -f install' >&2
 exit 1
 """
 
