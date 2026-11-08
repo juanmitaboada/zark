@@ -1385,8 +1385,9 @@ def run(
     marked = (
         [
             "",
-            f"{pool_name} already records {eng.point} as its last backup point (written",
-            "before the export); the registry's last backup was not updated.",
+            # One string: the box wraps it as a paragraph (M18E-3).
+            f"{pool_name} already records {eng.point} as its last backup point (written "
+            + "before the export); the registry's last backup was not updated.",
         ]
         if res.ok
         else []

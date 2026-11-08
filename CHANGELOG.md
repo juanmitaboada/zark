@@ -74,6 +74,12 @@ system 2.2 left half-done.
   a run holding only one of them is now refused as the kernel's other
   packages are, an install while a backup drive is plugged in or imported,
   a removal while one is imported.
+- **BACKUP NOT VERIFIED wraps its last paragraph as one** (M18E-3): the
+  sentence on the point the drive already records was two box lines, so
+  "(written" ended a row of its own at 80 columns.
+- `docs/USAGE.md` says that a 26.10 kernel set removed by hand with
+  `dpkg -r` loses its `linux-main-modules-*` packages before the image's
+  guard refuses, and to use apt, which refuses the whole set (M18E-2).
 
 #### Rejected
 

@@ -21232,6 +21232,33 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert f"backup already records {point} as its last backup point" in text
         assert not cfg.known_drives["backup"].last_backup_at
 
+    def test_the_already_records_paragraph_is_wrapped_as_one(self) -> None:
+        """M18E-3: at 80 columns the paragraph fills each row it can; no row
+        ends at "(written" with the rest of the sentence on its own row."""
+        fake = _fresh_fake()
+        out = StringIO()
+        bad = Readback(imported=True, health="DEGRADED", reexported=True)
+        with patch.dict(os.environ, {"COLUMNS": "80"}):
+            _, rc = self._run(
+                fake,
+                patch.object(ZFS, "verify_exported_pool_readback", return_value=bad),
+                redirect_stdout(out),
+            )
+        point = fake.ds["backup"].props["org.zark:last-point"]
+        plain = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        inners = [ln.strip()[1:-1] for ln in plain.splitlines() if ln.strip().startswith("║")]
+        start = next(i for i, r in enumerate(inners) if "already records" in r)
+        end = next(i for i in range(start, len(inners)) if "not updated." in inners[i])
+        rows = [r.strip() for r in inners[start : end + 1]]
+        area = len(inners[start]) - 3  # two spaces before the text, one after
+        assert rc == 1 and len(rows) >= 2, rows
+        assert " ".join(rows) == (
+            f"backup already records {point} as its last backup point (written before "
+            "the export); the registry's last backup was not updated."
+        ), rows
+        for row, nxt in itertools.pairwise(rows):
+            assert len(row) + 1 + len(nxt.split()[0]) > area, (row, nxt, area)
+
     def test_an_unread_key_status_stops_before_the_point(self) -> None:
         """M4c-19 (review §4.7): a failed keystatus read was "Key already
         loaded"; it is fatal now, before anything is written. The fake's
