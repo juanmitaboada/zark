@@ -9681,10 +9681,13 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
 
 class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
     """M18E-4 (4a): /etc/grub.d/99_zark_cfg_check stops grub-mkconfig when the
-    grub.cfg.new it is writing holds no kernel entry, so the previous grub.cfg
-    stays. The harness does what grub-mkconfig.in does (noble :279 to :325,
-    resolute and stonking :280 to :326): ``set -e``, stdout redirected to
-    grub.cfg.new, each script run in turn, grub.cfg replaced at the end."""
+    grub.cfg.new it is writing holds no kernel entry in the sections of
+    10_linux_zfs and 10_linux, so the previous grub.cfg stays. The harness does
+    what grub-mkconfig.in does (noble :279 to :325, resolute and stonking :280
+    to :326): ``set -e``, stdout redirected to grub.cfg.new, each script run in
+    turn between its "### BEGIN /etc/grub.d/<name> ###" and "### END ..."
+    markers (noble :304 and :306, the others :305 and :307), grub.cfg replaced
+    at the end."""
 
     _ENTRY = (
         "menuentry 'Ubuntu 26.10' {\n"
@@ -9692,14 +9695,12 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
         '\tinitrd\t"/BOOT/ubuntu_jseb3c@/initrd.img-7.3.0-10-generic"\n'
         "}\n"
     )
-    # linux lines that are not this system's kernel, as the archive's scripts
-    # write them. 20_memtest86+ of noble's 7.00-1build1 (8 spaces, "linux" and
-    # 3 or 4 spaces, the path made relative to /boot's file system: a separate
-    # /boot, the root's /boot, bpool); of resolute's 8.00-3 and stonking's
-    # 8.10-2 (two tabs, "linux %s %s", so a trailing space with no option).
-    # 30_os-prober (grub2 2.14-2ubuntu3 :295) for another Linux whose kernel
-    # os-prober's 90fallback found as /boot/kernel-* or a plain /vmlinuz file.
-    _NOT_KERNELS = (
+    # 20_memtest86+'s linux lines as the archive's scripts write them: noble's
+    # 7.00-1build1 (8 spaces, "linux" and 3 or 4 spaces, the path made relative
+    # to /boot's file system: a separate /boot, the root's /boot, bpool); of
+    # resolute's 8.00-3 and stonking's 8.10-2 (two tabs, "linux %s %s", so a
+    # trailing space with no option). No kernel, in any section.
+    _MEMTEST = (
         "        linux    /memtest86+x64.efi",
         "        linux   /boot/memtest86+x64.efi console=ttyS0,115200",
         "        linux    /memtest86+x64.bin",
@@ -9707,29 +9708,43 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
         "\t\tlinux /boot/mt86+x64 ",
         "\t\tlinux /mt86+x64 console=ttyS0,115200",
         "\t\tlinux /BOOT/ubuntu_jseb3c@/mt86+x64 ",
+    )
+    # 30_os-prober (grub2 2.14-2ubuntu3 :295) for another Linux on the disk:
+    # a kernel os-prober's 90fallback found as /boot/kernel-* or a plain
+    # /vmlinuz file, and a Debian's /boot/vmlinuz-<v> (M18R-23). Kernels of
+    # another system: they count for nothing outside 10_linux_zfs and 10_linux.
+    _OS_PROBER = (
         "\tlinux /boot/kernel-6.12.21-gentoo root=/dev/sda3",
         "\tlinux /vmlinuz root=/dev/sda3",
+        "\tlinux /boot/vmlinuz-6.12.0-1-amd64 root=UUID=0b1c ro quiet",
     )
     # What A9 installed on eli: 00_header and 30_uefi-firmware, no kernel;
     # with memtest86+'s entries and another system's.
-    _EMPTY = (
-        "### BEGIN /etc/grub.d/10_linux_zfs ###\n### END /etc/grub.d/10_linux_zfs ###\n"
-        "menuentry 'UEFI Firmware Settings' $menuentry_id_option 'uefi-firmware' {\n"
-        "\tfwsetup\n}\n"
-        "menuentry 'Memory test' { linux16 /memtest86+x64.bin }\n"
-        + "".join(f"menuentry 'not a kernel' {{\n{line}\n}}\n" for line in _NOT_KERNELS)
-    )
+    _EMPTY = {
+        "10_linux_zfs": "",
+        "20_memtest86+": "".join(f"menuentry 'Memory test' {{\n{ln}\n}}\n" for ln in _MEMTEST)
+        + "menuentry 'Memory test' { linux16 /memtest86+x64.bin }\n",
+        "30_os-prober": "".join(f"menuentry 'Other' {{\n{ln}\n}}\n" for ln in _OS_PROBER),
+        "30_uefi-firmware": (
+            "menuentry 'UEFI Firmware Settings' $menuentry_id_option 'uefi-firmware' {\n"
+            "\tfwsetup\n}\n"
+        ),
+    }
 
     @staticmethod
-    def _mkconfig(generated: str) -> tuple[int, str, str, str, str]:
-        """grub-mkconfig -o grub.cfg with one script printing ``generated``
-        and the check after it. Returns the status, grub.cfg, grub.cfg.new,
-        the stdout and the stderr."""
+    def _mkconfig(generated: str | dict[str, str]) -> tuple[int, str, str, str, str]:
+        """grub-mkconfig -o grub.cfg with a script per section printing its
+        text (a str is 10_linux_zfs's) and the check after them. Returns the
+        status, grub.cfg, grub.cfg.new, the stdout and the stderr."""
+        sections = {"10_linux_zfs": generated} if isinstance(generated, str) else generated
         with tempfile.TemporaryDirectory() as td:
             grub_d = Path(td, "grub.d")
             grub_d.mkdir()
-            Path(td, "body").write_text(generated, encoding="utf-8")
-            Path(grub_d, "10_body").write_text(f'#!/bin/sh\ncat "{td}/body"\n', encoding="ascii")
+            for name, text in sections.items():
+                Path(td, f"{name}.body").write_text(text, encoding="utf-8")
+                Path(grub_d, name).write_text(
+                    f'#!/bin/sh\ncat "{td}/{name}.body"\n', encoding="ascii"
+                )
             Path(grub_d, "99_zark_cfg_check").write_text(grub_guard.CHECK_SCRIPT, encoding="utf-8")
             for f in grub_d.iterdir():
                 f.chmod(0o755)
@@ -9739,8 +9754,10 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
                 [
                     "dash",
                     "-c",
-                    'set -e; exec > "$1.new"; for i in "$2"/*; do echo "### BEGIN $i ###"; '
-                    '"$i"; echo "### END $i ###"; done; cat "$1.new" > "$1"; rm -f "$1.new"',
+                    'set -e; exec > "$1.new"; for i in "$2"/*; do '
+                    'echo "### BEGIN /etc/grub.d/${i##*/} ###"; '
+                    '"$i"; echo "### END /etc/grub.d/${i##*/} ###"; done; '
+                    'cat "$1.new" > "$1"; rm -f "$1.new"',
                     "sh",
                     str(cfg),
                     str(grub_d),
@@ -9757,6 +9774,17 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
                 proc.stdout,
                 proc.stderr,
             )
+
+    def _decides(self, sections: str | dict[str, str]) -> bool:
+        """The check's verdict on ``sections`` (True: accepted), required to
+        be grub_cfg.missing_entries' on the same text."""
+        rc, cfg, new, out, err = self._mkconfig(sections)
+        written = cfg if rc == 0 else new
+        assert out == "", out
+        assert (rc == 0) == (grub_cfg_mod.missing_entries(written, []) == []), (rc, written)
+        if rc != 0:
+            assert cfg == "OLD\n" and "no kernel entry" in err, (rc, cfg, err)
+        return rc == 0
 
     def test_a_cfg_with_a_kernel_entry_is_installed_and_the_check_writes_nothing(self):
         rc, cfg, new, out, err = self._mkconfig(self._ENTRY)
@@ -9786,15 +9814,82 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
         assert rc != 0 and cfg == "OLD\n" and "no kernel entry" in err, (rc, err)
 
     def test_memtest_and_another_systems_lines_are_not_kernel_entries(self):
-        # Each alone in grub.cfg.new: refused, and no kernel for grub_cfg either.
-        for line in self._NOT_KERNELS:
-            body = f"menuentry 'not a kernel' {{\n{line}\n}}\n"
-            rc, cfg, _, _, err = self._mkconfig(body)
-            assert rc != 0 and cfg == "OLD\n" and "no kernel entry" in err, (line, rc, err)
-            assert grub_cfg_mod.missing_entries(body, []) == [""], line
-        assert grub_cfg_mod.missing_entries(self._EMPTY, []) == [""]
+        # memtest86+'s lines are no kernel even inside 10_linux_zfs's section;
+        # another system's, in 30_os-prober's, count for nothing (M18R-23).
+        for line in self._MEMTEST:
+            assert not self._decides(f"menuentry 'm' {{\n{line}\n}}\n"), line
+            assert not self._decides({"20_memtest86+": f"menuentry 'm' {{\n{line}\n}}\n"}), line
+        for line in self._OS_PROBER:
+            assert not self._decides({"30_os-prober": f"menuentry 'o' {{\n{line}\n}}\n"}), line
+        _, _, new, _, _ = self._mkconfig(self._EMPTY)
         kernel = "7.3.0-10-generic"
-        assert grub_cfg_mod.missing_entries(self._EMPTY, [kernel]) == [kernel]
+        assert grub_cfg_mod.missing_entries(new, [kernel]) == [kernel]
+        assert grub_cfg_mod.missing_entries(new, ["6.12.0-1-amd64"]) == ["6.12.0-1-amd64"]
+
+    def test_an_os_prober_kernel_beside_an_empty_section_is_refused(self):
+        # M18R-23: 10_linux_zfs wrote nothing; the other distro's entry boots
+        # the other distro, not this system.
+        other = f"menuentry 'Debian (on /dev/sda3)' {{\n{self._OS_PROBER[2]}\n}}\n"
+        assert not self._decides({"10_linux_zfs": "", "30_os-prober": other})
+        assert not self._decides({"10_linux": "", "10_linux_zfs": "", "40_custom": other})
+        assert self._decides({"10_linux_zfs": self._ENTRY, "30_os-prober": other})
+
+    def test_a_10_linux_entry_counts_on_a_root_that_is_not_zfs(self):
+        entry = "menuentry 'Ubuntu' {\n\tlinux\t/boot/vmlinuz-6.8.0-147-generic root=UUID=x ro\n}\n"
+        assert self._decides({"10_linux": entry, "10_linux_zfs": ""})
+        assert not self._decides({"10_linux": "", "10_linux_zfs": "", "41_custom": entry})
+
+    def test_every_image_name_the_two_scripts_take_counts(self):
+        # M18R-24: 10_linux_zfs.in:420's find -regex and 10_linux.in:307/:312's
+        # globs take vmlinuz-, vmlinux- and kernel-.
+        for name in ("vmlinuz", "vmlinux", "kernel"):
+            zfs = f'menuentry z {{\n\tlinux\t"/BOOT/u@/{name}-7.3.0-10-generic" root=ZFS=x\n}}\n'
+            ext = f"menuentry e {{\n\tlinux\t/boot/{name}-6.8.0-147-generic root=UUID=x ro\n}}\n"
+            assert self._decides({"10_linux_zfs": zfs}), name
+            assert self._decides({"10_linux": ext, "10_linux_zfs": ""}), name
+            _, cfg, _, _, _ = self._mkconfig({"10_linux_zfs": zfs})
+            assert grub_cfg_mod.missing_entries(cfg, ["7.3.0-10-generic"]) == [], name
+        for line in ("\tlinux\t/boot/xvmlinuz-1 ro", "\tlinux\t/boot/mykernel-1 ro"):
+            assert not self._decides(f"menuentry n {{\n{line}\n}}\n"), line
+
+    def test_without_proc_it_says_so_and_lets_grub_mkconfig_go_on(self):
+        # M18R-25: /proc/$$ absent (not a pipe or a terminal, which stay silent).
+        flags = ["-m"] if os.geteuid() == 0 else ["-rm"]
+        probe = subprocess.run(
+            ["unshare", *flags, "sh", "-c", "mount -t tmpfs zark-noproc /proc"],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if probe.returncode != 0:
+            raise SkipTest("no mount namespace here to hide /proc")
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td, "99")
+            script.write_text(grub_guard.CHECK_SCRIPT, encoding="utf-8")
+            new = Path(td, "grub.cfg.new")
+            new.write_text("### BEGIN /etc/grub.d/10_linux_zfs ###\n", encoding="ascii")
+            proc = subprocess.run(
+                [
+                    "unshare",
+                    *flags,
+                    "sh",
+                    "-c",
+                    'mount -t tmpfs zark-noproc /proc && dash "$1" >> "$2"',
+                    "sh",
+                    str(script),
+                    str(new),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            written = new.read_text(encoding="ascii")
+        assert proc.returncode == 0 and proc.stdout == "", proc
+        assert proc.stderr == (
+            "zark: /proc is not mounted: 99_zark_cfg_check could not read the new grub.cfg\n"
+        ), proc.stderr
+        assert written == "### BEGIN /etc/grub.d/10_linux_zfs ###\n", written
 
     def test_any_kernel_counts_not_only_the_running_one(self):
         # A chroot from a live (repair-boot) runs the live's kernel, which grub.cfg never names.
@@ -9837,7 +9932,12 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
             "linux vmlinuz-1",
             "# linux /vmlinuz-1",
             "\tlinuxefi /vmlinuz-1",
-            *self._NOT_KERNELS,
+            "\tlinux\t/boot/vmlinux-6.8.0-1 ro",
+            '\tlinux\t"/BOOT/u@/kernel-7.3.0-10-generic" root=ZFS=x',
+            "\tlinux\t/boot/xvmlinuz-1 ro",
+            "\tlinux\t/boot/mykernel-1 ro",
+            *self._MEMTEST,
+            *self._OS_PROBER,
         ]
         for line in lines:
             py = bool(re.search(grub_cfg_mod._LINUX_LINE, line))  # pylint: disable=protected-access
@@ -9851,8 +9951,8 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
                 == 0
             )
             assert py == sh_, (line, py, sh_)
-            # Neither pattern takes memtest86+'s or another system's line for a kernel.
-            assert not (line in self._NOT_KERNELS and py), line
+            # Neither pattern takes memtest86+'s line for a kernel.
+            assert not (line in self._MEMTEST and py), line
         assert f"'{grub_cfg_mod.LINUX_LINE_ERE}'" in grub_guard.CHECK_SCRIPT
 
     def test_the_script_is_posix_sh_and_ascii(self):
@@ -15359,19 +15459,34 @@ class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
     """E8: a stale grub.cfg.pre-repair is never passed off as regenerated."""
 
     @staticmethod
+    def section(name: str, text: bytes) -> bytes:
+        """``text`` between the markers grub-mkconfig writes for /etc/grub.d/<name>."""
+        return (
+            f"### BEGIN /etc/grub.d/{name} ###\n".encode()
+            + text
+            + (f"### END /etc/grub.d/{name} ###\n".encode())
+        )
+
+    @staticmethod
     def _regenerate(
         root: Path,
         generated: str | bytes,
         update_grub_ok: bool = True,
         stderr: str = "boom",
         kernels: list[str] | None = None,
+        others: str = "",
     ) -> str:
+        """update-grub writes ``generated`` as 10_linux_zfs's section (the
+        markers grub-mkconfig writes) and ``others`` as 30_os-prober's."""
         grub_cfg = root / "grub.cfg"
 
         def fake_run(cmd: str, **_kw: object) -> RunResult:
             if "update-grub" in cmd:
                 data = generated if isinstance(generated, bytes) else generated.encode()
-                grub_cfg.write_bytes(data)
+                grub_cfg.write_bytes(
+                    TestRepairBootGrubCfg.section("10_linux_zfs", data)
+                    + TestRepairBootGrubCfg.section("30_os-prober", others.encode())
+                )
                 rc, err = (0, "") if update_grub_ok else (1, stderr)
                 return RunResult(returncode=rc, stdout="", stderr=err, command=cmd)
             if cmd.startswith("cp "):
@@ -15427,14 +15542,29 @@ class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring
             with redirect_stdout(StringIO()):
                 assert self._regenerate(root, cfg, kernels=["7.0.0-38-generic"]) == ""
 
+    def test_another_systems_entry_is_no_entry_of_this_one(self):
+        # M18R-23: an os-prober entry for a Linux with the same kernel version
+        # (two Ubuntus of one release) is not this system's entry.
+        other = "\tlinux /boot/vmlinuz-7.0.0-38-generic root=UUID=0b1c ro\n"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with redirect_stdout(StringIO()):
+                reason = self._regenerate(root, "", others=other)
+                assert reason == "update-grub produced no kernel entries", reason
+                reason = self._regenerate(root, "", kernels=["7.0.0-38-generic"], others=other)
+                assert reason == "update-grub wrote no entry for 7.0.0-38-generic", reason
+                own = '\tlinux\t"/BOOT/x@/vmlinuz-7.0.0-38-generic" root=ZFS=x\n'
+                assert self._regenerate(root, own, kernels=["7.0.0-38-generic"], others=other) == ""
+
     def test_stale_backup_from_an_earlier_run_is_not_restored(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "grub.cfg.pre-repair").write_text("STALE vmlinuz", encoding="utf-8")
             with redirect_stdout(StringIO()):
-                reason = self._regenerate(root, "no kernels here")
+                reason = self._regenerate(root, "no kernels here\n")
             assert reason == "update-grub produced no kernel entries"
-            assert (root / "grub.cfg").read_text(encoding="utf-8") == "no kernels here"
+            written = (root / "grub.cfg").read_bytes()
+            assert written.startswith(self.section("10_linux_zfs", b"no kernels here\n")), written
 
     def test_this_runs_copy_is_restored_but_reported_as_failure(self):
         with tempfile.TemporaryDirectory() as td:

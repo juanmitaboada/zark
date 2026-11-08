@@ -14,8 +14,9 @@ zark (2.3.0~rc1-1) UNRELEASED; urgency=medium
     and holds dpkg's frontend lock for the import; the read-back waits for
     apt up to 15 minutes and a skipped one is reported as not read back.
   * /etc/grub.d/99_zark_cfg_check stops update-grub when the grub.cfg it
-    is writing has no kernel entry (10_linux_zfs failing on a busy mount
-    and exiting 0): the previous grub.cfg stays.
+    is writing has no kernel entry in 10_linux_zfs's or 10_linux's section
+    (10_linux_zfs failing on a busy mount and exiting 0): the previous
+    grub.cfg stays. Another system's os-prober entry does not count.
   * The APT hook counts 26.10's linux-main-modules-* as boot-critical.
   * finish names boot packages dpkg left half-done. Run sudo zark setup
     after the upgrade; sudo apt -f install finishes a system 2.2 left

@@ -38,7 +38,7 @@ kernel entry, so the previous grub.cfg stays (M18E-4).
 
 from pathlib import Path
 
-from lib.grub_cfg import LINUX_LINE_ERE
+from lib.grub_cfg import LINUX_LINE_ERE, OWN_SCRIPTS
 from lib.log import Log
 
 GUARD_RELATIVE_PATH = "etc/grub.d/09_zfs_backup_guard"
@@ -107,26 +107,37 @@ CHECK_RELATIVE_PATH = "etc/grub.d/99_zark_cfg_check"
 # grub-mkconfig.in:279 on noble, :280 on resolute and stonking); a non-zero
 # exit ends grub-mkconfig under its set -e before grub.cfg is replaced
 # (:325/:326). 10_linux_zfs's EXIT trap exits 0 after a failure (M18E-4), so
-# the entries are counted here. Any linux line counts, not the running
+# the entries are counted here. Any kernel's line counts, not the running
 # kernel's: a chroot from a live (repair-boot, zark chroot) runs the live's
-# kernel. POSIX sh, nothing on stdout.
+# kernel; but only inside the sections of 10_linux_zfs and 10_linux, the same
+# scope as grub_cfg.missing_entries (M18R-23). POSIX sh, nothing on stdout.
 CHECK_SCRIPT = """\
 #!/bin/sh
 # 99_zark_cfg_check - Refuse a grub.cfg without any kernel entry.
 #
 # grub-mkconfig runs this last, its stdout being the grub.cfg.new it is
 # writing. 10_linux_zfs can fail half way (a busy mount) and still exit 0,
-# leaving no kernel entry, and such a grub.cfg boots nothing. When no line
-# boots a kernel this exits 1: grub-mkconfig, under set -e, stops before it
-# replaces grub.cfg, so the previous one stays.
+# leaving no kernel entry, and such a grub.cfg boots nothing. When the
+# sections of 10_linux_zfs and 10_linux hold no kernel line this exits 1:
+# grub-mkconfig, under set -e, stops before it replaces grub.cfg, so the
+# previous one stays. Entries of 30_os-prober or 40_custom boot other
+# systems and do not count.
 #
 # Installed by zark.  Safe to remove if you don't use zark.
 
+# Without /proc this shell cannot see its own stdout: say so and let
+# grub-mkconfig go on, since a refusal would stop every run there.
+if [ ! -d "/proc/$$" ]; then
+    echo "zark: /proc is not mounted: 99_zark_cfg_check could not read the new grub.cfg" >&2
+    exit 0
+fi
 # The file grub-mkconfig is writing, through this shell's own descriptor.
 # Anything else (a terminal, a pipe, a closed stdout) has nothing to check.
 new="/proc/$$/fd/1"
 [ -f "$new" ] || exit 0
-if grep -Eq -- '__LINUX_LINE_ERE__' "$new" 2>/dev/null; then
+# grep -q, never a redirect of its stdout: dash applies a simple command's
+# redirections in this shell, and /proc/$$/fd/1 would then be that target.
+if sed -n __OWN_SECTIONS__ "$new" 2>/dev/null | grep -Eq -- '__LINUX_LINE_ERE__'; then
     exit 0
 fi
 {
@@ -140,7 +151,15 @@ fi
     echo ""
 } >&2
 exit 1
-""".replace("__LINUX_LINE_ERE__", LINUX_LINE_ERE)
+""".replace("__LINUX_LINE_ERE__", LINUX_LINE_ERE).replace(
+    "__OWN_SECTIONS__",
+    # One sed range per script, BEGIN to END markers ("." escaped, "|" as the
+    # delimiter since the paths hold "/").
+    " ".join(
+        "-e '\\|^### BEGIN {0} ###$|,\\|^### END {0} ###$|p'".format(path.replace(".", "\\."))
+        for path in OWN_SCRIPTS
+    ),
+)
 
 CFG_RELATIVE_PATH = "etc/default/grub.d/zark-backup-guard.cfg"
 

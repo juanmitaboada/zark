@@ -20,7 +20,8 @@ kernels that have an initrd, and exits 0 even when it aborts half way).
 Either way the caller must report it: a banner that says "regenerated" over
 a stale or empty grub.cfg sends the operator to a reboot that may not work.
 So the verdict reads the content: every installed kernel needs a ``linux``
-line naming its ``vmlinuz-<v>`` (M4c-6).
+line naming its ``vmlinuz-<v>`` (M4c-6), inside the sections of the two
+scripts that list this system's kernels (M18R-23).
 """
 
 import re
@@ -42,22 +43,55 @@ def _failure_detail(stderr: str) -> str:
 # A menu entry's kernel line, as 10_linux_zfs writes it:
 # ``linux "/BOOT/<be>@/vmlinuz-<v>" root=ZFS=...``. The path is absolute, so
 # the ``linux "${kernel}"`` line of its zsyshistorymenu function never matches.
-_LINUX_LINE = r'^\s*linux\s+"?/[^"$\s]*vmlinuz-'
+# The image is named vmlinuz-, vmlinux- or kernel-: the names 10_linux_zfs's
+# find -regex and 10_linux's globs take (10_linux_zfs.in:420 on resolute and
+# stonking, :421 on noble; 10_linux.in:307 and :312, :321 and :326 on noble),
+# the name right after a "/" (M18R-24).
+_LINUX_LINE = r'^\s*linux\s+"?/(?:[^"$\s]*/)?(?:vmlinuz|vmlinux|kernel)-'
 
 # The same line in POSIX ERE, for grep in 99_zark_cfg_check (lib/grub_guard.py):
 # \s as [:space:], outside and inside the bracket (M18E-4).
-LINUX_LINE_ERE = r'^[[:space:]]*linux[[:space:]]+"?/[^"$[:space:]]*vmlinuz-'
+LINUX_LINE_ERE = r'^[[:space:]]*linux[[:space:]]+"?/([^"$[:space:]]*/)?(vmlinuz|vmlinux|kernel)-'
+
+# The scripts whose sections list this system's kernels. grub-mkconfig writes
+# "### BEGIN $i ###" and "### END $i ###" around each script's output
+# (grub-mkconfig.in:304 and :306 on noble, :305 and :307 on resolute and
+# stonking), $i being "${grub_mkconfig_dir}"/<name> with grub_mkconfig_dir
+# "${sysconfdir}"/grub.d (:40) and sysconfdir /etc in Ubuntu's build. The
+# entries of 30_os-prober and 40_custom boot other systems (M18R-23).
+OWN_SCRIPTS = ("/etc/grub.d/10_linux_zfs", "/etc/grub.d/10_linux")
+
+
+def own_sections(content: str) -> str:
+    """The lines of ``content`` inside the sections of ``OWN_SCRIPTS``, as
+    ``sed -n '/BEGIN/,/END/p'`` prints them (markers included; a section
+    without its END runs to the end, as sed's range does)."""
+    begins = {f"### BEGIN {s} ###": f"### END {s} ###" for s in OWN_SCRIPTS}
+    out: list[str] = []
+    end = ""
+    for line in content.splitlines(keepends=True):
+        bare = line.rstrip("\n")
+        if not end:
+            end = begins.get(bare, "")
+            if end:
+                out.append(line)
+            continue
+        out.append(line)
+        if bare == end:
+            end = ""
+    return "".join(out)
 
 
 def missing_entries(content: str, kernels: list[str]) -> list[str]:
-    """The kernels of ``kernels`` without a ``linux`` line in ``content``;
-    with no kernel given, ``[""]`` when no line names any vmlinuz."""
+    """The kernels of ``kernels`` without a ``linux`` line in the sections of
+    ``OWN_SCRIPTS``; with no kernel given, ``[""]`` when none holds a kernel."""
+    own = own_sections(content)
     if not kernels:
-        return [] if re.search(_LINUX_LINE + r"\S", content, re.MULTILINE) else [""]
+        return [] if re.search(_LINUX_LINE + r"\S", own, re.MULTILINE) else [""]
     return [
         v
         for v in kernels
-        if not re.search(_LINUX_LINE + re.escape(v) + r'(?:["\s]|$)', content, re.MULTILINE)
+        if not re.search(_LINUX_LINE + re.escape(v) + r'(?:["\s]|$)', own, re.MULTILINE)
     ]
 
 

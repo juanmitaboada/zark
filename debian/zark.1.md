@@ -1511,11 +1511,15 @@ the pool is exported: **sudo apt -f install** when a package's maintainer
 script ran **update-grub**, **sudo update-grub** otherwise.
 
 */etc/grub.d/99_zark_cfg_check* runs after every other script, while the
-output of **grub-mkconfig** is the *grub.cfg.new* it is writing. When that
-file holds no **linux** line, it stops **update-grub** with a message on
-stderr and the old **grub.cfg** stays: *10_linux_zfs* can fail half way
-(a mount it finds busy) and still exit 0, which would otherwise install a
-**grub.cfg** with no kernel. Any kernel counts. Its message says what to
+output of **grub-mkconfig** is the *grub.cfg.new* it is writing. When the
+sections of *10_linux_zfs* and *10_linux* in that file hold no kernel line
+(an image named *vmlinuz-*, *vmlinux-* or *kernel-*), it stops
+**update-grub** with a message on stderr and the old **grub.cfg** stays:
+*10_linux_zfs* can fail half way (a mount it finds busy) and still exit 0,
+which would otherwise install a **grub.cfg** with no kernel. Any kernel of
+this system counts; the entries of *30_os-prober* and *40_custom* boot other
+systems and do not. Without */proc* it says so on stderr and checks
+nothing. Its message says what to
 run: **sudo update-grub** again, **sudo apt -f install** after a kernel
 removal, or **sudo zark repair-boot** from a live USB.
 
