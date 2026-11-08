@@ -34,6 +34,7 @@ from unittest.mock import MagicMock, patch
 
 import commands.fullcheck as fc_cmd
 import commands.status as status_cmd
+import lib.selftest_l1 as sl1
 from lib import (
     cli_spec,
     dpkg_lock,
@@ -41,11 +42,15 @@ from lib import (
     monitor_view as mview,
     progress,
     scrub,
+    selftest,
+    sh,
     status,
     status_file,
 )
+from lib.cleanup import Cleanup
 from lib.config import Config, DriveInfo
 from lib.log import Log
+from lib.selftest import Bench
 from lib.zfs import ZFS
 from tests.mock_sh import MockShell, patch_sh
 from tests.test_status_files import problems
@@ -1220,3 +1225,120 @@ class TestMonitorCheck:  # pylint: disable=missing-function-docstring
         line = mview._check_line({"last_check": CHECK}, "    ", now)  # pylint: disable=protected-access
         assert "damage found" in mview.line_text(line[0])
         assert not mview._check_line({}, "    ", now)  # pylint: disable=protected-access
+
+
+# ── commit 6: the self-test's POOL-17 (M19R-2) ──────────────────────────
+
+
+class TestSelftestScrub:  # pylint: disable=missing-function-docstring
+    """POOL-17 on a bench whose commands are stubbed: the order of (a), and
+    (b) refusing through R1 with no ``zpool scrub`` run, even by a
+    regression (the guard refuses it without running it)."""
+
+    def test_the_guard_refuses_zpool_scrub_and_records_everything(self) -> None:
+        mock = MockShell()
+        mock.on("zpool get").succeeds("off")
+        mock.on("zpool scrub").succeeds()
+        seen: list[str] = []
+        with patch_sh(mock), sl1._no_zpool_scrub(seen):  # pylint: disable=protected-access
+            r = sh.run("zpool scrub p")
+            g = sh.run(["zpool", "get", "-H", "-o", "value", "readonly", "p"])
+        assert not r.ok and g.ok
+        assert seen == ["zpool scrub p", "zpool get -H -o value readonly p"]
+        assert not mock.was_called("zpool scrub")
+        real = sh.run
+        with sl1._no_zpool_scrub([]):  # pylint: disable=protected-access
+            assert sh.run is not real
+        assert sh.run is real
+
+    def test_find_crosses_a_chunk_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = f"{td}/v"
+            needle = b"zark-needle-0123456789"
+            at = 8 * 1024 * 1024 - 5
+            with open(path, "wb") as f:
+                _ = f.seek(at)
+                _ = f.write(needle)
+            assert sl1._find(path, needle) == at  # pylint: disable=protected-access
+            assert sl1._find(path, b"absent") == -1  # pylint: disable=protected-access
+
+    def test_corruption_lands_in_the_known_block_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            bench = Bench(_log(), Cleanup(_log()), root=td)
+            os.makedirs(bench.dir)
+            content = b"k" * 131072
+            at = 5 * 1024 * 1024
+            vdev = bench.vdev("p")
+            with open(vdev, "wb") as f:
+                f.truncate(64 * 1024 * 1024)
+                _ = f.seek(at)
+                _ = f.write(content)
+            sl1._corrupt_known_block(bench, "p", content)  # pylint: disable=protected-access
+            data = Path(vdev).read_bytes()
+            changed = [
+                i
+                for i in range(at - 4096, at + len(content) + 4096)
+                if data[i] != (ord("k") if at <= i < at + len(content) else 0)
+            ]
+            assert changed and min(changed) >= at + 65536 and max(changed) < at + 65536 + 4096
+            assert data[:at] == bytes(at)
+            # A block inside the front labels and boot area is refused.
+            with open(vdev, "r+b") as f:
+                _ = f.seek(1024 * 1024)
+                _ = f.write(b"m" * 4096)
+            try:
+                sl1._corrupt_known_block(bench, "p", b"m" * 4096)  # pylint: disable=protected-access
+            except selftest.Fail:
+                pass
+            else:
+                raise AssertionError("a block at 1 MiB was overwritten")
+
+    def test_the_check_scrubs_read_write_and_refuses_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            bench = Bench(_log(), Cleanup(_log()), root=td)
+            os.makedirs(bench.mnt)
+            c = bench.pool("c")
+            state: dict[str, Any] = {"ro": "off", "scrubs": 0}
+            finished = scanning(state="FINISHED", errors=2)
+            perm = (
+                "config:\n\n\tNAME STATE READ WRITE CKSUM\n\t"
+                + f"{c} ONLINE 0 0 4\n\t  /x ONLINE 0 0 4\n\n"
+                + "errors: Permanent errors have been detected in the following files:\n\n"
+                + f"        {c}/x:/known\n"
+            )
+
+            def fake(cmd: Any, *_a: Any, **_k: Any) -> sh.RunResult:
+                text = cmd if isinstance(cmd, str) else " ".join(cmd)
+                calls.append(text)
+                out = ""
+                if text.startswith("zpool import") and "readonly=on" in text:
+                    state["ro"] = "on"
+                elif text.endswith(f"readonly {c}"):
+                    out = state["ro"]
+                elif text.endswith(f"health {c}"):
+                    out = "ONLINE"
+                elif text.startswith("zpool get -Hp -o value guid"):
+                    out = "123"
+                elif text.startswith("zpool scrub"):
+                    state["scrubs"] += 1
+                elif text.startswith("zpool status -j"):
+                    out = status_json(c, **finished)
+                elif text.startswith("zpool status -vp"):
+                    out = perm
+                return sh.RunResult(0, out, "", text)
+
+            calls: list[str] = []
+            mock = MockShell()
+            with (
+                patch.object(mock, "mock_run", side_effect=fake),
+                patch_sh(mock),
+                patch.object(sl1, "_corrupt_known_block") as corrupt,
+                patch.object(Bench, "drop_pool"),
+            ):
+                sl1.pool_17(bench)
+            assert corrupt.called and state["scrubs"] == 1
+            ro = next(i for i, s in enumerate(calls) if "readonly=on" in s)
+            first = next(i for i, s in enumerate(calls) if s.startswith("zpool scrub"))
+            assert calls.index(f"zpool export {c}") < first < ro
+            assert not [s for s in calls[ro:] if s.startswith("zpool scrub")]
+            assert "compression=off" in next(s for s in calls if s.startswith("zfs create"))

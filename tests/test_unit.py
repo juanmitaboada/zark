@@ -390,6 +390,7 @@ from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # no
     TestScrubPart,
     TestScrubRule,
     TestScrubState,
+    TestSelftestScrub,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -470,6 +471,7 @@ FULLCHECK_SUITES = (
     TestRestoreReader,
     TestScrubInterrupted,
     TestScrubPart,
+    TestSelftestScrub,
     TestCheckInStatus,
     TestCheckRunRecord,
     TestFullcheckOrphan,
@@ -27737,8 +27739,8 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
         checks = all_selftest_checks()
         # M7: SND-13, PRC-05, SYS-02, POOL-14; M8: RDR-01; M9a: DST-04; M9b: DST-05, POOL-15;
         # M11: DST-06; M14: RDR-02; M13: BOOT-01 to BOOT-10, UPG-01;
-        # M16: POOL-16, DSK-09, DSK-10
-        assert len([c for c in checks if c.level == 1]) == 73
+        # M16: POOL-16, DSK-09, DSK-10; M19: POOL-17
+        assert len([c for c in checks if c.level == 1]) == 74
         assert len([c for c in checks if c.level == 2]) == 10
         assert len({c.cid for c in checks}) == len(checks)
         # A check whose expectations changed gets its next revision (M9b, M11).

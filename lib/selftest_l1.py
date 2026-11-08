@@ -30,15 +30,19 @@ none``, so a clone inherits ``mountpoint=none`` and nothing mounts
 
 import fcntl
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from lib import identity, pool_record, progress, sh, zfs_features
+from lib import identity, pool_record, progress, scrub, sh, zfs_features
 from lib.dependents import destroy_plan, rollback_blockers
 from lib.keystore import ZVOL_ID, Keystore
+from lib.log import Log
 from lib.replication import Dest
 from lib.selftest import (
     VDEV_BYTES,
@@ -2053,5 +2057,153 @@ def pool_16(b: Bench) -> None:
         got = zfs.import_backup_pool(c, b.vdev(c), altroot=_altroot(c), guid=guid)
         expect(got, "import accepted for its own GUID", "refused")
         expect(b.pool_value("guid", c) == guid, f"GUID {guid}", "another")
+    finally:
+        b.drop_pool(c)
+
+
+# ── the full check's scrub (M19R-2) ──────────────────────────────────────
+
+# The known file: one 128 KiB record of a token that appears nowhere else.
+_KNOWN_BYTES = 128 * 1024
+_SCRUB_WAIT_S = 120
+
+
+@contextmanager
+def _no_zpool_scrub(seen: list[str]) -> Iterator[None]:
+    """Record every command lib.sh runs and refuse any ``zpool scrub``
+    without running it: on a module without OpenZFS PR 17717 a scrub of a
+    read-only pool never returns, so a regression of R1 must fail the check,
+    not hang the self-test."""
+    real = sh.run
+
+    def guarded(
+        cmd: str | list[str],
+        check: bool = False,  # pylint: disable=redefined-outer-name
+        input: str | None = None,  # pylint: disable=redefined-builtin
+        log: Log | None = None,
+        timeout: int | None = None,
+    ) -> sh.RunResult:
+        text = cmd if isinstance(cmd, str) else " ".join(cmd)
+        seen.append(text)
+        if text.split()[:2] == ["zpool", "scrub"]:
+            return sh.RunResult(1, "", "refused by the self-test", text)
+        return real(cmd, check=check, input=input, log=log, timeout=timeout)
+
+    setattr(sh, "run", guarded)  # noqa: B010 # the module attribute lib.scrub calls
+    try:
+        yield
+    finally:
+        setattr(sh, "run", real)  # noqa: B010
+
+
+def _find(path: str, needle: bytes) -> int:
+    """The first offset of ``needle`` in the file ``path``, or -1."""
+    chunk = 8 * 1024 * 1024
+    with open(path, "rb") as f:
+        base = 0
+        tail = b""
+        while block := f.read(chunk):
+            data = tail + block
+            hit = data.find(needle)
+            if hit >= 0:
+                return base - len(tail) + hit
+            tail = data[-(len(needle) - 1) :]
+            base += len(block)
+    return -1
+
+
+def _corrupt_known_block(b: Bench, pool: str, content: bytes) -> None:
+    """Overwrite 4 KiB in the middle of the known file's one data block, in
+    the exported pool's own vdev file and nowhere else. The block is found
+    by its bytes (the dataset is uncompressed and unencrypted), and must lie
+    between the front labels and boot area (4 MiB) and the back labels."""
+    vdev = b.vdev(pool)
+    off = _find(vdev, content)
+    expect(off >= 0, "the known block in the vdev file", "not found")
+    size = os.path.getsize(vdev)
+    expect(
+        4 * 1024**2 <= off and off + len(content) <= size - 512 * 1024,
+        "the known block inside the vdev's data area",
+        f"offset {off}",
+    )
+    with open(vdev, "r+b") as f:
+        _ = f.seek(off + len(content) // 2)
+        _ = f.write(secrets.token_bytes(4096))
+        f.flush()
+        os.fsync(f.fileno())
+
+
+@check(
+    "POOL-17",
+    1,
+    1,
+    "a scrub reports an injected corruption by file; R1 refuses a read-only pool",
+    depends=(
+        "zark fullcheck's scrub and its damage report (lib/scrub.py, ZFS.pool_damage)",
+        "rule R1 before every zpool scrub (M19R-1, M19R-2)",
+    ),
+)
+def pool_17(b: Bench) -> None:  # pylint: disable=too-many-locals
+    """(a) A read-write pool whose one data block of a known file was
+    overwritten on its vdev: ``lib.scrub.start`` (R1 allows it) starts the
+    scrub, ``lib.scrub.read`` follows it to FINISHED with errors, and
+    ``zpool status -vp`` read by ``ZFS.pool_damage`` names the file under
+    "Permanent errors" with a non-zero CKSUM counter. (b) The same pool
+    imported read-only: ``lib.scrub.start`` refuses through R1
+    (``readonly=on``) and no ``zpool scrub`` is run. Neither part asks the
+    module to refuse a scrub (OpenZFS PR 17717), so no platform can hang
+    here. lib/scrub.py:189-225; OpenZFS module/zfs/dsl_scan.c:4039-4040,
+    module/zfs/spa.c:478-479, cmd/zpool/zpool_main.c:9926-9985."""
+    c = b.make_pool("c")
+    try:
+        ds = b.fs(f"{c}/x", "compression=off", "recordsize=128K")
+        token = f"zark-pool17-{b.tag}-".encode().ljust(32, b".")
+        content = token * (_KNOWN_BYTES // len(token))
+        seed = f"{b.dir}/pool17.seed"
+        Path(seed).write_bytes(content)
+        mnt = _q(b.mnt)
+        _ = b.in_namespace(
+            f"mount -t zfs -o zfsutil {_q(ds)} {mnt} && cp {_q(seed)} {mnt}/known ; rc=$? ; "
+            + f"umount {mnt} && exit $rc"
+        )
+        Path(seed).unlink()
+        _ = b.ok(f"zpool sync {c}")
+        _ = b.ok(f"zpool export {c}")
+        _corrupt_known_block(b, c, content)
+        reimport(b, c)
+        why = scrub.refusal(c)
+        expect(not why, "R1 allows the read-write pool", observed(why))
+        expect(scrub.start(c, b.log), "the scrub to start", "it did not")
+        deadline = time.monotonic() + _SCRUB_WAIT_S
+        scan = scrub.read(c)
+        while scan is not None and scan.state == "SCANNING" and time.monotonic() < deadline:
+            time.sleep(0.5)
+            scan = scrub.read(c)
+        expect(scan is not None, "a scan state zark reads", "none")
+        assert scan is not None
+        expect(
+            (scan.function, scan.state) == ("SCRUB", "FINISHED"),
+            "SCRUB FINISHED",
+            observed(f"{scan.function}-{scan.state}"),
+        )
+        expect((scan.errors or 0) > 0, "the scrub's errors above 0", str(scan.errors))
+        damage = ZFS(b.log).pool_damage(c)
+        expect(bool(damage.counters), "a non-zero vdev counter", "none")
+        expect(
+            any(e.endswith("/known") for e in damage.errors),
+            "the known file under Permanent errors",
+            f"{len(damage.errors)} entries",
+            "\n".join(damage.errors),
+        )
+        _ = b.ok(f"zpool export {c}")
+        reimport(b, c, "-o readonly=on")
+        seen: list[str] = []
+        with _no_zpool_scrub(seen):
+            started = scrub.start(c, b.log)
+            why = scrub.refusal(c)
+        expect(not started, "the scrub of a read-only pool refused", "it was run")
+        expect("readonly=on" in why, "R1's reason readonly=on", observed(why))
+        ran = [s for s in seen if s.split()[:2] == ["zpool", "scrub"]]
+        expect(not ran, "no zpool scrub run on the read-only pool", f"{len(ran)} run")
     finally:
         b.drop_pool(c)
