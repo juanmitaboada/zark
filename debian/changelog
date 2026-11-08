@@ -1,3 +1,24 @@
+zark (2.3.0~rc2-1) UNRELEASED; urgency=medium
+
+  * Milestone M19 of zark 2.3 (zark fullcheck). Not for release: nothing
+    is published until the final 2.3.0.
+  * zark fullcheck [scrub | restore] verifies a backup drive's copies
+    without altering them: a read-only restore check (the keys loaded, a
+    point's snapshots mounted read-only and every file read) and a scrub
+    of the whole pool, then the read-back. The result is a banner, exit 1
+    unless clean, and the drive's last_check in known_drives.json, shown
+    by zark status, zark monitor and status.json (the MOTD unless clean).
+  * No zpool scrub runs unless the pool is read-write and not suspended
+    (on OpenZFS 2.2 such a scrub never returns). A scrub an interrupted
+    check left running is paused at the next read-write import by another
+    command and resumed by the next fullcheck.
+  * The guards' messages name a full check; sudo zark setup rewrites the
+    files 2.3.0-rc1 installed.
+  * Self-test check POOL-17: a scrub names a corrupted file; a read-only
+    pool is refused before any zpool scrub.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 09 Nov 2026 00:32:21 +0100
+
 zark (2.3.0~rc1-1) UNRELEASED; urgency=medium
 
   * Milestone M18 of zark 2.3 (kernel updates with a backup drive

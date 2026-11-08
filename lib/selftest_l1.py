@@ -2037,7 +2037,7 @@ def pool_16(b: Bench) -> None:
     of that name the device holds; ``import_backup_pool(..., guid=)`` reads
     its GUID (``zpool get guid``) and exports it when it is not the expected
     one, so a pool of that name on another disk is neither read nor written.
-    With the right GUID it stays imported. lib/zfs.py:434-505; OpenZFS
+    With the right GUID it stays imported. lib/zfs.py:434-515; OpenZFS
     cmd/zpool/zpool_main.c:4416-4423 (the import with ``-R``)."""
     c = b.make_pool("c")
     try:

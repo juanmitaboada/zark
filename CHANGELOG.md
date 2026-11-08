@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### M19 - `zark fullcheck`, a backup drive verified without altering it
+### M19 - `zark fullcheck`, a backup drive verified without altering it (2.3.0-rc2)
 
 #### Added
 
