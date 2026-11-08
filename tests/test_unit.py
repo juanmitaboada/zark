@@ -9692,12 +9692,32 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
         '\tinitrd\t"/BOOT/ubuntu_jseb3c@/initrd.img-7.3.0-10-generic"\n'
         "}\n"
     )
-    # What A9 installed on eli: 00_header and 30_uefi-firmware, no kernel.
+    # linux lines that are not this system's kernel, as the archive's scripts
+    # write them. 20_memtest86+ of noble's 7.00-1build1 (8 spaces, "linux" and
+    # 3 or 4 spaces, the path made relative to /boot's file system: a separate
+    # /boot, the root's /boot, bpool); of resolute's 8.00-3 and stonking's
+    # 8.10-2 (two tabs, "linux %s %s", so a trailing space with no option).
+    # 30_os-prober (grub2 2.14-2ubuntu3 :295) for another Linux whose kernel
+    # os-prober's 90fallback found as /boot/kernel-* or a plain /vmlinuz file.
+    _NOT_KERNELS = (
+        "        linux    /memtest86+x64.efi",
+        "        linux   /boot/memtest86+x64.efi console=ttyS0,115200",
+        "        linux    /memtest86+x64.bin",
+        "        linux    /BOOT/ubuntu_jseb3c@/memtest86+x64.efi",
+        "\t\tlinux /boot/mt86+x64 ",
+        "\t\tlinux /mt86+x64 console=ttyS0,115200",
+        "\t\tlinux /BOOT/ubuntu_jseb3c@/mt86+x64 ",
+        "\tlinux /boot/kernel-6.12.21-gentoo root=/dev/sda3",
+        "\tlinux /vmlinuz root=/dev/sda3",
+    )
+    # What A9 installed on eli: 00_header and 30_uefi-firmware, no kernel;
+    # with memtest86+'s entries and another system's.
     _EMPTY = (
         "### BEGIN /etc/grub.d/10_linux_zfs ###\n### END /etc/grub.d/10_linux_zfs ###\n"
         "menuentry 'UEFI Firmware Settings' $menuentry_id_option 'uefi-firmware' {\n"
         "\tfwsetup\n}\n"
         "menuentry 'Memory test' { linux16 /memtest86+x64.bin }\n"
+        + "".join(f"menuentry 'not a kernel' {{\n{line}\n}}\n" for line in _NOT_KERNELS)
     )
 
     @staticmethod
@@ -9765,6 +9785,17 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
         rc, cfg, _, _, err = self._mkconfig("")
         assert rc != 0 and cfg == "OLD\n" and "no kernel entry" in err, (rc, err)
 
+    def test_memtest_and_another_systems_lines_are_not_kernel_entries(self):
+        # Each alone in grub.cfg.new: refused, and no kernel for grub_cfg either.
+        for line in self._NOT_KERNELS:
+            body = f"menuentry 'not a kernel' {{\n{line}\n}}\n"
+            rc, cfg, _, _, err = self._mkconfig(body)
+            assert rc != 0 and cfg == "OLD\n" and "no kernel entry" in err, (line, rc, err)
+            assert grub_cfg_mod.missing_entries(body, []) == [""], line
+        assert grub_cfg_mod.missing_entries(self._EMPTY, []) == [""]
+        kernel = "7.3.0-10-generic"
+        assert grub_cfg_mod.missing_entries(self._EMPTY, [kernel]) == [kernel]
+
     def test_any_kernel_counts_not_only_the_running_one(self):
         # A chroot from a live (repair-boot) runs the live's kernel, which grub.cfg never names.
         other = self._ENTRY.replace("7.3.0-10-generic", "6.8.0-1-generic")
@@ -9806,6 +9837,7 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
             "linux vmlinuz-1",
             "# linux /vmlinuz-1",
             "\tlinuxefi /vmlinuz-1",
+            *self._NOT_KERNELS,
         ]
         for line in lines:
             py = bool(re.search(grub_cfg_mod._LINUX_LINE, line))  # pylint: disable=protected-access
@@ -9819,6 +9851,8 @@ class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
                 == 0
             )
             assert py == sh_, (line, py, sh_)
+            # Neither pattern takes memtest86+'s or another system's line for a kernel.
+            assert not (line in self._NOT_KERNELS and py), line
         assert f"'{grub_cfg_mod.LINUX_LINE_ERE}'" in grub_guard.CHECK_SCRIPT
 
     def test_the_script_is_posix_sh_and_ascii(self):
