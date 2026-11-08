@@ -371,6 +371,11 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     TestUpgradeRisk,
     _boot_record,
 )
+from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestPauseInterrupted,
+    TestScrubRule,
+    TestScrubState,
+)
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
     TestSitePage,
@@ -433,6 +438,13 @@ STATUS_FILE_SUITES = (
     TestStatusJson,
     TestStatusSchemas,
     TestTmpfiles,
+)
+
+# zark fullcheck's tests live in their own module (M19), named here for the same reason.
+FULLCHECK_SUITES = (
+    TestScrubState,
+    TestScrubRule,
+    TestPauseInterrupted,
 )
 
 # ═════════════════════════════════════════════════════════════════════════

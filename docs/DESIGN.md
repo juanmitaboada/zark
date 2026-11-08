@@ -55,6 +55,7 @@ zark/
 │   ├── restore_points.py      # Restore points of a backup pool
 │   ├── retention.py           # Destination retention: which snapshots may go
 │   ├── sanoid_retention.py    # sanoid's retention, read for the drive's window
+│   ├── scrub.py               # A backup pool's scrub: its state, and rule R1
 │   ├── selftest.py            # The platform self-test: checks, bench, runner
 │   ├── selftest_boot.py       # Level-1 checks for a /boot on ext4
 │   ├── selftest_host.py       # Level-1 checks on the host's own tools
