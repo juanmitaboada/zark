@@ -501,6 +501,17 @@ def render_page(certs: list[Cert], commit: str, version: str) -> str:  # pylint:
     history = sorted(certs, key=lambda c: (c.date, version_key(c.zark)), reverse=True)
     rows = "".join(_history_row(c) for c in history)
     report_url = f"{REPO_URL}/issues/{REPORT_ISSUE}"
+    # Until the first community report is checked in, say so instead of pointing below.
+    if any(c.source is not None for c in certs):
+        community = (
+            "Reports the maintainer has checked appear below as community reports, linked to\n"
+            "their issue."
+        )
+    else:
+        community = (
+            "Reports the maintainer has checked are added below as community reports, linked to\n"
+            "their issue. None has come in yet: yours would be the first."
+        )
     title = "Where zark is certified"
     desc = "Ubuntu series, kernels and OpenZFS versions on which zark's own self-test has passed."
     return f"""<!DOCTYPE html>
@@ -545,8 +556,7 @@ sudo zark selftest report</code></pre>
 <p>The second command prints a link that opens the
 <a href="{esc(report_url)}">self-test report issue</a> form with the report filled in. zark
 sends nothing itself. The report names no pool, disk, serial, GUID or host, but read it before
-you submit. Reports the maintainer has checked appear below as community reports, linked to
-their issue.</p>
+you submit. {community}</p>
 <h2>All certificates</h2>
 <table>
 <thead><tr><th>Date</th><th>zark</th><th>Ubuntu</th><th>Where</th><th>Level</th><th>Result</th>

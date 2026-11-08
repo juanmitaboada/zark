@@ -118,6 +118,14 @@ class TestSiteCertificates:  # pylint: disable=missing-function-docstring
         assert cert.count("FAIL") == 1
         assert "1 FAIL" in gen.render_page([cert], "abc1234", "9.9.9")
 
+    def test_the_community_line_says_none_yet_until_a_report_is_in(self):
+        mine = gen.validate_entry(_entry(), None)
+        page = gen.render_page([mine], "abc1234", "9.9.9")
+        assert "None has come in yet" in page and "appear below" not in page
+        theirs = gen.validate_entry(_entry(), 7)
+        page = gen.render_page([mine, theirs], "abc1234", "9.9.9")
+        assert "appear below" in page and "None has come in yet" not in page
+
     @staticmethod
     def _with(results: dict[int, str]) -> Any:
         """The shipped entry with its n-th checks set to the given results."""
