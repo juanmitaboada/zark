@@ -58,6 +58,16 @@ system 2.2 left half-done.
   minutes (M18R-21).
 - `finish` names boot-critical packages dpkg left half-installed or
   half-configured, with `sudo apt -f install` (M18-4 4a).
+- **`update-grub` stops before a `grub.cfg` with no kernel entry**
+  (M18E-4 4a): `/etc/grub.d/99_zark_cfg_check` runs after every other
+  script, counts the `linux` lines of the `grub.cfg.new` being written and,
+  with none, exits 1 with what to run, so `grub-mkconfig` keeps the previous
+  `grub.cfg`. On eli, a kernel removal's `update-grub` met a busy mount in
+  `10_linux_zfs`, whose EXIT trap exits 0 after a failure, and installed a
+  `grub.cfg` that booted nothing, every exit status 0. `setup`, `recover`,
+  `repair-boot` and `finish` install it with the other guards, and the
+  package's removal takes it. `finish` no longer advises unplugging a drive
+  for this refusal.
 
 #### Rejected
 

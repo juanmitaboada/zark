@@ -1185,7 +1185,8 @@ system:
 
     sudo zark setup          # the update-grub and apt guards of this version
 
-It adds */etc/default/grub.d/zark-backup-guard.cfg* and
+It adds */etc/default/grub.d/zark-backup-guard.cfg*,
+*/etc/grub.d/99_zark_cfg_check* and
 */etc/kernel/prerm.d/00-zark-backup-guard* and asks the APT hook for
 protocol version 3 (see **NOTES**). A kernel that **unattended-upgrades**
 left half-installed (**rH**) with a backup drive plugged in is finished by
@@ -1483,7 +1484,7 @@ just **zark**-recovered systems; an upstream bug has been filed against
 ## update-grub guard
 
 The **setup**, **recover**, **repair-boot** and **finish** commands install
-two files. */etc/default/grub.d/zark-backup-guard.cfg*, which
+three files. */etc/default/grub.d/zark-backup-guard.cfg*, which
 **grub-mkconfig**(8) sources before it writes anything, keeps pools that
 are only importable (a backup drive plugged in, not imported) out of the
 boot menu's scan: unless an importable pool is named **rpool** or
@@ -1508,6 +1509,15 @@ aborts it, **grub-mkconfig** (run under **set -e**) leaves the old
 which the next successful run replaces. Its message says what to run once
 the pool is exported: **sudo apt -f install** when a package's maintainer
 script ran **update-grub**, **sudo update-grub** otherwise.
+
+*/etc/grub.d/99_zark_cfg_check* runs after every other script, while the
+output of **grub-mkconfig** is the *grub.cfg.new* it is writing. When that
+file holds no **linux** line, it stops **update-grub** with a message on
+stderr and the old **grub.cfg** stays: *10_linux_zfs* can fail half way
+(a mount it finds busy) and still exit 0, which would otherwise install a
+**grub.cfg** with no kernel. Any kernel counts. Its message says what to
+run: **sudo update-grub** again, **sudo apt -f install** after a kernel
+removal, or **sudo zark repair-boot** from a live USB.
 
 ## apt guard
 

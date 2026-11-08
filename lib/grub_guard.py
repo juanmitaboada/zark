@@ -30,10 +30,15 @@ grub-mkconfig sources before it runs the grub.d scripts: it keeps pools that
 are only importable (a backup drive plugged in, not imported) out of
 10_linux_zfs's scan, so update-grub succeeds with the system's entries and the
 guard is left to refuse an imported backup only (M18, option C).
+
+And it installs /etc/grub.d/99_zark_cfg_check, which runs after every other
+grub.d script and stops update-grub when the grub.cfg being written has no
+kernel entry, so the previous grub.cfg stays (M18E-4).
 """
 
 from pathlib import Path
 
+from lib.grub_cfg import LINUX_LINE_ERE
 from lib.log import Log
 
 GUARD_RELATIVE_PATH = "etc/grub.d/09_zfs_backup_guard"
@@ -94,6 +99,48 @@ if [ -n "$extra" ]; then
     exit 1
 fi
 """
+
+CHECK_RELATIVE_PATH = "etc/grub.d/99_zark_cfg_check"
+
+# Run by grub-mkconfig after every other grub.d script (the glob sorts 99_
+# last), with its stdout the grub.cfg.new being written (exec > at
+# grub-mkconfig.in:279 on noble, :280 on resolute and stonking); a non-zero
+# exit ends grub-mkconfig under its set -e before grub.cfg is replaced
+# (:325/:326). 10_linux_zfs's EXIT trap exits 0 after a failure (M18E-4), so
+# the entries are counted here. Any linux line counts, not the running
+# kernel's: a chroot from a live (repair-boot, zark chroot) runs the live's
+# kernel. POSIX sh, nothing on stdout.
+CHECK_SCRIPT = """\
+#!/bin/sh
+# 99_zark_cfg_check - Refuse a grub.cfg without any kernel entry.
+#
+# grub-mkconfig runs this last, its stdout being the grub.cfg.new it is
+# writing. 10_linux_zfs can fail half way (a busy mount) and still exit 0,
+# leaving no kernel entry, and such a grub.cfg boots nothing. When no line
+# boots a kernel this exits 1: grub-mkconfig, under set -e, stops before it
+# replaces grub.cfg, so the previous one stays.
+#
+# Installed by zark.  Safe to remove if you don't use zark.
+
+# The file grub-mkconfig is writing, through this shell's own descriptor.
+# Anything else (a terminal, a pipe, a closed stdout) has nothing to check.
+new="/proc/$$/fd/1"
+[ -f "$new" ] || exit 0
+if grep -Eq -- '__LINUX_LINE_ERE__' "$new" 2>/dev/null; then
+    exit 0
+fi
+{
+    echo "ERROR: no kernel entry was written to the new grub.cfg."
+    echo ""
+    echo "  10_linux_zfs may have failed on a busy mount and still exited 0."
+    echo "  grub.cfg is left as it was. Run again: sudo update-grub"
+    echo "  After a kernel removal: sudo apt -f install (dpkg --configure -a"
+    echo "  does not finish a pending removal)."
+    echo "  From a live USB: sudo zark repair-boot"
+    echo ""
+} >&2
+exit 1
+""".replace("__LINUX_LINE_ERE__", LINUX_LINE_ERE)
 
 CFG_RELATIVE_PATH = "etc/default/grub.d/zark-backup-guard.cfg"
 
@@ -166,6 +213,7 @@ def _holds(path: Path, text: str, *, executable: bool) -> bool:
 def install(target_root: str, log: Log, *, overwrite: bool = True) -> bool:
     """
     Write the GRUB guard script to {target_root}/etc/grub.d/09_zfs_backup_guard
+    and the entry check to {target_root}/etc/grub.d/99_zark_cfg_check
     (executable) and the scan file to
     {target_root}/etc/default/grub.d/zark-backup-guard.cfg (0644, sourced).
 
@@ -177,12 +225,13 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> bool:
         overwrite: if False, leave an existing file untouched. Defaults to
             True because every caller in zark wants the canonical version.
 
-    Returns True when it wrote either file, False when both were already
+    Returns True when it wrote any file, False when all were already
     there (current, or kept because ``overwrite`` is False; M5a-24).
     """
     wrote = False
     for rel, text, mode in (
         (GUARD_RELATIVE_PATH, GUARD_SCRIPT, 0o755),
+        (CHECK_RELATIVE_PATH, CHECK_SCRIPT, 0o755),
         (CFG_RELATIVE_PATH, CFG_TEXT, 0o644),
     ):
         path = _path(target_root, rel)
@@ -195,7 +244,10 @@ def install(target_root: str, log: Log, *, overwrite: bool = True) -> bool:
         path.chmod(mode)
         wrote = True
     if wrote:
-        log.ok("Grub guard installed (09_zfs_backup_guard, zark-backup-guard.cfg) ✓")
+        log.ok(
+            "Grub guard installed "
+            + "(09_zfs_backup_guard, 99_zark_cfg_check, zark-backup-guard.cfg) ✓"
+        )
     else:
         log.ok("Grub guard already current ✓")
     return wrote
@@ -211,7 +263,7 @@ def _zarks(path: Path, canonical: str, header: str) -> bool:
 
 
 def remove(target_root: str, log: Log) -> list[str]:
-    """Remove the guard and the scan file :func:`install` wrote under
+    """Remove the guard, the entry check and the scan file :func:`install` wrote under
     ``target_root``: this zark's, or an older zark's (its header and
     "Installed by zark"); return the paths left because they are not zark's
     (M3P.2)."""
@@ -219,6 +271,7 @@ def remove(target_root: str, log: Log) -> list[str]:
     removed = 0
     for rel, text, header in (
         (GUARD_RELATIVE_PATH, GUARD_SCRIPT, "# 09_zfs_backup_guard -"),
+        (CHECK_RELATIVE_PATH, CHECK_SCRIPT, "# 99_zark_cfg_check -"),
         (CFG_RELATIVE_PATH, CFG_TEXT, "# zark-backup-guard.cfg -"),
     ):
         path = _path(target_root, rel)
@@ -234,9 +287,11 @@ def remove(target_root: str, log: Log) -> list[str]:
 
 
 def is_current(target_root: str = "") -> bool:
-    """True when the guard under ``target_root`` holds this zark's script and
-    is executable, and the scan file holds this zark's text (what
-    :func:`install` would leave; M4c-10)."""
-    return _holds(
-        _path(target_root, GUARD_RELATIVE_PATH), GUARD_SCRIPT, executable=True
-    ) and _holds(_path(target_root, CFG_RELATIVE_PATH), CFG_TEXT, executable=False)
+    """True when the guard and the entry check under ``target_root`` hold
+    this zark's scripts and are executable, and the scan file holds this
+    zark's text (what :func:`install` would leave; M4c-10)."""
+    return (
+        _holds(_path(target_root, GUARD_RELATIVE_PATH), GUARD_SCRIPT, executable=True)
+        and _holds(_path(target_root, CHECK_RELATIVE_PATH), CHECK_SCRIPT, executable=True)
+        and _holds(_path(target_root, CFG_RELATIVE_PATH), CFG_TEXT, executable=False)
+    )

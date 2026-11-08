@@ -44,6 +44,10 @@ def _failure_detail(stderr: str) -> str:
 # the ``linux "${kernel}"`` line of its zsyshistorymenu function never matches.
 _LINUX_LINE = r'^\s*linux\s+"?/[^"$\s]*vmlinuz-'
 
+# The same line in POSIX ERE, for grep in 99_zark_cfg_check (lib/grub_guard.py):
+# \s as [:space:], outside and inside the bracket (M18E-4).
+LINUX_LINE_ERE = r'^[[:space:]]*linux[[:space:]]+"?/[^"$[:space:]]*vmlinuz-'
+
 
 def missing_entries(content: str, kernels: list[str]) -> list[str]:
     """The kernels of ``kernels`` without a ``linux`` line in ``content``;

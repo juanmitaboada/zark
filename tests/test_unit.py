@@ -9672,6 +9672,209 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
             shutil.rmtree(work, ignore_errors=True)
 
 
+class TestGrubCfgCheck:  # pylint: disable=missing-function-docstring
+    """M18E-4 (4a): /etc/grub.d/99_zark_cfg_check stops grub-mkconfig when the
+    grub.cfg.new it is writing holds no kernel entry, so the previous grub.cfg
+    stays. The harness does what grub-mkconfig.in does (noble :279 to :325,
+    resolute and stonking :280 to :326): ``set -e``, stdout redirected to
+    grub.cfg.new, each script run in turn, grub.cfg replaced at the end."""
+
+    _ENTRY = (
+        "menuentry 'Ubuntu 26.10' {\n"
+        '\tlinux\t"/BOOT/ubuntu_jseb3c@/vmlinuz-7.3.0-10-generic" root=ZFS="rpool/ROOT/x"\n'
+        '\tinitrd\t"/BOOT/ubuntu_jseb3c@/initrd.img-7.3.0-10-generic"\n'
+        "}\n"
+    )
+    # What A9 installed on eli: 00_header and 30_uefi-firmware, no kernel.
+    _EMPTY = (
+        "### BEGIN /etc/grub.d/10_linux_zfs ###\n### END /etc/grub.d/10_linux_zfs ###\n"
+        "menuentry 'UEFI Firmware Settings' $menuentry_id_option 'uefi-firmware' {\n"
+        "\tfwsetup\n}\n"
+        "menuentry 'Memory test' { linux16 /memtest86+x64.bin }\n"
+    )
+
+    @staticmethod
+    def _mkconfig(generated: str) -> tuple[int, str, str, str, str]:
+        """grub-mkconfig -o grub.cfg with one script printing ``generated``
+        and the check after it. Returns the status, grub.cfg, grub.cfg.new,
+        the stdout and the stderr."""
+        with tempfile.TemporaryDirectory() as td:
+            grub_d = Path(td, "grub.d")
+            grub_d.mkdir()
+            Path(td, "body").write_text(generated, encoding="utf-8")
+            Path(grub_d, "10_body").write_text(f'#!/bin/sh\ncat "{td}/body"\n', encoding="ascii")
+            Path(grub_d, "99_zark_cfg_check").write_text(grub_guard.CHECK_SCRIPT, encoding="utf-8")
+            for f in grub_d.iterdir():
+                f.chmod(0o755)
+            cfg = Path(td, "grub.cfg")
+            cfg.write_text("OLD\n", encoding="ascii")
+            proc = subprocess.run(
+                [
+                    "dash",
+                    "-c",
+                    'set -e; exec > "$1.new"; for i in "$2"/*; do echo "### BEGIN $i ###"; '
+                    '"$i"; echo "### END $i ###"; done; cat "$1.new" > "$1"; rm -f "$1.new"',
+                    "sh",
+                    str(cfg),
+                    str(grub_d),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            new = Path(f"{cfg}.new")
+            return (
+                proc.returncode,
+                cfg.read_text(encoding="utf-8"),
+                new.read_text(encoding="utf-8") if new.exists() else "",
+                proc.stdout,
+                proc.stderr,
+            )
+
+    def test_a_cfg_with_a_kernel_entry_is_installed_and_the_check_writes_nothing(self):
+        rc, cfg, new, out, err = self._mkconfig(self._ENTRY)
+        assert rc == 0 and err == "" and out == "", (rc, err)
+        assert self._ENTRY in cfg and new == "", cfg
+        # Nothing of the check's in grub.cfg: only the harness's markers around it.
+        tail = cfg.split("99_zark_cfg_check ###\n", 1)[1]
+        assert tail.startswith("### END ") and tail.count("\n") == 1, tail
+
+    def test_a_cfg_without_any_kernel_entry_stops_grub_mkconfig(self):
+        rc, cfg, new, out, err = self._mkconfig(self._EMPTY)
+        assert rc != 0 and cfg == "OLD\n", (rc, cfg)  # the previous grub.cfg stays
+        assert "fwsetup" in new and out == "", out
+        flat = " ".join(err.split())
+        assert err.startswith("ERROR: no kernel entry was written to the new grub.cfg.\n"), err
+        for way in (
+            "10_linux_zfs may have failed on a busy mount and still exited 0.",
+            "Run again: sudo update-grub",
+            "After a kernel removal: sudo apt -f install (dpkg --configure -a does not "
+            "finish a pending removal).",
+            "From a live USB: sudo zark repair-boot",
+        ):
+            assert way in flat, (way, flat)
+
+    def test_a_system_with_no_kernel_at_all_is_refused(self):
+        rc, cfg, _, _, err = self._mkconfig("")
+        assert rc != 0 and cfg == "OLD\n" and "no kernel entry" in err, (rc, err)
+
+    def test_any_kernel_counts_not_only_the_running_one(self):
+        # A chroot from a live (repair-boot) runs the live's kernel, which grub.cfg never names.
+        other = self._ENTRY.replace("7.3.0-10-generic", "6.8.0-1-generic")
+        assert os.uname().release not in other
+        rc, cfg, _, _, err = self._mkconfig(other)
+        assert rc == 0 and other in cfg, err
+
+    def test_a_pipe_or_a_terminal_is_not_checked(self):
+        proc = subprocess.run(
+            ["dash", "-c", grub_guard.CHECK_SCRIPT],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), proc
+
+    def test_a_closed_stdout_is_not_checked(self):
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td, "99")
+            script.write_text(grub_guard.CHECK_SCRIPT, encoding="utf-8")
+            proc = subprocess.run(
+                ["dash", "-c", 'dash "$1" >&-', "sh", str(script)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        assert (proc.returncode, proc.stderr) == (0, ""), proc
+
+    def test_its_pattern_is_grub_cfgs(self):
+        # The ERE for grep and grub_cfg's Python pattern decide alike, line by line.
+        lines = [
+            '\tlinux\t"/BOOT/ubuntu_jseb3c@/vmlinuz-7.3.0-10-generic" root=ZFS=rpool',
+            "\tlinux\t/vmlinuz-6.8.0-147-generic root=UUID=x ro",
+            "  linux /boot/vmlinuz-7.0.0-42-generic",
+            '\tlinux\t"${kernel}" ${args}',
+            "\tlinux16 /memtest86+x64.bin",
+            "linux vmlinuz-1",
+            "# linux /vmlinuz-1",
+            "\tlinuxefi /vmlinuz-1",
+        ]
+        for line in lines:
+            py = bool(re.search(grub_cfg_mod._LINUX_LINE, line))  # pylint: disable=protected-access
+            sh_ = (
+                subprocess.run(
+                    ["grep", "-Eq", "--", grub_cfg_mod.LINUX_LINE_ERE],
+                    input=line + "\n",
+                    text=True,
+                    check=False,
+                ).returncode
+                == 0
+            )
+            assert py == sh_, (line, py, sh_)
+        assert f"'{grub_cfg_mod.LINUX_LINE_ERE}'" in grub_guard.CHECK_SCRIPT
+
+    def test_the_script_is_posix_sh_and_ascii(self):
+        proc = subprocess.run(
+            ["dash", "-n"],
+            input=grub_guard.CHECK_SCRIPT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert grub_guard.CHECK_SCRIPT.isascii()
+        assert grub_guard.CHECK_SCRIPT.startswith("#!/bin/sh\n# 99_zark_cfg_check - ")
+        assert "Installed by zark" in grub_guard.CHECK_SCRIPT
+
+    def test_its_message_is_the_failure_detail_repair_boot_and_finish_report(self):
+        _, _, _, _, err = self._mkconfig(self._EMPTY)
+        detail = grub_cfg_mod._failure_detail(err)  # pylint: disable=protected-access
+        assert detail == "ERROR: no kernel entry was written to the new grub.cfg.", detail
+
+    def test_it_runs_after_every_other_grub_d_script(self):
+        names = [
+            "00_header",
+            "05_debian_theme",
+            "09_zfs_backup_guard",
+            "10_linux_zfs",
+            "30_os-prober",
+            "30_uefi-firmware",
+            "35_fwupd",
+            "41_custom",
+        ]
+        rel = grub_guard.CHECK_RELATIVE_PATH
+        assert rel.startswith("etc/grub.d/")
+        assert sorted([*names, Path(rel).name])[-1] == Path(rel).name
+
+    def test_install_remove_and_is_current_take_three_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            assert grub_guard.install(td, make_log())
+            check = Path(td, grub_guard.CHECK_RELATIVE_PATH)
+            assert check.read_text(encoding="utf-8") == grub_guard.CHECK_SCRIPT
+            assert check.stat().st_mode & 0o777 == 0o755
+            assert grub_guard.is_current(td)
+            check.chmod(0o644)
+            assert not grub_guard.is_current(td)
+            assert grub_guard.install(td, make_log()) and grub_guard.is_current(td)
+            check.write_text(
+                "#!/bin/sh\n# 99_zark_cfg_check - older\n# Installed by zark.\n", encoding="ascii"
+            )
+            assert not grub_guard.is_current(td)
+            assert not grub_guard.install(td, make_log(), overwrite=False)  # finish keeps it
+            check.unlink()
+            assert grub_guard.install(td, make_log(), overwrite=False)  # adds a missing one
+            assert grub_guard.is_current(td)
+            assert not grub_guard.remove(td, make_log())
+            assert not check.exists()
+            check.write_text(
+                "#!/bin/sh\n# 99_zark_cfg_check - older\n# Installed by zark.\n", encoding="ascii"
+            )
+            assert not grub_guard.remove(td, make_log()) and not check.exists()
+            check.write_text("#!/bin/sh\necho mine\n", encoding="ascii")
+            assert grub_guard.remove(td, make_log()) == [str(check)] and check.exists()
+
+
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/identity.py and lib/registry.py (M1: I20-I25, hallazgo 7)
 # ═════════════════════════════════════════════════════════════════════════
@@ -15384,6 +15587,15 @@ class TestFinishBanner:  # pylint: disable=missing-function-docstring
         assert "GRUB config updated ✓" not in out
         assert f"grub.cfg not regenerated: {reason}" in out
         assert "Disconnect the external drive(s)" in out
+
+    def test_the_entry_checks_refusal_is_not_a_drives(self):
+        # M18E-4: 99_zark_cfg_check's message names no drive; finish asks to run again.
+        reason = "update-grub failed: ERROR: no kernel entry was written to the new grub.cfg."
+        out, exited, _ = self._run(grub_failure=reason)
+        assert exited and "FINISH INCOMPLETE" in out
+        assert f"grub.cfg not regenerated: {reason}" in out
+        assert "Disconnect the external drive(s)" not in out
+        assert "then run again:" in out and "finish" in out
 
     def test_initrd_failure_names_its_kernel_and_sends_to_repair_boot(self):
         out, exited, _ = self._run(initrd_failures=("dracut failed for 7.0.0-38-generic (rc=1)",))

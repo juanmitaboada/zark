@@ -388,7 +388,8 @@ def run(
     ]
     if failed:
         advice: list[str] = []
-        if grub_failure.startswith("update-grub failed"):
+        # 99_zark_cfg_check's refusal (no kernel entry, M18E-4) is not a drive's.
+        if grub_failure.startswith("update-grub failed") and "no kernel entry" not in grub_failure:
             advice.append("Disconnect the external drive(s) if any,")
         if efi_failure.startswith(("the ESP is not mounted", "/boot/efi is")):
             advice.append("Mount the ESP of rpool's disk on /boot/efi,")
