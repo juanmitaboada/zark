@@ -73,6 +73,9 @@ no `reclaim_bytes` is a ZFS figure.
 | `proc-gone` | `running`'s file; the case's `/proc` has `1/` but not the pid | as `idle` | `edge` |
 | `proc-reused` | `running`'s file; the case's `/proc` has `1/` and the pid with other start ticks | as `idle` | `edge` |
 | `boot-ext4` | absent | as `idle` on a system whose `/boot` is an ext4 partition: rpool alone, the `boot` object at 86 % (`warning`, a `boot_capacity` notice), black's `last_point_record` | `ok` |
+| `fullcheck-running` | `zark fullcheck` of black, step 2: `check` with the scrub at 40 % (`transfer` and `point` null) | as `idle` | `running` |
+| `fullcheck-damage` | absent | as `idle`, black's `last_check` `damage` and a `critical` `drive_check` notice | `attention` |
+| `fullcheck-not-finished` | absent | as `idle`, black's `last_check` `not_finished` (the scrub paused) and a `warning` `drive_check` notice | `ok` |
 
 ## Liveness
 

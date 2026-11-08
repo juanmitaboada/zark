@@ -47,8 +47,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from lib import log as log_mod, sh, signals, status_file, statusdirs
+from lib import fullcheck, log as log_mod, sh, signals, status_file, statusdirs
 from lib.config import VERSION, Config, now_utc_iso
+from lib.fullcheck import Check
 from lib.log import Log
 from lib.status_file import DriveUpdate, LastRun
 from lib.zfs import Space
@@ -220,6 +221,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
     point: str | None = None
     transfer: dict[str, Any] | None = None
     meter: ByteMeter | None = None
+    check: dict[str, Any] | None = None  # zark fullcheck's part under way (M19)
     updates: dict[str, DriveUpdate] = field(default_factory=dict)
     error: str = ""  # the last fatal error's message, or a crash's
     on_end: list[Callable[[], None]] = field(default_factory=list)
@@ -251,6 +253,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
             "drive": self.drive,
             "point": self.point,
             "transfer": self._transfer(),
+            **({"check": self.check} if self.command == "fullcheck" else {}),
         }
 
     def _transfer(self) -> dict[str, Any] | None:
@@ -337,8 +340,12 @@ def _orphan(path: Path, log: Log) -> dict[str, Any] | None:
 
 
 def _record_orphan(doc: dict[str, Any], command: str, log: Log) -> None:
-    """A dead backup's drive gets ``last_run`` ``interrupted`` (M7-7 7a)."""
+    """A dead backup's drive gets ``last_run`` ``interrupted`` (M7-7 7a); a
+    dead full check's, ``last_check`` ``not_finished`` (M19-12 12a)."""
     drive = doc.get("drive")
+    if doc.get("command") == "fullcheck" and isinstance(drive, dict):
+        _record_orphan_check(doc, drive, command, log)
+        return
     if doc.get("command") != "backup" or not isinstance(drive, dict):
         return
     guid, began, ended = drive.get("guid"), doc.get("started_at"), doc.get("updated_at")
@@ -368,6 +375,35 @@ def _record_orphan(doc: dict[str, Any], command: str, log: Log) -> None:
         {guid: DriveUpdate(run, unless_started_at=began)},
         warn=log,
     )
+
+
+def _record_orphan_check(
+    doc: dict[str, Any], drive: dict[str, Any], command: str, log: Log
+) -> None:
+    """The registry's ``last_check`` of the drive a dead ``fullcheck`` was
+    checking, ``not_finished``; status.json follows (its notice is then a
+    warning). On the installed system only, and for a registered drive."""
+    guid, began, ended = drive.get("guid"), doc.get("started_at"), doc.get("updated_at")
+    if not (isinstance(guid, str) and isinstance(began, str) and isinstance(ended, str)):
+        return
+    log.warn(f"An earlier full check of {drive.get('name', guid)} ended without cleaning up")
+    if sh.is_live_usb():
+        return
+    cfg = Config.load()
+    if cfg.load_error is not None:
+        log.warn(status_file.unusable_registry(cfg.load_error))
+        return
+    info = next((i for i in cfg.known_drives.values() if i.guid == guid), None)
+    if info is None:
+        return  # a drive no longer registered is dropped (D4)
+    check = Check(
+        started_at=began,
+        ended_at=ended,
+        result="not_finished",
+        message="the check ended without recording a result",
+    )
+    _ = fullcheck.save(guid, check, log)
+    status_file.refresh_or_warn(Config.load(), Log(os.devnull), command, warn=log)
 
 
 def start(command: str, log: Log | None = None, path: Path | None = None) -> bool:
@@ -465,6 +501,11 @@ def set_transfer(transfer: dict[str, Any] | None, meter: ByteMeter | None = None
         r.meter = meter if transfer is not None else None
 
     _changed(update)
+
+
+def set_check(check: dict[str, Any] | None) -> None:
+    """``zark fullcheck``'s part under way (the ``check`` object), None between parts."""
+    _changed(lambda r: setattr(r, "check", dict(check) if check is not None else None))
 
 
 def record(guid: str, update: DriveUpdate) -> None:

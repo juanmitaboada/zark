@@ -45,7 +45,18 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import NoReturn
 
-from lib import cli_spec, drive_marks, exclusions, scrub, sh, signals, survey, zfs_features
+from lib import (
+    cli_spec,
+    drive_marks,
+    exclusions,
+    progress,
+    scrub,
+    sh,
+    signals,
+    status_file,
+    survey,
+    zfs_features,
+)
 from lib.backup_layout import find_be
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config, now_utc_iso, zark_command
@@ -110,8 +121,9 @@ class CheckRun:  # pylint: disable=too-many-instance-attributes
         self.check.result = result
         self.check.message = message
         self.check.ended_at = now_utc_iso()
-        if not self.live:
-            _ = save(self.guid, self.check, log)
+        if not self.live and save(self.guid, self.check, log):
+            # status.json and the MOTD follow the registry now, not at the timer's next run.
+            status_file.refresh_or_warn(Config.load(), Log(os.devnull), "fullcheck", warn=log)
 
 
 def parts_asked(args: list[str], log: Log) -> tuple[bool, bool]:
@@ -171,6 +183,31 @@ def estimate(size: int, measured: float | None, *, stream: bool) -> str:
             + " (no rate measured on this drive yet)"
         )
     return "unknown until measured (the first full check measures it)"
+
+
+def check_doc(  # pylint: disable=too-many-arguments
+    phase: str,
+    *,
+    total: int | None = None,
+    done: int | None = None,
+    rate_s: float | None = None,
+    percent: int | None = None,
+    errors: int = 0,
+    dataset: str | None = None,
+    resumed: bool = False,
+) -> dict[str, object]:
+    """progress.json's ``check`` object (docs/STATUS-FILES.md): byte counters
+    null when not measured, a rate never zero."""
+    return {
+        "phase": phase,
+        "bytes_total": total,
+        "bytes_done": done,
+        "rate_bytes_per_s": int(rate_s) if rate_s else None,
+        "percent": percent,
+        "errors": errors,
+        "dataset": dataset,
+        "resumed": resumed,
+    }
 
 
 def _fail(cr: CheckRun, message: str, log: Log) -> NoReturn:
@@ -262,7 +299,9 @@ def _open_point(  # pylint: disable=too-many-locals
     return point, build_plan(pool, device, be, point, snaps, log, complete, excluded)
 
 
-def _read_point(cr: CheckRun, point: Point, plan: RestorePlan, cleanup: Cleanup, log: Log) -> None:
+def _read_point(  # pylint: disable=too-many-locals
+    cr: CheckRun, point: Point, plan: RestorePlan, cleanup: Cleanup, log: Log
+) -> None:
     """Every row recover would restore, mounted from its snapshot and read."""
     rows = [r for r in plan.rows if r.restored and r.snap is not None]
     total = sum(r.referenced for r in rows)
@@ -273,10 +312,17 @@ def _read_point(cr: CheckRun, point: Point, plan: RestorePlan, cleanup: Cleanup,
     )
     began = time.monotonic()
     read = ReadResult()
+    meter = _Meter(total, began)
     for n, row in enumerate(rows):
         assert row.snap is not None
+        meter.dataset, meter.errors = row.rel, read.errors
+        meter.show(force=True)
         got = read_snapshot(
-            f"{cr.pool}/{row.snap.stored}@{row.snap.name}", f"{CHECK_MNT}/{n}", cleanup, log
+            f"{cr.pool}/{row.snap.stored}@{row.snap.name}",
+            f"{CHECK_MNT}/{n}",
+            cleanup,
+            log,
+            meter.add,
         )
         read.files += got.files
         read.bytes += got.bytes
@@ -297,7 +343,46 @@ def _read_point(cr: CheckRun, point: Point, plan: RestorePlan, cleanup: Cleanup,
         )
 
 
-def read_snapshot(full: str, mnt: str, cleanup: Cleanup, log: Log) -> ReadResult:
+class _Meter:
+    """The restore check's bytes for progress.json, written at most once a second."""
+
+    def __init__(self, total: int, began: float) -> None:
+        self.total, self.began, self.done, self.shown = total, began, 0, 0.0
+        self.dataset = ""
+        self.errors = 0
+
+    def add(self, n: int) -> None:
+        """``n`` bytes more were read."""
+        self.done += n
+        self.show()
+
+    def show(self, force: bool = False) -> None:
+        """Write the counters, at most once a second unless ``force``."""
+        now = time.monotonic()
+        if not force and now - self.shown < 1.0:
+            return
+        self.shown = now
+        spent = now - self.began
+        progress.set_check(
+            check_doc(
+                "restore",
+                total=self.total or None,
+                done=self.done,
+                rate_s=self.done / spent if spent > 0 and self.done else None,
+                percent=min(100, self.done * 100 // self.total) if self.total else None,
+                errors=self.errors,
+                dataset=self.dataset,
+            )
+        )
+
+
+def read_snapshot(
+    full: str,
+    mnt: str,
+    cleanup: Cleanup,
+    log: Log,
+    done: Callable[[int], None] | None = None,
+) -> ReadResult:
     """Mount one snapshot read-only at ``mnt`` (its own directory), read it, unmount."""
     _ = sh.run(f"mkdir -p {mnt}")
     cleanup.track_mount(mnt)
@@ -307,7 +392,7 @@ def read_snapshot(full: str, mnt: str, cleanup: Cleanup, log: Log) -> ReadResult
         _remove_dir(mnt)
         return out
     try:
-        return read_tree(mnt)
+        return read_tree(mnt, done)
     finally:
         if not sh.run(f"umount {mnt}", log=log).ok:
             log.warn(f"Could not unmount {mnt}; the cleanup tries again")
@@ -386,19 +471,13 @@ def scrub_part(cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log) 
         _fail(cr, f"{pool} is resilvering: run the full check once it has ended", log)
     action = _action(cr, cleanup, log)
     cleanup.track_action(action)
-    if scan.running:
-        log.info(f"The scrub of {pool} resumed with the import")
-    elif not scrub.start(pool, log):
-        cleanup.untrack_action(action)
-        _fail(cr, f"Cannot start the scrub of {pool}: {scrub.refusal(pool) or 'see the log'}", log)
-    elif scan.scrubbing and scan.paused:
-        log.info(
-            f"Resuming the scrub of {pool}" + (f" at {scan.percent} %" if scan.percent else "")
-        )
+    _start(cr, scan, cleanup, action, log)
     prev = last_check(Config.load().known_drives.get(pool))
+    resumed = scan.scrubbing
     began = time.monotonic()
     shown = 0.0
     reported = False
+    first: tuple[float, int] | None = None
     while True:
         time.sleep(POLL_S)
         if scrub.is_suspended(pool):
@@ -408,6 +487,9 @@ def scrub_part(cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log) 
         now = scrub.read(pool)
         if now is None:
             continue
+        if first is None and now.issued is not None:
+            first = (time.monotonic(), now.issued)
+        progress.set_check(_scrub_doc(now, first, resumed))
         if not reported and now.bytes_total:
             reported = True
             log.info(
@@ -422,6 +504,40 @@ def scrub_part(cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log) 
         break
     cleanup.untrack_action(action)
     return _scrub_ended(cr, zfs, now, time.monotonic() - began, cleanup, log)
+
+
+def _start(
+    cr: CheckRun, scan: scrub.Scan, cleanup: Cleanup, action: Callable[[], None], log: Log
+) -> None:
+    """Start the scrub, resume a paused one, or let one that resumed with the import run."""
+    pool = cr.pool
+    if scan.running:
+        log.info(f"The scrub of {pool} resumed with the import")
+    elif not scrub.start(pool, log):
+        cleanup.untrack_action(action)
+        _fail(cr, f"Cannot start the scrub of {pool}: {scrub.refusal(pool) or 'see the log'}", log)
+    elif scan.scrubbing and scan.paused:
+        at = f" at {scan.percent} %" if scan.percent is not None else ""
+        log.info(f"Resuming the scrub of {pool}{at}")
+
+
+def _scrub_doc(
+    scan: scrub.Scan, first: tuple[float, int] | None, resumed: bool
+) -> dict[str, object]:
+    """``check`` for the scrub: its rate over this run's polls, not the whole scrub's."""
+    rate_s = None
+    if first is not None and scan.issued is not None:
+        spent = time.monotonic() - first[0]
+        rate_s = (scan.issued - first[1]) / spent if spent > 0 else None
+    return check_doc(
+        "scrub",
+        total=scan.bytes_total,
+        done=scan.issued,
+        rate_s=rate_s if rate_s and rate_s > 0 else None,
+        percent=scan.percent,
+        errors=scan.errors or 0,
+        resumed=resumed,
+    )
 
 
 def _action(cr: CheckRun, cleanup: Cleanup, log: Log) -> Callable[[], None]:
@@ -523,6 +639,7 @@ def run(args: list[str]) -> None:  # pylint: disable=too-many-branches
     device = backup_device(drive)
     if not device:
         log.fatal(f"Cannot locate the device of {drive.name} for a device-exact import")
+    progress.set_drive(drive.name, drive.guid, drive.drive_id)
     zfs = ZFS(log)
     cleanup = Cleanup(log)
     cleanup.register()
@@ -536,6 +653,7 @@ def run(args: list[str]) -> None:  # pylint: disable=too-many-branches
         log.step(1, TOTAL_STEPS, "Restore check: not asked")
     if do_scrub and scrub_part(cr, zfs, device, cleanup, log):
         log.step(3, TOTAL_STEPS, f"Reading {drive.name} back after the scrub...")
+        progress.set_check(check_doc("readback"))
         rb = zfs.verify_exported_pool_readback(drive.name, device, cleanup, skip_note=SKIP_NOTE)
         if rb.skipped:
             cr.lines += rb.describe(again=False)
@@ -546,6 +664,7 @@ def run(args: list[str]) -> None:  # pylint: disable=too-many-branches
     elif not do_scrub:
         log.step(2, TOTAL_STEPS, "Scrub: not asked")
     cleanup.untrack_action(on_exit)
+    progress.set_check(None)
     _finish(cr, zfs, device, cfg, log)
 
 

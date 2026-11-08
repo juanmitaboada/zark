@@ -225,6 +225,90 @@
           }
         }
       ]
+    },
+    "check": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "phase",
+            "bytes_total",
+            "bytes_done",
+            "rate_bytes_per_s",
+            "percent",
+            "errors",
+            "dataset",
+            "resumed"
+          ],
+          "properties": {
+            "phase": {
+              "type": "string",
+              "minLength": 1
+            },
+            "bytes_total": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bytes_done": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "rate_bytes_per_s": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "percent": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "errors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dataset": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resumed": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {

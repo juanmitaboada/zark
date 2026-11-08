@@ -855,7 +855,10 @@ end-to-end sequences.
 
     The result ends in a banner (FULL CHECK PASSED, FOUND DAMAGE or NOT
     FINISHED) and in the drive's **last_check** entry in
-    **known_drives.json**. On a live session only the restore check runs
+    **known_drives.json**, which **status**, the MOTD and *status.json*
+    show; a check that found damage is a critical notice, one that did not
+    finish a warning. A check that died (a power cut, SIGKILL) is recorded
+    as not finished by the next command. On a live session only the restore check runs
     and nothing is recorded. Exit status 0 when every part asked for
     passed; 1 for damage found (a repair included), a part that could not
     run or did not finish, or a refused start; 75 as for any import while
@@ -1332,7 +1335,8 @@ roll its backup points back).
 */run/zark/progress.json*
 :   While a command that changes state runs: its step, whether it waits
     for an answer and for what, and for **backup** the drive, the backup
-    point and the transfer (datasets, bytes sent, their rate). Written at
+    point and the transfer (datasets, bytes sent, their rate), for
+    **fullcheck** the drive and the part under way. Written at
     least every 5 seconds; removed when the command ends. For other
     programs, which read it without root: the format, schema version 1,
     is in *docs/STATUS-FILES.md* in **zark**'s source, installed by the

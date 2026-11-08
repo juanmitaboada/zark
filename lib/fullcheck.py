@@ -188,16 +188,54 @@ def _nonneg(value: Any) -> int | None:
     return value if ok else None
 
 
+def _time(value: Any) -> str | None:
+    return value if isinstance(value, str) and parse_utc_iso(value) is not None else None
+
+
+def _scrub_part(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("state") not in SCRUB_STATES:
+        return None
+    return {
+        "state": value["state"],
+        **{
+            k: _nonneg(value.get(k))
+            for k in ("examined_bytes", "repaired_bytes", "errors", "permanent_errors", "seconds")
+        },
+    }
+
+
+def _restore_part(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    paths = value.get("error_paths")
+    return {
+        **{k: _nonneg(value.get(k)) or 0 for k in ("datasets", "files", "bytes", "errors")},
+        "error_paths": [p for p in paths if isinstance(p, str)][:MAX_ERROR_PATHS]
+        if isinstance(paths, list)
+        else [],
+        "seconds": _nonneg(value.get("seconds")),
+    }
+
+
 def valid(value: Any) -> dict[str, Any] | None:
-    """A registry ``last_check`` a reader can use, None otherwise: one that
-    does not parse is shown as absent, never fatal to the registry."""
+    """A registry ``last_check`` as status.json carries it, None when it
+    cannot be used: one that does not parse is shown as absent, never fatal
+    to the registry (a hand edit, an older or newer zark's)."""
     if not isinstance(value, dict) or value.get("result") not in RESULTS:
         return None
-    if not isinstance(value.get("ended_at"), str) or parse_utc_iso(value["ended_at"]) is None:
+    started, ended = _time(value.get("started_at")), _time(value.get("ended_at"))
+    if started is None or ended is None:
         return None
-    if not isinstance(value.get("started_at"), str):
-        return None
-    return value
+    point, message = value.get("point"), value.get("message")
+    return {
+        "started_at": started,
+        "ended_at": ended,
+        "result": value["result"],
+        "point": point if isinstance(point, str) and point else None,
+        "scrub": _scrub_part(value.get("scrub")),
+        "restore": _restore_part(value.get("restore")),
+        "message": message if isinstance(message, str) else "",
+    }
 
 
 def last_check(info: Any) -> dict[str, Any] | None:

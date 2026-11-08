@@ -154,6 +154,7 @@ Present while a command that takes the lock runs; absent otherwise.
 | `drive` | object or null | the backup drive the command works on, once chosen |
 | `point` | string or null | the backup point of this run (`zark_YYYY-MM-DD_HH:MM:SSZ`) once taken; backup only |
 | `transfer` | object or null | non-null only while a backup moves data (step 7); null otherwise and for every other command |
+| `check` | object or null, optional | `fullcheck` only: the part under way; null between parts. Absent for every other command |
 
 `waiting_for_input` is true during every read of the terminal: yes/no
 questions (timed ones and the eject prompt included), choices, text and
@@ -183,6 +184,22 @@ end of input, arrives.
 | `bytes_total_partial` | boolean | true when at least one planned send has no estimate, so `bytes_total` is a floor |
 | `bytes_done` | integer or null | stream bytes sent so far in this run, every send included |
 | `rate_bytes_per_s` | integer or null | `bytes_done`'s rate over the last 30 s; null until two measurements exist |
+
+`check` (`zark fullcheck`, M19):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `phase` | string, open enumeration | `restore` (the point read back), `scrub`, `readback` (the read-back after the scrub). Generic case: "checking" |
+| `bytes_total` | integer or null | `restore`: the point's referenced bytes; `scrub`: what the scrub issues in all; null when not measured |
+| `bytes_done` | integer or null | bytes read (`restore`) or issued (`scrub`) so far; for a resumed scrub, from its start |
+| `rate_bytes_per_s` | integer or null | measured over this run; null until measured, never 0 |
+| `percent` | integer or null | 0 to 100; the scrub's own figure. On OpenZFS 2.2 the scrub reports a percentage and no exact bytes: then the byte fields are null and `percent` is set |
+| `errors` | integer | read errors so far (`restore`), or the scrub's error count |
+| `dataset` | string or null | `restore`: the dataset being read; null otherwise |
+| `resumed` | boolean | the scrub continues one an earlier run left paused or running |
+
+The byte counters follow the rules below; a reader without `bytes_total`
+shows `percent` when it is set.
 
 #### Byte counters
 
@@ -269,7 +286,11 @@ A command that takes the lock knows any `progress.json` it finds is an
 orphan, since the lock admits one run. Before replacing it, if the orphan's
 `command` is `backup` and it names a `drive`, the new command records in
 `status.json` a `last_run` for that drive with result `interrupted` and
-`ended_at` set to the orphan's `updated_at`.
+`ended_at` set to the orphan's `updated_at`. If the orphan's `command` is
+`fullcheck` and it names a registered `drive`, the new command records that
+drive's `last_check` with result `not_finished` (in the registry, from which
+`status.json` takes it, with a `drive_check` notice at `warning`). Neither
+is recorded from a live session.
 
 ## /var/lib/zark/status.json
 
@@ -408,6 +429,7 @@ pool has.
 | `retention_next` | object, optional | what the drive's policy would remove at a backup a few days later |
 | `reclaim_by_age` | array, optional | per month, what removing every older point zark would remove frees |
 | `last_point_record` | object, optional | the last completed backup's point, as recorded on the drive: `written_by` (the zark that wrote it) and `min_recover` (the oldest zark that recovers it, null when any does); written by `backup`, carried forward otherwise |
+| `last_check` | object, optional | the drive's last `zark fullcheck` (below); taken from the registry at every write; absent when the drive was never checked |
 
 `last_run`:
 
@@ -435,6 +457,20 @@ A run that ends before a drive is chosen records nothing: `last_run` belongs
 to a drive. Only `incomplete`, `not_verified` and `interrupted` call for
 attention; `aborted` changed nothing.
 
+`last_check` (M19):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `started_at` | timestamp | |
+| `ended_at` | timestamp | |
+| `result` | closed enumeration | `clean`: every part asked for passed; `damage`: a part found something wrong, a repair by the scrub included; `not_finished`: interrupted, the read-back skipped, the drive gone; `failed`: a part could not run (the import, the passphrase, a key) |
+| `point` | string or null | the point the restore check read; null when it did not run |
+| `scrub` | object or null | null when the scrub did not run: `state` (`finished`, `paused`, `not_run`), `examined_bytes`, `repaired_bytes`, `errors`, `permanent_errors`, `seconds` (each integer or null) |
+| `restore` | object or null | null when the restore check did not run: `datasets`, `files`, `bytes`, `errors` (integers), `error_paths` (up to 20 strings, for people), `seconds` (integer or null) |
+| `message` | string | one line for people; empty for `clean` |
+
+`damage` calls for attention: the `drive_check` notice is then `critical`.
+
 ### Carried-forward fields
 
 `space`, `last_run` and `last_backup_point` are only known while zark has
@@ -449,6 +485,11 @@ and logs a warning that names the cause; a registry that does not exist is
 an empty one. If the previous file is unreadable or of another `kind`,
 nothing is carried forward and a warning is logged; if it is absent, this is
 a first write and nothing is logged.
+
+`last_check` is not carried forward: every writer, the timer included,
+takes it from the registry (`known_drives.json`, the drive's `last_check`
+key), as it does `last_backup_at` and `autoeject`. A `last_check` there that
+does not parse is left out.
 
 The drive contents (`datasets`, `points`, `non_point_snapshots`,
 `retention_next`, `reclaim_by_age`) are carried with `space` as one group: a writer either
@@ -635,6 +676,7 @@ colour and an icon without parsing text.
 | `no_anchor` | a drive with no anchor in the source, one per drive | `warning` |
 | `read_error` | the source pools, or their datasets, could not be read | `warning` |
 | `origin_residues` | snapshots in the source no registered drive needs | `info` |
+| `drive_check` | a drive whose last `zark fullcheck` did not pass, one per drive | `critical` for `damage`, `warning` for `not_finished` and `failed` |
 | `selftest` | a subscribed self-test warning | `warning` |
 
 ## Reading the files

@@ -36,11 +36,13 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from lib import anchors, certificates, sh, statusdirs, survey, upgrade_risk
 from lib.boot_layout import boot_mount
 from lib.config import Config, now_utc_iso, zark_command
 from lib.drives import drive_staleness_days, no_anchor_lines
+from lib.fullcheck import last_check
 from lib.log import Log
 from lib.origin_prune import inventory
 from lib.zfs import DatasetUsage, Space, read_datasets, read_space
@@ -125,6 +127,7 @@ class Status:  # pylint: disable=too-many-instance-attributes
     datasets: dict[str, list[DatasetUsage] | None] = field(default_factory=dict)  # pool → R2
     boot: BootSpace | None = None  # an ext4 /boot (M12-6 6a)
     upgrade_risk: str = ""  # why the 24.04 to 26.04 upgrade would stop the mounts (M12P.3)
+    checks: dict[str, dict[str, Any]] = field(default_factory=dict)  # drive → last_check (M19)
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,11 @@ def gather(cfg: Config, log: Log) -> Status:
         st.boot = read_boot_space()
     st.upgrade_risk = upgrade_risk.exposed()
     st.ages = {name: drive_staleness_days(info) for name, info in sorted(cfg.known_drives.items())}
+    st.checks = {
+        name: check
+        for name, info in sorted(cfg.known_drives.items())
+        if (check := last_check(info)) is not None
+    }
     if "rpool" not in pools:
         return st
     try:
@@ -223,6 +231,35 @@ def rpo_line(st: Status) -> tuple[bool, str]:
     return stale, "last backups: " + ", ".join(parts)
 
 
+def check_lines(st: Status) -> list[tuple[str, str, str]]:
+    """(level, drive, text) for every drive whose last full check did not
+    pass (M19-7 7a): critical for damage, a warning for one that did not
+    finish or could not run; nothing for a clean one."""
+    out: list[tuple[str, str, str]] = []
+    for name, check in sorted(st.checks.items()):
+        when = str(check["ended_at"])[:10]
+        result = check["result"]
+        if result == "damage":
+            out.append(
+                (
+                    "critical",
+                    name,
+                    f"{name}: the last full check ({when}) found damage: "
+                    + f"{zark_command()} fullcheck shows it again",
+                )
+            )
+        elif result in ("not_finished", "failed"):
+            what = "did not finish" if result == "not_finished" else "could not run"
+            out.append(
+                (
+                    "warning",
+                    name,
+                    f"{name}: the last full check ({when}) {what}: {zark_command()} fullcheck",
+                )
+            )
+    return out
+
+
 def notices(st: Status) -> list[Notice]:
     """The MOTD's lines in its order, each with its level, code and subject
     (docs/STATUS-FILES.md, "Notice entry")."""
@@ -247,6 +284,7 @@ def notices(st: Status) -> list[Notice]:
         for pool, space in st.spaces.items()
         if space is not None and st.datasets.get(pool) is None
     ]
+    out += [Notice(level, "drive_check", drive, text) for level, drive, text in check_lines(st)]
     if st.residues:
         out.append(Notice("info", "origin_residues", None, residue_line(st.residues)))
     out += [Notice("warning", "selftest", None, line) for line in st.selftest]

@@ -42,6 +42,7 @@ from typing import Any
 from lib import sh, status, statusdirs
 from lib.config import VERSION, Config, now_utc_iso, parse_utc_iso
 from lib.drive_contents import CONTENT_FIELDS, DriveContents
+from lib.fullcheck import last_check
 from lib.log import Log
 from lib.status import CAP_CRITICAL, CAP_WARNING, RPO_WARNING_DAYS, Status, cap_level, notices
 from lib.zfs import Space
@@ -211,6 +212,8 @@ def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,t
                 "space": space,
                 **contents,
                 **({"last_point_record": record} if isinstance(record, dict) else {}),
+                # From the registry at every write, never carried forward (M19R-6).
+                **({"last_check": check} if (check := last_check(info)) is not None else {}),
             }
         )
     return {

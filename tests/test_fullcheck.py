@@ -26,16 +26,29 @@ import os
 import signal
 import tempfile
 from contextlib import redirect_stdout
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import commands.fullcheck as fc_cmd
-from lib import cli_spec, dpkg_lock, fullcheck, scrub
+import commands.status as status_cmd
+from lib import (
+    cli_spec,
+    dpkg_lock,
+    fullcheck,
+    monitor_view as mview,
+    progress,
+    scrub,
+    status,
+    status_file,
+)
+from lib.config import Config, DriveInfo
 from lib.log import Log
 from lib.zfs import ZFS
 from tests.mock_sh import MockShell, patch_sh
+from tests.test_status_files import problems
 
 POOL = "backup2"
 
@@ -659,7 +672,7 @@ class TestRestoreCheck:  # pylint: disable=missing-function-docstring
             patch.object(fc_cmd.Keystore, "load_pool_keys", return_value=1),
             patch.object(fc_cmd.Keystore, "umount"),
             patch.object(fc_cmd, "build_plan", return_value=_plan(0)),
-            patch.object(fc_cmd, "save") as save,
+            patch.object(fc_cmd, "save", return_value=False) as save,
             redirect_stdout(StringIO()),
         ):
             try:
@@ -725,7 +738,7 @@ class TestScrubPart:  # pylint: disable=missing-function-docstring
             patch.object(fc_cmd.scrub, "is_suspended", side_effect=is_suspended),
             patch.object(fc_cmd.time, "sleep"),
             patch.object(fc_cmd.zfs_features, "check_drive"),
-            patch.object(fc_cmd, "save"),
+            patch.object(fc_cmd, "save", return_value=False),
             redirect_stdout(StringIO()),
         ):
             try:
@@ -836,7 +849,11 @@ class TestScrubInterrupted:  # pylint: disable=missing-function-docstring
         mock.on(f"zpool list {POOL}").succeeds(POOL)
         mock.on_prefix("zfs unload-key").succeeds()
         mock.on(f"zpool export {POOL}").succeeds()
-        with patch_sh(mock), patch.object(fc_cmd, "save"), redirect_stdout(StringIO()):
+        with (
+            patch_sh(mock),
+            patch.object(fc_cmd, "save", return_value=False),
+            redirect_stdout(StringIO()),
+        ):
             cleanup._run()  # pylint: disable=protected-access
         calls = mock.calls
         pause = calls.index(f"zpool scrub -p {POOL}")
@@ -853,7 +870,11 @@ class TestScrubInterrupted:  # pylint: disable=missing-function-docstring
         cleanup.track_action(fc_cmd._action(cr, cleanup, _log()))  # pylint: disable=protected-access
         mock = r1_mock(health="SUSPENDED")
         mock.on(f"zpool list {POOL}").succeeds(POOL)
-        with patch_sh(mock), patch.object(fc_cmd, "save"), redirect_stdout(StringIO()):
+        with (
+            patch_sh(mock),
+            patch.object(fc_cmd, "save", return_value=False),
+            redirect_stdout(StringIO()),
+        ):
             cleanup._run()  # pylint: disable=protected-access
         assert mock.was_not_called("zpool scrub") and mock.was_not_called("zpool export")
         assert cr.check.result == "not_finished" and "suspended" in cr.check.message
@@ -867,7 +888,7 @@ class TestScrubInterrupted:  # pylint: disable=missing-function-docstring
             with (
                 patch_sh(mock),
                 patch.object(fc_cmd.signals, "received", return_value=signal_received),
-                patch.object(fc_cmd, "save"),
+                patch.object(fc_cmd, "save", return_value=False),
                 redirect_stdout(StringIO()),
             ):
                 cleanup._run()  # pylint: disable=protected-access
@@ -898,7 +919,7 @@ class TestFullcheckResult:  # pylint: disable=missing-function-docstring
         zfs.pool_exists.return_value = imported
         code = 0
         with (
-            patch.object(fc_cmd, "save") as save,
+            patch.object(fc_cmd, "save", return_value=False) as save,
             patch.object(fc_cmd, "prompt_eject_or_attach") as eject,
             redirect_stdout(StringIO()),
         ):
@@ -916,7 +937,7 @@ class TestFullcheckResult:  # pylint: disable=missing-function-docstring
         code, save, _ = self._finish(cr)
         assert code == 1 and save.call_args.args[1].result == "damage"
         cr = _cr()
-        with patch.object(fc_cmd, "save"):
+        with patch.object(fc_cmd, "save", return_value=False):
             cr.record("not_finished", "the check was interrupted", _log())
         code, save, _ = self._finish(cr)
         assert code == 1 and not save.called
@@ -979,7 +1000,7 @@ class TestCheckRecord:  # pylint: disable=missing-function-docstring
             "scrub": {"examined_bytes": 1000, "seconds": 10},
             "restore": {"bytes": 50, "seconds": 0},
         }
-        assert fullcheck.valid(good) is good
+        assert fullcheck.valid(good) is not None
         bads: list[Any] = [{**good, "result": "weird"}, {**good, "ended_at": "x"}, [], None]
         for bad in bads:
             assert fullcheck.valid(bad) is None, bad
@@ -992,3 +1013,210 @@ class TestCheckRecord:  # pylint: disable=missing-function-docstring
         assert "1 h 00 min" in fc_cmd.estimate(3600 * 100, 100.0, stream=False)
         assert "on a disk" in fc_cmd.estimate(10**12, None, stream=True)
         assert "unknown until measured" in fc_cmd.estimate(10**12, None, stream=False)
+
+
+# ── commit 4: progress.json's check, last_check in status.json, the orphan ──
+
+CHECK = {
+    "started_at": "2026-11-09T09:00:00Z",
+    "ended_at": "2026-11-09T10:00:00Z",
+    "result": "damage",
+    "point": "zark_2026-11-09_08:00:00Z",
+    "scrub": fullcheck.scrub_record("finished", examined=10, repaired=0, errors=1, seconds=5),
+    "restore": None,
+    "message": "the full check found damage",
+}
+
+
+def _cfg(**checks: dict[str, Any] | None) -> Config:
+    """A registry of drives named by ``checks``, each with its last_check (None: never)."""
+    cfg = Config()
+    for n, (name, check) in enumerate(sorted(checks.items())):
+        info = DriveInfo(name, str(100 + n), f"usb-{name}-0:0")
+        if check is not None:
+            info.extra[fullcheck.LAST_CHECK_KEY] = check
+        cfg.known_drives[name] = info
+    return cfg
+
+
+class TestProgressCheck:  # pylint: disable=missing-function-docstring
+    """docs/STATUS-FILES.md, progress.json's ``check``: fullcheck only."""
+
+    def _doc(self, command: str, check: dict[str, Any] | None) -> dict[str, Any]:
+        st = progress._State(  # pylint: disable=protected-access
+            command, 1, 1, "6f1c0b8e-3d52-4a8e-9c1f-2b7d4e5a9c03", "2026-11-09T09:00:00Z",
+            Path("/nonexistent"), _log(), check=check,
+        )  # fmt: skip
+        return st.document()
+
+    def test_present_for_fullcheck_absent_for_the_rest(self) -> None:
+        doc = self._doc("fullcheck", fc_cmd.check_doc("scrub", percent=4))
+        assert doc["check"]["phase"] == "scrub" and doc["check"]["percent"] == 4
+        assert self._doc("fullcheck", None)["check"] is None
+        assert "check" not in self._doc("backup", None)
+        assert not problems(
+            self._doc("fullcheck", fc_cmd.check_doc("restore", total=9, done=3)), "progress"
+        )
+
+    def test_check_doc_never_writes_a_zero_rate(self) -> None:
+        assert fc_cmd.check_doc("scrub", rate_s=0.0)["rate_bytes_per_s"] is None
+        assert fc_cmd.check_doc("scrub", rate_s=12.7)["rate_bytes_per_s"] == 12
+
+    def test_the_scrub_rate_is_this_runs(self) -> None:
+        scan = scrub.parse_json(status_json(**scanning()), POOL)
+        assert scan is not None
+        with patch.object(fc_cmd.time, "monotonic", return_value=110.0):
+            doc = fc_cmd._scrub_doc(scan, (100.0, (40 << 30) - 1000), True)  # pylint: disable=protected-access
+        assert doc["rate_bytes_per_s"] == 100 and doc["resumed"] is True
+        assert doc["bytes_total"] == 100 << 30 and doc["bytes_done"] == 40 << 30
+
+
+class TestCheckInStatus:  # pylint: disable=missing-function-docstring
+    """M19-7 7a, M19R-6: last_check and drive_check from the registry, at every write."""
+
+    def test_the_notices(self) -> None:
+        st = status.Status()
+        st.checks = {
+            "a": {**CHECK, "result": "damage"},
+            "b": {**CHECK, "result": "not_finished"},
+            "c": {**CHECK, "result": "failed"},
+            "d": {**CHECK, "result": "clean"},
+        }
+        got = [(n.level, n.code, n.subject) for n in status.notices(st) if n.code == "drive_check"]
+        assert got == [
+            ("critical", "drive_check", "a"),
+            ("warning", "drive_check", "b"),
+            ("warning", "drive_check", "c"),
+        ]
+
+    def test_gather_reads_them_from_the_registry(self) -> None:
+        cfg = _cfg(black=CHECK, blue=None, bad={**CHECK, "result": "weird"})
+        with (
+            patch.object(status.survey, "source_pools", return_value=[]),
+            patch.object(status.certificates, "warnings", return_value=[]),
+            patch.object(status.upgrade_risk, "exposed", return_value=""),
+            patch.object(status, "read_boot_space", return_value=None),
+        ):
+            st = status.gather(cfg, _log())
+        assert list(st.checks) == ["black"] and st.checks["black"]["result"] == "damage"
+
+    def test_status_json_takes_last_check_from_the_registry_not_the_previous_file(self) -> None:
+        cfg = _cfg(black=CHECK, blue=None)
+        prev = {"drives": [{"guid": "101", "last_check": CHECK}]}  # blue's, from an older file
+        st = status.Status()
+        doc = status_file.build(st, cfg, "timer", prev)
+        by = {d["name"]: d for d in doc["drives"]}
+        assert by["black"]["last_check"] == fullcheck.valid(CHECK)
+        assert "last_check" not in by["blue"]
+        assert not problems(doc, "status")
+
+    def test_a_malformed_record_is_left_out_whole(self) -> None:
+        assert fullcheck.valid({**CHECK, "scrub": "x"})["scrub"] is None  # type: ignore[index]
+        assert fullcheck.valid({**CHECK, "ended_at": "yesterday"}) is None
+        odd = fullcheck.valid({**CHECK, "restore": {"files": -1, "error_paths": [1, "a"]}})
+        assert odd is not None and odd["restore"]["files"] == 0
+        assert odd["restore"]["error_paths"] == ["a"]
+
+    def test_status_prints_one_line_per_checked_drive(self) -> None:
+        st = status.Status()
+        st.checks = {"black": CHECK, "blue": {**CHECK, "result": "clean"}}
+        out = StringIO()
+        with redirect_stdout(out):
+            status_cmd._checks(st, _log())  # pylint: disable=protected-access
+        text = out.getvalue()
+        assert "black: last full check 2026-11-09: damage found" in text
+        assert "blue: last full check 2026-11-09: clean" in text
+
+
+class TestCheckRunRecord:  # pylint: disable=missing-function-docstring
+    """M19R-6: a recorded check refreshes status.json at once, never from a live."""
+
+    def _record(self, *, live: bool, saved: bool = True) -> tuple[Any, Any]:
+        with (
+            patch.object(fc_cmd, "save", return_value=saved) as save,
+            patch.object(fc_cmd.status_file, "refresh_or_warn") as refresh,
+            patch.object(fc_cmd.Config, "load", return_value=Config()),
+        ):
+            cr = _cr(live)
+            cr.record("clean", "", _log())
+            cr.record("damage", "again", _log())  # once only
+        return save, refresh
+
+    def test_installed(self) -> None:
+        save, refresh = self._record(live=False)
+        assert save.call_count == 1 and save.call_args.args[1].result == "clean"
+        assert refresh.call_count == 1 and refresh.call_args.args[2] == "fullcheck"
+        # No DriveUpdate: a full check never writes last_run (M19 2.4).
+        assert len(refresh.call_args.args) == 3 and set(refresh.call_args.kwargs) == {"warn"}
+
+    def test_not_from_a_live_nor_after_a_failed_save(self) -> None:
+        save, refresh = self._record(live=True)
+        assert not save.called and not refresh.called
+        _, refresh = self._record(live=False, saved=False)
+        assert not refresh.called
+
+
+class TestFullcheckOrphan:  # pylint: disable=missing-function-docstring
+    """M19-12 12a, M19R-4: a dead fullcheck is recorded not_finished."""
+
+    def _orphan(self, *, command: str = "fullcheck", guid: str = "100", live: bool = False) -> Any:
+        doc = {
+            "command": command,
+            "started_at": "2026-11-09T09:00:00Z",
+            "updated_at": "2026-11-09T09:30:00Z",
+            "drive": {"name": "black", "guid": guid},
+        }
+        cfg = _cfg(black=None)
+        with (
+            patch.object(progress, "Config") as config,
+            patch.object(progress.sh, "is_live_usb", return_value=live),
+            patch.object(progress.fullcheck, "save") as save,
+            patch.object(progress.status_file, "refresh_or_warn") as refresh,
+            redirect_stdout(StringIO()),
+        ):
+            config.load.return_value = cfg
+            progress._record_orphan(doc, "clean", _log())  # pylint: disable=protected-access
+        return save, refresh
+
+    def test_recorded_not_finished(self) -> None:
+        save, refresh = self._orphan()
+        check = save.call_args.args[1]
+        assert save.call_args.args[0] == "100" and check.result == "not_finished"
+        assert (check.started_at, check.ended_at) == (
+            "2026-11-09T09:00:00Z",
+            "2026-11-09T09:30:00Z",
+        )
+        assert refresh.called
+        assert "last_run" not in str(refresh.call_args)
+
+    def test_not_from_a_live_nor_for_an_unregistered_drive(self) -> None:
+        save, _ = self._orphan(live=True)
+        assert not save.called
+        save, _ = self._orphan(guid="999")
+        assert not save.called
+
+    def test_a_backup_orphan_is_not_a_check(self) -> None:
+        save, refresh = self._orphan(command="backup")
+        assert not save.called and refresh.called
+
+
+class TestMonitorCheck:  # pylint: disable=missing-function-docstring
+    """zark monitor: the part under way, and each drive's last check."""
+
+    def test_the_part_under_way(self) -> None:
+        opt = mview.ViewOptions()
+        doc = fc_cmd.check_doc("scrub", total=100, done=40, rate_s=7, percent=40, errors=2)
+        text = "\n".join(mview.line_text(ln) for ln in mview._check_lines(doc, opt, ""))  # pylint: disable=protected-access
+        assert "scrub 40 %" in text and "2 error(s)" in text and "/s" in text
+        noble = fc_cmd.check_doc("scrub", percent=55)
+        text = "\n".join(mview.line_text(ln) for ln in mview._check_lines(noble, opt, ""))  # pylint: disable=protected-access
+        assert "scrub 55 %" in text
+        rest = fc_cmd.check_doc("restore", total=10, done=2, dataset="backup2/rpool/home")
+        text = "\n".join(mview.line_text(ln) for ln in mview._check_lines(rest, opt, ""))  # pylint: disable=protected-access
+        assert "restore check 20 %" in text and "now backup2/rpool/home" in text
+
+    def test_the_last_check_line(self) -> None:
+        now = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+        line = mview._check_line({"last_check": CHECK}, "    ", now)  # pylint: disable=protected-access
+        assert "damage found" in mview.line_text(line[0])
+        assert not mview._check_line({}, "    ", now)  # pylint: disable=protected-access

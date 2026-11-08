@@ -66,6 +66,7 @@ def _report(st: status.Status, log: Log) -> None:
         log.warn(line)
     if st.read_error:
         log.warn(st.read_error)
+    _checks(st, log)
     if st.residues:
         log.info(status.residue_line(st.residues))
     if st.upgrade_risk:
@@ -77,6 +78,24 @@ def _report(st: status.Status, log: Log) -> None:
         (log.error if boot and boot[0] == "critical" else log.warn if boot else log.ok)(text)
         # An ext4 point needs a zark that lays that disk out (M12-8).
         log.info(f"Points of this system are recovered with zark {MIN_RECOVER_EXT4} or later")
+
+
+def _checks(st: status.Status, log: Log) -> None:
+    """One line per drive with a recorded full check (M19-7 7a)."""
+    words = {
+        "clean": "clean",
+        "damage": "damage found",
+        "not_finished": "not finished",
+        "failed": "failed",
+    }
+    for name, check in sorted(st.checks.items()):
+        text = f"{name}: last full check {check['ended_at'][:10]}: {words[check['result']]}"
+        if check["result"] == "damage":
+            log.error(text)
+        elif check["result"] == "clean":
+            log.ok(text)
+        else:
+            log.warn(text)
 
 
 def _point_records(doc: dict[str, Any] | None, log: Log) -> None:

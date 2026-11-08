@@ -370,7 +370,49 @@ def _active_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     transfer = pdoc.get("transfer")
     if isinstance(transfer, dict):
         return lines + _transfer_lines(inp, transfer, opt, style)
+    check = pdoc.get("check")
+    if isinstance(check, dict):
+        return lines + _check_lines(check, opt, style)
     return lines + _step_meter(pdoc, opt, style)
+
+
+_PHASES = {"restore": "restore check", "scrub": "scrub", "readback": "read-back"}
+
+
+def _check_lines(check: Mapping[str, Any], opt: ViewOptions, style: str) -> list[Line]:
+    """zark fullcheck's part under way (progress.json ``check``, M19)."""
+    phase = clean(check.get("phase", "?"))
+    head = _PHASES.get(phase, phase)
+    done, total = _int(check.get("bytes_done")), _int(check.get("bytes_total"))
+    pct = _int(check.get("percent"))
+    fraction = min(1.0, done / total) if total and done is not None else None
+    if fraction is None and pct is not None:
+        fraction = min(100, pct) / 100
+    if fraction is None:
+        lines: list[Line] = [[(f"  {head}", style or "bold")]]
+    else:
+        lines = [
+            [
+                ("  " + meter(fraction, 40, opt.unicode_bars), style or "run"),
+                (f"  {head} {int(fraction * 100)} %", style or "bold"),
+            ]
+        ]
+    parts: list[str] = []
+    if total:
+        parts.append(f"{fmt_bytes(done)} of {fmt_bytes(total)}")
+    rate = _int(check.get("rate_bytes_per_s"))
+    if rate:
+        parts.append(f"{fmt_bytes(rate)}/s")
+    if check.get("resumed") is True:
+        parts.append("resumed")
+    errors = _int(check.get("errors")) or 0
+    line: Line = [("  " + "   ".join(parts) + ("   " if parts else ""), style)]
+    line.append((f"{errors} error(s)", "crit" if errors else style))
+    lines.append(line)
+    dataset = check.get("dataset")
+    if isinstance(dataset, str):
+        lines.append([(f"  now {clean(dataset)}", style)])
+    return lines
 
 
 def _drive_attention(doc: Mapping[str, Any]) -> list[str]:
@@ -556,6 +598,24 @@ def _drive_row(drive: Mapping[str, Any], width: int, where: str, now: datetime) 
     return row
 
 
+_CHECK_WORDS = {
+    "clean": ("clean", "ok"),
+    "damage": ("damage found", "crit"),
+    "not_finished": ("not finished", "warn"),
+    "failed": ("failed", "warn"),
+}
+
+
+def _check_line(drive: Mapping[str, Any], pad: str, now: datetime) -> list[Line]:
+    """The drive's last full check (status.json ``last_check``, M19)."""
+    check = drive.get("last_check")
+    if not isinstance(check, dict) or check.get("result") not in _CHECK_WORDS:
+        return []
+    word, style = _CHECK_WORDS[str(check["result"])]
+    when = fmt_local(_ts(check.get("ended_at")), now)
+    return [[(f"{pad}last full check {when}: ", "dim"), (word, style)]]
+
+
 def _result_style(result: str) -> str:
     if result in sr.ATTENTION_RESULTS:
         return "crit"
@@ -633,6 +693,7 @@ def _drive_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
         in_use = bool(using) and using.get("guid") == drive.get("guid")
         lines.append(_drive_row(drive, width, _where(drive, in_use, inp.by_id), r.now))
         lines += _run_lines(drive, pad, r.now)
+        lines += _check_line(drive, pad, r.now)
         space = using.get("space") if in_use else drive.get("space")
         if isinstance(space, dict):
             lines.append(_drive_fill(inp, opt, drive, space, in_use))

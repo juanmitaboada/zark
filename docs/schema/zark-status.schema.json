@@ -487,6 +487,180 @@
                 ]
               }
             }
+          },
+          "last_check": {
+            "type": "object",
+            "required": [
+              "started_at",
+              "ended_at",
+              "result",
+              "point",
+              "scrub",
+              "restore",
+              "message"
+            ],
+            "properties": {
+              "started_at": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+              },
+              "ended_at": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+              },
+              "result": {
+                "enum": [
+                  "clean",
+                  "damage",
+                  "not_finished",
+                  "failed"
+                ]
+              },
+              "point": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scrub": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "state",
+                      "examined_bytes",
+                      "repaired_bytes",
+                      "errors",
+                      "permanent_errors",
+                      "seconds"
+                    ],
+                    "properties": {
+                      "state": {
+                        "enum": [
+                          "finished",
+                          "paused",
+                          "not_run"
+                        ]
+                      },
+                      "examined_bytes": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "repaired_bytes": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "errors": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "permanent_errors": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "seconds": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "restore": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "datasets",
+                      "files",
+                      "bytes",
+                      "errors",
+                      "error_paths",
+                      "seconds"
+                    ],
+                    "properties": {
+                      "datasets": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "files": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "errors": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "error_paths": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "seconds": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
           }
         }
       }

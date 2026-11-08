@@ -372,13 +372,18 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     _boot_record,
 )
 from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestCheckInStatus,
     TestCheckRecord,
+    TestCheckRunRecord,
     TestFullcheckFlow,
+    TestFullcheckOrphan,
     TestFullcheckPrecondition,
     TestFullcheckResult,
     TestFullcheckWords,
     TestImportPausesScrub,
+    TestMonitorCheck,
     TestPauseInterrupted,
+    TestProgressCheck,
     TestRestoreCheck,
     TestRestoreReader,
     TestScrubInterrupted,
@@ -465,6 +470,11 @@ FULLCHECK_SUITES = (
     TestRestoreReader,
     TestScrubInterrupted,
     TestScrubPart,
+    TestCheckInStatus,
+    TestCheckRunRecord,
+    TestFullcheckOrphan,
+    TestMonitorCheck,
+    TestProgressCheck,
 )
 
 # ═════════════════════════════════════════════════════════════════════════
