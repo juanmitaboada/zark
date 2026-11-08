@@ -28,6 +28,7 @@ zark/
 │   ├── engine.py              # Backup executor: point, send/receive, anchors
 │   ├── exclusions.py          # Datasets left out of backups or snapshots
 │   ├── forensics.py           # Pool state captured before it is changed
+│   ├── fullcheck.py           # fullcheck's reader of a point, and its record
 │   ├── grub_cfg.py            # grub.cfg regeneration with an honest verdict
 │   ├── grub_guard.py          # The update-grub guard
 │   ├── health.py              # Drive health checks and the destructive test
@@ -81,6 +82,7 @@ zark/
 │   ├── explore.py             # Scan for ZFS pools and show their status
 │   ├── finish.py              # Post-recovery finalization
 │   ├── fix_rpool_mountpoint.py  # Give a restored rpool back mountpoint=/
+│   ├── fullcheck.py           # Scrub a drive and read a point back, changing no data
 │   ├── health.py              # Drive analysis: read-only and destructive
 │   ├── monitor.py             # Live view, a reader of the status files
 │   ├── mount.py               # Backup pool mounting (+ `mount local` for the system)

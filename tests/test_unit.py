@@ -372,8 +372,17 @@ from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # no
     _boot_record,
 )
 from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestCheckRecord,
+    TestFullcheckFlow,
+    TestFullcheckPrecondition,
+    TestFullcheckResult,
+    TestFullcheckWords,
     TestImportPausesScrub,
     TestPauseInterrupted,
+    TestRestoreCheck,
+    TestRestoreReader,
+    TestScrubInterrupted,
+    TestScrubPart,
     TestScrubRule,
     TestScrubState,
 )
@@ -447,6 +456,15 @@ FULLCHECK_SUITES = (
     TestScrubRule,
     TestPauseInterrupted,
     TestImportPausesScrub,
+    TestCheckRecord,
+    TestFullcheckFlow,
+    TestFullcheckPrecondition,
+    TestFullcheckResult,
+    TestFullcheckWords,
+    TestRestoreCheck,
+    TestRestoreReader,
+    TestScrubInterrupted,
+    TestScrubPart,
 )
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -27052,7 +27070,7 @@ class TestHelpOrder:  # pylint: disable=missing-function-docstring
     def test_every_command_once_and_sorted_in_its_group(self) -> None:
         names = cli_spec_mod.command_names()
         assert sorted(names) == sorted(cli_spec_mod.DESCRIPTIONS)
-        assert len(names) == len(set(names)) == 22
+        assert len(names) == len(set(names)) == 23
         for group in cli_spec_mod.GROUPS:
             assert list(group.commands) == sorted(group.commands), group.title
         commands = sorted(p.stem.replace("_", "-") for p in (_REPO_ROOT / "commands").glob("*.py"))
@@ -27181,7 +27199,7 @@ class TestCompletion:  # pylint: disable=missing-function-docstring
 
     def test_commands_options_and_subcommands(self) -> None:
         how, got = self._complete("zark ")
-        assert how == "words" and got[:22] == cli_spec_mod.command_names()
+        assert how == "words" and got[:23] == cli_spec_mod.command_names()
         assert self._complete("sudo ./zark reg") == ("words", ["registry"])
         assert self._complete("zark backup --") == ("words", ["--debug", "--no-snapshot"])
         assert self._complete("zark selftest ")[1] == [

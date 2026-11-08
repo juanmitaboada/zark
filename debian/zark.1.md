@@ -825,6 +825,42 @@ end-to-end sequences.
     JSON snippet that should be added to **known_drives.json** to register
     them.
 
+**fullcheck** \[**scrub** | **restore**\]
+:   Verify a registered backup drive's copies without altering them. With
+    no word it runs both parts, in this order; **restore** or **scrub** runs
+    one. The drive must not be imported: a pool that is (by **mount** or
+    anything else) is refused before the first question; export it first.
+
+    The restore check imports the drive read-only, asks for the backup
+    point (the newest complete one by default, as **recover** offers them)
+    and the drive's passphrase, opens the drive's keystore read-only and
+    loads every key, then mounts each dataset **recover** would restore
+    from that point's snapshot, read-only, and reads every file, symlink and
+    directory in it, each file once. A read that fails is named with its
+    path and the check goes on. Nothing on the drive is written.
+
+    The scrub then imports the drive read-write and scrubs the whole pool:
+    every block of every point is read and its checksum verified, without
+    the key. The scrub writes only its own progress, the pool's labels and
+    history, and rewrites a damaged metadata copy from a good one; it
+    changes no file, snapshot or property. It is unattended and takes hours
+    on a large drive (an estimate is shown, from the drive's last measured
+    rate when there is one). Ctrl-C pauses it and the next **fullcheck**
+    resumes it from its last checkpoint (up to two hours back); a backup,
+    prune or read-write mount that finds a scrub an interrupted check left
+    running pauses it and says so. A drive that goes away during the scrub
+    leaves its pool suspended: zark neither pauses nor exports it and says
+    how to bring it back. After the scrub the drive is read back as after a
+    backup, waiting for apt as the backup's read-back does.
+
+    The result ends in a banner (FULL CHECK PASSED, FOUND DAMAGE or NOT
+    FINISHED) and in the drive's **last_check** entry in
+    **known_drives.json**. On a live session only the restore check runs
+    and nothing is recorded. Exit status 0 when every part asked for
+    passed; 1 for damage found (a repair included), a part that could not
+    run or did not finish, or a refused start; 75 as for any import while
+    apt or dpkg runs.
+
 **health** \[*device*\]
 :   Interactive drive analysis and debugging tool. With a *device* it checks
     that device; without one it scans connected non-system drives and lets

@@ -44,7 +44,7 @@ GROUPS: tuple[Group, ...] = (
         "Recovery (live USB)",
         ("chroot", "finish", "fix-rpool-mountpoint", "recover", "repair-boot", "simulate"),
     ),
-    Group("Inspection", ("explore", "health", "monitor", "mount", "status", "umount")),
+    Group("Inspection", ("explore", "fullcheck", "health", "monitor", "mount", "status", "umount")),
     Group("Setup and upkeep", ("alerts", "clean", "selftest", "setup")),
 )
 
@@ -56,6 +56,7 @@ DESCRIPTIONS: dict[str, str] = {
     "exclude": "Leave datasets out of backups or of local snapshots (list/add/remove)",
     "explore": "Scan for ZFS pools, show known/unknown status",
     "finish": "Post-recovery finalization (run from recovered system)",
+    "fullcheck": "Scrub a backup drive and read a point back, changing no data (scrub/restore)",
     "fix-rpool-mountpoint": "Give a restored rpool back mountpoint=/ (live USB)",
     "health": "Non-destructive risk checks on a backup drive",
     "monitor": "Live view of a running command and the backups' state (no root)",
@@ -170,6 +171,7 @@ SPECS: dict[str, Spec] = {
         Spec("explore"),
         Spec("finish"),
         Spec("fix-rpool-mountpoint"),
+        Spec("fullcheck", args=(Arg("words", ("scrub", "restore")),)),
         Spec("health", args=(_DEVICE,)),
         Spec(
             "monitor",
