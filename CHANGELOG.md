@@ -68,6 +68,12 @@ system 2.2 left half-done.
   `repair-boot` and `finish` install it with the other guards, and the
   package's removal takes it. `finish` no longer advises unplugging a drive
   for this refusal.
+- **26.10's `linux-main-modules-*` are boot-critical to the APT hook**
+  (M18E-1): 26.10 ships the ZFS and v4l2loopback modules in
+  `linux-main-modules-zfs-<v>` and `linux-main-modules-v4l2loopback-<v>`;
+  a run holding only one of them is now refused as the kernel's other
+  packages are, an install while a backup drive is plugged in or imported,
+  a removal while one is imported.
 
 #### Rejected
 

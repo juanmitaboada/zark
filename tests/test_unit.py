@@ -9137,6 +9137,13 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
     def test_a_removal_is_refused_only_while_a_pool_is_imported(self):
         self._table(self._v3(self._remove()), {"system": 0, "plugged": 0, "imported": 1})
 
+    def test_a_run_with_only_a_main_modules_package_is_boot_critical(self):
+        # M18E-1: 26.10's linux-main-modules-zfs-<v> alone, as the others.
+        name = "linux-main-modules-zfs-7.3.0-9-generic"
+        self._table(self._v3(self._install(name)), {"system": 0, "plugged": 1, "imported": 1})
+        self._table(self._v3(self._remove(name)), {"system": 0, "plugged": 0, "imported": 1})
+        assert "linux-main-modules-*" in apt_guard.SENSITIVE_GLOBS
+
     def test_a_purge_is_a_removal(self):
         # M18R-11: dpkgpm.cc prints **REMOVE** for a purge too; no state field to tell them.
         purge = f"{self._K} 7.3.0-9.9 amd64 same > - - none **REMOVE**"

@@ -1527,8 +1527,8 @@ recovered system) install a complementary, earlier line of defence:
 **DPkg::Pre-Install-Pkgs** hook with protocol version 3 via
 */etc/apt/apt.conf.d/09zark-zfs-backup-guard*, so APT sends it every
 action before **dpkg**(1) starts. For a boot-critical package
-(**linux-image**, **linux-modules**, **linux-headers**, **grub**,
-**shim**, **zfs**, ...) the hook aborts the whole transaction when the
+(**linux-image**, **linux-modules**, **linux-main-modules**,
+**linux-headers**, **grub**, **shim**, **zfs**, ...) the hook aborts the whole transaction when the
 package is to be installed while an external ZFS pool is plugged in or
 imported, and when it is to be removed or purged while one is imported (a
 backup or a mount is running). With the drive only plugged in a kernel

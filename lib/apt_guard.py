@@ -75,6 +75,8 @@ SENSITIVE_GLOBS: tuple[str, ...] = (
     "linux-headers-*",
     "linux-modules-*",
     "linux-modules-extra-*",
+    # 26.10 ships the ZFS and v4l2loopback modules apart (M18E-1).
+    "linux-main-modules-*",
     "grub-*",
     "grub2-*",
     "grub-efi-*",
