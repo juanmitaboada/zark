@@ -163,6 +163,8 @@ def parse_text(text: str) -> Scan | None:  # pylint: disable=too-many-return-sta
         )
     if first.startswith("scrub canceled"):
         return Scan("SCRUB", "CANCELED")
+    if first.startswith("resilver canceled"):  # 2.2.2 zpool_main.c:7746-7748 (M19R-15)
+        return Scan("RESILVER", "CANCELED")
     if first.startswith("resilver"):
         return Scan("RESILVER", "FINISHED" if first.startswith("resilvered") else "SCANNING")
     if first.startswith(("scrub in progress", "scrub paused")):

@@ -176,6 +176,12 @@ class TestScrubState:  # pylint: disable=missing-function-docstring
         assert scrub.parse_text("  pool: x\n") is None
         assert scrub.parse_text("  scan: something new\n") is None
 
+    def test_a_canceled_resilver_is_not_one_under_way(self) -> None:
+        """M19R-15: 2.2.2 zpool_main.c:7746-7748, "resilver canceled on %s"."""
+        got = scrub.parse_text("  scan: resilver canceled on Mon Nov  9 10:00:00 2026\n")
+        assert got is not None and (got.function, got.state) == ("RESILVER", "CANCELED")
+        assert not got.resilvering
+
     def test_nice_bytes(self) -> None:
         assert scrub.nice_bytes("0B") == 0
         assert scrub.nice_bytes("1.21G") == int(1.21 * (1 << 30))
