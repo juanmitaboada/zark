@@ -8379,7 +8379,11 @@ class TestExcludeCommand:  # pylint: disable=missing-function-docstring
     """zark exclude (M5b-2 2a): list, add and remove, as origin's properties."""
 
     def _run(
-        self, fake: FakeZfs, args: list[str], answer: bool = True
+        self,
+        fake: FakeZfs,
+        args: list[str],
+        answer: bool = True,
+        status_doc: dict[str, Any] | None = None,
     ) -> tuple[str, int, MagicMock]:
         cfg = make_config()
         cfg.known_drives["blue"] = DriveInfo("blue", "999", "usb-B-0:0")
@@ -8387,6 +8391,7 @@ class TestExcludeCommand:  # pylint: disable=missing-function-docstring
         with (
             patch_sh(fake),
             patch.object(Config, "load", return_value=cfg),
+            patch.object(exclude_mod.status_file, "read", return_value=status_doc),
             patch.object(Log, "ask", return_value=answer),
             patch.object(exclude_mod, "configure_sanoid", return_value=True) as sanoid,
             patch("builtins.input", return_value=""),
@@ -8413,8 +8418,58 @@ class TestExcludeCommand:  # pylint: disable=missing-function-docstring
         out, rc, sanoid = self._run(fake, ["add", "rpool/var/lib/docker", "snapshots"])
         assert rc == 0 and sanoid.called, out
         assert "removes the 1 it took at its next prune" in out, out
-        assert "blue has no zark 2 anchor there" in out, out
+        assert (
+            "blue may hold rpool/var/lib/docker (what it holds was never measured) "
+            "and has no zark 2 anchor there" in " ".join(out.split())
+        ), out
         assert fake.ds["rpool/var/lib/docker"].props["org.zark:snapshot"] == "no"
+
+    # ── the anchor warning's two conditions (M20-1 1a) ───────────────────
+
+    @staticmethod
+    def _measured(*names: str) -> dict[str, Any]:
+        return {"drives": [{"name": "blue", "datasets": [{"name": n} for n in names]}]}
+
+    def test_nothing_to_drain_names_no_drive(self):
+        # The coordinator's false positive on carmen (2026-11-06): a dataset
+        # never sent anywhere and with no sanoid snapshot.
+        fake = _fresh_fake()
+        fake.ds["rpool/var/lib/docker"].snaps = []
+        out, rc, _ = self._run(fake, ["add", "rpool/var/lib/docker", "snapshots"])
+        assert rc == 0 and "removes the 0 it took" in out, out
+        assert "no zark 2 anchor" not in out, out
+
+    def test_a_measured_drive_that_does_not_hold_it_is_not_named(self):
+        fake = _fresh_fake()
+        doc = self._measured("blue/rpool/USERDATA/home")
+        out, rc, _ = self._run(fake, ["add", "rpool/var/lib/docker", "snapshots"], status_doc=doc)
+        assert rc == 0 and "no zark 2 anchor" not in out, out
+
+    def test_a_measured_drive_that_holds_it_is_named(self):
+        fake = _fresh_fake()
+        doc = self._measured("blue/rpool/var/lib/docker")
+        out, rc, _ = self._run(fake, ["add", "rpool/var/lib/docker", "both"], status_doc=doc)
+        flat = " ".join(out.split())
+        assert rc == 0 and "blue holds rpool/var/lib/docker and has no zark 2 anchor" in flat, out
+        assert "never measured" not in flat, out
+
+    def test_an_anchored_drive_is_not_named(self):
+        fake = _fresh_fake()
+        fake.ds["rpool/var/lib/docker"].bookmarks.append(
+            FSnap(repl.anchor_name("999", P1), "7", 1, 1)
+        )
+        doc = self._measured("blue/rpool/var/lib/docker")
+        out, rc, _ = self._run(fake, ["add", "rpool/var/lib/docker", "snapshots"], status_doc=doc)
+        assert rc == 0 and "no zark 2 anchor" not in out, out
+
+    def test_more_than_three_datasets(self):
+        fake = _fresh_fake()
+        for n in range(3):
+            fake.dataset(f"rpool/var/lib/docker/c{n}", canmount="on", mountpoint="none")
+            fake.snap(f"rpool/var/lib/docker/c{n}", "autosnap_2026-10-01_00:00:00_daily")
+        out, rc, _ = self._run(fake, ["add", "rpool/var", "snapshots"])
+        flat = " ".join(out.split())
+        assert rc == 0 and "and 3 more (what it holds was never measured)" in flat, out
 
     def test_nothing_changes_without_a_yes(self):
         fake = _fresh_fake()

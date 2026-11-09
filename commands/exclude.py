@@ -34,10 +34,10 @@ the boot pool, the keystore and the structural containers (D10).
 """
 
 import shlex
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from commands.setup import configure_sanoid
-from lib import cli_spec, exclusions, sh, survey
+from lib import cli_spec, exclusions, sh, status_file, survey
 from lib.config import Config, zark_command
 from lib.exclusions import BACKUPS, BOTH, REPLICATE, SNAPSHOT, SNAPSHOTS
 from lib.log import Log
@@ -102,16 +102,54 @@ def _drained_snapshots(rels: list[str], origin: dict[str, Origin]) -> int:
     return sum(1 for rel in rels for s in origin[rel].snaps if s.name.startswith("autosnap_"))
 
 
-def _unanchored_drives(rels: list[str], origin: dict[str, Origin]) -> list[str]:
-    """Registered drives with no zark 2 anchor on one of ``rels``: their base
-    there is a sanoid snapshot, which the drain removes (as M4d-32 warns)."""
+def _held(doc: dict[str, Any] | None) -> dict[str, set[str] | None]:
+    """Each drive's datasets as status.json last measured them (its optional
+    ``datasets``), None for a drive never measured or a file that cannot be
+    read: not known, never "holds nothing"."""
+    out: dict[str, set[str] | None] = {}
+    for d in (doc or {}).get("drives", []):
+        if not isinstance(d, dict) or not isinstance(d.get("name"), str):
+            continue
+        listed = d.get("datasets")
+        out[d["name"]] = (
+            {x["name"] for x in listed if isinstance(x, dict) and isinstance(x.get("name"), str)}
+            if isinstance(listed, list)
+            else None
+        )
+    return out
+
+
+def _unanchored_drives(
+    rels: list[str], origin: dict[str, Origin]
+) -> list[tuple[str, list[str], bool]]:
+    """Registered drives whose base on one of ``rels`` may be a sanoid
+    snapshot the drain removes (M4d-32), as (drive, datasets, known): the
+    dataset has ``autosnap_*`` snapshots to drain, the drive has no zark 2
+    anchor on it, and the drive holds it by status.json's last measure
+    (``known``) or was never measured (M20-1 1a). A dataset with nothing to
+    drain, or that a measured drive does not hold, names no drive."""
     drives = {i.guid: n for n, i in Config.load().known_drives.items()}
-    out: set[str] = set()
+    held = _held(status_file.read())
+    found: dict[str, list[str]] = {}
     for rel in rels:
         o = origin[rel]
+        if not any(s.name.startswith("autosnap_") for s in o.snaps):
+            continue
         anchored = {anchor_disk(r.name) for r in [*o.bookmarks, *o.snaps]} - {""}
-        out |= {name for guid, name in drives.items() if guid not in anchored}
-    return sorted(out)
+        for guid, name in drives.items():
+            has = held.get(name)
+            if guid not in anchored and (has is None or f"{name}/{rel}" in has):
+                found.setdefault(name, []).append(rel)
+    return [(name, found[name], held.get(name) is not None) for name in sorted(found)]
+
+
+def _late_line(drive: str, rels: list[str], known: bool) -> str:
+    shown = ", ".join(rels[:3]) + (f" and {len(rels) - 3} more" if len(rels) > 3 else "")
+    holds = f"holds {shown}" if known else f"may hold {shown} (what it holds was never measured)"
+    return (
+        f"{drive} {holds} and has no zark 2 anchor there: its base may be one of "
+        + "those snapshots. Back up to it first."
+    )
 
 
 def _add(dataset: str, what: str, log: Log) -> None:
@@ -136,12 +174,8 @@ def _add(dataset: str, what: str, log: Log) -> None:
             f"sanoid takes no more snapshots of them, and removes the {n} it took "
             + "at its next prune."
         )
-        late = _unanchored_drives(rels, origin)
-        if late:
-            log.warn(
-                f"{', '.join(late)} has no zark 2 anchor there: its base may be one of "
-                + "those snapshots. Back up to it first."
-            )
+        for drive, held, known in _unanchored_drives(rels, origin):
+            log.warn(_late_line(drive, held, known))
     if not log.ask(f"Exclude {dataset} ({what})?", default=False):
         log.info("Nothing changed")
         return
