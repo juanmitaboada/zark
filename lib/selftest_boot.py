@@ -302,7 +302,7 @@ def boot_04(b: Bench) -> None:
     """A child made with ``canmount=noauto mountpoint=legacy`` under an
     encrypted dataset: its parent's encryption root, ``acltype`` and
     ``xattr`` inherited; ``zfs mount`` refuses it (a legacy mountpoint,
-    which ``zfs mount -a`` and zark's tree mount skip, lib/mount.py:263);
+    which ``zfs mount -a`` and zark's tree mount skip, lib/mount.py:302);
     ``mount -t zfs`` mounts it, and a snapshot read-only; raw full and
     incremental sends of the parent and the child receive, as a point's."""
     c, be, copy = _copy_tree(b)

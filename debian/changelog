@@ -1,3 +1,26 @@
+zark (2.3.0~rc4-1) UNRELEASED; urgency=medium
+
+  * Milestone M20 of zark 2.3 (readers and small fixes). Not for release:
+    nothing is published until the final 2.3.0.
+  * zark registry verify <name>: a drive whose first read-back prepare
+    could not run (apt held its locks) waits in pending_drives.json with
+    its anchors kept, is named by status, the MOTD, registry list, explore
+    and backup, and is registered once read back. The read-back checks
+    the pool's GUID; prepare drops the entries it replaces at the export.
+  * backup --drive <name> picks the connected registered drive by name;
+    zark.log names the user behind each command; progress.json gains the
+    optional question object; exit status 2 and the statuses' stability
+    are documented.
+  * prune shows a table of candidate ages; exclude warns of a drained base
+    only where a drive may hold the dataset; zark status names a drive's
+    last run that needs attention; the external-pool MOTD tells plugged in
+    from imported.
+  * repair-boot stops when a bind into the chroot fails; zark chroot stops
+    at the first failed bind and names the ones not attempted.
+  * health's report and simulate's files are created privately in /tmp.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 10 Nov 2026 00:24:41 +0100
+
 zark (2.3.0~rc3-1) UNRELEASED; urgency=medium
 
   * Milestone M19b of zark 2.3 (zark fullcheck's findings on eli). Not
