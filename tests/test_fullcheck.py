@@ -811,6 +811,49 @@ class TestRestoreCheck:  # pylint: disable=missing-function-docstring
         assert cr.check.restore["files"] == 3 and cr.check.restore["errors"] == 1
         assert cr.check.restore["error_paths"] == ["/x: Input/output error"]
 
+    def test_the_total_is_the_logical_size_the_walk_reads(self) -> None:
+        """M19E-2: ``logicalreferenced``, not ``referenced`` (compressed on the
+        drive), so the percent does not reach 100 before the walk ends; a
+        snapshot whose size is not read counts its ``referenced``."""
+        cr = _cr()
+        point = MagicMock()
+        point.label_utc.return_value = "2026-11-09 10:00:00 UTC"
+        mock = MockShell()
+        mock.on_prefix("zfs get -Hp -o name,value logicalreferenced").succeeds(
+            f"{POOL}/rpool/d0@zark_p\t1000\n{POOL}/rpool/d1@zark_p\t3000\n"
+        )
+        docs: list[Any] = []
+        out = StringIO()
+        plan = _plan(3)
+        with (
+            patch_sh(mock),
+            patch.object(fc_cmd, "read_snapshot", return_value=fullcheck.ReadResult(files=1)),
+            patch.object(fc_cmd, "point_name", return_value="zark_p"),
+            patch.object(fc_cmd.progress, "set_check", side_effect=docs.append),
+            redirect_stdout(out),
+        ):
+            fc_cmd._read_point(cr, point, plan, fc_cmd.Cleanup(_log()), _log())  # pylint: disable=protected-access
+        assert mock.was_called(
+            "zfs get -Hp -o name,value logicalreferenced "
+            + f"{POOL}/rpool/d0@zark_p {POOL}/rpool/d1@zark_p {POOL}/rpool/d2@zark_p"
+        )
+        assert {d["bytes_total"] for d in docs} == {1000 + 3000 + 10}
+        # Neither size read: the unknown referenced (-1) counts nothing.
+        plan.rows[2].referenced = -1
+        docs.clear()
+        mock.on_prefix("zfs get -Hp -o name,value logicalreferenced").succeeds(
+            f"{POOL}/rpool/d0@zark_p\t1000\n{POOL}/rpool/d1@zark_p\t3000\n"
+        )
+        with (
+            patch_sh(mock),
+            patch.object(fc_cmd, "read_snapshot", return_value=fullcheck.ReadResult(files=1)),
+            patch.object(fc_cmd, "point_name", return_value="zark_p"),
+            patch.object(fc_cmd.progress, "set_check", side_effect=docs.append),
+            redirect_stdout(out),
+        ):
+            fc_cmd._read_point(cr, point, plan, fc_cmd.Cleanup(_log()), _log())  # pylint: disable=protected-access
+        assert {d["bytes_total"] for d in docs} == {4000}
+
     def _open(self, *, loaded_ok: bool, ks_ok: bool = True) -> tuple[Any, int]:
         cr = _cr()
         zfs = MagicMock()

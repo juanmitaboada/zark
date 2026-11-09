@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Damage.unlisted`). Self-test POOL-17 (revision 2) corrupts a block of
   an encrypted dataset too and checks that the list is refused without its
   key and names both files with it.
+- **The restore check's total is the bytes it reads** (M19E-2): the sum of
+  each snapshot's `logicalreferenced`, not of its `referenced`, which
+  counts the copies compressed; on eli the percent reached 100 with two
+  datasets still to read and the total said 6.7 GiB for a walk of 8.0 GiB.
 
 ### M19 - `zark fullcheck`, a backup drive verified without altering it (2.3.0-rc2)
 

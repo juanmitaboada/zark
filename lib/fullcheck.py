@@ -183,6 +183,21 @@ def restore_record(datasets: int, read: ReadResult, seconds: float) -> dict[str,
     }
 
 
+def logical_sizes(snapshots: list[str]) -> dict[str, int]:
+    """``logicalreferenced`` in bytes of each full snapshot name (M19E-2): the
+    bytes a walk of its files reads, where ``referenced`` counts them as the
+    drive stores them (compressed); a name whose size is not read is absent."""
+    if not snapshots:
+        return {}
+    r = sh.run("zfs get -Hp -o name,value logicalreferenced " + " ".join(snapshots))
+    out: dict[str, int] = {}
+    for line in r.lines if r.ok else []:
+        name, _, value = line.partition("\t")
+        if value.strip().isdigit():
+            out[name] = int(value)
+    return out
+
+
 def _nonneg(value: Any) -> int | None:
     ok = isinstance(value, int) and not isinstance(value, bool) and value >= 0
     return value if ok else None

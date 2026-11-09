@@ -68,6 +68,7 @@ from lib.fullcheck import (
     Check,
     ReadResult,
     last_check,
+    logical_sizes,
     rate,
     read_tree,
     restore_record,
@@ -312,7 +313,10 @@ def _read_point(  # pylint: disable=too-many-locals
 ) -> None:
     """Every row recover would restore, mounted from its snapshot and read."""
     rows = [r for r in plan.rows if r.restored and r.snap is not None]
-    total = sum(r.referenced for r in rows)
+    names = [f"{cr.pool}/{r.snap.stored}@{r.snap.name}" for r in rows if r.snap is not None]
+    # M19E-2: the walk counts the files' logical bytes; referenced is compressed.
+    logical = logical_sizes(names)
+    total = sum(logical.get(n, max(r.referenced, 0)) for n, r in zip(names, rows, strict=True))
     prev = last_check(Config.load().known_drives.get(cr.pool))
     log.info(
         f"Reading {len(rows)} dataset(s) of point {point.label_utc()} ({_gib(total)}): "
