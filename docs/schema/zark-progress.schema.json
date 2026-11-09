@@ -64,6 +64,71 @@
         "null"
       ]
     },
+    "question": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "default",
+            "options",
+            "word",
+            "timeout_s",
+            "destructive"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": {
+              "type": [
+                "boolean",
+                "integer",
+                "string",
+                "null"
+              ]
+            },
+            "options": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "word": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeout_s": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              ]
+            },
+            "destructive": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    },
     "step": {
       "anyOf": [
         {

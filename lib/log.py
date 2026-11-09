@@ -31,7 +31,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Collection, Sequence
 from types import TracebackType
-from typing import NoReturn
+from typing import Any, NoReturn
 
 _YES_NO = ("y", "yes", "n", "no")
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -40,17 +40,17 @@ _HANG = re.compile(r" *(?:[•→✓✗-] |\d+\. )?")
 _RESET = "\033[0m"
 
 # What lib.progress hears (M7-4, M7-9): a numbered step, the terminal
-# reads, with their prompt while one waits and None once it returned or
-# raised, and a fatal error's message. Set by progress.start; log itself
-# imports nothing of zark's.
+# reads, with their prompt and question (Z3) while one waits and None once
+# it returned or raised, and a fatal error's message. Set by
+# progress.start; log itself imports nothing of zark's.
 _ON_STEP: list[Callable[[int, int, str], None]] = []
-_ON_WAIT: list[Callable[[str | None], None]] = []
+_ON_WAIT: list[Callable[[str | None, dict[str, Any] | None], None]] = []
 _ON_FATAL: list[Callable[[str], None]] = []
 
 
 def watch(
     on_step: Callable[[int, int, str], None] | None,
-    on_wait: Callable[[str | None], None] | None,
+    on_wait: Callable[[str | None, dict[str, Any] | None], None] | None,
     on_fatal: Callable[[str], None] | None = None,
 ) -> None:
     """Hear every :meth:`Log.step`, every terminal read and every
@@ -94,16 +94,39 @@ class _Deadline:
             signal.signal(signal.SIGALRM, self._old)  # type: ignore[arg-type]
 
 
+def _q(  # pylint: disable=too-many-arguments
+    kind: str,
+    *,
+    default: bool | int | str | None = None,
+    options: Sequence[str] | None = None,
+    word: str | None = None,
+    timeout_s: float | None = None,
+    destructive: bool = False,
+) -> dict[str, Any]:
+    """What a program needs to answer a read in zark's place (progress.json's
+    ``question``, Z3): its kind and fields, never an answer."""
+    return {
+        "kind": kind,
+        "default": default,
+        "options": list(options) if options is not None else None,
+        "word": word,
+        "timeout_s": int(timeout_s) if timeout_s is not None else None,
+        "destructive": destructive,
+    }
+
+
 class _Reading:
     """Around one read of the terminal: the watcher hears its prompt (no
-    colour codes) before it, and None after it, whatever ends it."""
+    colour codes) and its question before it, and None after it, whatever
+    ends it."""
 
-    def __init__(self, prompt: str):
+    def __init__(self, prompt: str, asked: dict[str, Any]):
         self._prompt = " ".join(_SGR.sub("", prompt).split())
+        self._asked = asked
 
     def __enter__(self) -> None:
         for hear in _ON_WAIT:
-            hear(self._prompt)
+            hear(self._prompt, self._asked)
 
     def __exit__(
         self,
@@ -112,7 +135,7 @@ class _Reading:
         _tb: TracebackType | None,
     ) -> None:
         for hear in _ON_WAIT:
-            hear(None)
+            hear(None, None)
 
 
 def _read_line(prompt: str) -> str:
@@ -457,7 +480,9 @@ class Log:
         self._show(self._box(f"{self.Y}?{self.N} {question}"), after=False)
         eof = False
         try:
-            with _Reading(question):
+            # A yes that changes the system passes on_eof=False (above).
+            asked = _q("yes_no", default=default, destructive=on_eof is False)
+            with _Reading(question, asked):
                 answer = _read_line(f"    {prompt}: ").strip().lower()
         except EOFError:
             answer, eof = "", True
@@ -473,7 +498,7 @@ class Log:
         """Wait for Enter (after a physical step). True on a line, False at
         EOF, where nobody did the step; the log says which."""
         try:
-            with _Reading(prompt):
+            with _Reading(prompt, _q("enter")):
                 _ = _read_line(prompt)
         except EOFError:
             self._answer_to_file(prompt.strip(), "<eof>")
@@ -500,7 +525,7 @@ class Log:
             self._answer_to_file(question, f"<no tty> ({'yes' if default else 'no'})")
             return default
 
-        with _Reading(question):
+        with _Reading(question, _q("timed", default=default, timeout_s=timeout)):
             return self._countdown(question, default, timeout, prompt)
 
     def _countdown(self, question: str, default: bool, timeout: int, prompt: str) -> bool:
@@ -564,7 +589,7 @@ class Log:
             return "done"
         rows = [f"{self.Y}?{self.N} {question}"] + ([f"  {tail}"] if tail else [])
         self._show(self._box(*rows), after=False)
-        with _Reading(question):
+        with _Reading(question, _q("wait", timeout_s=timeout)):
             return self._wait_on_terminal(question, end, done, clock, poll)
 
     def _wait_on_terminal(
@@ -630,7 +655,7 @@ class Log:
             rows.append(f"  (default: {self.W}{default}{self.N})")
         self._show(self._box(*rows), after=False, err=True)
         try:
-            with _Reading(question):
+            with _Reading(question, _q("input", default=default)):
                 answer = _read_line("    > ").strip()
         except EOFError:
             answer = ""
@@ -648,7 +673,9 @@ class Log:
         raising.
         """
         try:
-            with _Reading(label or prompt):
+            # Every caller accepts one word; with more, none is named.
+            word = next(iter(accept)) if len(accept) == 1 else None
+            with _Reading(label or prompt, _q("word", word=word, destructive=True)):
                 answer = _read_line(prompt).strip()
         except EOFError:
             answer = ""
@@ -670,7 +697,7 @@ class Log:
         try:
             # getpass restores the echo in its own finally, so an alarm's
             # exception leaves the terminal as it found it (Lib/getpass.py, unix_getpass).
-            with _Reading(question), _Deadline(timeout):
+            with _Reading(question, _q("passphrase", timeout_s=timeout)), _Deadline(timeout):
                 return getpass.getpass("    Passphrase: ", stream=sys.stdout)
         except PromptTimeout:
             sys.stdout.write("\n")  # getpass's own newline comes only after a line
@@ -688,7 +715,7 @@ class Log:
             marker = " ←" if i == default else ""
             print(f"    {self.W}{i + 1}){self.N} {opt}{marker}")
         print()
-        with _Reading(question):
+        with _Reading(question, _q("choice", default=default, options=options)):
             return self._choose(question, options, default)
 
     def _choose(self, question: str, options: list[str], default: int) -> int:
@@ -736,7 +763,7 @@ class Log:
         print(f"  {self.Y}Open another terminal to debug if needed.{self.N}")
         print()
         try:
-            with _Reading("Press Enter to cleanup and exit"):
+            with _Reading("Press Enter to cleanup and exit", _q("pause")):
                 _ = _read_line("  Press Enter to cleanup and exit... ")
         except EOFError:
             pass

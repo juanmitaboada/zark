@@ -983,13 +983,21 @@ class TestProgressFile:  # pylint: disable=missing-function-docstring
                 assert Log(os.devnull).ask(f"Eject {Log.W}black{Log.N} now?", default=True)
             after = _until(path, lambda d: not d["waiting_for_input"])
         assert seen[0]["waiting_for"] == "Eject black now?"
+        assert seen[0]["question"] == {
+            "kind": "yes_no",
+            "default": True,
+            "options": None,
+            "word": None,
+            "timeout_s": None,
+            "destructive": False,
+        }, seen[0]
         assert not problems(seen[0], "progress")
-        assert after["waiting_for"] is None
+        assert after["waiting_for"] is None and after["question"] is None, after
 
     def test_every_terminal_read_is_heard(self):
         heard: list[str | None] = []
         log = Log(os.devnull)
-        log_mod.watch(None, heard.append)
+        log_mod.watch(None, lambda prompt, _q: heard.append(prompt))
         try:
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
                 with patch("builtins.input", return_value="y"):

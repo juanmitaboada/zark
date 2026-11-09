@@ -216,6 +216,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
     path: Path
     log: Log
     waiting_for: str | None = None
+    question: dict[str, Any] | None = None  # what the read asks, for a program (Z3)
     step: dict[str, Any] | None = None
     drive: dict[str, Any] | None = None
     point: str | None = None
@@ -249,6 +250,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
             "updated_at": now_utc_iso(),
             "waiting_for_input": self.waiting_for is not None,
             "waiting_for": self.waiting_for,
+            "question": self.question,
             "step": self.step,
             "drive": self.drive,
             "point": self.point,
@@ -451,9 +453,14 @@ def on_step(index: int, total: int, label: str) -> None:
         _changed(lambda r: setattr(r, "step", {"index": index, "total": total, "label": label}))
 
 
-def on_wait(prompt: str | None) -> None:
-    """A terminal read began (its prompt) or ended (None)."""
-    _changed(lambda r: setattr(r, "waiting_for", prompt))
+def on_wait(prompt: str | None, question: dict[str, Any] | None = None) -> None:
+    """A terminal read began (its prompt and question) or ended (None)."""
+
+    def _set(run: _State) -> None:
+        run.waiting_for = prompt
+        run.question = dict(question) if prompt is not None and question is not None else None
+
+    _changed(_set)
 
 
 def note_error(message: str) -> None:

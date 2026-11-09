@@ -10,6 +10,14 @@
   "updated_at": "2026-10-24T09:27:58Z",
   "waiting_for_input": true,
   "waiting_for": "Eject drive 'black' now? (powers the device down)",
+  "question": {
+    "kind": "timed",
+    "default": true,
+    "options": null,
+    "word": null,
+    "timeout_s": 10,
+    "destructive": false
+  },
   "step": {
     "index": 8,
     "total": 8,

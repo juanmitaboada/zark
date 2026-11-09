@@ -399,6 +399,7 @@ from tests.test_readers import (  # pylint: disable=wrong-import-position # noqa
     TestHealthReportFile,
     TestInvokingUser,
     TestPendingFile,
+    TestQuestionObject,
     TestSimulateTempFiles,
     TestStatusLastRun,
 )
@@ -499,6 +500,7 @@ READERS_SUITES = (
     TestPendingFile,
     TestBackupDriveOption,
     TestInvokingUser,
+    TestQuestionObject,
 )
 
 # ═════════════════════════════════════════════════════════════════════════

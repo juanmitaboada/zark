@@ -10,6 +10,14 @@
   "updated_at": "2026-10-24T09:02:34Z",
   "waiting_for_input": true,
   "waiting_for": "Passphrase for black",
+  "question": {
+    "kind": "passphrase",
+    "default": null,
+    "options": null,
+    "word": null,
+    "timeout_s": null,
+    "destructive": false
+  },
   "step": {
     "index": 5,
     "total": 8,

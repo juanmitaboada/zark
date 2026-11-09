@@ -544,3 +544,168 @@ class TestInvokingUser:  # pylint: disable=missing-function-docstring
         assert order[0].startswith("file:zark prune --dry-run run by uid 1000 ("), order
         assert order[0].endswith(") via sudo"), order
         assert out.getvalue() == "", out.getvalue()
+
+
+class TestQuestionObject:  # pylint: disable=missing-function-docstring
+    """Z3: each read tells its watcher what it asks, as progress.json's
+    ``question``, and nothing of what is typed."""
+
+    @staticmethod
+    def _heard(ask: Any, *patches: Any) -> list[tuple[str | None, Any]]:
+        # pylint: disable=import-outside-toplevel
+        from contextlib import ExitStack, redirect_stderr
+
+        from lib import log as log_mod
+
+        heard: list[tuple[str | None, Any]] = []
+        log_mod.watch(None, lambda prompt, q: heard.append((prompt, q)))
+        try:
+            with ExitStack() as stack:
+                for cm in (*patches, redirect_stdout(StringIO()), redirect_stderr(StringIO())):
+                    stack.enter_context(cm)
+                try:
+                    ask(Log(os.devnull))
+                except (SystemExit, KeyboardInterrupt, EOFError):
+                    pass
+        finally:
+            log_mod.watch(None, None)
+        assert len(heard) == 2 and heard[1] == (None, None), heard
+        return heard
+
+    @staticmethod
+    def _q(kind: str, **fields: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "kind": kind,
+            "default": None,
+            "options": None,
+            "word": None,
+            "timeout_s": None,
+            "destructive": False,
+        }
+        return {**base, **fields}
+
+    @staticmethod
+    def _tty(line: str) -> tuple[Any, Any]:
+        from unittest.mock import MagicMock  # pylint: disable=import-outside-toplevel
+
+        tty = MagicMock()
+        tty.isatty.return_value = True
+        tty.readline.return_value = line
+        return (
+            patch("lib.log.sys.stdin", tty),
+            patch("lib.log.select.select", return_value=([tty], [], [])),
+        )
+
+    def test_yes_no(self):
+        y = patch("builtins.input", return_value="y")
+        got = self._heard(lambda log: log.ask("Q?"), y)[0][1]
+        assert got == self._q("yes_no", default=False), got
+        got = self._heard(lambda log: log.ask("Q?", default=True), y)[0][1]
+        assert got == self._q("yes_no", default=True), got
+        got = self._heard(lambda log: log.ask("Destroy?", on_eof=False), y)[0][1]
+        assert got == self._q("yes_no", default=False, destructive=True), got
+        # on_eof=True is not a yes that changes the system.
+        got = self._heard(lambda log: log.ask("Q?", on_eof=True), y)[0][1]
+        assert got == self._q("yes_no", default=False), got
+
+    def test_timed_and_wait(self):
+        got = self._heard(lambda log: log.ask_timeout("Eject?", True, 10), *self._tty("n\n"))
+        assert got[0][1] == self._q("timed", default=True, timeout_s=10), got
+        got = self._heard(lambda log: log.ask_wait("Wait?", 90.5, lambda: False), *self._tty("y\n"))
+        assert got[0][1] == self._q("wait", timeout_s=90), got
+
+    def test_choice_input_word_enter_pause(self):
+        two = patch("builtins.input", return_value="2")
+        got = self._heard(lambda log: log.ask_choice("Which?", ["a", "b"], default=1), two)
+        assert got[0][1] == self._q("choice", default=1, options=["a", "b"]), got
+        got = self._heard(lambda log: log.ask_input("Name?", "rpool"), two)
+        assert got[0][1] == self._q("input", default="rpool"), got
+        got = self._heard(
+            lambda log: log.ask_text("  > ", accept=("DESTROY",), label="Type DESTROY"), two
+        )
+        assert got[0][1] == self._q("word", word="DESTROY", destructive=True), got
+        got = self._heard(lambda log: log.ask_enter("Press Enter: "), two)
+        assert got[0][1] == self._q("enter"), got
+        eof = patch("builtins.input", side_effect=EOFError)
+        got = self._heard(lambda log: log.fatal("boom"), eof)
+        assert got[0] == ("Press Enter to cleanup and exit", self._q("pause")), got
+
+    def test_cleared_after_an_eof_or_an_interrupt(self):
+        for effect in (EOFError, KeyboardInterrupt):
+            stop = patch("builtins.input", side_effect=effect)
+            got = self._heard(lambda log: log.ask("Q?", on_eof=False), stop)
+            assert got[0][1]["kind"] == "yes_no" and got[1] == (None, None), got
+            got = self._heard(lambda log: log.ask_choice("Which?", ["a"]), stop)
+            assert got[0][1]["kind"] == "choice", got
+
+    def test_a_passphrase_with_a_limit_names_it(self):
+        eof = patch("lib.log.getpass.getpass", side_effect=EOFError)
+        got = self._heard(lambda log: log.ask_password("Passphrase for black", timeout=600), eof)
+        assert got[0][1] == self._q("passphrase", timeout_s=600), got
+        got = self._heard(lambda log: log.ask_password("Passphrase for black"), eof)
+        assert got[0][1] == self._q("passphrase"), got
+
+    def test_the_passphrase_never_reaches_progress_json(self):  # pylint: disable=too-many-locals
+        # pylint: disable=import-outside-toplevel
+        import json
+
+        from lib import status_file
+        from tests.test_status_files import _running, _until
+
+        secret = "correct horse battery staple 7Q"
+        during: list[bytes] = []
+        written: list[str] = []
+        real = status_file.write_atomic
+
+        def _write(where: Path, text: str, *, durable: bool) -> None:
+            written.append(text)
+            real(where, text, durable=durable)
+
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch.object(status_file, "write_atomic", _write),
+                _running(Path(td)) as (path, _),
+            ):
+
+                def _typed(*_a: Any, **_k: Any) -> str:
+                    _ = _until(path, lambda d: d["waiting_for_input"])
+                    during.append(path.read_bytes())
+                    return secret
+
+                with patch("lib.log.getpass.getpass", side_effect=_typed):
+                    with redirect_stdout(StringIO()):
+                        got = Log(os.devnull).ask_password("Passphrase for black")
+                after = _until(path, lambda d: not d["waiting_for_input"])
+                files = [p.read_bytes() for p in Path(td).rglob("*") if p.is_file()]
+        assert got == secret
+        doc = json.loads(during[0])
+        assert doc["question"] == self._q("passphrase"), doc
+        assert after["question"] is None, after
+        assert written, written
+        for data in (*during, *files, *(w.encode() for w in written)):
+            assert secret.encode() not in data
+
+    def test_the_schema_takes_each_kind_and_an_older_file_without_it(self):
+        # pylint: disable=import-outside-toplevel
+        import json
+
+        from tests.test_status_files import FIXTURES, PROGRESS_REL, problems
+
+        doc = json.loads((FIXTURES / "waiting" / PROGRESS_REL).read_text("utf-8"))
+        for q in (
+            self._q("yes_no", default=True, destructive=True),
+            self._q("timed", default=False, timeout_s=10),
+            self._q("wait", timeout_s=600),
+            self._q("choice", default=0, options=["a", "b"]),
+            self._q("input", default="rpool"),
+            self._q("word", word="DESTROY", destructive=True),
+            self._q("passphrase"),
+            self._q("enter"),
+            self._q("pause"),
+            None,
+        ):
+            assert not problems({**doc, "question": q}, "progress"), (q, problems(doc, "progress"))
+        older = {k: v for k, v in doc.items() if k != "question"}
+        assert not problems(older, "progress")
+        for bad in ({"kind": "yes_no"}, {**self._q("choice"), "options": [1]}, "yes_no"):
+            assert problems({**doc, "question": bad}, "progress"), bad
