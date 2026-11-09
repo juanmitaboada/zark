@@ -498,6 +498,8 @@ def scrub_part(cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log) 
                 + estimate(now.bytes_total, rate(prev, "scrub", "examined_bytes"), stream=True)
             )
         if now.function == "SCRUB" and now.state == "SCANNING":
+            if now.paused:
+                break  # M19R-13: paused outside zark (`zpool scrub -p`): not ours to wait for
             if time.monotonic() - shown >= REPORT_EVERY_S:
                 shown = time.monotonic()
                 _report(now, began, pool, log)
@@ -554,8 +556,9 @@ def _scrub_ended(  # pylint: disable=too-many-arguments,too-many-positional-argu
     pool = cr.pool
     damage: Damage = zfs.pool_damage(pool)
     finished = scan.function == "SCRUB" and scan.state == "FINISHED"
+    paused = scan.scrubbing and scan.paused
     cr.check.scrub = scrub_record(
-        "finished" if finished else "not_run",
+        "finished" if finished else "paused" if paused else "not_run",
         examined=scan.examined,
         repaired=scan.processed,
         errors=scan.errors,
@@ -566,7 +569,11 @@ def _scrub_ended(  # pylint: disable=too-many-arguments,too-many-positional-argu
         _fail(cr, f"Could not export {pool} after the scrub", log)
     cleanup.untrack_pool(pool)
     if not finished:
-        cr.record("not_finished", f"the scrub of {pool} ended {scan.state.lower()}", log)
+        why = f"the scrub of {pool} ended {scan.state.lower()}"
+        if paused:
+            again = f"{zark_command()} fullcheck"
+            why = f"the scrub of {pool} was paused outside zark; `{again}` resumes it"
+        cr.record("not_finished", why, log)
         return False
     found = bool(scan.errors) or bool(scan.processed) or damage.any
     if found:

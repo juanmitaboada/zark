@@ -868,6 +868,17 @@ class TestScrubPart:  # pylint: disable=missing-function-docstring
         _, _, _, mock, _ = self._part(zfs, scanning(scrub_pause=1), scanning(state="FINISHED"))
         assert mock.was_called(f"zpool scrub {POOL}")
 
+    def test_a_scrub_paused_outside_zark_ends_the_poll(self) -> None:
+        """M19R-13: `zpool scrub -p` in another terminal during step 2."""
+        zfs = _zfs()
+        paused = scanning(scrub_pause=1762686000)
+        got, cleanup, cr, mock, code = self._part(zfs, {}, scanning(), paused)
+        assert (got, code) == (False, 0)
+        assert cr.check.result == "not_finished" and "paused outside zark" in cr.check.message
+        assert cr.check.scrub is not None and cr.check.scrub["state"] == "paused"
+        assert zfs.pool_export.called and not cleanup._actions  # pylint: disable=protected-access
+        assert mock.was_not_called(f"zpool scrub -p {POOL}")
+
     def test_a_ctrl_c_during_the_poll_leaves_the_pause_registered(self) -> None:
         """M19R-5: from step 2's import to its export the cleanup holds the
         pause, so a signal in the poll pauses the scrub, then exports."""
