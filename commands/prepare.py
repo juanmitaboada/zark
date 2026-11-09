@@ -21,6 +21,7 @@ reads the pool back and only then registers the drive. Leaves nothing in
 origin but this drive's anchors.
 """
 
+import os
 import socket
 import time
 from datetime import UTC, datetime
@@ -32,14 +33,16 @@ from lib import (
     drive_marks,
     engine,
     exclusions,
+    pending,
     pool_record,
     registry,
     sh,
+    status_file,
     survey,
 )
 from lib.boot_layout import BootRefresh, require_boot_copy
 from lib.cleanup import Cleanup, flush_device_cache, prompt_eject_or_attach
-from lib.config import VERSION, Config, DriveInfo, now_utc_iso, zark_command
+from lib.config import VERSION, Config, DriveInfo, now_utc_iso, registry_entry, zark_command
 from lib.drives import record_backup, validate_external_block_device
 from lib.health import check_device, render_report
 from lib.identity import DiskIdentity, Evidence, enclosure_mates, recognise, registry_names
@@ -132,13 +135,14 @@ def run(
 
     # ── Stale registry entries for this same drive ───────────────────────
     replace = _stale_entries(ident, cfg, log)
+    waiting, pending_here = _pending_here(ident, cfg, log)
+    # A drive waiting for its read-back keeps its name (M20-6).
+    taken = {*cfg.known_drives, *waiting} - replace - pending_here
 
     # ── Pool name ────────────────────────────────────────────────────────
     default_pool = "backup"
     counter = 1
-    while (default_pool in cfg.known_drives and default_pool not in replace) or zfs.pool_exists(
-        default_pool
-    ):
+    while default_pool in taken or zfs.pool_exists(default_pool):
         counter += 1
         default_pool = f"backup{counter}"
 
@@ -146,6 +150,15 @@ def run(
     if not new_pool.isidentifier():
         # Not echoed: a mistyped answer here may be a passphrase.
         log.fatal("Invalid pool name - letters, digits and _ only, not starting with a digit")
+    if new_pool in waiting and new_pool not in pending_here:
+        log.fatal(
+            f"Pool name '{new_pool}' is a drive waiting for its read-back "
+            + f"({waiting[new_pool].entry['drive_id']})",
+            solutions=[
+                "Choose another pool name",
+                f"Or finish it: {zark_command()} registry verify {new_pool}",
+            ],
+        )
     if new_pool in cfg.known_drives and new_pool not in replace:
         other = cfg.known_drives[new_pool].drive_id
         log.fatal(
@@ -273,6 +286,9 @@ def run(
     if exported:
         cleanup.untrack_pool(new_pool)
         flush_device_cache(log)
+        # The pools these entries name went at zpool create: drop them now,
+        # whatever the read-back does (M20R-2, M20R-3).
+        _drop_replaced(cfg, replace, waiting, pending_here, log)
 
     if not complete:
         # H16: a drive whose data or keystore did not land is never registered,
@@ -299,22 +315,43 @@ def run(
             new_pool,
             device=ident.part1,
             cleanup=cleanup,
-            skip_note="It would be reported as not done, and the drive would not be registered.",
+            skip_note="It would be reported as not done, and the drive would wait for it.",
+            guid=new_guid,
         )
         if exported
         else None
     )
+    info = DriveInfo(
+        name=new_pool,
+        guid=new_guid,
+        drive_id=base_drive_id,
+        enclosure_id=enclosure_id,
+        last_backup_at=prepared_at,  # I13: prepare is a full backup
+        autoeject=autoeject,
+        extra={registry.RETENTION_KEY: retention} if retention else {},
+    )
+    record_backup(info, VERSION, shared, {"prepared-at": prepared_at, "prepared-version": VERSION})
+    if rb is not None and rb.skipped and _wait_for_verify(cfg, info, prepared_at, ident, log):
+        # Not read back because apt ran (M18-13): the drive waits, with its
+        # anchors, for zark registry verify (M20-4 4a).
+        log.banner_error(
+            "DRIVE NOT VERIFIED YET",
+            [
+                *rb.describe(again=False),
+                "",
+                "When apt has ended, read it back and register it: "
+                + f"{zark_command()} registry verify {new_pool}",
+                "Until then it is not registered and no backup goes to it.",
+            ],
+        )
+        raise SystemExit(1)
     if rb is None or not rb.ok:
         lines = (
             rb.describe(again=False)
             if rb
             else [f"{new_pool} could not be exported, so it was not read back."]
         )
-        if rb is not None and rb.skipped:
-            lines.append(
-                "The drive holds a first backup zark cannot verify without registering it; "
-                + "zark has no command to read an unregistered drive back."
-            )
+        if rb is not None and rb.skipped:  # and it could not be recorded as waiting
             lines.append(
                 f"Wipe and retry once apt has ended: {zark_command()} purge {ident.by_id_path}"
             )
@@ -326,27 +363,7 @@ def run(
         raise SystemExit(1)
     log.ok(f"{new_pool} verified reimportable (ONLINE)")  # I13: the verdict is logged
 
-    for name in replace:
-        # The same disk, now blank: the replaced pool's anchors are useless.
-        left = anchors.drop_anchors_of(cfg.known_drives[name].guid, log)
-        if left:
-            log.warn(left)
-        del cfg.known_drives[name]
-    cfg.known_drives[new_pool] = DriveInfo(
-        name=new_pool,
-        guid=new_guid,
-        drive_id=base_drive_id,
-        enclosure_id=enclosure_id,
-        last_backup_at=prepared_at,  # I13: prepare is a full backup
-        autoeject=autoeject,
-        extra={registry.RETENTION_KEY: retention} if retention else {},
-    )
-    record_backup(
-        cfg.known_drives[new_pool],
-        VERSION,
-        shared,
-        {"prepared-at": prepared_at, "prepared-version": VERSION},
-    )
+    cfg.known_drives[new_pool] = info
     cfg.save_drives()
 
     elapsed = int(time.time() - start)
@@ -383,6 +400,88 @@ def run(
         default_eject=False,
         autoeject=autoeject,
     )
+
+
+def _wait_for_verify(
+    cfg: Config, info: DriveInfo, prepared_at: str, ident: DiskIdentity, log: Log
+) -> bool:
+    """Record the drive as waiting for its read-back; False when the pending
+    file cannot be read or written (the drive is then not verified, as
+    before M20: its anchors go and the purge is advised)."""
+    try:
+        pending.add(cfg, pending.Pending(info.name, registry_entry(info), prepared_at, ident.part1))
+    except (pending.PendingError, registry.RegistryError, OSError) as e:
+        log.error(f"Cannot record {info.name} as waiting for its read-back: {e}")
+        return False
+    status_file.refresh_or_warn(cfg, Log(os.devnull), "prepare", warn=log)
+    return True
+
+
+def _pending_here(
+    ident: DiskIdentity, cfg: Config, log: Log
+) -> tuple[dict[str, pending.Pending], set[str]]:
+    """The drives waiting for their read-back, and those among them prepared
+    on this very disk (M20R-3): about to be wiped, so their pool will not
+    exist; dropped with their anchors after the export, with no question.
+    One that shares only this enclosure's name is asked about, default no.
+    An unreadable file is a warning: nothing is dropped."""
+    try:
+        waiting = pending.read(cfg)
+    except pending.PendingError as e:
+        log.warn(f"Cannot read the drives waiting for a read-back: {e}")
+        return {}, set()
+    here: set[str] = set()
+    for m in recognise(ident, {name: p.info for name, p in waiting.items()}):
+        if m.evidence is not Evidence.BUS:
+            here.add(m.name)
+            continue
+        # Only the enclosure's name: another disk may have gone through it,
+        # so asked, default no, as _stale_entries asks for a registry entry.
+        log.warn(
+            f"The pending registration '{m.name}' is under this enclosure's name; "
+            + "nothing proves this disk is that drive"
+        )
+        if log.ask(
+            f"Is this disk the pending '{m.name}'? Drop it (and its anchors in origin) "
+            + "when preparing?",
+            default=False,
+        ):
+            here.add(m.name)
+    if here:
+        log.warn(f"Waiting for a read-back on this same drive (stale): {', '.join(sorted(here))}")
+    return waiting, here
+
+
+def _drop_replaced(
+    cfg: Config,
+    replace: set[str],
+    waiting: dict[str, pending.Pending],
+    here: set[str],
+    log: Log,
+) -> None:
+    """Drop the registry entries and pending registrations of this disk's
+    earlier pools, with their anchors, once the new pool is exported."""
+    for name in sorted(replace):
+        # The same disk, now blank: the replaced pool's anchors are useless.
+        left = anchors.drop_anchors_of(cfg.known_drives[name].guid, log)
+        if left:
+            log.warn(left)
+        del cfg.known_drives[name]
+    if replace:
+        cfg.save_drives()
+        log.info(
+            f"Replaced in the registry: {', '.join(sorted(replace))} "
+            + "(this disk's earlier pools; their anchors in origin dropped)"
+        )
+    for name in sorted(here):
+        left = anchors.drop_anchors_of(waiting[name].guid, log)
+        if left:
+            log.warn(left)
+        _ = pending.remove(cfg, name)
+        log.info(f"The pending registration of {name} on this disk is dropped (its pool was here)")
+    if here:
+        # The notice and the MOTD line go with the entry, not at the next timer run (M20R-5).
+        status_file.refresh_or_warn(cfg, Log(os.devnull), "prepare", warn=log)
 
 
 def _stale_entries(ident: DiskIdentity, cfg: Config, log: Log) -> set[str]:

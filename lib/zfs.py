@@ -227,6 +227,9 @@ class Readback:  # pylint: disable=too-many-instance-attributes
     skipped: str = ""
     holders: list[dpkg_lock.Holder] = field(default_factory=list)
     pool: str = ""
+    # The GUID found at the device when it was not the one expected, or
+    # "unreadable" (M20R-1): another pool of that name is on the disk.
+    foreign: str = ""
 
     @property
     def ok(self) -> bool:
@@ -238,6 +241,8 @@ class Readback:  # pylint: disable=too-many-instance-attributes
         not run is not one that failed (M18R-14)."""
         if self.skipped:
             return f"{pool} was not read back (apt was running)"
+        if self.foreign:
+            return f"{pool} is another pool (GUID {self.foreign})"
         return f"{pool} failed its read-back"
 
     def describe(self, *, again: bool = True) -> list[str]:
@@ -260,6 +265,16 @@ class Readback:  # pylint: disable=too-many-instance-attributes
                     ]
                     if again
                     else []
+                ),
+            ]
+        if self.foreign:
+            return [
+                f"The disk holds another pool named {self.pool} (GUID {self.foreign}), "
+                + "not the one expected: nothing was registered.",
+                *(
+                    []
+                    if self.reexported
+                    else ["The read-back import could not be exported again: it is still imported."]
                 ),
             ]
         if not self.imported:
@@ -586,8 +601,15 @@ class ZFS:
         cleanup: PoolTracker | None = None,
         *,
         skip_note: str = "It would be reported as not done.",
+        guid: str = "",
     ) -> "Readback":
         """Confirm an already-exported pool can be re-imported and reads clean.
+
+        ``guid``, when given, is the pool GUID expected at ``device``: read
+        while the pool is imported, before its health; another GUID (or one
+        that cannot be read) exports it again and is not ``ok``, with
+        ``foreign`` set (M20R-1). The import is by name, so without it a
+        pool of the same name on that disk would pass.
 
         ``cleanup`` tracks the pool from before its re-import until its
         export succeeded, so a run stopped in between (a signal, a fatal)
@@ -652,6 +674,20 @@ class ZFS:
             _ = forensics.capture(name, "read-back could not re-import the pool", self.log)
             return Readback(imported=False, error=r.stderr.strip())
 
+        if guid and (actual := self.pool_guid(name)) != guid:
+            found = actual or "unreadable"
+            self.log.error(
+                f"Read-back of {name}: the pool at {device} has GUID {found}, not {guid}"
+            )
+            reexported = self._reexport(name, root, cleanup)
+            return Readback(
+                imported=True,
+                reexported=reexported,
+                error=f"GUID {found}, not {guid}",
+                pool=name,
+                foreign=found,
+            )
+
         health = self.pool_health(name)
         status = ""
         if health != "ONLINE":
@@ -660,6 +696,11 @@ class ZFS:
             # While it is still imported: zpool status -v needs the pool.
             _ = forensics.capture(name, f"read-back health {health}", self.log)
 
+        reexported = self._reexport(name, root, cleanup)
+        return Readback(imported=True, health=health, status=status, reexported=reexported)
+
+    def _reexport(self, name: str, root: str, cleanup: PoolTracker | None) -> bool:
+        """The read-back's export, checked and logged (I12)."""
         reexported = self._export_after_udev(name)
         run("sync")
         if reexported and cleanup is not None:
@@ -671,7 +712,7 @@ class ZFS:
             self.log.ok(f"Read-back of {name}: exported again")
         else:
             self.log.error(f"Read-back of {name}: could NOT export it again - still imported")
-        return Readback(imported=True, health=health, status=status, reexported=reexported)
+        return reexported
 
     def _import_for_readback(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,

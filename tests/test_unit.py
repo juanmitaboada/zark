@@ -396,6 +396,7 @@ from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # no
 )
 from tests.test_readers import (  # pylint: disable=wrong-import-position # noqa: E402
     TestHealthReportFile,
+    TestPendingFile,
     TestSimulateTempFiles,
     TestStatusLastRun,
 )
@@ -493,6 +494,7 @@ READERS_SUITES = (
     TestHealthReportFile,
     TestSimulateTempFiles,
     TestStatusLastRun,
+    TestPendingFile,
 )
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -6080,7 +6082,7 @@ class TestReadbackWaitsForApt:  # pylint: disable=missing-function-docstring,use
         assert len(rb.describe(again=False)) == 2
 
     def test_prepare_passes_its_own_note(self):
-        note = "It would be reported as not done, and the drive would not be registered."
+        note = "It would be reported as not done, and the drive would wait for it."
         seen: list[str] = []
 
         def ask_wait(_self: Log, _q: str, _t: float, _d: Any, tail: str = "", **_k: Any) -> str:
@@ -6143,7 +6145,9 @@ class TestReadbackWaitsForApt:  # pylint: disable=missing-function-docstring,use
         assert not cfg.known_drives["backup"].last_backup_at
         eject.assert_not_called()
 
-    def test_prepare_with_a_skipped_read_back_does_not_register_the_drive(self):
+    def test_prepare_with_a_skipped_read_back_waits_for_verify(self):
+        # M20-4 4a: not registered (M18-13), but the anchors are kept and the
+        # entry prepare would write waits in pending_drives.json.
         fake = _fresh_fake(())
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(cfg_dir / "known_drives.json", {})
@@ -6153,15 +6157,17 @@ class TestReadbackWaitsForApt:  # pylint: disable=missing-function-docstring,use
             fake, cfg_dir, readback=skipped, out=out
         )
         text = " ".join(unframed(out.getvalue()).split())
-        assert rc == 1 and "DRIVE NOT VERIFIED" in text, text
+        assert rc == 1 and "DRIVE NOT VERIFIED YET" in text, text
         assert "The read-back of blue was not done" in text and "still running after 15" in text
-        assert "The drive has NOT been registered." in text and "backup again" not in text, text
-        assert "Wipe and retry once apt has ended:" in text, text
-        assert (
-            "The drive holds a first backup zark cannot verify without registering it; "
-            "zark has no command to read an unregistered drive back."
-        ) in text, text
+        assert "registry verify blue" in text and "backup again" not in text, text
+        assert "Until then it is not registered and no backup goes to it." in text, text
+        assert "purge" not in text and "has no command" not in text, text
         assert json.loads((cfg_dir / "known_drives.json").read_text(encoding="utf-8")) == {}
+        doc = json.loads((cfg_dir / "pending_drives.json").read_text(encoding="utf-8"))
+        entry = doc["pending"]["blue"]["entry"]
+        assert entry["guid"] == "777" and entry["drive_id"].startswith("usb-Kingston"), entry
+        assert doc["pending"]["blue"]["device"].endswith("-part1"), doc
+        assert fake.bookmarks("rpool/USERDATA/home"), "the anchors were dropped"
 
 
 class TestReadbackVerification:  # pylint: disable=missing-function-docstring
@@ -6288,6 +6294,55 @@ class TestReadbackVerification:  # pylint: disable=missing-function-docstring
                         )
                 assert not (base / "black").exists()
                 assert base.exists() is other, other
+
+
+class TestReadbackGuid:  # pylint: disable=missing-function-docstring
+    """M20R-1: with ``guid``, the read-back checks the pool's GUID while it is
+    imported, before its health; another pool of that name is not ok."""
+
+    DEV = TestReadbackVerification.DEV
+    IMPORT = TestReadbackVerification.IMPORT
+
+    def _mock(self, guid: str | None) -> MockShell:
+        mock = MockShell()
+        mock.on("sync").succeeds()
+        mock.on("drop_caches").succeeds()
+        mock.on(self.IMPORT).succeeds()
+        if guid is None:
+            mock.on("zpool get -H -o value guid black").fails("no such pool")
+        else:
+            mock.on("zpool get -H -o value guid black").succeeds(guid)
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("zpool export black").succeeds()
+        return mock
+
+    def test_the_expected_guid_reads_on(self):
+        mock = self._mock("111")
+        with patch_sh(mock):
+            rb = ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, guid="111")
+        assert rb.ok and not rb.foreign, rb
+        calls = mock.calls
+        assert calls.index("zpool get -H -o value guid black") < calls.index(
+            "zpool list -H -o health black"
+        ), calls
+
+    def test_another_guid_is_exported_and_not_ok(self):
+        for found, shown in (("222", "222"), (None, "unreadable")):
+            mock = self._mock(found)
+            with patch_sh(mock):
+                rb = ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, guid="111")
+            assert not rb.ok and rb.imported and rb.reexported and rb.foreign == shown, rb
+            assert not mock.was_called("zpool list -H -o health black"), mock.calls
+            assert mock.was_called("zpool export black"), mock.calls
+            text = " ".join(rb.describe())
+            assert f"another pool named black (GUID {shown})" in text, text
+            assert rb.summary("black") == f"black is another pool (GUID {shown})"
+
+    def test_no_guid_no_guid_read(self):
+        mock = self._mock("222")
+        with patch_sh(mock):
+            rb = ZFS(make_log()).verify_exported_pool_readback("black", self.DEV)
+        assert rb.ok and not mock.was_called("zpool get -H -o value guid black"), mock.calls
 
 
 class TestReadbackTracked:  # pylint: disable=missing-function-docstring
@@ -11933,7 +11988,7 @@ class TestPurgeReportUnregistered:  # pylint: disable=missing-function-docstring
         assert f"{Log.Y}⚠  IRREVERSIBLE OPERATION{Log.N}" in out.getvalue()
 
 
-class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
+class TestPrepareIdentity:  # pylint: disable=missing-function-docstring,too-many-public-methods
     """I16/I22/I23 + I-G in prepare."""
 
     asked: list[str]  # the yes/no questions of the last _prepare
@@ -12267,6 +12322,184 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring
         assert fake.bookmarks("rpool/ROOT/be") and all(
             repl.anchor_disk(b) == "777" for b in fake.bookmarks("rpool/ROOT/be")
         )
+
+    # ── the pending registration (M20-4 4a, M20R-2, M20R-3) ──────────────
+
+    def _replaced_fixture(self) -> tuple[FakeZfs, Path]:
+        """A registered 'blue' of this very disk (GUID 1) with its anchors; the
+        new pool is prepared as 'new'."""
+        fake = _fresh_fake(("old",))
+        assert _engine_run(fake, "old", "1", P1).ok
+        _ = [fake.ds.pop(n) for n in [n for n in fake.ds if n == "old" or n.startswith("old/")]]
+        fake.pools.discard("old")
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(
+            cfg_dir / "known_drives.json", {"blue": {"guid": "1", "drive_id": _KINGSTON_ID}}
+        )
+        return fake, cfg_dir
+
+    def test_the_replaced_entry_goes_whatever_the_read_back_does(self):
+        # M20R-2: its pool went at zpool create.
+        for rb in (
+            Readback(imported=False, skipped="operator", pool="new"),
+            Readback(imported=True, health="DEGRADED", status="x", reexported=True),
+        ):
+            fake, cfg_dir = self._replaced_fixture()
+            out = StringIO()
+            assert self._prepare(fake, cfg_dir, readback=rb, out=out, Pool="new") == 1
+            data = json.loads((cfg_dir / "known_drives.json").read_text())
+            assert data == {}, (rb, data)
+            assert repl.anchor_name("1", P1) not in fake.bookmarks("rpool/ROOT/be"), rb
+            assert "Replaced in the registry: blue" in " ".join(out.getvalue().split()), rb
+
+    def test_an_incomplete_send_drops_the_replaced_entry_too(self):
+        fake, cfg_dir = self._replaced_fixture()
+        fake.inject["new/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert self._prepare(fake, cfg_dir, Pool="new") == 1
+        assert json.loads((cfg_dir / "known_drives.json").read_text()) == {}
+
+    def test_a_failed_export_keeps_the_replaced_entry(self):
+        fake, cfg_dir = self._replaced_fixture()
+        with patch.object(ZFS, "pool_export", return_value=False):
+            assert self._prepare(fake, cfg_dir, Pool="new") == 1
+        assert "blue" in json.loads((cfg_dir / "known_drives.json").read_text())
+
+    @staticmethod
+    def _pending_file(cfg_dir: Path, name: str, guid: str, drive_id: str) -> None:
+        doc = {
+            "schema_version": 1,
+            "pending": {
+                name: {
+                    "entry": {"guid": guid, "drive_id": drive_id, "autoeject": False},
+                    "prepared_at": "2026-11-09T10:00:00Z",
+                    "device": f"/dev/disk/by-id/{drive_id}-part1",
+                }
+            },
+        }
+        (cfg_dir / "pending_drives.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    def test_a_pending_registration_of_this_disk_is_dropped(self):
+        # M20R-3: prepared again before its verify, the disk's old pool is gone.
+        fake = _fresh_fake(("old",))
+        assert _engine_run(fake, "old", "9", P1).ok
+        _ = [fake.ds.pop(n) for n in [n for n in fake.ds if n == "old" or n.startswith("old/")]]
+        fake.pools.discard("old")
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        self._pending_file(cfg_dir, "old", "9", self.ATA_B)
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out, disk=self._samsung(), Pool="old") == 0, (
+            out.getvalue()
+        )
+        assert not [q for q in self.asked if "pending 'old'" in q], self.asked
+        assert not (cfg_dir / "pending_drives.json").exists()
+        assert repl.anchor_name("9", P1) not in fake.bookmarks("rpool/ROOT/be")
+        text = " ".join(out.getvalue().split())
+        assert "The pending registration of old on this disk is dropped" in text, text
+        assert json.loads((cfg_dir / "known_drives.json").read_text())["old"]["guid"] == "777"
+
+    def test_dropping_a_pending_registration_refreshes_status_json(self):
+        # M20R-5: its drive_pending notice and MOTD line go with it.
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        self._pending_file(cfg_dir, "old", "9", self.ATA_B)
+        seen: list[tuple[str, bool]] = []
+
+        def _refresh(_cfg: Any, _log: Any, by: str, **_kw: Any) -> None:
+            seen.append((by, (cfg_dir / "pending_drives.json").exists()))
+
+        with patch.object(prepare_mod.status_file, "refresh_or_warn", side_effect=_refresh):
+            assert self._prepare(fake, cfg_dir, disk=self._samsung(), Pool="old") == 0
+        assert seen and seen[0] == ("prepare", False), seen
+
+    def test_a_pending_registration_under_the_enclosure_s_name_is_asked_about(self):
+        for answer_no in (True, False):
+            fake = _fresh_fake(())
+            cfg_dir = Path(tempfile.mkdtemp())
+            registry_write_atomic(cfg_dir / "known_drives.json", {})
+            self._pending_file(cfg_dir, "old", "9", _KINGSTON_ID)
+            refuse = ("pending 'old'",) if answer_no else ()
+            assert self._prepare(fake, cfg_dir, refuse=refuse) == 0
+            asked = [q for q in self.asked if "Is this disk the pending 'old'?" in q]
+            assert asked and self.defaults[asked[0]] is False, self.defaults
+            kept = (cfg_dir / "pending_drives.json").exists()
+            assert kept is answer_no, answer_no
+
+    def test_a_pending_registration_of_another_disk_is_kept_and_its_name_taken(self):
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        self._pending_file(cfg_dir, "backup", "9", "ata-OTHER_DISK_X1")
+        out = StringIO()
+        rc = self._prepare(fake, cfg_dir, out=out, Pool="backup")
+        assert rc == 1 and "is a drive waiting for its read-back" in out.getvalue(), rc
+        assert "pending" in json.loads((cfg_dir / "pending_drives.json").read_text())
+        assert self._prepare(_fresh_fake(()), cfg_dir) == 0  # Pool "blue": another name
+        assert "backup" in json.loads((cfg_dir / "pending_drives.json").read_text())["pending"]
+
+    def test_an_unreadable_pending_file_only_warns(self):
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        (cfg_dir / "pending_drives.json").write_text("{", encoding="utf-8")
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out) == 0, out.getvalue()
+        assert "Cannot read the drives waiting for a read-back" in out.getvalue()
+
+    def test_the_read_back_gets_the_new_guid(self):
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        seen: list[dict[str, Any]] = []
+        rb = Readback(imported=True, health="ONLINE", reexported=True)
+
+        def readback(*_a: Any, **k: Any) -> Readback:
+            seen.append(k)
+            return rb
+
+        spy = patch.object(ZFS, "verify_exported_pool_readback", side_effect=readback)
+        assert self._prepare(fake, cfg_dir, extra=(spy,)) == 0
+        assert seen and seen[0]["guid"] == "777", seen
+
+    def test_another_pool_at_the_read_back_registers_nothing(self):
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        rb = Readback(imported=True, reexported=True, foreign="222", pool="blue")
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, readback=rb, out=out) == 1
+        text = " ".join(unframed(out.getvalue()).split())
+        assert "DRIVE NOT VERIFIED" in text and "another pool named blue (GUID 222)" in text
+        assert json.loads((cfg_dir / "known_drives.json").read_text()) == {}
+        assert not (cfg_dir / "pending_drives.json").exists()
+        assert not [b for b in fake.bookmarks("rpool/ROOT/be") if repl.anchor_disk(b) == "777"]
+
+    def test_a_skipped_read_back_keeps_the_anchors_and_waits(self):
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        for why in ("operator", "timeout"):
+            fake = _fresh_fake(())
+            rb = Readback(imported=False, skipped=why, pool="blue")
+            assert self._prepare(fake, cfg_dir, readback=rb) == 1, why
+            assert [b for b in fake.bookmarks("rpool/ROOT/be") if repl.anchor_disk(b) == "777"]
+            doc = json.loads((cfg_dir / "pending_drives.json").read_text())
+            assert doc["pending"]["blue"]["entry"]["guid"] == "777", doc
+            assert json.loads((cfg_dir / "known_drives.json").read_text()) == {}
+            (cfg_dir / "pending_drives.json").unlink()
+
+    def test_a_skip_that_cannot_be_recorded_drops_the_anchors(self):
+        fake = _fresh_fake(())
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        rb = Readback(imported=False, skipped="operator", pool="blue")
+        out = StringIO()
+        with patch.object(prepare_mod.pending, "add", side_effect=OSError("read-only")):
+            assert self._prepare(fake, cfg_dir, readback=rb, out=out) == 1
+        text = " ".join(unframed(out.getvalue()).split())
+        assert "Cannot record blue as waiting" in text and "Wipe and retry" in text, text
+        assert not [b for b in fake.bookmarks("rpool/ROOT/be") if repl.anchor_disk(b) == "777"]
 
     def test_prepare_refuses_while_bpool_is_not_imported(self):
         """M2R-4 (E4b): a new drive would be prepared without bpool."""
@@ -13296,6 +13529,321 @@ _ELI_CACHE_RPOOL = "\n".join(
     ],
 )
 _ELI_CACHE_BPOOL = f"bpool\tnone\toff\nbpool/BOOT\tnone\toff\nbpool/BOOT/{_BE}\t/boot\ton"
+
+
+class TestRegistryVerify:  # pylint: disable=missing-function-docstring
+    """``zark registry verify <name>`` (M20-5 5a): a drive prepare could not
+    read back is read back, its GUID checked, and registered with the entry
+    prepare recorded; the pending drive shown where drives are listed (6b)."""
+
+    DEV = "/dev/disk/by-id/ata-SAMSUNG_HM501II_S12AB34C567890-part1"
+
+    @staticmethod
+    def _fixture(anchored: bool = True) -> tuple[FakeZfs, Path]:
+        fake = _fresh_fake(("old",))
+        if anchored:
+            assert _engine_run(fake, "old", "9", P1).ok
+        _ = [fake.ds.pop(n) for n in [n for n in fake.ds if n == "old" or n.startswith("old/")]]
+        fake.pools.discard("old")
+        d = Path(tempfile.mkdtemp())
+        registry_write_atomic(d / "known_drives.json", {})
+        doc = {
+            "schema_version": 1,
+            "pending": {
+                "old": {
+                    "entry": {
+                        "guid": "9",
+                        "drive_id": "ata-SAMSUNG_HM501II_S12AB34C567890",
+                        "last_backup_at": "2026-11-09T10:00:00Z",
+                        "autoeject": True,
+                        "retention": {"window_days": 60},
+                        "prepared_at": "2026-11-09T10:00:00Z",
+                    },
+                    "prepared_at": "2026-11-09T10:00:00Z",
+                    "device": TestRegistryVerify.DEV,
+                }
+            },
+        }
+        (d / "pending_drives.json").write_text(json.dumps(doc), encoding="utf-8")
+        return fake, d
+
+    def _run(  # pylint: disable=too-many-arguments
+        self,
+        fake: FakeZfs,
+        d: Path,
+        args: list[str],
+        *,
+        rb: Readback | None = None,
+        live: bool = False,
+        connected: bool = True,
+        yes: bool = True,
+    ) -> tuple[int, str, list[dict[str, Any]], MagicMock]:
+        seen: list[dict[str, Any]] = []
+
+        def readback(_self: ZFS, name: str, **k: Any) -> Readback:
+            seen.append({"name": name, **k})
+            return rb or Readback(imported=True, health="ONLINE", reexported=True)
+
+        eject = MagicMock()
+        out, rc = StringIO(), 0
+        with (
+            patch_sh(fake),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch.object(registry_mod.sh, "is_live_usb", return_value=live),
+            exists_only(
+                *([self.DEV] if connected else []), absent=() if connected else (self.DEV,)
+            ),
+            patch.object(ZFS, "verify_exported_pool_readback", autospec=True, side_effect=readback),
+            patch.object(registry_mod, "prompt_eject_or_attach", eject),
+            patch.object(Cleanup, "register", lambda _self: None),
+            patch.object(Log, "ask", return_value=yes),
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(out),
+        ):
+            try:
+                registry_mod.run(args)
+            except SystemExit as e:
+                rc = int(e.code or 0)
+        return rc, " ".join(unframed(out.getvalue()).split()), seen, eject
+
+    @staticmethod
+    def _anchored(fake: FakeZfs) -> bool:
+        return any(repl.anchor_disk(b) == "9" for b in fake.bookmarks("rpool/ROOT/be"))
+
+    def test_a_read_back_that_passes_registers_what_prepare_recorded(self):
+        fake, d = self._fixture()
+        rc, out, seen, eject = self._run(fake, d, ["verify", "old"])
+        assert rc == 0 and "DRIVE REGISTERED" in out, out
+        assert seen == [
+            {
+                "name": "old",
+                "device": self.DEV,
+                "cleanup": seen[0]["cleanup"],
+                "skip_note": "It would be reported as not done; the drive stays waiting.",
+                "guid": "9",
+            }
+        ], seen
+        entry = json.loads((d / "known_drives.json").read_text())["old"]
+        assert entry["guid"] == "9" and entry["retention"] == {"window_days": 60}, entry
+        assert entry["autoeject"] is True and entry["prepared_at"], entry
+        assert not (d / "pending_drives.json").exists()
+        assert self._anchored(fake)
+        eject.assert_called_once()
+        assert eject.call_args.args[0] == self.DEV.removesuffix("-part1"), eject.call_args
+
+    def test_the_registry_is_written_before_the_pending_entry_goes(self):
+        fake, d = self._fixture()
+        order: list[str] = []
+        real_save, real_remove = Config.save_drives, registry_mod.pending.remove
+
+        def save(c: Config) -> None:
+            order.append("registry")
+            real_save(c)
+
+        def remove(c: Config, n: str) -> bool:
+            order.append("pending")
+            return real_remove(c, n)
+
+        with (
+            patch.object(Config, "save_drives", autospec=True, side_effect=save),
+            patch.object(registry_mod.pending, "remove", side_effect=remove),
+        ):
+            rc, _, _, _ = self._run(fake, d, ["verify", "old"])
+        assert rc == 0 and order == ["registry", "pending"], order
+
+    def test_a_skipped_read_back_changes_nothing(self):
+        fake, d = self._fixture()
+        before = (d / "pending_drives.json").read_text()
+        rb = Readback(imported=False, skipped="operator", pool="old")
+        rc, out, _, eject = self._run(fake, d, ["verify", "old"], rb=rb)
+        assert rc == 1 and "DRIVE NOT VERIFIED YET" in out and "registry verify old again" in out
+        assert (d / "pending_drives.json").read_text() == before
+        assert json.loads((d / "known_drives.json").read_text()) == {}
+        assert self._anchored(fake) and not eject.called
+
+    def test_a_failed_read_back_drops_the_anchors_and_the_entry(self):
+        fake, d = self._fixture()
+        rb = Readback(imported=True, health="DEGRADED", status="x", reexported=True, pool="old")
+        rc, out, _, _ = self._run(fake, d, ["verify", "old"], rb=rb)
+        assert rc == 1 and "DRIVE NOT VERIFIED" in out and "Wipe and retry:" in out, out
+        assert not (d / "pending_drives.json").exists() and not self._anchored(fake)
+        assert json.loads((d / "known_drives.json").read_text()) == {}
+
+    def test_another_pool_on_the_disk_drops_the_entry_without_the_purge_advice(self):
+        fake, d = self._fixture()
+        rb = Readback(imported=True, reexported=True, foreign="222", pool="old")
+        rc, out, _, _ = self._run(fake, d, ["verify", "old"], rb=rb)
+        assert rc == 1 and "another pool named old (GUID 222)" in out, out
+        assert "is no longer there" in out and "purge" not in out, out
+        assert not (d / "pending_drives.json").exists() and not self._anchored(fake)
+
+    def test_the_refusals_import_nothing(self):
+        fake, d = self._fixture()
+        for live, connected, args, why in (
+            (True, True, ["verify", "old"], "runs on the installed system"),
+            (False, True, ["verify", "nope"], "'nope' is not waiting for a read-back"),
+            (False, False, ["verify", "old"], "old's disk is not connected"),
+        ):
+            rc, out, seen, _ = self._run(fake, d, args, live=live, connected=connected)
+            assert rc == 1 and why in out and not seen, (why, out)
+        registry_write_atomic(
+            d / "known_drives.json", {"other": {"guid": "9", "drive_id": "ata-X"}}
+        )
+        rc, out, seen, _ = self._run(fake, d, ["verify", "old"])
+        assert rc == 1 and "is already in the registry" in out and not seen, out
+
+    def test_an_imported_pool_of_that_name_is_refused(self):
+        fake, d = self._fixture()
+        fake.pool("old")
+        rc, out, seen, _ = self._run(fake, d, ["verify", "old"])
+        assert rc == 1 and "A pool named 'old' is imported" in out and not seen, out
+
+    def test_without_anchors_it_asks_default_no(self):
+        fake, d = self._fixture(anchored=False)
+        rc, out, seen, _ = self._run(fake, d, ["verify", "old"], yes=False)
+        assert rc == 0 and "no anchor in origin any more" in out and not seen, out
+        assert "Nothing changed" in out
+        rc, out, seen, _ = self._run(fake, d, ["verify", "old"], yes=True)
+        assert rc == 0 and seen and "DRIVE REGISTERED" in out, out
+
+    def test_dpkg_busy_at_the_import_writes_nothing(self):
+        fake, d = self._fixture()
+        before = (d / "pending_drives.json").read_text()
+        busy = dpkg_lock.DpkgBusy(TestReadbackWaitsForApt.HELD)
+        with (
+            patch.object(ZFS, "verify_exported_pool_readback", side_effect=busy),
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch_sh(fake),
+            patch.object(registry_mod.sh, "is_live_usb", return_value=False),
+            exists_only(self.DEV),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                registry_mod.run(["verify", "old"])
+            except dpkg_lock.DpkgBusy:
+                pass
+            else:
+                raise AssertionError("DpkgBusy did not reach the entry point")
+        assert (d / "pending_drives.json").read_text() == before
+        assert json.loads((d / "known_drives.json").read_text()) == {}
+
+    def test_list_and_forget(self):
+        fake, d = self._fixture()
+        rc, out, _, _ = self._run(fake, d, ["list"])
+        assert rc == 0 and "Waiting for a read-back" in out, out
+        assert "finish it: sudo ./zark registry verify old" in out or "registry verify old" in out
+        registry_write_atomic(
+            d / "known_drives.json", {"blue": {"guid": "5", "drive_id": "ata-BLUE_X"}}
+        )
+        with patch.object(registry_mod, "locate_registered") as where:
+            where.return_value = Location(Presence.ABSENT, "", "", None)
+            rc, out, _, _ = self._run(fake, d, ["list"])
+        assert "anchor(s) in origin, waiting for a read-back" in out, out
+        assert "(old): " in out and "drive GUID 9: " in out and "no registry entry" not in out, out
+        registry_write_atomic(d / "known_drives.json", {})
+        rc, out, _, _ = self._run(fake, d, ["forget", "old"])
+        assert rc == 0 and "'old' removed from" in out, out
+        assert not (d / "pending_drives.json").exists() and not self._anchored(fake)
+
+    def test_forget_by_guid_and_a_no_keeps_it(self):
+        fake, d = self._fixture()
+        rc, out, _, _ = self._run(fake, d, ["forget", "9"], yes=False)
+        assert rc == 0 and "Aborted" in out and (d / "pending_drives.json").exists()
+        rc, out, _, _ = self._run(fake, d, ["forget", "9"])
+        assert rc == 0 and not (d / "pending_drives.json").exists(), out
+
+    def test_status_shows_it_with_the_command(self):
+        fake, d = self._fixture()
+        with patch_sh(fake), patch.object(Config, "default_config_dir", return_value=d):
+            cfg = Config.load()
+            st = status_lib.gather(cfg, Log(os.devnull))
+            got = [n for n in status_lib.notices(st) if n.code == "drive_pending"]
+            doc = status_file_lib.build(st, cfg, "test", None)
+        assert [(n.level, n.subject) for n in got] == [("warning", "old")], got
+        assert "registry verify old" in got[0].text, got
+        assert not tsf.problems(doc, "status"), tsf.problems(doc, "status")
+        assert sreader.indicator("idle", None, "ok", doc) != "attention", doc["notices"]
+        assert "registry verify old" in status_lib.motd_text(st), status_lib.motd_text(st)
+        (d / "pending_drives.json").write_text("{", encoding="utf-8")
+        with patch_sh(fake), patch.object(Config, "default_config_dir", return_value=d):
+            st = status_lib.gather(Config.load(), Log(os.devnull))
+        assert [n.code for n in status_lib.notices(st) if "pending" in n.text] == ["read_error"]
+
+    def test_explore_lists_it_as_pending_and_never_offers_it(self):
+        _, d = self._fixture()
+        drive = ConnectedDrive(
+            "old", "9", "usb-X-0:0", "/dev/sdb1", False, False, False, "exported"
+        )
+        asked: list[str] = []
+
+        def ask(q: str, **_k: Any) -> bool:
+            asked.append(q)
+            return True
+
+        out = StringIO()
+        with (
+            patch.object(Config, "default_config_dir", return_value=d),
+            patch.object(explore_mod, "scan_connected_drives", return_value=[drive]),
+            patch.object(Log, "ask", side_effect=ask),
+            redirect_stdout(out),
+        ):
+            explore_mod.run([])
+        text = " ".join(out.getvalue().split())
+        assert "PENDING" in text and "registry verify old" in text, text
+        assert not [q for q in asked if q.startswith("Auto-register")], asked
+        assert json.loads((d / "known_drives.json").read_text()) == {}
+
+    def test_completion_offers_the_pending_names(self):
+        _, d = self._fixture()
+        with patch.dict(os.environ, {"ZARK_CONFIG_DIR": str(d)}):
+            how, words = completion_mod.complete("zark registry verify ", Path("/nonexistent"))
+        assert (how, words) == ("words", ["old"]), (how, words)
+
+    def test_purge_of_its_pool_drops_the_entry(self):
+        _, d = self._fixture()
+        with (
+            patch.object(Config, "default_config_dir", return_value=d),
+            redirect_stdout(StringIO()),
+        ):
+            purge_mod._drop_pending(Config.load(), ["5"], Log(os.devnull))  # pylint: disable=protected-access
+            assert (d / "pending_drives.json").exists()
+            purge_mod._drop_pending(Config.load(), ["9"], Log(os.devnull))  # pylint: disable=protected-access
+        assert not (d / "pending_drives.json").exists()
+
+    def test_backup_s_fatal_names_the_command(self):
+        out = StringIO()
+        with (
+            patch.object(backup_mod, "Config"),
+            patch.object(backup_mod, "_detect_live_usb", return_value=False),
+            patch.object(backup_mod, "warn_rpool_mountpoint_lost"),
+            patch.object(backup_mod, "warn_kernel_named_vdevs"),
+            patch.object(backup_mod.certificates, "show_warnings"),
+            patch.object(backup_mod.survey, "require_bookmark_v2"),
+            patch.object(backup_mod.survey, "require_boot_layout", return_value="bpool"),
+            patch.object(backup_mod.pool_record, "capture", return_value="{}"),
+            patch.object(backup_mod, "scan_connected_drives", return_value=[]),
+            patch.object(backup_mod.pending, "among", return_value=["old"]),
+            patch.object(backup_mod.Cleanup, "register", lambda _self: None),
+            patch_sh(MockShell()),
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(out),
+            redirect_stderr(StringIO()),
+        ):
+            try:
+                backup_mod.run([])
+            except SystemExit:
+                pass
+        text = " ".join(unframed(out.getvalue()).split())
+        assert "No known backup drives detected" in text, text
+        assert "old is connected, but its registration was not finished" in text, text
+        assert "registry verify old" in text, text
+
+    def test_backup_names_the_command_when_only_a_pending_drive_is_connected(self):
+        _, d = self._fixture()
+        with patch.object(Config, "default_config_dir", return_value=d):
+            got = backup_mod.pending.among(Config.load(), {"9", "5"}, Log(os.devnull))
+            assert not backup_mod.pending.among(Config.load(), {"5"}, Log(os.devnull))
+        assert got == ["old"]
 
 
 class TestRestorePoints:  # pylint: disable=missing-function-docstring

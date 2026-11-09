@@ -44,6 +44,7 @@ zark/
 │   ├── mount_props.py         # Where a restored dataset's mount properties come from
 │   ├── notify.py              # Desktop notifications from root
 │   ├── origin_prune.py        # What `zark prune` can remove in origin
+│   ├── pending.py             # pending_drives.json: drives prepare could not read back yet
 │   ├── platform_facts.py      # The platform, as the self-test records it
 │   ├── pool_record.py         # How origin's pools were at a backup point (features, versions)
 │   ├── progress.py            # /run/zark/progress.json: what the running command does

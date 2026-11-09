@@ -89,6 +89,10 @@ def _checks(st: status.Status, log: Log) -> None:
         "not_finished": "not finished",
         "failed": "failed",
     }
+    for name in st.pending:  # prepared, not read back yet (M20-6 6b)
+        log.warn(status.pending_line(name))
+    if st.pending_error:
+        log.warn(st.pending_error)
     for name, check in sorted(st.checks.items()):
         text = f"{name}: last full check {check['ended_at'][:10]}: {words[check['result']]}"
         if check["result"] == "damage":

@@ -223,3 +223,67 @@ class TestStatusLastRun:  # pylint: disable=missing-function-docstring
         ):
             status_cmd.run([])
         assert "bk: last run interrupted" in out.getvalue(), out.getvalue()
+
+
+class TestPendingFile:  # pylint: disable=missing-function-docstring
+    """lib.pending: pending_drives.json, validated and written atomically (M20-4 4a)."""
+
+    @staticmethod
+    def _cfg() -> Any:
+        from lib.config import Config  # pylint: disable=import-outside-toplevel
+
+        cfg = Config()
+        cfg.config_dir = Path(tempfile.mkdtemp())
+        return cfg
+
+    @staticmethod
+    def _item(name: str = "old", guid: str = "9") -> Any:
+        from lib import pending  # pylint: disable=import-outside-toplevel
+
+        entry = {"guid": guid, "drive_id": "ata-X", "last_backup_at": None, "autoeject": False}
+        return pending.Pending(name, entry, "2026-11-09T10:00:00Z", "/dev/disk/by-id/ata-X-part1")
+
+    def test_absent_is_none_and_a_round_trip_keeps_everything(self):
+        from lib import pending  # pylint: disable=import-outside-toplevel
+
+        cfg = self._cfg()
+        assert not pending.read(cfg)
+        pending.add(cfg, self._item())
+        got = pending.read(cfg)
+        assert got == {"old": self._item()}, got
+        assert stat.S_IMODE(os.stat(pending.path(cfg)).st_mode) == 0o644
+        assert got["old"].info.guid == "9" and got["old"].guid == "9"
+        assert pending.by_guid(got, "9") == got["old"] and pending.by_guid(got, "1") is None
+
+    def test_remove_and_an_empty_file_goes(self):
+        from lib import pending  # pylint: disable=import-outside-toplevel
+
+        cfg = self._cfg()
+        pending.add(cfg, self._item("a", "1"))
+        pending.add(cfg, self._item("b", "2"))
+        assert pending.remove(cfg, "a") and not pending.remove(cfg, "a")
+        assert list(pending.read(cfg)) == ["b"]
+        assert pending.remove(cfg, "b") and not pending.path(cfg).exists()
+
+    def test_what_is_refused(self):
+        from lib import pending  # pylint: disable=import-outside-toplevel
+
+        cfg = self._cfg()
+        for text, why in (
+            ("{", "invalid JSON"),
+            ('{"schema_version": 2, "pending": {}}', "not a schema 1"),
+            ('{"schema_version": 1, "pending": []}', "'pending' must be an object"),
+            ('{"schema_version": 1, "pending": {"a": {"entry": {"guid": "x"}}}}', "guid"),
+            (
+                '{"schema_version": 1, "pending": {"a": {"entry": '
+                '{"guid": "1", "drive_id": "d"}, "prepared_at": "t"}}}',
+                "needs 'prepared_at' and 'device'",
+            ),
+        ):
+            pending.path(cfg).write_text(text, encoding="utf-8")
+            try:
+                pending.read(cfg)
+            except pending.PendingError as e:
+                assert why in str(e), (why, e)
+            else:
+                raise AssertionError(f"accepted: {text}")

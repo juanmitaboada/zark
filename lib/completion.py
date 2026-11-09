@@ -63,6 +63,17 @@ def drives(root: Path) -> list[str]:
     return sorted(k for k in data if isinstance(k, str)) if isinstance(data, dict) else []
 
 
+def waiting(root: Path) -> list[str]:
+    """The drives waiting for their read-back (pending_drives.json, beside
+    the registry), the ones ``registry verify`` takes; none when unreadable."""
+    try:
+        doc = json.loads((registry_path(root).parent / "pending_drives.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = doc.get("pending") if isinstance(doc, dict) else None
+    return sorted(k for k in items if isinstance(k, str)) if isinstance(items, dict) else []
+
+
 def devices(by_id: Path | None = None) -> list[str]:
     """Whole disks under ``by_id`` (:data:`BY_ID`), as full paths (zark
     refuses partitions)."""
@@ -107,6 +118,7 @@ def _values(arg: cli_spec.Arg, root: Path) -> tuple[str, list[str]]:
     found = {
         "device": devices,
         "drive": lambda: drives(root),
+        "pending": lambda: waiting(root),
         "dataset": datasets,
         "excluded": excluded,
     }.get(arg.kind)

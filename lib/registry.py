@@ -174,7 +174,13 @@ def serialize(entries: dict[str, dict[str, Any]], path: Path) -> str:
 
 def write_atomic(path: Path, entries: dict[str, dict[str, Any]]) -> None:
     """Validate and atomically replace ``path`` with ``entries``."""
-    text = serialize(entries, path)
+    write_text_atomic(path, serialize(entries, path))
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text``: a temporary file in the same
+    directory, fsync, rename, fsync of the directory; the file's mode kept,
+    0644 for a new one. Also used for pending_drives.json (lib.pending)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)

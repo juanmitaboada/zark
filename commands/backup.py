@@ -26,6 +26,8 @@ per-dataset table goes to the terminal and to zark.log.
 Refuses to run from live USB (would back up the wrong system).
 """
 
+# pylint: disable=too-many-lines
+
 import os
 import signal
 import socket
@@ -46,6 +48,7 @@ from lib import (
     exclusions,
     forensics,
     notify,
+    pending,
     pool_record,
     progress,
     reclaim,
@@ -1173,14 +1176,17 @@ def run(
     known = [d for d in drives if d.known]
 
     if not known:
+        waiting = pending.among(cfg, {d.guid for d in drives}, log)
         log.fatal(
             "No known backup drives detected",
             causes=[
+                *(f"{n} is connected, but its registration was not finished" for n in waiting),
                 "No drives from known_drives.json are connected",
                 "USB cable not properly seated",
                 "Drive has different ID than registered",
             ],
             solutions=[
+                *(f"Run: {zark_command()} registry verify {n}" for n in waiting),
                 "Connect a backup drive and run again",
                 f"Run: {zark_command()} explore  to scan for unknown pools",
                 f"Run: {zark_command()} prepare /dev/sdX  to register a new drive",

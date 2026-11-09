@@ -28,7 +28,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import NamedTuple
 
-from lib import anchors, forensics, sh
+from lib import anchors, forensics, pending, sh, status_file
 from lib.cleanup import flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.drives import SYSTEM_POOLS, validate_external_block_device
@@ -344,6 +344,22 @@ def _report_lines(marks: list[Mark]) -> list[str]:
     return [f"{sign[ok]} {text}" for ok, text in marks]
 
 
+def _drop_pending(cfg: Config, guids: list[str], log: Log) -> None:
+    """A wiped pool that was waiting for its read-back (M20-6 6b): its
+    pending entry goes with the anchors dropped above."""
+    try:
+        waiting = pending.read(cfg)
+    except pending.PendingError as e:
+        log.warn(f"Cannot read the drives waiting for a read-back: {e}")
+        return
+    gone = [p.name for p in waiting.values() if p.guid in guids]
+    for name in gone:
+        _ = pending.remove(cfg, name)
+        log.ok(f"Removed {name} from the drives waiting for a read-back")
+    if gone:
+        status_file.refresh_or_warn(cfg, Log(os.devnull), "purge", warn=log)
+
+
 def run(
     args: list[str],
 ):  # pylint: disable=too-many-branches,too-many-statements,too-many-locals
@@ -446,6 +462,7 @@ def run(
             del cfg.known_drives[name]
         cfg.save_drives()
         log.ok(f"Removed {', '.join(matched)} from known_drives.json")
+    _drop_pending(cfg, guids, log)
 
     # Flush kernel buffers before asking about the bridge power-down.
     # Even though purge does not leave a pool behind, the dd/wipefs/

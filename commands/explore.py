@@ -18,12 +18,14 @@ Non-destructive. Shows:
   - Known drives (green): registered and GUID matches
   - GUID changed (yellow): name matches but GUID differs
   - Renamed (yellow): GUID matches but name differs
+  - Pending (yellow): prepared, waiting for zark registry verify
   - Unknown (yellow): not in known_drives.json
 
 For unknown/changed drives, shows the exact JSON to add.
 """
 
-from lib.config import Config, DriveInfo
+from lib import pending
+from lib.config import Config, DriveInfo, zark_command
 from lib.drives import ConnectedDrive, scan_connected_drives
 from lib.identity import Kind, classify, names_of, registry_names, whole_disk
 from lib.log import Log
@@ -78,9 +80,26 @@ def run(
         return
 
     # Display results
+    try:
+        waiting = {p.guid: p.name for p in pending.read(cfg).values()}
+    except pending.PendingError as e:
+        log.warn(f"Cannot read the drives waiting for a read-back: {e}")
+        waiting = {}
     unknown_count = 0
     for d in drives:
-        if d.known and not d.guid_changed and not d.renamed:
+        if not d.known and d.guid in waiting:
+            # Prepared while apt ran: registered only after its read-back (M20-6 6b).
+            unknown_count += 1
+            name = waiting[d.guid]
+            log.raw(
+                f"  {log.Y}⚠ PENDING{log.N}  {log.W}{d.name}{log.N}  "
+                + f"(GUID: {d.guid}) [{d.state}]",
+            )
+            log.raw(
+                f"           {name}: prepared, not read back yet: run "
+                + f"{zark_command()} registry verify {name}"
+            )
+        elif d.known and not d.guid_changed and not d.renamed:
             log.raw(
                 f"  {log.G}✓ KNOWN{log.N}    {log.W}{d.name}{log.N}  "
                 + f"(GUID: {d.guid}) [{d.state}]",
@@ -181,7 +200,13 @@ def run(
                         log.ok(f"Removed {len(stale)} stale entry/entries")
 
     # Offer auto-registration for unknown drives
-    unknowns = [d for d in drives if not d.known or d.guid_changed or d.renamed]
+    # A drive waiting for its read-back is registered by registry verify,
+    # which reads it back first; never here.
+    unknowns = [
+        d
+        for d in drives
+        if (not d.known or d.guid_changed or d.renamed) and not (not d.known and d.guid in waiting)
+    ]
     if unknowns and log.ask("Auto-register these drives in known_drives.json?", default=False):
         saved = 0
         for d in unknowns:

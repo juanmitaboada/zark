@@ -497,6 +497,7 @@ class TestPoolRecordCapture:  # pylint: disable=missing-function-docstring
             patch.object(survey, "require_boot_layout", return_value="bpool"),
             patch.object(pool_record, "capture", side_effect=capture),
             patch.object(backup_mod, "scan_connected_drives", side_effect=scan),
+            patch.object(backup_mod.pending, "among", return_value=[]),
             patch.object(backup_mod.Cleanup, "register", lambda _self: None),
             patch_sh(MockShell()),
             patch("builtins.input", return_value=""),

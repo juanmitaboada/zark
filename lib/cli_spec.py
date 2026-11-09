@@ -65,7 +65,7 @@ DESCRIPTIONS: dict[str, str] = {
     "prune": "Reclaim space in origin or on a backup drive (interactive)",
     "purge": "Securely wipe a managed backup drive",
     "recover": "Full bare-metal recovery from backup drive",
-    "registry": "List, forget or fix entries in known_drives.json, or set a drive's retention",
+    "registry": "List, forget, fix or verify drives in known_drives.json, or set a retention",
     "repair-boot": "Fix boot issues from live USB (grub.cfg, initrd)",
     "selftest": "Check that this platform behaves as zark relies on",
     "setup": "Install dependencies, configure sanoid snapshots (--remove: undo the guards, alerts)",
@@ -83,9 +83,10 @@ def command_names() -> list[str]:
 # ── the words each command's parser reads (M14-9) ────────────────────────
 
 # Kinds of value, as the completion lists them: a whole disk, a registered
-# drive, a filesystem of rpool, one carrying an exclusion, a file, a
-# directory, one of fixed words, or free text (nothing offered).
-KINDS = ("device", "drive", "dataset", "excluded", "file", "dir", "words", "text")
+# drive, a drive waiting for its read-back, a filesystem of rpool, one
+# carrying an exclusion, a file, a directory, one of fixed words, or free
+# text (nothing offered).
+KINDS = ("device", "drive", "pending", "dataset", "excluded", "file", "dir", "words", "text")
 
 
 @dataclass(frozen=True)
@@ -196,6 +197,7 @@ SPECS: dict[str, Spec] = {
                 Spec("list"),
                 Spec("forget", args=(_DRIVE,)),
                 Spec("fix", args=(_DRIVE,)),
+                Spec("verify", args=(Arg("pending"),)),
                 Spec(
                     "retention",
                     args=(_DRIVE, Arg("words", ("window", "max_age", "margin"), repeat=True)),

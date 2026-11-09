@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lib import anchors, certificates, sh, statusdirs, survey, upgrade_risk
+from lib import anchors, certificates, pending, sh, statusdirs, survey, upgrade_risk
 from lib.boot_layout import boot_mount
 from lib.config import Config, now_utc_iso, zark_command
 from lib.drives import drive_staleness_days, no_anchor_lines
@@ -128,6 +128,8 @@ class Status:  # pylint: disable=too-many-instance-attributes
     boot: BootSpace | None = None  # an ext4 /boot (M12-6 6a)
     upgrade_risk: str = ""  # why the 24.04 to 26.04 upgrade would stop the mounts (M12P.3)
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)  # drive → last_check (M19)
+    pending: list[str] = field(default_factory=list)  # drives waiting for a read-back (M20-6)
+    pending_error: str = ""  # why pending_drives.json could not be read
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,10 @@ def gather(cfg: Config, log: Log) -> Status:
         for name, info in sorted(cfg.known_drives.items())
         if (check := last_check(info)) is not None
     }
+    try:
+        st.pending = sorted(pending.read(cfg))
+    except pending.PendingError as e:
+        st.pending_error = f"could not read {pending.FILE_NAME}: {e}"
     if "rpool" not in pools:
         return st
     try:
@@ -231,6 +237,15 @@ def rpo_line(st: Status) -> tuple[bool, str]:
     return stale, "last backups: " + ", ".join(parts)
 
 
+def pending_line(name: str) -> str:
+    """A drive prepare wrote but could not read back, and the command that
+    finishes its registration (M20-6 6b)."""
+    return (
+        f"{name} was prepared but not read back (apt was running): "
+        + f"run {zark_command()} registry verify {name}"
+    )
+
+
 def check_lines(st: Status) -> list[tuple[str, str, str]]:
     """(level, drive, text) for every drive whose last full check did not
     pass (M19-7 7a): critical for damage, a warning for one that did not
@@ -277,6 +292,9 @@ def notices(st: Status) -> list[Notice]:
         Notice("warning", "no_anchor", drive, line)
         for line, drive in zip(st.shared, drives, strict=True)
     ]
+    out += [Notice("warning", "drive_pending", name, pending_line(name)) for name in st.pending]
+    if st.pending_error:
+        out.append(Notice("warning", "read_error", None, st.pending_error))
     if st.read_error:
         out.append(Notice("warning", "read_error", None, st.read_error))
     out += [

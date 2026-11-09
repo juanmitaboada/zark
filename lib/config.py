@@ -104,6 +104,37 @@ class DriveInfo:
     enclosure_id: str = ""  # by-id name of the enclosure, when drive_id is the disk's own
 
 
+def drive_info(name: str, info: dict[str, Any]) -> DriveInfo:
+    """A validated registry entry (:func:`lib.registry.parse`) as a DriveInfo."""
+    return DriveInfo(
+        name=name,
+        guid=str(info["guid"]),
+        drive_id=str(info["drive_id"]),
+        last_backup_at=(
+            str(info["last_backup_at"]) if isinstance(info.get("last_backup_at"), str) else None
+        ),
+        autoeject=bool(info.get("autoeject", False)),
+        extra={
+            k: v
+            for k, v in info.items()
+            if k not in registry.KNOWN_KEYS and k != registry.ENCLOSURE_KEY
+        },
+        enclosure_id=str(info.get(registry.ENCLOSURE_KEY, "")),
+    )
+
+
+def registry_entry(info: DriveInfo) -> dict[str, Any]:
+    """The registry entry of ``info``, with every key :meth:`Config.save_drives` writes."""
+    return {
+        **info.extra,
+        "guid": info.guid,
+        "drive_id": info.drive_id,
+        "last_backup_at": info.last_backup_at,
+        "autoeject": info.autoeject,
+        **({registry.ENCLOSURE_KEY: info.enclosure_id} if info.enclosure_id else {}),
+    }
+
+
 @dataclass
 class Config:
     """Runtime configuration."""
@@ -175,23 +206,7 @@ class Config:
             cfg._load_error = str(e)
             return cfg
         for name, info in data.items():
-            cfg.known_drives[name] = DriveInfo(
-                name=name,
-                guid=str(info["guid"]),
-                drive_id=str(info["drive_id"]),
-                last_backup_at=(
-                    str(info["last_backup_at"])
-                    if isinstance(info.get("last_backup_at"), str)
-                    else None
-                ),
-                autoeject=bool(info.get("autoeject", False)),
-                extra={
-                    k: v
-                    for k, v in info.items()
-                    if k not in registry.KNOWN_KEYS and k != registry.ENCLOSURE_KEY
-                },
-                enclosure_id=str(info.get(registry.ENCLOSURE_KEY, "")),
-            )
+            cfg.known_drives[name] = drive_info(name, info)
         return cfg
 
     @property
@@ -228,16 +243,7 @@ class Config:
             raise registry.RegistryError(
                 f"refusing to overwrite unreadable registry: {self._load_error}",
             )
-        entries: dict[str, dict[str, Any]] = {}
-        for name, info in self.known_drives.items():
-            entries[name] = {
-                **info.extra,
-                "guid": info.guid,
-                "drive_id": info.drive_id,
-                "last_backup_at": info.last_backup_at,
-                "autoeject": info.autoeject,
-                **({registry.ENCLOSURE_KEY: info.enclosure_id} if info.enclosure_id else {}),
-            }
+        entries = {name: registry_entry(info) for name, info in self.known_drives.items()}
         registry.write_atomic(self.drives_file_path, entries)
 
     @property
