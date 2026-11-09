@@ -1,3 +1,19 @@
+zark (2.3.0~rc3-1) UNRELEASED; urgency=medium
+
+  * Milestone M19b of zark 2.3 (zark fullcheck's findings on eli). Not
+    for release: nothing is published until the final 2.3.0.
+  * When the scrub finds damage on an encrypted drive, zark fullcheck asks
+    the passphrase again and names the damaged files: ZFS lists them only
+    while their keys are loaded. The keystore is opened read-only, the
+    keys are unloaded before the export and nothing is mounted.
+  * The restore check's total is the logical size it reads, so its
+    percent no longer reaches 100 early on a compressed drive.
+  * The estimates keep each part's last measured rate (check_rates in
+    known_drives.json) across a check that measured nothing.
+  * Self-test check POOL-17, revision 2: the encrypted case too.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 10 Nov 2026 00:13:02 +0100
+
 zark (2.3.0~rc2-1) UNRELEASED; urgency=medium
 
   * Milestone M19 of zark 2.3 (zark fullcheck). Not for release: nothing

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### M19b - `zark fullcheck`'s findings on eli
+### M19b - `zark fullcheck`'s findings on eli (2.3.0-rc3)
 
 #### Fixed
 
