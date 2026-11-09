@@ -397,6 +397,7 @@ from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # no
 from tests.test_readers import (  # pylint: disable=wrong-import-position # noqa: E402
     TestHealthReportFile,
     TestSimulateTempFiles,
+    TestStatusLastRun,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -491,6 +492,7 @@ FULLCHECK_SUITES = (
 READERS_SUITES = (
     TestHealthReportFile,
     TestSimulateTempFiles,
+    TestStatusLastRun,
 )
 
 # ═════════════════════════════════════════════════════════════════════════

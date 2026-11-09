@@ -37,6 +37,7 @@ from lib import (
     notify,
     status,
     status_file,
+    status_reader as sr,
     statusdirs,
     survey,
     upgrade_risk,
@@ -111,6 +112,29 @@ def _point_records(doc: dict[str, Any] | None, log: Log) -> None:
             )
 
 
+def _last_runs(doc: dict[str, Any] | None, log: Log) -> None:
+    """Each drive whose last run calls for attention (M13E.2): incomplete,
+    not verified or interrupted, as zark monitor and the extension show it.
+    ``datasets_missing`` is named only when it is not 0: for an interrupted
+    run it is always 0, which says nothing (docs/STATUS-FILES.md)."""
+    for d in (doc or {}).get("drives", []):
+        last = d.get("last_run") if isinstance(d, dict) else None
+        if not isinstance(last, dict) or last.get("result") not in sr.ATTENTION_RESULTS:
+            continue
+        ended = sr.parse_timestamp(last.get("ended_at"))
+        when = ended.astimezone().strftime("%Y-%m-%d %H:%M") if ended else "time unknown"
+        missing = last.get("datasets_missing")
+        extra = f", {missing} dataset(s) missing" if isinstance(missing, int) and missing else ""
+        message = last.get("message") if isinstance(last.get("message"), str) else ""
+        text = f"{d.get('name')}: last run {last['result']} ({when}){extra}" + (
+            f": {message}" if message else ""
+        )
+        if last["result"] == "not_verified":
+            log.error(text)
+        else:
+            log.warn(text)
+
+
 def _exclusions(log: Log) -> None:
     """One line when anything is excluded from backups, and the sanoid.conf
     line when setup's split of the drained subtrees is missing (M5b-13b).
@@ -170,5 +194,7 @@ def run(args: list[str]) -> None:
     log.banner("STATUS", "Source pools and backup drives")
     st = status_file.refresh(cfg, log, "status")
     _report(st, log)
-    _point_records(status_file.read(), log)
+    doc = status_file.read()
+    _point_records(doc, log)
+    _last_runs(doc, log)
     _exclusions(log)

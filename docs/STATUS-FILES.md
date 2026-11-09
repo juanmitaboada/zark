@@ -440,7 +440,7 @@ pool has.
 | `started_at` | timestamp | |
 | `ended_at` | timestamp | |
 | `point` | string or null | the run's point; null if none was taken |
-| `datasets_missing` | integer | expected datasets not at the point; non-zero only for `incomplete`. Datasets left out by design (zvols, `zark exclude`) are not expected |
+| `datasets_missing` | integer | expected datasets not at the point; non-zero only for `incomplete`. For `interrupted` it is 0 and says nothing: what reached the point is not known, and the next backup resumes the partial receives. Datasets left out by design (zvols, `zark exclude`) are not expected |
 | `message` | string | one line for people, as the terminal said it; empty for `completed` |
 
 `result`:

@@ -33,6 +33,7 @@ from typing import Any
 from unittest.mock import patch
 
 from lib import health
+from lib.log import Log
 from tests.mock_sh import MockShell, patch_sh
 
 
@@ -158,3 +159,67 @@ class TestSimulateTempFiles:  # pylint: disable=missing-function-docstring
         _, run_dir, out = self._run(write_log=False, qemu_missing=True)
         assert "qemu-system-x86_64 not found in PATH" in out, out
         assert not Path(run_dir, "OVMF_VARS.fd").exists()
+
+
+class TestStatusLastRun:  # pylint: disable=missing-function-docstring
+    """M13E.2: zark status names a drive's last run when it calls for attention."""
+
+    @staticmethod
+    def _out(*runs: dict[str, Any] | None) -> str:
+        import commands.status as status_cmd  # pylint: disable=import-outside-toplevel
+
+        drives = [
+            {"name": f"d{i}", **({"last_run": r} if r is not None else {})}
+            for i, r in enumerate(runs)
+        ]
+        with redirect_stdout(StringIO()) as out:
+            status_cmd._last_runs({"drives": drives}, Log(os.devnull))  # pylint: disable=protected-access
+        return " ".join(out.getvalue().split())
+
+    @staticmethod
+    def _run(result: str, missing: int = 0, message: str = "why") -> dict[str, Any]:
+        return {
+            "result": result,
+            "ended_at": "2026-11-09T10:00:00Z",
+            "datasets_missing": missing,
+            "message": message,
+        }
+
+    def test_the_three_attention_results(self):
+        text = self._out(
+            self._run("interrupted", message="interrupted by SIGINT"),
+            self._run("incomplete", 2, "2 datasets failed"),
+            self._run("not_verified", message="d2 failed its read-back"),
+        )
+        assert "d0: last run interrupted (" in text and ": interrupted by SIGINT" in text, text
+        assert "d1: last run incomplete (" in text and ", 2 dataset(s) missing" in text, text
+        assert "d2: last run not_verified (" in text, text
+        assert "missing" not in text.split("d1:", maxsplit=1)[0], (
+            text
+        )  # interrupted: 0 is not printed
+
+    def test_nothing_for_the_others(self):
+        text = self._out(self._run("completed"), self._run("aborted"), None)
+        assert text == "", text
+
+    def test_no_file_no_line(self):
+        import commands.status as status_cmd  # pylint: disable=import-outside-toplevel
+
+        with redirect_stdout(StringIO()) as out:
+            status_cmd._last_runs(None, Log(os.devnull))  # pylint: disable=protected-access
+        assert out.getvalue() == ""
+
+    def test_run_prints_it_after_the_point_records(self):
+        import commands.status as status_cmd  # pylint: disable=import-outside-toplevel
+
+        doc = {"drives": [{"name": "bk", "last_run": self._run("interrupted")}]}
+        with (
+            patch.object(status_cmd.status_file, "refresh"),
+            patch.object(status_cmd.status_file, "read", return_value=doc),
+            patch.object(status_cmd, "_report"),
+            patch.object(status_cmd, "_exclusions"),
+            patch.object(status_cmd.Config, "load"),
+            redirect_stdout(StringIO()) as out,
+        ):
+            status_cmd.run([])
+        assert "bk: last run interrupted" in out.getvalue(), out.getvalue()
