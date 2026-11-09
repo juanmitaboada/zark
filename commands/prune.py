@@ -41,6 +41,7 @@ subtree excluded from backups, kept or not (typed PRUNE, D11).
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import partial
 
 from lib import (
@@ -59,7 +60,7 @@ from lib.config import Config
 from lib.dependents import destroy_plan
 from lib.drives import ConnectedDrive, backup_device, scan_connected_drives
 from lib.log import Log
-from lib.origin_prune import Inventory, Item, inventory, older_than
+from lib.origin_prune import AUTOSNAP_TYPE, Inventory, Item, inventory, older_than
 from lib.replication import Dest
 from lib.restore_points import Complete
 from lib.retention import (
@@ -78,6 +79,10 @@ from lib.retention import (
 from lib.zfs import ZFS, read_space
 
 WORD = "PRUNE"
+# The ages the origin's table measures before asking (Juanmi, 2026-11-06;
+# M20-2 2a), with the oldest sanoid snapshot's age in whole days.
+AGE_ROWS = (1, 3, 7, 14, 30, 60, 90)
+KINDS = ("frequently", "hourly", "daily", "weekly", "monthly", "yearly")
 # What zark 1.x, or sanoid, writes to a dataset: zark 2 moves only its points.
 LEGACY_NAME = re.compile(r"^(autosnap|syncoid)_")
 HISTORY_WHY = "older than the drive's first backup point, removed by hand"
@@ -123,12 +128,17 @@ def _summary(inv: Inventory, drives: dict[str, str], log: Log) -> None:
             freed = reclaim.reclaim_names([i.target for i in items])
             log.info(
                 f"  {label:34} {len(items):5}  oldest {_when(oldest)}"
-                + f"  all of them free {_gib(freed)}"
+                + f"  alone free {_gib(freed)}"
             )
 
     log.info("Snapshots in origin, by kind:")
-    for kind in ("frequently", "hourly", "daily", "weekly", "monthly", "yearly"):
+    for kind in KINDS:
         line(f"sanoid {kind}", inv.autosnaps.get(kind, []))
+    if inv.autosnaps:
+        log.info(
+            "  Kinds share blocks: these figures do not add up; the table under "
+            + "'remove sanoid snapshots older than N days' measures each age as a whole."
+        )
     line("legacy residues (removable)", inv.residues)
     if inv.residues_kept:
         log.info(f"  {'legacy residues a drive may need':34} {len(inv.residues_kept):5}")
@@ -144,7 +154,138 @@ def _remove(items: list[Item], why: str, log: Log) -> None:
         log.warn(f"{len(failed)} could not be removed (see above)")
 
 
+@dataclass
+class AgeRow:
+    """What keeping ``days`` days of sanoid snapshots removes and frees."""
+
+    days: int
+    counts: dict[str, int]  # kind → snapshots removed
+    by_ds: dict[str, list[str]]  # dataset → its snapshots removed
+    freed: dict[str, int] = field(default_factory=dict)  # pool → bytes
+    unanchored: bool = False  # a drive's base may be among them (M4d-32)
+
+
+def age_rows(inv: Inventory, now: int) -> list[AgeRow]:
+    """The table's rows, before anything is measured: each candidate age's
+    removal set (what :func:`older_than` gives for it, so a row and the same
+    age typed at the question agree), by kind and dataset. A row that
+    removes nothing, or exactly what the row before it removes, is left out."""
+    items = [i for kind in inv.autosnaps.values() for i in kind]
+    if not items:
+        return []
+    oldest_days = max(0, now - min(i.creation for i in items)) // DAY
+    rows: list[AgeRow] = []
+    before: frozenset[str] = frozenset()
+    ages: set[int] = set(AGE_ROWS)
+    if oldest_days >= 1:
+        ages.add(oldest_days)
+    for days in sorted(ages):
+        cut = older_than(inv, now - days * DAY)
+        names = frozenset(i.target for i in cut)
+        if not names or names == before:
+            continue
+        before = names
+        rows.append(_age_row(days, cut, inv))
+    return rows
+
+
+def _age_row(days: int, cut: list[Item], inv: Inventory) -> AgeRow:
+    counts: dict[str, int] = {}
+    by_ds: dict[str, list[str]] = {}
+    for i in cut:
+        ds, _, snap = i.target.partition("@")
+        if m := AUTOSNAP_TYPE.match(snap):
+            counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+        by_ds.setdefault(ds, []).append(snap)
+    return AgeRow(days, counts, by_ds, unanchored=any(inv.unanchored.get(ds) for ds in by_ds))
+
+
+def measure_rows(rows: list[AgeRow]) -> int:
+    """Fill each row's ``freed`` per pool with :func:`reclaim.dry_run`, one per
+    dataset and row; a dataset whose removal set did not change from the row
+    before reuses that row's figure. Returns how many dry runs it took. Each
+    row is cumulative: everything it removes is measured together, as
+    destroying it would free."""
+    last: dict[str, tuple[tuple[str, ...], int]] = {}
+    runs = 0
+    for row in rows:
+        for ds, snaps in sorted(row.by_ds.items()):
+            key = tuple(snaps)
+            if ds in last and last[ds][0] == key:
+                got = last[ds][1]
+            else:
+                got = reclaim.dry_run(ds, snaps) or 0
+                runs += 1
+                last[ds] = (key, got)
+            pool = ds.split("/", 1)[0]
+            row.freed[pool] = row.freed.get(pool, 0) + got
+    return runs
+
+
+def dry_runs_needed(rows: list[AgeRow]) -> int:
+    """How many dry runs :func:`measure_rows` takes for ``rows``."""
+    last: dict[str, tuple[str, ...]] = {}
+    runs = 0
+    for row in rows:
+        for ds, snaps in row.by_ds.items():
+            if last.get(ds) != tuple(snaps):
+                runs += 1
+                last[ds] = tuple(snaps)
+    return runs
+
+
+def _pool_alloc() -> dict[str, tuple[int, int]]:
+    """Each source pool's (allocated, size) in bytes, from ``zpool list``."""
+    out: dict[str, tuple[int, int]] = {}
+    for pool in survey.source_pools():
+        r = sh.run(f"zpool list -Hp -o name,alloc,size {pool}")
+        f = r.output.strip().split("\t") if r.ok else []
+        if len(f) == 3 and f[1].isdigit() and f[2].isdigit() and int(f[2]) > 0:
+            out[pool] = (int(f[1]), int(f[2]))
+    return out
+
+
+def _after(pool: str, row: AgeRow, alloc: dict[str, tuple[int, int]]) -> str:
+    """The pool's use after the row's removals: pool accounting minus the dry
+    runs' dataset accounting, so about (equal enough on one disk or a mirror)."""
+    if pool not in alloc:
+        return "-"
+    used, size = alloc[pool]
+    return f"~{max(0, used - row.freed.get(pool, 0)) * 100 // size} %"
+
+
+def _age_table(inv: Inventory, now: int, log: Log) -> None:
+    """Juanmi's table of candidate ages (M20-2 2a, M20-3 3a): what keeping N
+    days removes by kind, what it frees and each pool's use after, so the
+    number typed next is an informed one."""
+    rows = age_rows(inv, now)
+    if not rows:
+        return
+    log.info(f"Measuring {len(rows)} age(s): {dry_runs_needed(rows)} dry run(s)...")
+    started = time.monotonic()
+    runs = measure_rows(rows)
+    log.file(f"  age table: {runs} dry run(s) in {time.monotonic() - started:.1f} s")
+    alloc = _pool_alloc()
+    pools = sorted({p for row in rows for p in row.freed})
+    kinds = [k for k in KINDS if any(row.counts.get(k) for row in rows)]
+    head = f"{'N':>6}  " + "  ".join(f"{k:>10}" for k in kinds) + f"  {'frees':>9}"
+    head += "".join(f"  {p + ' after':>12}" for p in pools)
+    log.info("Sanoid snapshots removed by keeping N days (measured now, each row as a whole):")
+    log.info(head)
+    for row in rows:
+        line = f"{row.days:>6}  " + "  ".join(f"{row.counts.get(k, 0):>10}" for k in kinds)
+        line += f"  {_gib(sum(row.freed.values())):>9}"
+        line += "".join(f"  {_after(p, row, alloc):>12}" for p in pools)
+        log.info(line + ("  (!)" if row.unanchored else ""))
+    if any(row.unanchored for row in rows):
+        log.info(
+            "  (!) a registered drive has no zark 2 anchor on a dataset the row touches: its "
+            + "base there may be a snapshot the row removes (named after you choose)"
+        )
+
+
 def _by_age(inv: Inventory, log: Log) -> None:
+    _age_table(inv, int(time.time()), log)
     raw = log.ask_input("Keep sanoid snapshots of how many days?", "30")
     if not raw.isdigit():
         log.warn("Not a number of days - nothing removed")

@@ -24293,6 +24293,179 @@ class TestPruneLegacyHistory:  # pylint: disable=too-few-public-methods
         assert not any(r.target in pins for r in got.snapshots)
 
 
+class TestPruneAgeTable:  # pylint: disable=missing-function-docstring
+    """The origin's table of candidate ages before the question (M20-2 2a,
+    M20-3 3a): each row cumulative, measured by reclaim's dry run only."""
+
+    NOW = 1000 * ret.DAY
+
+    def _inv(self, unanchored: dict[str, list[str]] | None = None) -> oprune.Inventory:
+        def item(ds: str, kind: str, age_days: float, n: int) -> oprune.Item:
+            return oprune.Item(
+                f"{ds}@autosnap_2026-01-01_00:00:{n:02d}_{kind}",
+                int(self.NOW - age_days * ret.DAY),
+            )
+
+        return oprune.Inventory(
+            autosnaps={
+                "daily": [
+                    item("rpool/A", "daily", a, n) for n, a in enumerate((0.5, 2, 5, 10, 120.5))
+                ],
+                "hourly": [item("rpool/B", "hourly", a, n) for n, a in enumerate((0.5, 2))],
+                "weekly": [item("bpool/C", "weekly", 20, 0)],
+            },
+            unanchored=unanchored or {},
+        )
+
+    @staticmethod
+    def _dry(calls: list[str]) -> Callable[[str, list[str]], int]:
+        def dry(ds: str, snaps: list[str]) -> int:
+            calls.append(f"{ds}@{','.join(snaps)}")
+            return len(snaps) * (1 << 20) + (7 if ds.startswith("bpool") else 0)
+
+        return dry
+
+    def test_the_candidate_ages_their_sets_and_counts(self):
+        rows = prune_mod.age_rows(self._inv(), self.NOW)
+        # 1: A x4, B x1, C; 3: A x3, C; 7: A x2, C; 14: A x1, C; 30, 60, 90 and
+        # 120 (the oldest's age): A x1 alone, equal to each other: one row.
+        assert [r.days for r in rows] == [1, 3, 7, 14, 30], [r.days for r in rows]
+        assert rows[0].counts == {"daily": 4, "hourly": 1, "weekly": 1}, rows[0].counts
+        assert rows[3].counts == {"daily": 1, "weekly": 1}, rows[3].counts
+        for r in rows:
+            names = {f"{ds}@{n}" for ds, snaps in r.by_ds.items() for n in snaps}
+            assert names == {
+                i.target for i in oprune.older_than(self._inv(), self.NOW - r.days * ret.DAY)
+            }, r.days
+
+    def test_the_oldest_age_is_a_row_of_its_own(self):
+        inv = self._inv()
+        inv.autosnaps["daily"].append(
+            oprune.Item("rpool/A@autosnap_old_daily", int(self.NOW - 400.5 * ret.DAY))
+        )
+        rows = prune_mod.age_rows(inv, self.NOW)
+        assert rows[-1].days == 400 and rows[-1].counts == {"daily": 1}, rows[-1]
+        assert [r.days for r in rows] == [1, 3, 7, 14, 30, 400], [r.days for r in rows]
+
+    def test_nothing_older_than_a_day_gives_no_rows(self):
+        inv = oprune.Inventory(
+            autosnaps={"daily": [oprune.Item("rpool/A@autosnap_x_daily", self.NOW - 60)]}
+        )
+        assert not prune_mod.age_rows(inv, self.NOW)
+        assert not prune_mod.age_rows(oprune.Inventory(), self.NOW)
+
+    def test_each_row_frees_what_reclaim_names_measures_for_its_set(self):
+        rows = prune_mod.age_rows(self._inv(), self.NOW)
+        calls: list[str] = []
+        with patch.object(prune_mod.reclaim, "dry_run", side_effect=self._dry(calls)):
+            _ = prune_mod.measure_rows(rows)
+            for r in rows:
+                names = [f"{ds}@{n}" for ds, snaps in r.by_ds.items() for n in snaps]
+                assert sum(r.freed.values()) == prune_mod.reclaim.reclaim_names(names), r.days
+        assert rows[3].freed == {"rpool": 1 << 20, "bpool": (1 << 20) + 7}, rows[3].freed
+
+    def test_an_unchanged_dataset_reuses_the_row_before(self):
+        rows = prune_mod.age_rows(self._inv(), self.NOW)
+        calls: list[str] = []
+        with patch.object(prune_mod.reclaim, "dry_run", side_effect=self._dry(calls)):
+            runs = prune_mod.measure_rows(rows)
+        # A changes at each of the first four rows (4, 3, 2, 1 snapshots) and
+        # keeps its one at 30's; B is only in the first; C is the same in the
+        # first four: 4 + 1 + 1.
+        assert runs == len(calls) == prune_mod.dry_runs_needed(rows) == 6, calls
+        assert rows[4].freed == {"rpool": 1 << 20}, rows[4].freed
+
+    def _table(self, inv: oprune.Inventory, mock: MockShell) -> str:
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(prune_mod.survey, "source_pools", return_value=["rpool", "bpool"]),
+            patch.object(prune_mod.reclaim, "dry_run", side_effect=self._dry([])),
+            redirect_stdout(out),
+        ):
+            prune_mod._age_table(inv, self.NOW, Log(os.devnull))  # pylint: disable=protected-access
+        return Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+
+    def test_the_table_and_each_pool_s_use_after(self):
+        mock = MockShell()
+        mock.on("zpool list -Hp -o name,alloc,size rpool").succeeds(
+            f"rpool\t{60 << 20}\t{100 << 20}"
+        )
+        mock.on("zpool list -Hp -o name,alloc,size bpool").fails()
+        text = self._table(self._inv(), mock)
+        rows = [ln.split()[1:] for ln in text.splitlines() if ln.startswith("[INFO]")]
+        lines = [" ".join(r) for r in rows if r and r[0] in ("1", "14")]
+        assert "Measuring 5 age(s): 6 dry run(s)" in text, text
+        assert "frequently" not in text and "monthly" not in text, text
+        assert "~55 %" in lines[0] and "6.0M" in lines[0], lines
+        assert lines[1].split()[-3] == "-", lines  # bpool's figures unreadable
+        assert "(!)" not in text, text
+
+    def test_the_mark_is_on_the_rows_touching_an_unanchored_dataset(self):
+        mock = MockShell()
+        text = self._table(self._inv({"bpool/C": ["black"]}), mock)
+        marked = [ln.split()[1] for ln in text.splitlines() if ln.rstrip().endswith("(!)")]
+        assert marked == ["1", "3", "7", "14"], text
+        assert "(!) a registered drive has no zark 2 anchor" in " ".join(text.split()), text
+
+    def test_a_typed_age_between_rows_removes_older_than_s_set(self):
+        inv = self._inv()
+        removed: list[list[oprune.Item]] = []
+        with (
+            patch_sh(MockShell()),
+            redirect_stdout(StringIO()),
+            patch.object(Log, "ask_input", return_value="4"),
+            patch.object(prune_mod, "_typed", return_value=True),
+            patch.object(prune_mod, "_remove", side_effect=lambda i, *_: removed.append(i)),
+            patch.object(prune_mod.reclaim, "dry_run", return_value=0),
+            patch.object(prune_mod.time, "time", return_value=float(self.NOW)),
+        ):
+            prune_mod._by_age(inv, Log(os.devnull))  # pylint: disable=protected-access
+        assert removed == [oprune.older_than(inv, self.NOW - 4 * ret.DAY)], removed
+        assert len(removed[0]) == 4, removed  # A at 5, 10 and 120.5 days, C at 20: no row
+
+    def test_the_table_destroys_nothing_and_the_typed_age_is_older_than_s(self):
+        fake = _fresh_fake()
+        assert _engine_run(fake, "backup", "111", P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "d")
+        now = fake.clock + 10 * ret.DAY
+        before = len(fake.calls)
+        out = TestPruneCommand()._origin(  # pylint: disable=protected-access
+            fake,
+            cfg,
+            *TestPruneCommand._answers([1, 0], ["5"], "no", False),  # pylint: disable=protected-access
+            patch.object(prune_mod.time, "time", return_value=float(now)),
+        )
+        calls = fake.calls[before:]
+        assert "Sanoid snapshots removed by keeping N days" in out, out
+        assert not [c for c in calls if c.startswith("zfs destroy ") and "-nvp" not in c], calls
+        assert "alone free" in out and "Kinds share blocks" in out, out
+        with patch_sh(fake):
+            origin = survey.read_origin(survey.source_pools(), strict=True)
+        want = {
+            i.target
+            for i in oprune.older_than(
+                oprune.inventory(origin, {"111": "backup"}), now - 5 * ret.DAY
+            )
+        }
+        before = len(fake.calls)
+        _ = TestPruneCommand()._origin(  # pylint: disable=protected-access
+            fake,
+            cfg,
+            *TestPruneCommand._answers([1, 0], ["5"], "PRUNE", False),  # pylint: disable=protected-access
+            patch.object(prune_mod.time, "time", return_value=float(now)),
+        )
+        gone = {
+            n
+            for c in fake.calls[before:]
+            if c.startswith("zfs destroy ") and "-nvp" not in c
+            for n in _destroyed(c)
+        }
+        assert want and gone == want, gone ^ want
+
+
 class TestPruneCommand:  # pylint: disable=too-many-public-methods
     """`zark prune` on FakeZfs: origin and a drive."""
 
