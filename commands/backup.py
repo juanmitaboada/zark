@@ -63,6 +63,7 @@ from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import VERSION, Config, now_utc_iso, zark_command
 from lib.dependents import DestroyPlan, also, destroy_plan, rollback_blockers, takes_lines
 from lib.drives import (
+    ConnectedDrive,
     backup_device,
     drive_staleness_days,
     no_anchor_lines,
@@ -180,14 +181,61 @@ class BackupArgs:
     # ``--no-snapshot`` predates the backup point, which now replaces the
     # pre-backup sanoid run; the flag is accepted and has no effect.
     take_snapshots: bool = True
+    # The registered drive to use instead of select_drive's question (Z4).
+    drive: str = ""
+
+
+class UsageError(ValueError):
+    """A word the command line cannot be run with (exit 2, nothing done)."""
 
 
 def _parse_args(args: list[str]) -> BackupArgs:
     """Parse backup's command-line arguments (unknown flags are ignored)."""
+    spec = cli_spec.command("backup")
     parsed = BackupArgs()
-    if cli_spec.command("backup").word("--no-snapshot") in args:
+    if spec.word("--no-snapshot") in args:
         parsed.take_snapshots = False
+    flag = spec.word("--drive")
+    if flag in args:
+        i = args.index(flag)
+        value = args[i + 1] if i + 1 < len(args) else ""
+        # An option in its place would be read as a drive's name.
+        if not value.strip() or value.startswith("-"):
+            raise UsageError("backup: --drive needs a drive name")
+        parsed.drive = value
     return parsed
+
+
+def _named_drive(name: str, cfg: Config, drives: list[ConnectedDrive], log: Log) -> ConnectedDrive:
+    """The connected registered drive ``--drive`` names; fatal when the name is
+    not registered or that drive is not connected (Z4). Only what
+    select_drive would offer can be picked."""
+    if name not in cfg.known_drives:
+        try:
+            waiting = name in pending.read(cfg)
+        except pending.PendingError:
+            waiting = False
+        log.fatal(
+            f"{name} is not a registered drive",
+            causes=[
+                *([f"{name} is waiting for a read-back"] if waiting else []),
+                f"Registered: {', '.join(sorted(cfg.known_drives)) or 'none'}",
+            ],
+            solutions=[
+                *([f"Run: {zark_command()} registry verify {name}"] if waiting else []),
+                f"Run: {zark_command()} registry list",
+            ],
+        )
+    match = next((d for d in drives if d.known and d.name == name), None)
+    if match is None:
+        connected = sorted(d.name for d in drives if d.known)
+        log.fatal(
+            f"{name} is not connected",
+            causes=[f"Connected registered drives: {', '.join(connected) or 'none'}"],
+            solutions=[f"Connect {name} and run again"],
+        )
+    log.ok(f"Using drive: {match.name} ({match.model or match.drive_id}, {match.size})")
+    return match
 
 
 def _gib(n: int) -> str:
@@ -1137,8 +1185,12 @@ def run(
     args: list[str],
 ):  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
     """Main backup function."""
-    opts = _parse_args(args)
     log = Log()
+    try:
+        opts = _parse_args(args)
+    except UsageError as e:
+        log.error(str(e))
+        raise SystemExit(2) from e
     cfg = Config.load()
     cfg.check_registry(log, fatal=True)
     zfs = ZFS(log)
@@ -1175,7 +1227,9 @@ def run(
     drives = scan_connected_drives(cfg, log)
     known = [d for d in drives if d.known]
 
-    if not known:
+    if opts.drive:
+        drive: ConnectedDrive | None = _named_drive(opts.drive, cfg, drives, log)
+    elif not known:
         waiting = pending.among(cfg, {d.guid for d in drives}, log)
         log.fatal(
             "No known backup drives detected",
@@ -1192,8 +1246,8 @@ def run(
                 f"Run: {zark_command()} prepare /dev/sdX  to register a new drive",
             ],
         )
-
-    drive = select_drive(known, log, known_only=True)
+    else:
+        drive = select_drive(known, log, known_only=True)
     if not drive:
         return
 

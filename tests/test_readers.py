@@ -287,3 +287,175 @@ class TestPendingFile:  # pylint: disable=missing-function-docstring
                 assert why in str(e), (why, e)
             else:
                 raise AssertionError(f"accepted: {text}")
+
+
+class TestBackupDriveOption:  # pylint: disable=missing-function-docstring
+    """Z4: ``backup --drive NAME`` picks among the connected registered drives,
+    in place of select_drive's question; refusals touch nothing."""
+
+    @staticmethod
+    def _cfg(names: tuple[str, ...] = ("alpha", "beta")) -> Any:
+        from lib.config import Config, DriveInfo  # pylint: disable=import-outside-toplevel
+
+        cfg = Config()
+        cfg.config_dir = Path(tempfile.mkdtemp())
+        for i, name in enumerate(names, 1):
+            cfg.known_drives[name] = DriveInfo(name, f"{i}{i}{i}", f"usb-{name}-0:0")
+        return cfg
+
+    @staticmethod
+    def _drive(name: str, guid: str) -> Any:
+        from lib.drives import ConnectedDrive  # pylint: disable=import-outside-toplevel
+
+        return ConnectedDrive(
+            name, guid, f"usb-{name}-0:0", f"/dev/{name}", True, False, False, "exported"
+        )
+
+    def _run(
+        self, args: list[str], cfg: Any, drives: list[Any]
+    ) -> tuple[int, str, list[tuple[str, str | None, str]], list[str]]:
+        """Run backup until its import, which is refused: (exit status, text,
+        the imports asked for, select_drive's calls)."""
+        # pylint: disable=import-outside-toplevel,too-many-locals
+        from contextlib import ExitStack, redirect_stderr
+
+        from commands import backup as backup_mod
+        from lib.zfs import ZFS
+
+        imports: list[tuple[str, str | None, str]] = []
+        selected: list[str] = []
+        scanned: list[int] = []
+
+        def _import(_self: Any, name: str, device: str | None, *, guid: str = "") -> bool:
+            imports.append((name, device, guid))
+            return False
+
+        def _select(known: list[Any], _log: Any, known_only: bool = True) -> Any:
+            selected.append(",".join(d.name for d in known) + f":{known_only}")
+            return known[0]
+
+        def _scan(_cfg: Any, _log: Any) -> list[Any]:
+            scanned.append(1)
+            return drives
+
+        out = StringIO()
+        rc = 0
+        with ExitStack() as stack:
+            for cm in (
+                patch.object(backup_mod.Config, "load", return_value=cfg),
+                patch.object(backup_mod, "_detect_live_usb", return_value=False),
+                patch.object(backup_mod, "warn_rpool_mountpoint_lost"),
+                patch.object(backup_mod, "warn_kernel_named_vdevs"),
+                patch.object(backup_mod.certificates, "show_warnings"),
+                patch.object(backup_mod.survey, "require_bookmark_v2"),
+                patch.object(backup_mod.survey, "require_boot_layout", return_value="bpool"),
+                patch.object(backup_mod.pool_record, "capture", return_value="{}"),
+                patch.object(backup_mod.pool_record, "require"),
+                patch.object(backup_mod, "scan_connected_drives", side_effect=_scan),
+                patch.object(backup_mod, "select_drive", side_effect=_select),
+                patch.object(backup_mod, "backup_device", side_effect=lambda d: d.dev_path),
+                patch.object(backup_mod.progress, "set_drive"),
+                patch.object(backup_mod.progress, "on_end"),
+                patch.object(ZFS, "import_backup_pool", _import),
+                patch.object(backup_mod.Cleanup, "register", lambda _self: None),
+                patch_sh(MockShell()),
+                patch("builtins.input", side_effect=EOFError),
+                redirect_stdout(out),
+                redirect_stderr(out),
+            ):
+                stack.enter_context(cm)
+            try:
+                backup_mod.run(args)
+            except SystemExit as e:
+                rc = int(e.code or 0)
+        if not scanned:
+            imports.append(("not scanned", None, ""))
+        return rc, " ".join(out.getvalue().split()), imports, selected
+
+    def test_each_connected_drive_is_picked_without_a_question(self):
+        cfg = self._cfg()
+        drives = [self._drive("alpha", "111"), self._drive("beta", "222")]
+        for name, guid in (("alpha", "111"), ("beta", "222")):
+            rc, text, imports, selected = self._run(["--drive", name], cfg, drives)
+            assert rc == 1 and "Cannot import pool" in text, text
+            assert imports == [(name, f"/dev/{name}", guid)], imports
+            assert not selected, selected
+
+    def test_without_the_option_the_question_is_today_s(self):
+        cfg = self._cfg()
+        drives = [self._drive("alpha", "111"), self._drive("beta", "222")]
+        _, _, imports, selected = self._run([], cfg, drives)
+        assert selected == ["alpha,beta:True"], selected
+        assert imports == [("alpha", "/dev/alpha", "111")], imports
+
+    def test_one_drive_connected_and_named(self):
+        cfg = self._cfg()
+        _, _, imports, selected = self._run(["--drive", "beta"], cfg, [self._drive("beta", "222")])
+        assert imports == [("beta", "/dev/beta", "222")] and not selected, (imports, selected)
+
+    def test_a_registered_drive_not_connected_is_refused(self):
+        cfg = self._cfg()
+        # An unknown pool of that name on another disk is not it.
+        stranger = self._drive("beta", "999")
+        stranger.known = False
+        rc, text, imports, selected = self._run(
+            ["--drive", "beta"], cfg, [self._drive("alpha", "111"), stranger]
+        )
+        assert rc == 1 and "beta is not connected" in text, text
+        assert "Connected registered drives: alpha" in text, text
+        assert not imports and not selected, (imports, selected)
+
+    def test_a_registered_prefix_of_a_connected_name_is_not_it(self):
+        cfg = self._cfg(("back", "backup"))
+        rc, text, imports, _ = self._run(["--drive", "back"], cfg, [self._drive("backup", "222")])
+        assert rc == 1 and "back is not connected" in text, text
+        assert not imports, imports
+
+    def test_an_unknown_name_and_a_prefix_are_refused(self):
+        cfg = self._cfg()
+        drives = [self._drive("alpha", "111")]
+        for name in ("gamma", "alp"):
+            rc, text, imports, _ = self._run(["--drive", name], cfg, drives)
+            assert rc == 1 and f"{name} is not a registered drive" in text, text
+            assert "Registered: alpha, beta" in text, text
+            assert "registry verify" not in text, text
+            assert not imports, imports
+
+    def test_a_pending_name_is_refused_with_the_verify_command(self):
+        from lib import pending  # pylint: disable=import-outside-toplevel
+
+        cfg = self._cfg()
+        entry = {"guid": "333", "drive_id": "ata-X", "last_backup_at": None, "autoeject": False}
+        pending.add(cfg, pending.Pending("gamma", entry, "2026-11-09T10:00:00Z", "/dev/gamma1"))
+        rc, text, imports, _ = self._run(["--drive", "gamma"], cfg, [self._drive("alpha", "111")])
+        assert rc == 1 and "gamma is not a registered drive" in text, text
+        assert "gamma is waiting for a read-back" in text, text
+        assert "registry verify gamma" in text, text
+        assert not imports, imports
+
+    def test_a_missing_value_is_a_usage_error_before_the_scan(self):
+        cfg = self._cfg()
+        drives = [self._drive("alpha", "111")]
+        for args in (["--drive"], ["--drive", "--no-snapshot"], ["--drive", ""]):
+            rc, text, imports, selected = self._run(args, cfg, drives)
+            assert rc == 2 and "backup: --drive needs a drive name" in text, (args, text)
+            assert imports == [("not scanned", None, "")] and not selected, imports
+
+    def test_with_no_snapshot_in_either_order(self):
+        from commands.backup import _parse_args  # pylint: disable=import-outside-toplevel
+
+        for args in (["--no-snapshot", "--drive", "beta"], ["--drive", "beta", "--no-snapshot"]):
+            got = _parse_args(args)
+            assert got.drive == "beta" and not got.take_snapshots, (args, got)
+        assert _parse_args([]).drive == ""
+
+    def test_completion_offers_the_option_and_the_registered_names(self):
+        from lib import completion  # pylint: disable=import-outside-toplevel
+
+        d = Path(tempfile.mkdtemp())
+        (d / "known_drives.json").write_text('{"alpha": {"guid": "1", "drive_id": "x"}}')
+        with patch.dict(os.environ, {"ZARK_CONFIG_DIR": str(d)}):
+            opts = completion.complete("zark backup --", Path("/nonexistent"))
+            names = completion.complete("zark backup --drive ", Path("/nonexistent"))
+        assert "--drive" in opts[1], opts
+        assert names == ("words", ["alpha"]), names

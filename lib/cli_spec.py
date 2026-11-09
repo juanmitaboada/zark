@@ -157,7 +157,7 @@ SPECS: dict[str, Spec] = {
     s.name: s
     for s in (
         Spec("alerts", subcommands=(Spec("install"), Spec("remove"))),
-        Spec("backup", options=(Opt("--no-snapshot"),)),
+        Spec("backup", options=(Opt("--no-snapshot"), Opt("--drive", _DRIVE))),
         Spec("chroot", args=(_DEVICE,)),
         Spec("clean"),
         Spec(

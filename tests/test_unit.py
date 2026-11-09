@@ -395,6 +395,7 @@ from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # no
     TestSelftestScrub,
 )
 from tests.test_readers import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestBackupDriveOption,
     TestHealthReportFile,
     TestPendingFile,
     TestSimulateTempFiles,
@@ -495,6 +496,7 @@ READERS_SUITES = (
     TestSimulateTempFiles,
     TestStatusLastRun,
     TestPendingFile,
+    TestBackupDriveOption,
 )
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -28260,7 +28262,7 @@ class TestCompletion:  # pylint: disable=missing-function-docstring
         how, got = self._complete("zark ")
         assert how == "words" and got[:23] == cli_spec_mod.command_names()
         assert self._complete("sudo ./zark reg") == ("words", ["registry"])
-        assert self._complete("zark backup --") == ("words", ["--debug", "--no-snapshot"])
+        assert self._complete("zark backup --")[1] == ["--debug", "--drive", "--no-snapshot"]
         assert self._complete("zark selftest ")[1] == [
             "run", "status", "report", "certificate", "warnings"
         ]  # fmt: skip
