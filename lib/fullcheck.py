@@ -35,6 +35,11 @@ from lib.config import Config, parse_utc_iso
 from lib.log import Log
 
 LAST_CHECK_KEY = "last_check"
+# M19E-3: each part's newest measured size and duration, kept beside
+# last_check so that a run that measured nothing (interrupted, a scrub-only
+# resume) does not hide the rate the next estimate needs.
+RATES_KEY = "check_rates"
+SIZE_KEYS = {"scrub": "examined_bytes", "restore": "bytes"}
 # clean: every check asked for passed; damage: a check found something wrong
 # (a repair included); not_finished: interrupted, skipped or suspended;
 # failed: a check could not run (the import, the passphrase, a key).
@@ -259,14 +264,39 @@ def last_check(info: Any) -> dict[str, Any] | None:
     return valid(extra.get(LAST_CHECK_KEY)) if isinstance(extra, dict) else None
 
 
-def rate(prev: dict[str, Any] | None, part: str, size_key: str) -> float | None:
-    """Bytes a second of ``part`` (``scrub`` or ``restore``) in a previous
-    ``last_check``, None when it measured none (M19R-9)."""
-    obj = prev.get(part) if prev else None
+def _measured(obj: Any, part: str) -> tuple[int, int] | None:
+    """(size, seconds) of a ``scrub`` or ``restore`` object that measured them."""
     if not isinstance(obj, dict):
         return None
-    size, secs = _nonneg(obj.get(size_key)), _nonneg(obj.get("seconds"))
-    return size / secs if size and secs else None
+    size, secs = _nonneg(obj.get(SIZE_KEYS[part])), _nonneg(obj.get("seconds"))
+    return (size, secs) if size and secs else None
+
+
+def rate(info: Any, part: str) -> float | None:
+    """Bytes a second of ``part`` (``scrub`` or ``restore``) on the drive of
+    registry entry ``info`` (a DriveInfo), from the newest run that measured
+    it (M19R-9, M19E-3): its ``check_rates``, else (a registry written before
+    them) its ``last_check``; None when none did."""
+    extra = getattr(info, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    rates = extra.get(RATES_KEY)
+    kept = rates.get(part) if isinstance(rates, dict) else None
+    check = valid(extra.get(LAST_CHECK_KEY))
+    got = _measured(kept, part) or _measured(check.get(part) if check else None, part)
+    return got[0] / got[1] if got else None
+
+
+def _keep_rates(extra: dict[str, Any], check: Check) -> None:
+    """``check_rates``: each part ``check`` measured replaces that part's."""
+    rates = extra.get(RATES_KEY)
+    kept = dict(rates) if isinstance(rates, dict) else {}
+    for part, obj in (("scrub", check.scrub), ("restore", check.restore)):
+        got = _measured(obj, part)
+        if got:
+            kept[part] = {SIZE_KEYS[part]: got[0], "seconds": got[1], "at": check.ended_at}
+    if kept:
+        extra[RATES_KEY] = kept
 
 
 def save(guid: str, check: Check, log: Log) -> bool:
@@ -281,6 +311,7 @@ def save(guid: str, check: Check, log: Log) -> bool:
         log.warn("The drive is no longer registered: its full check is not recorded")
         return False
     info.extra[LAST_CHECK_KEY] = check.to_json()
+    _keep_rates(info.extra, check)
     try:
         cfg.save_drives()
     except (registry.RegistryError, OSError) as e:

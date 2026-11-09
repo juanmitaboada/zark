@@ -1415,21 +1415,63 @@ class TestCheckRecord:  # pylint: disable=missing-function-docstring
                 assert not fullcheck.save(GUID, fullcheck.Check(started_at="x"), _log())
             assert reg.read_text(encoding="utf-8") == before
 
+    def test_a_run_that_measures_nothing_keeps_the_last_measured_rates(self) -> None:
+        """M19E-3: A2 measured both parts, A3's interrupted run and its
+        scrub-only resume measured one or none; each estimate still comes
+        from the newest run that measured its part."""
+        measured = fullcheck.Check(started_at="2026-11-09T22:15:06Z")
+        measured.result, measured.ended_at = "clean", "2026-11-09T22:18:55Z"
+        measured.scrub = fullcheck.scrub_record("finished", examined=4500, seconds=45)
+        measured.restore = fullcheck.restore_record(
+            19, fullcheck.ReadResult(files=1, bytes=14700), 147
+        )
+        interrupted = fullcheck.Check(started_at="2026-11-09T22:25:07Z")
+        interrupted.result, interrupted.ended_at = "not_finished", "2026-11-09T22:28:05Z"
+        interrupted.scrub = fullcheck.scrub_record("paused")
+        resumed = fullcheck.Check(started_at="2026-11-09T22:28:37Z")
+        resumed.result, resumed.ended_at = "clean", "2026-11-09T22:29:38Z"
+        resumed.scrub = fullcheck.scrub_record("finished", examined=9000, seconds=45)
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = Path(tmp) / "known_drives.json"
+            reg.write_text(json.dumps({POOL: {"guid": GUID, "drive_id": "ata-x"}}), "utf-8")
+            with (
+                patch.dict(os.environ, {"ZARK_CONFIG_DIR": tmp}),
+                patch.object(fullcheck.sh, "is_live_usb", return_value=False),
+                redirect_stdout(StringIO()),
+            ):
+                rates: list[tuple[float | None, float | None]] = []
+                for check in (measured, interrupted, resumed):
+                    assert fullcheck.save(GUID, check, _log())
+                    info = Config.load().known_drives[POOL]
+                    rates.append((fullcheck.rate(info, "scrub"), fullcheck.rate(info, "restore")))
+            kept = json.loads(reg.read_text(encoding="utf-8"))[POOL][fullcheck.RATES_KEY]
+        assert rates == [(100.0, 100.0), (100.0, 100.0), (200.0, 100.0)]
+        assert kept == {
+            "scrub": {"examined_bytes": 9000, "seconds": 45, "at": "2026-11-09T22:29:38Z"},
+            "restore": {"bytes": 14700, "seconds": 147, "at": "2026-11-09T22:18:55Z"},
+        }
+
     def test_valid_and_rate(self) -> None:
         good = {
             "started_at": "2026-11-09T09:00:00Z",
             "ended_at": "2026-11-09T10:00:00Z",
             "result": "damage",
-            "scrub": {"examined_bytes": 1000, "seconds": 10},
+            "scrub": {"state": "finished", "examined_bytes": 1000, "seconds": 10},
             "restore": {"bytes": 50, "seconds": 0},
         }
         assert fullcheck.valid(good) is not None
         bads: list[Any] = [{**good, "result": "weird"}, {**good, "ended_at": "x"}, [], None]
         for bad in bads:
             assert fullcheck.valid(bad) is None, bad
-        assert fullcheck.rate(good, "scrub", "examined_bytes") == 100.0
-        assert fullcheck.rate(good, "restore", "bytes") is None
-        assert fullcheck.rate(None, "scrub", "examined_bytes") is None
+        info = DriveInfo(name=POOL, guid=GUID, drive_id="ata-x")
+        info.extra[fullcheck.LAST_CHECK_KEY] = good  # a registry written before check_rates
+        assert fullcheck.rate(info, "scrub") == 100.0
+        assert fullcheck.rate(info, "restore") is None
+        assert fullcheck.rate(None, "scrub") is None
+        info.extra[fullcheck.RATES_KEY] = {"scrub": {"examined_bytes": 400, "seconds": 2}}
+        assert fullcheck.rate(info, "scrub") == 200.0  # check_rates first
+        info.extra[fullcheck.RATES_KEY] = "damaged"
+        assert fullcheck.rate(info, "scrub") == 100.0
 
     def test_the_estimates(self) -> None:
         assert "measured" in fc_cmd.estimate(3600 * 100, 100.0, stream=True)

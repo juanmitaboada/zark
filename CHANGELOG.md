@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each snapshot's `logicalreferenced`, not of its `referenced`, which
   counts the copies compressed; on eli the percent reached 100 with two
   datasets still to read and the total said 6.7 GiB for a walk of 8.0 GiB.
+- **The estimate keeps the last measured rate of each part** (M19E-3): a
+  run that measured nothing (interrupted, or a scrub-only resume) replaced
+  the `last_check` the estimate read, and the next one said "no rate
+  measured on this drive yet". `known_drives.json` keeps each part's
+  newest measured size and duration in `check_rates`, beside `last_check`
+  (which `status.json` copies, unchanged); a registry written before it is
+  read from its `last_check` as before.
 
 ### M19 - `zark fullcheck`, a backup drive verified without altering it (2.3.0-rc2)
 

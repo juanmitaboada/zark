@@ -67,7 +67,6 @@ from lib.fullcheck import (
     MAX_ERROR_PATHS,
     Check,
     ReadResult,
-    last_check,
     logical_sizes,
     rate,
     read_tree,
@@ -317,10 +316,10 @@ def _read_point(  # pylint: disable=too-many-locals
     # M19E-2: the walk counts the files' logical bytes; referenced is compressed.
     logical = logical_sizes(names)
     total = sum(logical.get(n, max(r.referenced, 0)) for n, r in zip(names, rows, strict=True))
-    prev = last_check(Config.load().known_drives.get(cr.pool))
+    info = Config.load().known_drives.get(cr.pool)
     log.info(
         f"Reading {len(rows)} dataset(s) of point {point.label_utc()} ({_gib(total)}): "
-        + estimate(total, rate(prev, "restore", "bytes"), stream=False)
+        + estimate(total, rate(info, "restore"), stream=False)
     )
     began = time.monotonic()
     read = ReadResult()
@@ -484,7 +483,7 @@ def scrub_part(cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log) 
     action = _action(cr, cleanup, log)
     cleanup.track_action(action)
     _start(cr, scan, cleanup, action, log)
-    prev = last_check(Config.load().known_drives.get(pool))
+    info = Config.load().known_drives.get(pool)
     resumed = scan.scrubbing
     began = time.monotonic()
     shown = 0.0
@@ -506,7 +505,7 @@ def scrub_part(cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log) 
             reported = True
             log.info(
                 f"Scrubbing {_gib(now.bytes_total)}: "
-                + estimate(now.bytes_total, rate(prev, "scrub", "examined_bytes"), stream=True)
+                + estimate(now.bytes_total, rate(info, "scrub"), stream=True)
             )
         if now.function == "SCRUB" and now.state == "SCANNING":
             if now.paused:
