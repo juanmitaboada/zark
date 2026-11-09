@@ -33,6 +33,7 @@ possible future addition).
 
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -988,11 +989,27 @@ def generate_report(  # pylint: disable=too-many-locals
     return "\n".join(lines)
 
 
-def write_report_file(content: str) -> str:
-    """Write a report to /tmp and return its path."""
+def _sudo_owner() -> tuple[int, int] | None:
+    """The user and group who ran zark through sudo, when both are known."""
+    uid, gid = os.environ.get("SUDO_UID", ""), os.environ.get("SUDO_GID", "")
+    if not (uid.isdigit() and gid.isdigit()):
+        return None
+    return int(uid), int(gid)
+
+
+def write_report_file(content: str, directory: str = "/tmp") -> str:
+    """Write a report to a new file in ``directory`` and return its path.
+
+    mkstemp creates it with O_EXCL and mode 0600 under a random name, so a
+    name planted in /tmp is never followed or truncated (M23T-1); it is
+    handed to the user who ran sudo, who files it, through the descriptor.
+    """
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    path = f"/tmp/zark-health-report-{ts}.txt"
-    Path(path).write_text(content, encoding="utf-8")
+    fd, path = tempfile.mkstemp(prefix=f"zark-health-report-{ts}-", suffix=".txt", dir=directory)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        if (owner := _sudo_owner()) is not None:
+            os.fchown(f.fileno(), *owner)
+        _ = f.write(content)
     return path
 
 
