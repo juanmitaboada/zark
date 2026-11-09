@@ -15606,6 +15606,8 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         grub_failure: str = "",
         vdev: str = "/dev/disk/by-id/ata-DISK-part4",
         guard_wrote: bool = True,
+        bind_fails: tuple[str, ...] = (),
+        cleanups: list[Cleanup] | None = None,
     ) -> tuple[MockShell, str, bool, list[str]]:
         mock = MockShell()
         order: list[str] = []
@@ -15626,6 +15628,9 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         )
         mock.on("chroot /mnt/repair update-grub").fails()
         mock.on("mount /dev/sda1 /mnt/repair/boot/efi").succeeds()
+        for d in bind_fails:
+            mock.on(f"mount --bind /{d} /mnt/repair/{d}").fails(f"mount: /{d}: denied")
+        mock.on_prefix("mount --bind /").succeeds()
         exported_after_rpool_state = {"rpool": export_rpool_ok}
 
         def fake_initrd(*_a: object) -> list[str]:
@@ -15651,7 +15656,12 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         exited = False
         patches: list[AbstractContextManager[object]] = [
             patch_sh(mock),
-            patch.object(repair_boot_mod.Cleanup, "register"),
+            patch.object(
+                repair_boot_mod.Cleanup,
+                "register",
+                autospec=True,
+                side_effect=(cleanups if cleanups is not None else []).append,
+            ),
             patch.object(repair_boot_mod.sh, "is_live_usb", return_value=True),
             patch.object(repair_boot_mod, "mount_system_pools", side_effect=fake_mount),
             patch.object(repair_boot_mod, "regenerate_initrd", side_effect=fake_initrd),
@@ -15659,7 +15669,8 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
             patch.object(repair_boot_mod, "regenerate_grub_cfg", side_effect=fake_grub),
             patch.object(repair_boot_mod, "fix_grub_bpool_uuid"),
             # write_zpool_cache mkdirs under /mnt/repair: unprivileged runs fail
-            patch.object(ZFS, "write_zpool_cache"),
+            patch.object(ZFS, "write_zpool_cache", side_effect=lambda *_a: order.append("cache")),
+            patch("builtins.input", side_effect=EOFError),  # the pause after a fatal
             patch.object(repair_boot_mod.Path, "glob", return_value=[Path("vmlinuz-7")]),
             patch("lib.cleanup.Path.is_mount", return_value=True),
             patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
@@ -15713,7 +15724,7 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
     def test_initrd_and_guard_come_before_update_grub(self):
         # 10_linux_zfs skips kernels without an initrd (E8 on eli).
         _, _, _, order = self._run(export_rpool_ok=True)
-        assert order == ["guard", "initrd", "grub"]
+        assert order == ["cache", "guard", "initrd", "grub"]
 
     def test_kernel_named_vdevs_make_the_repair_incomplete(self):
         # R2-9: the zpool.cache written here keeps whatever the import recorded.
@@ -15728,6 +15739,90 @@ class TestRepairBootCleanup:  # pylint: disable=missing-function-docstring
         assert "BOOT REPAIR INCOMPLETE" in out
         assert "grub.cfg regenerated ✓" not in out
         assert "grub.cfg not regenerated: no entries" in out
+
+
+class TestRepairBootBinds:  # pylint: disable=missing-function-docstring
+    """repair-boot's binds checked (map row ``repair-boot binds unchecked``,
+    M20-10 10a): a failed bind stops it before anything is written."""
+
+    def test_each_failed_bind_stops_before_anything_is_written(self):
+        names = ("proc", "sys", "dev", "dev/pts", "run")
+        for n, d in enumerate(names):
+            made: list[Cleanup] = []
+            mock, out, exited, order = TestRepairBootCleanup._run(  # pylint: disable=protected-access
+                export_rpool_ok=True, bind_fails=(d,), cleanups=made
+            )
+            # What atexit runs after the fatal (register is stubbed here).
+            with patch_sh(mock), redirect_stdout(StringIO()):
+                with patch("lib.cleanup.Path.is_mount", return_value=True):
+                    with patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0):
+                        made[0].run()
+            flat = " ".join(Log._STRIP_RE.sub("", unframed(out)).split())  # pylint: disable=protected-access
+            assert exited and f"Could not bind-mount /{d} (mount: /{d}: denied)" in flat, flat
+            later = [f"/{x}" for x in names[n + 1 :]]
+            if later:
+                assert f"not attempted: {', '.join(later)}" in flat, flat
+            assert not order, (d, order)  # no zpool.cache, guard, initrd or update-grub
+            binds = [c for c in mock.calls if c.startswith("mount --bind")]
+            assert binds == [f"mount --bind /{x} /mnt/repair/{x}" for x in names[: n + 1]], binds
+            umounts = [c for c in mock.calls if c.startswith("umount /mnt/repair/")]
+            for x in names[:n]:
+                assert f"umount /mnt/repair/{x}" in umounts, (d, umounts)
+            assert f"umount /mnt/repair/{d}" not in umounts, (d, umounts)
+            assert "zpool export rpool" in mock.calls, mock.calls
+            assert "BOOT REPAIR COMPLETE" not in out
+
+    def test_all_binds_ok_then_today_s_order(self):
+        mock, out, exited, order = TestRepairBootCleanup._run(export_rpool_ok=True)  # pylint: disable=protected-access
+        assert not exited and order == ["cache", "guard", "initrd", "grub"], order
+        binds = [c for c in mock.calls if c.startswith("mount --bind")]
+        assert len(binds) == 5 and "BOOT REPAIR COMPLETE" in out, binds
+
+    def test_a_failed_efivarfs_is_neither_fatal_nor_tracked(self):
+        mock, out, exited, _ = TestRepairBootCleanup._run(export_rpool_ok=True)  # pylint: disable=protected-access
+        assert not exited and "BOOT REPAIR COMPLETE" in out
+        assert "umount /mnt/repair/sys/firmware/efi/efivars" not in mock.calls, mock.calls
+
+
+class TestChrootBinds:  # pylint: disable=missing-function-docstring
+    """M20R-4: chroot binds through the same helper; it stops at the first
+    failed bind and its warning names the ones not attempted."""
+
+    @staticmethod
+    def _bind(fail: str = "") -> tuple[MockShell, Cleanup, str]:
+        mock = MockShell()
+        mock.on_prefix("mkdir -p").succeeds()
+        if fail:
+            mock.on(f"mount --bind /{fail} /mnt/zark/chroot/{fail}").fails("denied")
+        mock.on_prefix("mount").succeeds()
+        cleanup = Cleanup(make_log())
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(chroot_mod, "esp_of_rpool_disk", return_value=""),
+            redirect_stdout(out),
+        ):
+            chroot_mod._setup_bind_mounts(  # pylint: disable=protected-access
+                "/mnt/zark/chroot", cleanup, make_log()
+            )
+        return mock, cleanup, " ".join(unframed(out.getvalue()).split())
+
+    def test_a_failed_proc_bind_stops_the_rest_and_names_them(self):
+        mock, cleanup, out = self._bind("proc")
+        assert [c for c in mock.calls if c.startswith("mount --bind")] == [
+            "mount --bind /proc /mnt/zark/chroot/proc"
+        ], mock.calls
+        assert (
+            "Could not bind-mount /proc (denied); not attempted: /sys, /dev, /dev/pts, /run" in out
+        ), out
+        assert not cleanup._mounts, cleanup._mounts  # pylint: disable=protected-access
+        assert not [c for c in mock.calls if "efivars" in c], mock.calls  # /sys not bound
+
+    def test_all_five_bound_and_tracked(self):
+        mock, cleanup, out = self._bind()
+        assert len([c for c in mock.calls if c.startswith("mount --bind")]) == 5, mock.calls
+        assert "Could not bind-mount" not in out
+        assert "/mnt/zark/chroot/dev/pts" in cleanup._mounts  # pylint: disable=protected-access
 
 
 class TestRepairBootGrubCfg:  # pylint: disable=missing-function-docstring

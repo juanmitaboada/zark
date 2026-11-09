@@ -36,7 +36,7 @@ from lib.cleanup import BUSY_HINT, Cleanup
 from lib.config import zark_command
 from lib.keystore import Keystore
 from lib.log import Log
-from lib.mount import mount_system_pools
+from lib.mount import bind_runtime, mount_system_pools
 from lib.zfs import ZFS
 
 CHROOT_MNT = "/mnt/zark/chroot"
@@ -49,18 +49,21 @@ def _setup_bind_mounts(root: str, cleanup: Cleanup, log: Log) -> None:
     mounts, so Cleanup (which unmounts in reverse) removes the binds before
     unmounting the datasets and exporting the pools.
     """
-    for d in ("proc", "sys", "dev", "dev/pts", "run"):
-        sh.run(f"mkdir -p {root}/{d}")
-        if sh.run(f"mount --bind /{d} {root}/{d}").ok:
-            cleanup.track_mount(f"{root}/{d}")
-        else:
-            log.warn(f"Could not bind-mount /{d}")
+    # The first bind that fails stops the rest (bind_runtime): a /dev/pts
+    # bound after a failed /dev would land on the system's own directory.
+    # The shell is still offered; the warning says what it lacks (M20R-4).
+    failed = bind_runtime(root, cleanup)
+    if failed is not None:
+        log.warn(failed.describe())
 
-    # efivars (best-effort; absent on legacy-BIOS systems)
+    # efivars (best-effort; absent on legacy-BIOS systems). Only on a bound
+    # /sys: otherwise its directory would be made on the system's own tree.
+    sys_bound = failed is None or "/sys" not in (failed.mount, *failed.not_attempted)
     efivars = f"{root}/sys/firmware/efi/efivars"
-    sh.run(f"mkdir -p {efivars}")
-    if sh.run(f"mount -t efivarfs efivarfs {efivars}", check=False).ok:
-        cleanup.track_mount(efivars)
+    if sys_bound:
+        sh.run(f"mkdir -p {efivars}")
+        if sh.run(f"mount -t efivarfs efivarfs {efivars}", check=False).ok:
+            cleanup.track_mount(efivars)
 
     # ESP at /boot/efi so grub/efibootmgr work inside the chroot: the one on
     # rpool's disk, not the first NVMe disk's (a Windows ESP can come first;

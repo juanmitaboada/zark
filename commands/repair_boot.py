@@ -29,7 +29,7 @@ from lib.grub_cfg import regenerate_grub_cfg
 from lib.initrd import installed_kernels, regenerate_initrd
 from lib.keystore import Keystore
 from lib.log import Log
-from lib.mount import kernel_named_vdevs, mount_system_pools
+from lib.mount import RUNTIME_BINDS, bind_runtime, kernel_named_vdevs, mount_system_pools
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 REPAIR_MNT = "/mnt/repair"
@@ -118,11 +118,20 @@ def run(
     # initrd, and the guard is itself a grub.d script.
     log.step(3, TOTAL_STEPS, "Installing grub guard and regenerating initrd...")
 
-    # Bind mounts
-    for d in ("proc", "sys", "dev", "dev/pts", "run"):
-        _ = sh.run(f"mkdir -p {REPAIR_MNT}/{d}")
-        _ = sh.run(f"mount --bind /{d} {REPAIR_MNT}/{d}")
-        cleanup.track_mount(f"{REPAIR_MNT}/{d}")
+    # Bind mounts, each checked: without /proc, 99_zark_cfg_check cannot
+    # read the grub.cfg it guards (M18E-4), and without /dev or /sys the
+    # initrd and update-grub run on a half-prepared tree. Nothing has been
+    # written to the system yet; the cleanup unmounts what was bound.
+    failed = bind_runtime(REPAIR_MNT, cleanup)
+    if failed is not None:
+        log.fatal(
+            failed.describe(),
+            causes=[
+                f"repair-boot needs {', '.join(f'/{d}' for d in RUNTIME_BINDS)} inside "
+                + f"{REPAIR_MNT}; nothing was written to the installed system"
+            ],
+            solutions=[f"Check the live session's mounts, then run {zark_command()} repair-boot"],
+        )
 
     # EFI: the ESP on the disk that holds rpool (never "the first vfat",
     # which on a live session can be the live USB's own ESP)
@@ -134,12 +143,14 @@ def run(
     else:
         log.warn("No EFI System Partition found on rpool's disk - /boot/efi not mounted")
 
+    # efivars: best-effort (grub-install and efibootmgr use it, and
+    # repair-boot runs neither); tracked only when it mounted.
     _ = sh.run(f"mkdir -p {REPAIR_MNT}/sys/firmware/efi/efivars")
-    _ = sh.run(
+    if sh.run(
         f"mount -t efivarfs efivarfs {REPAIR_MNT}/sys/firmware/efi/efivars 2>/dev/null",
         check=False,
-    )
-    cleanup.track_mount(f"{REPAIR_MNT}/sys/firmware/efi/efivars")
+    ).ok:
+        cleanup.track_mount(f"{REPAIR_MNT}/sys/firmware/efi/efivars")
 
     # zpool.cache
     cache_path = f"{REPAIR_MNT}/etc/zfs/zpool.cache"

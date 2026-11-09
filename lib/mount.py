@@ -27,6 +27,7 @@ Used by:
 
 import os
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
 
 from lib.backup_layout import choose_dataset
@@ -38,6 +39,43 @@ from lib.keystore import KeystoreLike, open_keystore
 from lib.log import Log
 from lib.sh import run
 from lib.zfs import ZFS
+
+# The kernel's and the runtime's file systems a chroot of the installed
+# system needs, in the order they are bound (a child after its parent).
+RUNTIME_BINDS = ("proc", "sys", "dev", "dev/pts", "run")
+
+
+@dataclass(frozen=True)
+class BindFailure:
+    """The first of :data:`RUNTIME_BINDS` that could not be bound."""
+
+    mount: str  # "/proc"
+    error: str  # mount's stderr
+    not_attempted: tuple[str, ...]  # the ones after it, never tried
+
+    def describe(self) -> str:
+        """One line naming the bind that failed and those not attempted."""
+        rest = f"; not attempted: {', '.join(self.not_attempted)}" if self.not_attempted else ""
+        return f"Could not bind-mount {self.mount} ({self.error or 'no error text'}){rest}"
+
+
+def bind_runtime(root: str, cleanup: Cleanup) -> BindFailure | None:
+    """Bind ``/proc``, ``/sys``, ``/dev``, ``/dev/pts`` and ``/run`` under
+    ``root``, each tracked for the cleanup only once it is mounted.
+
+    Stops at the first that fails and returns it: nothing is bound after it,
+    so a ``/dev/pts`` is never mounted onto the system's own ``dev/pts``
+    directory when ``/dev`` did not bind. None when all five are bound.
+    """
+    for n, d in enumerate(RUNTIME_BINDS):
+        _ = run(f"mkdir -p {root}/{d}")
+        r = run(f"mount --bind /{d} {root}/{d}")
+        if not r.ok:
+            return BindFailure(
+                f"/{d}", r.stderr.strip(), tuple(f"/{x}" for x in RUNTIME_BINDS[n + 1 :])
+            )
+        cleanup.track_mount(f"{root}/{d}")
+    return None
 
 
 def find_system_root_dataset(log: Log) -> str | None:
