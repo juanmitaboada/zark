@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### M19b - `zark fullcheck`'s findings on eli
+
+#### Fixed
+
+- **A full check names the damaged files of an encrypted drive**
+  (M19E-1). ZFS lists the damaged files only while the key of every
+  damaged block's dataset is loaded, and refuses the whole list otherwise
+  (exit 0, the refusal on stderr), so a scrub that found damage on a zark
+  drive reported its counters but named no file and recorded
+  `permanent_errors` 0. When the status has no list, `fullcheck` asks the
+  passphrase again, opens the keystore read-only, loads the keys for that
+  one read and unloads them before the export; nothing is mounted. The
+  scrub's result and the damage are recorded (and `status.json` and the
+  MOTD refreshed) before that question, so a Ctrl-C there leaves them
+  recorded, the check `not_finished` "after its scrub found damage". A
+  status with no `errors:` line is now read as a list not given
+  (`Damage.unlisted`). Self-test POOL-17 (revision 2) corrupts a block of
+  an encrypted dataset too and checks that the list is refused without its
+  key and names both files with it.
+
 ### M19 - `zark fullcheck`, a backup drive verified without altering it (2.3.0-rc2)
 
 #### Added

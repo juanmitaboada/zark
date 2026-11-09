@@ -95,6 +95,7 @@ REPORT_EVERY_S = 60.0
 # (a 2.5" disk and a SATA SSD, each behind USB 3).
 DISK_RATE, SSD_RATE = 100 * 1000**2, 400 * 1000**2
 SKIP_NOTE = "It would be reported as not done."
+UNNAMED = "the damaged files are not named: the drive's keys were not loaded"
 R2 = (
     "The scrub writes only its own progress, the pool's labels and history, and "
     + "rewrites a damaged metadata copy from a good one; it changes no file, "
@@ -119,6 +120,12 @@ class CheckRun:  # pylint: disable=too-many-instance-attributes
         if self.recorded:
             return
         self.recorded = True
+        self.write(result, message, log)
+
+    def write(self, result: str, message: str, log: Log) -> None:
+        """``last_check`` as it stands, written now; ``record`` still writes
+        the run's end. Alone, before a question the run may not get past
+        (M19E-1: the passphrase that names the damaged files)."""
         self.check.result = result
         self.check.message = message
         self.check.ended_at = now_utc_iso()
@@ -554,7 +561,7 @@ def _scrub_ended(  # pylint: disable=too-many-arguments,too-many-positional-argu
     cr: CheckRun, zfs: ZFS, scan: scrub.Scan, seconds: float, cleanup: Cleanup, log: Log
 ) -> bool:
     pool = cr.pool
-    damage: Damage = zfs.pool_damage(pool)
+    damage = zfs.pool_damage(pool)
     finished = scan.function == "SCRUB" and scan.state == "FINISHED"
     paused = scan.scrubbing and scan.paused
     cr.check.scrub = scrub_record(
@@ -565,6 +572,7 @@ def _scrub_ended(  # pylint: disable=too-many-arguments,too-many-positional-argu
         permanent_errors=len(damage.errors),
         seconds=seconds,
     )
+    damage = _named(cr, zfs, damage, cleanup, log)
     if not zfs.pool_export(pool, wait_udev=True):
         _fail(cr, f"Could not export {pool} after the scrub", log)
     cleanup.untrack_pool(pool)
@@ -582,9 +590,58 @@ def _scrub_ended(  # pylint: disable=too-many-arguments,too-many-positional-argu
         cr.lines.append(f"Scrub: {scan.errors or 0} error(s){repaired}")
         cr.lines += [f"  {c}" for c in damage.counters]
         cr.lines += [f"  {e}" for e in damage.errors[:20]]
+        if damage.unlisted:
+            cr.lines.append(f"  {UNNAMED}")
     else:
         cr.lines.append(f"Scrub: every block of {pool} read back clean ({_gib(scan.examined)})")
     return True
+
+
+def _named(cr: CheckRun, zfs: ZFS, damage: Damage, cleanup: Cleanup, log: Log) -> Damage:
+    """M19E-1: the damaged files of an encrypted drive, listed by ``zpool
+    status -v`` only while their keys are loaded. Asked for only when the
+    list was refused: the keystore opened read-only (the passphrase asked
+    again), the keys loaded, the list read, every key unloaded, all before
+    the export. Nothing is mounted (every dataset is ``canmount=noauto``) and
+    a key load writes nothing to the pool. On a signal the cleanup closes the
+    keystore, unloads the keys and exports; a dead check's ``zark clean``
+    closes the mapper and exports, which drops every key.
+
+    The scrub's record and the damage are written before the question
+    (M19E-1 1a), so a Ctrl-C or no terminal there loses neither; a list
+    read with the keys rewrites the record with its count."""
+    if not damage.unlisted:
+        return damage
+    pool = cr.pool
+    cr.damage = True  # the list is refused only for a damaged block
+    cr.write("damage", f"the full check found damage; {UNNAMED}", log)
+    log.info(f"The damaged files of {pool} are listed only with its keys loaded")
+    ks = Keystore(log)
+    cleanup.track_keystore(ks)  # before it opens: a signal in between closes it
+    try:
+        opened = open_keystore(ks, pool, log, readonly=True)
+    except EOFError:  # no terminal to ask on
+        opened = False
+    if not opened:
+        log.warn(f"The damaged files of {pool} are not named: its keystore did not open")
+        return damage
+    try:
+        _ = ks.load_pool_keys(f"{pool}/rpool")
+    finally:
+        ks.umount()
+    try:
+        named = zfs.pool_damage(pool)
+    finally:
+        if not zfs.unload_keys(pool):
+            log.warn(f"Some keys of {pool} did not unload; its export drops them")
+    # The first read was refused because something is damaged: a second
+    # read that names nothing (refused again, or failed) keeps the first.
+    if not named.errors:
+        return damage
+    if cr.check.scrub is not None:
+        cr.check.scrub["permanent_errors"] = len(named.errors)
+    cr.write("damage", "the full check found damage", log)
+    return named
 
 
 # ── the command ───────────────────────────────────────────────────────────
@@ -710,7 +767,8 @@ def _on_exit(cr: CheckRun, log: Log) -> Callable[[], None]:
 
     def action() -> None:
         if signals.received() is not None:
-            cr.record("not_finished", "the check was interrupted", log)
+            found = " after its scrub found damage" if cr.damage else ""
+            cr.record("not_finished", f"the check was interrupted{found}", log)
         else:
             cr.record("failed", "the check stopped before its end", log)
 

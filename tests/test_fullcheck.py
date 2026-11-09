@@ -54,7 +54,7 @@ from lib.cleanup import Cleanup
 from lib.config import Config, DriveInfo
 from lib.log import Log
 from lib.selftest import Bench
-from lib.zfs import ZFS
+from lib.zfs import ZFS, parse_damage
 from tests.mock_sh import MockShell, patch_sh
 from tests.test_status_files import problems
 
@@ -1013,6 +1013,209 @@ class TestScrubPart:  # pylint: disable=missing-function-docstring
         assert not cleanup._actions  # pylint: disable=protected-access
 
 
+# eli's B4 (2.4.4): `zpool status -vp` of a pool with a damaged block in an
+# encrypted dataset whose key is not loaded: rc 0, the list refused on stderr
+# ("errors: List of errors unavailable: permission denied"), no errors: line.
+TEXT_UNLISTED = """  pool: m19s
+ state: ONLINE
+status: One or more devices has experienced an error resulting in data
+\tcorruption.  Applications may be affected.
+  scan: scrub repaired 0B in 00:00:00 with 2 errors on Tue Nov 10 06:19:02 2026
+config:
+
+\tNAME               STATE     READ WRITE CKSUM
+\tm19s               ONLINE       0     0     0
+\t  /var/tmp/m19/v1  ONLINE       0     0     0
+
+"""
+NAMED = ["backup2/rpool/USERDATA/home_x@zark_p:/known", "backup2/rpool/ROOT/ubuntu_x:/etc/x"]
+
+
+class TestDamageNamed:  # pylint: disable=missing-function-docstring
+    """M19E-1: on an encrypted drive the scrub's damaged files are named with
+    the keys loaded from the keystore opened read-only, then unloaded, before
+    the export."""
+
+    def test_a_list_zpool_did_not_give_is_unlisted(self) -> None:
+        unlisted = parse_damage(TEXT_UNLISTED)
+        assert unlisted.unlisted and not unlisted.errors and not unlisted.any
+        listed = parse_damage(
+            TEXT_UNLISTED
+            + "errors: Permanent errors have been detected in the "
+            + "following files:\n\n        m19s/plain:/known\n"
+        )
+        assert not listed.unlisted and listed.errors == ["m19s/plain:/known"]
+        clean = parse_damage(TEXT_UNLISTED + "errors: No known data errors\n")
+        assert not clean.unlisted and not clean.any
+        assert not parse_damage("").unlisted  # nothing read: nothing claimed
+
+    def _ended(  # pylint: disable=too-many-locals
+        self, *damages: Any, opens: bool | None = True, interrupt: bool = False
+    ) -> tuple[fc_cmd.CheckRun, list[str], list[bool], fc_cmd.Cleanup, MockShell]:
+        """``opens`` None: a Ctrl-C at the passphrase."""
+        cr = _cr()
+        cleanup = fc_cmd.Cleanup(_log())
+        cleanup.track_pool(POOL)
+        cleanup.track_action(fc_cmd._on_exit(cr, _log()))  # pylint: disable=protected-access
+        order: list[str] = []
+        opened: list[bool] = []
+        zfs = _zfs()
+        answers = list(damages)
+
+        def damage(_pool: str) -> Any:
+            order.append("status")
+            if interrupt and len(order) > 1:
+                raise KeyboardInterrupt
+            return answers.pop(0)
+
+        def open_ks(ks: Any, _pool: str, _log: Log, *, readonly: bool = False) -> bool:
+            assert ks in cleanup._keystores  # pylint: disable=protected-access
+            opened.append(readonly)
+            order.append("open")
+            if opens is None:
+                raise KeyboardInterrupt
+            return opens
+
+        def export(_pool: str, **_kw: Any) -> bool:
+            order.append("export")
+            return True
+
+        def mark(step: str, value: Any = None) -> Any:
+            order.append(step)
+            return value
+
+        def save(_guid: str, check: Any, _log: Log) -> bool:
+            named = check.scrub["permanent_errors"] if check.scrub else None
+            return mark(f"save {check.result} {named}", False)
+
+        zfs.pool_damage.side_effect = damage
+        zfs.pool_export.side_effect = export
+        zfs.unload_keys.side_effect = lambda _pool: mark("unload", True)
+        mock = MockShell()
+        mock.on_prefix("zfs unload-key").succeeds()
+        mock.on(f"zpool list {POOL}").succeeds(POOL)
+        mock.on(f"zpool export {POOL}").succeeds()
+        scan = scrub.parse_json(status_json(**scanning(state="FINISHED", errors=2)), POOL)
+        assert scan is not None
+        with (
+            patch_sh(mock),
+            patch.object(fc_cmd, "open_keystore", side_effect=open_ks),
+            patch.object(
+                fc_cmd.Keystore, "load_pool_keys", side_effect=lambda _r: mark("load", 19)
+            ),
+            patch.object(fc_cmd.Keystore, "umount", side_effect=lambda: mark("close")),
+            patch.object(fc_cmd, "save", side_effect=save),
+            patch.object(fc_cmd.signals, "received", return_value=signal.SIGINT),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                fc_cmd._scrub_ended(cr, zfs, scan, 45.0, cleanup, _log())  # pylint: disable=protected-access
+            except KeyboardInterrupt:
+                cleanup._run()  # pylint: disable=protected-access
+        order += [f"sh: {c}" for c in mock.calls]
+        return cr, order, opened, cleanup, mock
+
+    def test_an_unlisted_damage_is_named_with_the_keys_loaded_read_only(self) -> None:
+        named = fc_cmd.Damage(counters=["/dev/sdc1 ONLINE 0 0 4"], errors=list(NAMED))
+        cr, order, opened, _, mock = self._ended(fc_cmd.Damage(unlisted=True), named)
+        assert opened == [True] and not mock.calls
+        assert order == [
+            "status",
+            "save damage 0",
+            "open",
+            "load",
+            "close",
+            "status",
+            "unload",
+            "save damage 2",
+            "export",
+        ]
+        assert cr.damage and cr.check.scrub is not None
+        assert cr.check.scrub["permanent_errors"] == 2
+        assert all(f"  {e}" in cr.lines for e in NAMED)
+
+    def test_a_listed_or_clean_list_asks_for_no_passphrase(self) -> None:
+        for damage in (fc_cmd.Damage(errors=[NAMED[0]]), fc_cmd.Damage()):
+            cr, order, opened, _, mock = self._ended(damage)
+            assert not opened and order == ["status", "export"], damage
+            assert not mock.calls
+            assert cr.damage  # the scan's errors are damage on their own
+
+    def test_a_keystore_that_does_not_open_leaves_the_files_unnamed(self) -> None:
+        cr, order, opened, _, mock = self._ended(fc_cmd.Damage(unlisted=True), opens=False)
+        assert opened == [True] and order == ["status", "save damage 0", "open", "export"]
+        assert not mock.calls
+        assert cr.damage and cr.check.scrub is not None
+        assert cr.check.scrub["permanent_errors"] == 0 and cr.check.scrub["errors"] == 2
+        assert any("not named" in line for line in cr.lines)
+
+    def test_a_second_read_that_names_nothing_keeps_the_first(self) -> None:
+        counters = ["/dev/sdc1 ONLINE 0 0 4"]
+        for second in (fc_cmd.Damage(), fc_cmd.Damage(counters=counters, unlisted=True)):
+            first = fc_cmd.Damage(counters=counters, unlisted=True)
+            cr, order, _, _, _ = self._ended(first, second)
+            assert order == [
+                "status",
+                "save damage 0",
+                "open",
+                "load",
+                "close",
+                "status",
+                "unload",
+                "export",
+            ]
+            assert cr.check.scrub is not None and cr.check.scrub["permanent_errors"] == 0
+            assert f"  {counters[0]}" in cr.lines and any("not named" in x for x in cr.lines)
+
+    def test_no_terminal_to_ask_on_leaves_the_files_unnamed(self) -> None:
+        cr = _cr()
+        zfs = _zfs()
+        zfs.pool_damage.return_value = fc_cmd.Damage(unlisted=True)
+        scan = scrub.parse_json(status_json(**scanning(state="FINISHED", errors=2)), POOL)
+        assert scan is not None
+        saved: list[tuple[str, Any]] = []
+
+        def save(_guid: str, check: Any, _log: Log) -> bool:
+            saved.append((check.result, dict(check.scrub or {})))
+            return False
+
+        with (
+            patch.object(fc_cmd, "open_keystore", side_effect=EOFError),
+            patch.object(fc_cmd, "save", side_effect=save),
+            redirect_stdout(StringIO()),
+        ):
+            got = fc_cmd._scrub_ended(cr, zfs, scan, 45.0, fc_cmd.Cleanup(_log()), _log())  # pylint: disable=protected-access
+        assert got is True and cr.damage and zfs.pool_export.called
+        assert not zfs.unload_keys.called and any("not named" in line for line in cr.lines)
+        # Written before the question that could not be asked (M19E-1 1a).
+        assert [r for r, _ in saved] == ["damage"]
+        assert saved[0][1]["errors"] == 2 and saved[0][1]["permanent_errors"] == 0
+
+    def test_a_signal_while_the_keys_are_loaded_unloads_them_before_the_export(self) -> None:
+        _, order, _, cleanup, mock = self._ended(fc_cmd.Damage(unlisted=True), interrupt=True)
+        # The list's read interrupted: the keys unloaded on the way out, the
+        # export left to the cleanup, which unloads again first.
+        assert order[:7] == ["status", "save damage 0", "open", "load", "close", "status", "unload"]
+        assert "export" not in order
+        calls = mock.calls
+        assert calls.index(f"zfs unload-key -r {POOL}") < calls.index(f"zpool export {POOL}")
+        assert not cleanup._keystores  # pylint: disable=protected-access
+
+    def test_a_ctrl_c_at_the_passphrase_keeps_the_scrub_and_the_damage(self) -> None:
+        # M19E-1 1a: recorded before the question, so the interrupted run's
+        # record keeps the scrub's numbers and says it found damage.
+        cr, order, _, _, mock = self._ended(fc_cmd.Damage(unlisted=True), opens=None)
+        assert order[:3] == ["status", "save damage 0", "open"]
+        assert "save not_finished 0" in order and "load" not in order
+        assert cr.check.result == "not_finished"
+        assert cr.check.message == "the check was interrupted after its scrub found damage"
+        assert cr.check.scrub is not None and cr.check.scrub["state"] == "finished"
+        assert cr.check.scrub["errors"] == 2 and cr.check.scrub["seconds"] == 45
+        assert mock.calls.index(f"zfs unload-key -r {POOL}") < mock.calls.index(
+            f"zpool export {POOL}"
+        )
+
+
 class TestScrubInterrupted:  # pylint: disable=missing-function-docstring
     """M19R-5, M19-13 13a: what the cleanup does at a signal, in each step."""
 
@@ -1465,18 +1668,67 @@ class TestSelftestScrub:  # pylint: disable=missing-function-docstring
             else:
                 raise AssertionError("a block at 1 MiB was overwritten")
 
-    def test_the_check_scrubs_read_write_and_refuses_read_only(self) -> None:
+    def test_the_encrypted_block_is_placed_by_zdb_and_must_be_ciphertext(self) -> None:
+        """M19E-1: the DVA's offset plus 4 MiB, 4 KiB in its middle; zeros or
+        the file's own bytes at that place write nothing."""
+        with tempfile.TemporaryDirectory() as td:
+            bench = Bench(_log(), Cleanup(_log()), root=td)
+            os.makedirs(bench.dir)
+            vdev = bench.vdev("p")
+            at, size = 0x500000, 0x20000
+            plain = b"z" * size
+            with open(vdev, "wb") as f:
+                f.truncate(64 * 1024 * 1024)
+                _ = f.seek(4 * 1024 * 1024 + at)
+                _ = f.write(b"\x01\x02" * (size // 2))
+            out = (
+                "    Object  lvl   iblk   dblk  dsize  dnsize  lsize   %full  type\n"
+                + f"               0  L0 DVA[0]=<0:{at:x}:{size:x}> [L0 ZFS plain file] fletcher4\n"
+            )
+            ran: list[str] = []
+
+            def zdb(cmd: str) -> sh.RunResult:
+                ran.append(cmd)
+                return sh.RunResult(0, out, "", cmd)
+
+            with patch.object(Bench, "ok", side_effect=zdb):
+                sl1._corrupt_encrypted_block(bench, "p", "p/e", "2", plain)  # pylint: disable=protected-access
+            assert ran == [f"zdb -e -p {bench.dir} -ddddd p/e 2"]
+            data = Path(vdev).read_bytes()
+            start = 4 * 1024 * 1024 + at
+            changed = [i for i in range(start, start + size) if data[i] != (1 if i % 2 == 0 else 2)]
+            assert changed and min(changed) >= start + size // 2
+            assert max(changed) < start + size // 2 + 4096
+            assert data[:start] == bytes(start)
+            # The 2.2 form of the line is read the same way.
+            out = out.replace(f"DVA[0]=<0:{at:x}:{size:x}>", f"0:{at:x}:{size:x}")
+            with patch.object(Bench, "ok", side_effect=zdb):
+                sl1._corrupt_encrypted_block(bench, "p", "p/e", "2", plain)  # pylint: disable=protected-access
+            # Zeros (a wrong place) write nothing.
+            out = out.replace(f"0:{at:x}:", f"0:{at + 0x100000:x}:")
+            before = Path(vdev).read_bytes()
+            try:
+                with patch.object(Bench, "ok", side_effect=zdb):
+                    sl1._corrupt_encrypted_block(bench, "p", "p/e", "2", plain)  # pylint: disable=protected-access
+            except selftest.Fail:
+                pass
+            else:
+                raise AssertionError("zeros at the block's place were overwritten")
+            assert Path(vdev).read_bytes() == before
+
+    def _pool17(self, listed_without_key: bool = False) -> tuple[list[str], dict[str, Any], Any]:  # pylint: disable=too-many-locals
+        """POOL-17 on a stubbed bench; (the commands, the state, the corruption mocks)."""
         with tempfile.TemporaryDirectory() as td:
             bench = Bench(_log(), Cleanup(_log()), root=td)
             os.makedirs(bench.mnt)
             c = bench.pool("c")
-            state: dict[str, Any] = {"ro": "off", "scrubs": 0}
+            state: dict[str, Any] = {"ro": "off", "scrubs": 0, "key": False}
             finished = scanning(state="FINISHED", errors=2)
+            unlisted = f"config:\n\n\tNAME STATE READ WRITE CKSUM\n\t{c} ONLINE 0 0 4\n\n"
             perm = (
-                "config:\n\n\tNAME STATE READ WRITE CKSUM\n\t"
-                + f"{c} ONLINE 0 0 4\n\t  /x ONLINE 0 0 4\n\n"
+                unlisted
                 + "errors: Permanent errors have been detected in the following files:\n\n"
-                + f"        {c}/x:/known\n"
+                + f"        {c}/x:/known\n        {c}/e:/known\n"
             )
 
             def fake(cmd: Any, *_a: Any, **_k: Any) -> sh.RunResult:
@@ -1496,7 +1748,15 @@ class TestSelftestScrub:  # pylint: disable=missing-function-docstring
                 elif text.startswith("zpool status -j"):
                     out = status_json(c, **finished)
                 elif text.startswith("zpool status -vp"):
-                    out = perm
+                    out = perm if state["key"] or listed_without_key else unlisted
+                elif text.startswith("unshare -m"):
+                    out = "2"  # the known file's object number
+                elif text.startswith("zfs load-key"):
+                    state["key"] = True
+                elif text.startswith("zfs unload-key"):
+                    state["key"] = False
+                elif "keystatus" in text:
+                    out = "available" if state["key"] else "unavailable"
                 return sh.RunResult(0, out, "", text)
 
             calls: list[str] = []
@@ -1505,12 +1765,37 @@ class TestSelftestScrub:  # pylint: disable=missing-function-docstring
                 patch.object(mock, "mock_run", side_effect=fake),
                 patch_sh(mock),
                 patch.object(sl1, "_corrupt_known_block") as corrupt,
+                patch.object(sl1, "_corrupt_encrypted_block") as corrupt_enc,
                 patch.object(Bench, "drop_pool"),
             ):
                 sl1.pool_17(bench)
-            assert corrupt.called and state["scrubs"] == 1
-            ro = next(i for i, s in enumerate(calls) if "readonly=on" in s)
-            first = next(i for i, s in enumerate(calls) if s.startswith("zpool scrub"))
-            assert calls.index(f"zpool export {c}") < first < ro
-            assert not [s for s in calls[ro:] if s.startswith("zpool scrub")]
-            assert "compression=off" in next(s for s in calls if s.startswith("zfs create"))
+            state["c"] = c
+            return calls, state, (corrupt, corrupt_enc)
+
+    def test_the_check_scrubs_read_write_and_refuses_read_only(self) -> None:
+        calls, state, (corrupt, corrupt_enc) = self._pool17()
+        c = state["c"]
+        assert corrupt.called and state["scrubs"] == 1
+        assert corrupt_enc.call_args.args[2:4] == (f"{c}/e", "2")
+        # M19E-1: the list read without the key, then with it, then the key unloaded.
+        vp = [i for i, s in enumerate(calls) if s.startswith("zpool status -vp")]
+        load = calls.index(f"zfs load-key {c}/e")
+        assert len(vp) == 2 and vp[0] < load < vp[1] < calls.index(f"zfs unload-key -r {c}")
+        assert not state["key"]
+        enc = next(s for s in calls if s.startswith("zfs create") and f"{c}/e" in s)
+        assert "encryption=aes-256-gcm" in enc and "compression=off" in enc
+        ro = next(i for i, s in enumerate(calls) if "readonly=on" in s)
+        first = next(i for i, s in enumerate(calls) if s.startswith("zpool scrub"))
+        assert calls.index(f"zpool export {c}") < first < ro
+        assert not [s for s in calls[ro:] if s.startswith("zpool scrub")]
+        assert "compression=off" in next(s for s in calls if s.startswith("zfs create"))
+
+    def test_a_list_given_without_the_key_fails_the_check(self) -> None:
+        """M19E-1: the behaviour fullcheck relies on is that the list is
+        refused without the key; a platform that gives it is reported."""
+        try:
+            _ = self._pool17(listed_without_key=True)
+        except selftest.Fail as e:
+            assert "key is not loaded" in str(e) or "key is not loaded" in repr(e.args)
+        else:
+            raise AssertionError("POOL-17 passed with a list given without the key")

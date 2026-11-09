@@ -30,6 +30,7 @@ none``, so a clone inherits ``mountpoint=none`` and nothing mounts
 
 import fcntl
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -2120,56 +2121,107 @@ def _corrupt_known_block(b: Bench, pool: str, content: bytes) -> None:
     vdev = b.vdev(pool)
     off = _find(vdev, content)
     expect(off >= 0, "the known block in the vdev file", "not found")
-    size = os.path.getsize(vdev)
+    _overwrite_middle(vdev, off, len(content))
+
+
+def _overwrite_middle(vdev: str, off: int, size: int) -> None:
+    """4 KiB of random bytes in the middle of the block at ``off`` of the
+    vdev file ``vdev``, refused unless the block lies between the front
+    labels and boot area (4 MiB) and the back labels (512 KiB)."""
     expect(
-        4 * 1024**2 <= off and off + len(content) <= size - 512 * 1024,
+        4 * 1024**2 <= off and off + size <= os.path.getsize(vdev) - 512 * 1024,
         "the known block inside the vdev's data area",
         f"offset {off}",
     )
     with open(vdev, "r+b") as f:
-        _ = f.seek(off + len(content) // 2)
+        _ = f.seek(off + size // 2 // 4096 * 4096)
         _ = f.write(secrets.token_bytes(4096))
         f.flush()
         os.fsync(f.fileno())
 
 
+# zdb -ddddd's first level-0 block pointer of an object: "0  L0 DVA[0]=<vdev:offset:psize>"
+# on 2.4, "0  L0 vdev:offset:psize" on 2.2 (eli's B2 and C2 read both).
+_L0 = re.compile(r"^\s+0\s+L0\s+(?:DVA\[0\]=<)?(\d+):([0-9a-f]+):([0-9a-f]+)", re.M)
+
+
+def _corrupt_encrypted_block(b: Bench, pool: str, ds: str, obj: str, plain: bytes) -> None:
+    """Overwrite 4 KiB of object ``obj``'s first data block in the encrypted
+    ``ds`` of the exported ``pool`` (M19E-1). Its bytes on disk are not the
+    file's, so ``zdb -e`` places it, as eli's B2 did: the DVA's offset plus
+    the 4 MiB of front labels and boot area. The block read there must not
+    be zeros nor the file's own bytes (it is ciphertext), else nothing is
+    written."""
+    vdev = b.vdev(pool)
+    r = b.ok(f"zdb -e -p {_q(b.dir)} -ddddd {_q(ds)} {obj}")
+    m = _L0.search(r.output)
+    expect(m is not None, "zdb's first L0 block pointer of the file", "none", r.output[-4000:])
+    assert m is not None
+    off, size = int(m.group(2), 16) + 4 * 1024**2, int(m.group(3), 16)
+    with open(vdev, "rb") as f:
+        _ = f.seek(off)
+        data = f.read(size)
+    expect(any(data) and plain[:64] not in data, "ciphertext at the block's place", "not")
+    _overwrite_middle(vdev, off, size)
+
+
 @check(
     "POOL-17",
+    2,
     1,
-    1,
-    "a scrub reports an injected corruption by file; R1 refuses a read-only pool",
+    "a scrub reports an injected corruption by file, an encrypted dataset's with its key "
+    + "loaded; R1 refuses a read-only pool",
     depends=(
         "zark fullcheck's scrub and its damage report (lib/scrub.py, ZFS.pool_damage)",
+        "the damaged files of an encrypted drive named with its keys loaded (M19E-1)",
         "rule R1 before every zpool scrub (M19R-1, M19R-2)",
     ),
 )
-def pool_17(b: Bench) -> None:  # pylint: disable=too-many-locals
-    """(a) A read-write pool whose one data block of a known file was
-    overwritten on its vdev: ``lib.scrub.start`` (R1 allows it) starts the
+def pool_17(b: Bench) -> None:  # pylint: disable=too-many-locals,too-many-statements
+    """(a) A read-write pool with one data block of a known file overwritten
+    on its vdev in an unencrypted dataset and one in an encrypted dataset
+    whose key is not loaded: ``lib.scrub.start`` (R1 allows it) starts the
     scrub, ``lib.scrub.read`` follows it to FINISHED with errors, and
-    ``zpool status -vp`` read by ``ZFS.pool_damage`` names the file under
-    "Permanent errors" with a non-zero CKSUM counter. (b) The same pool
-    imported read-only: ``lib.scrub.start`` refuses through R1
-    (``readonly=on``) and no ``zpool scrub`` is run. Neither part asks the
-    module to refuse a scrub (OpenZFS PR 17717), so no platform can hang
-    here. lib/scrub.py:189-225; OpenZFS module/zfs/dsl_scan.c:4039-4040,
-    module/zfs/spa.c:478-479, cmd/zpool/zpool_main.c:9926-9985."""
+    ``zpool status -vp`` read by ``ZFS.pool_damage`` shows a non-zero CKSUM
+    counter and no list of files (``unlisted``: zpool refuses the whole list
+    while a damaged block's key is not loaded, rev 2, M19E-1); with the key
+    loaded it names both files under "Permanent errors", and the key is
+    unloaded again. (b) The same pool imported read-only:
+    ``lib.scrub.start`` refuses through R1 (``readonly=on``) and no ``zpool
+    scrub`` is run. Neither part asks the module to refuse a scrub (OpenZFS
+    PR 17717), so no platform can hang here. lib/scrub.py:189-225; OpenZFS
+    module/zfs/dsl_scan.c:4039-4040, module/zfs/spa.c:478-479,
+    module/zfs/spa_errlog.c (process_error_block, DS_HOLD_FLAG_DECRYPT),
+    cmd/zpool/zpool_main.c:9926-9985."""
     c = b.make_pool("c")
     try:
         ds = b.fs(f"{c}/x", "compression=off", "recordsize=128K")
+        enc = b.fs(
+            f"{c}/e",
+            "compression=off",
+            "recordsize=128K",
+            "encryption=aes-256-gcm",
+            "keyformat=raw",
+            f"keylocation=file://{b.key}",
+        )
         token = f"zark-pool17-{b.tag}-".encode().ljust(32, b".")
         content = token * (_KNOWN_BYTES // len(token))
         seed = f"{b.dir}/pool17.seed"
         Path(seed).write_bytes(content)
         mnt = _q(b.mnt)
-        _ = b.in_namespace(
-            f"mount -t zfs -o zfsutil {_q(ds)} {mnt} && cp {_q(seed)} {mnt}/known ; rc=$? ; "
-            + f"umount {mnt} && exit $rc"
-        )
+        objs: dict[str, str] = {}
+        for d in (ds, enc):
+            r = b.in_namespace(
+                f"mount -t zfs -o zfsutil {_q(d)} {mnt} && cp {_q(seed)} {mnt}/known && "
+                + f"stat -c %i {mnt}/known ; rc=$? ; umount {mnt} && exit $rc"
+            )
+            objs[d] = r.output.strip()
+            expect(objs[d].isdigit(), "the known file's object number", observed(objs[d]))
         Path(seed).unlink()
         _ = b.ok(f"zpool sync {c}")
         _ = b.ok(f"zpool export {c}")
         _corrupt_known_block(b, c, content)
+        _corrupt_encrypted_block(b, c, enc, objs[enc], content)
         reimport(b, c)
         why = scrub.refusal(c)
         expect(not why, "R1 allows the read-write pool", observed(why))
@@ -2187,14 +2239,27 @@ def pool_17(b: Bench) -> None:  # pylint: disable=too-many-locals
             observed(f"{scan.function}-{scan.state}"),
         )
         expect((scan.errors or 0) > 0, "the scrub's errors above 0", str(scan.errors))
-        damage = ZFS(b.log).pool_damage(c)
+        zfs = ZFS(b.log)
+        damage = zfs.pool_damage(c)
         expect(bool(damage.counters), "a non-zero vdev counter", "none")
         expect(
-            any(e.endswith("/known") for e in damage.errors),
-            "the known file under Permanent errors",
+            damage.unlisted and not damage.errors,
+            "no list of files while the encrypted dataset's key is not loaded",
             f"{len(damage.errors)} entries",
             "\n".join(damage.errors),
         )
+        _ = b.ok(f"zfs load-key {_q(enc)}")
+        damage = zfs.pool_damage(c)
+        expect(
+            any(e == f"{ds}:/known" for e in damage.errors)
+            and any(e == f"{enc}:/known" for e in damage.errors),
+            "both known files under Permanent errors with the key loaded",
+            f"{len(damage.errors)} entries",
+            "\n".join(damage.errors),
+        )
+        expect(zfs.unload_keys(c), "zfs unload-key -r to succeed", "it failed")
+        got = b.value("keystatus", enc)
+        expect(got == "unavailable", "the key unloaded again", observed(got))
         _ = b.ok(f"zpool export {c}")
         reimport(b, c, "-o readonly=on")
         seen: list[str] = []

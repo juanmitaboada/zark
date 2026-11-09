@@ -375,6 +375,7 @@ from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # no
     TestCheckInStatus,
     TestCheckRecord,
     TestCheckRunRecord,
+    TestDamageNamed,
     TestFullcheckFlow,
     TestFullcheckOrphan,
     TestFullcheckPrecondition,
@@ -472,6 +473,7 @@ FULLCHECK_SUITES = (
     TestRestoreReader,
     TestScrubInterrupted,
     TestScrubPart,
+    TestDamageNamed,
     TestSelftestScrub,
     TestCheckInStatus,
     TestCheckRunRecord,
@@ -27818,8 +27820,8 @@ class TestSelftestFramework:  # pylint: disable=missing-function-docstring
         assert len([c for c in checks if c.level == 1]) == 74
         assert len([c for c in checks if c.level == 2]) == 10
         assert len({c.cid for c in checks}) == len(checks)
-        # A check whose expectations changed gets its next revision (M9b, M11).
-        revs = {"SNP-07": 2, "POOL-13": 2, "DST-05": 2}
+        # A check whose expectations changed gets its next revision (M9b, M11, M19E-1).
+        revs = {"SNP-07": 2, "POOL-13": 2, "DST-05": 2, "POOL-17": 2}
         for c in checks:
             assert re.fullmatch(r"[A-Z]{3,4}-\d\d", c.cid), c.cid
             assert c.rev == revs.get(c.cid, 1) and c.depends, c.cid

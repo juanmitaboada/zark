@@ -850,8 +850,15 @@ end-to-end sequences.
     prune or read-write mount that finds a scrub an interrupted check left
     running pauses it and says so. A drive that goes away during the scrub
     leaves its pool suspended: zark neither pauses nor exports it and says
-    how to bring it back. After the scrub the drive is read back as after a
-    backup, waiting for apt as the backup's read-back does.
+    how to bring it back. When the scrub found damage that **zpool status**
+    lists only with the keys loaded (every dataset of a zark drive is
+    encrypted), the passphrase is asked again: the keystore is opened
+    read-only, the keys are loaded for that one read, which names the
+    damaged files, and unloaded before the export; nothing is mounted. The
+    scrub's result and the damage are recorded before that question, so an
+    interrupt there leaves them recorded (the check not finished). After
+    the scrub the drive is read back as after a backup, waiting for apt as
+    the backup's read-back does.
 
     The result ends in a banner (FULL CHECK PASSED, FOUND DAMAGE or NOT
     FINISHED) and in the drive's **last_check** entry in

@@ -175,6 +175,10 @@ class Damage:
 
     counters: list[str] = field(default_factory=list)  # vdev lines with READ/WRITE/CKSUM > 0
     errors: list[str] = field(default_factory=list)  # the "Permanent errors" list
+    # M19E-1: a status with no errors: line, zpool having refused the list (on
+    # stderr: "List of errors unavailable: permission denied", rc 0), as it does
+    # while a damaged block's dataset is encrypted and its key is not loaded.
+    unlisted: bool = False
 
     @property
     def any(self) -> bool:
@@ -186,12 +190,14 @@ def parse_damage(text: str) -> Damage:
     """Read the non-zero vdev counters and the permanent errors from ``zpool status -vp``."""
     damage = Damage()
     in_config = in_errors = False
+    seen_config = seen_errors = False
     for line in text.splitlines():
         words = line.split()
         if words[:5] == ["NAME", "STATE", "READ", "WRITE", "CKSUM"]:
-            in_config = True
+            in_config = seen_config = True
             continue
         if line.startswith("errors:"):
+            seen_errors = True
             in_config = False
             in_errors = "Permanent errors" in line
             continue
@@ -203,6 +209,7 @@ def parse_damage(text: str) -> Damage:
                     damage.counters.append(" ".join(words))
         elif in_errors and words:
             damage.errors.append(line.strip())
+    damage.unlisted = seen_config and not seen_errors
     return damage
 
 
@@ -772,6 +779,10 @@ class ZFS:
         # -p: exact counters; "1.2K" would not parse as a number.
         r = run(f"zpool status -vp {name}")
         return parse_damage(r.stdout) if r.ok else Damage()
+
+    def unload_keys(self, name: str) -> bool:
+        """``zfs unload-key -r``: every key loaded under pool ``name`` (M19E-1)."""
+        return run(f"zfs unload-key -r {name}", log=self.log).ok
 
     def write_zpool_cache(self, cache_path: str, pools: list[str]) -> None:
         """
