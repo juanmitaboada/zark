@@ -23,7 +23,7 @@ Usage:    sudo ./zark <command> [options]
 import os
 import sys
 
-from lib import cli_spec, dpkg_lock, live, lock, progress, signals
+from lib import cli_spec, dpkg_lock, invoker, live, lock, progress, signals
 from lib.config import VERSION, Config
 from lib.log import Log
 
@@ -122,6 +122,9 @@ def main():  # pylint: disable=too-many-branches
         print(f"  Run: {prefix}{invoke_name} --help")
         sys.exit(1)
 
+    # Who ran it, before the lock, so a run refused for a held lock is
+    # attributed too (Z2); zark.log only.
+    Log().file(invoker.run_line(cmd_name, cmd_args))
     # Two zark runs at once can remove each other's points or prune under a
     # backup: every command that changes state takes the one lock first.
     lock.guard(cmd_name, cmd_args)

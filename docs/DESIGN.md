@@ -34,6 +34,7 @@ zark/
 │   ├── health.py              # Drive health checks and the destructive test
 │   ├── identity.py            # Device identity: how every command names a disk
 │   ├── initrd.py              # initrd regeneration for a mounted target system
+│   ├── invoker.py             # The user behind a run (pkexec, sudo or root), for zark.log
 │   ├── keystore.py            # The LUKS keystore and the key loads
 │   ├── live.py                # The live session's installer probe
 │   ├── live_pools.py          # The monitor's two read-only pool listings

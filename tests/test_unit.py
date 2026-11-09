@@ -397,6 +397,7 @@ from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # no
 from tests.test_readers import (  # pylint: disable=wrong-import-position # noqa: E402
     TestBackupDriveOption,
     TestHealthReportFile,
+    TestInvokingUser,
     TestPendingFile,
     TestSimulateTempFiles,
     TestStatusLastRun,
@@ -497,6 +498,7 @@ READERS_SUITES = (
     TestStatusLastRun,
     TestPendingFile,
     TestBackupDriveOption,
+    TestInvokingUser,
 )
 
 # ═════════════════════════════════════════════════════════════════════════

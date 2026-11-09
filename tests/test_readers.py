@@ -459,3 +459,88 @@ class TestBackupDriveOption:  # pylint: disable=missing-function-docstring
             names = completion.complete("zark backup --drive ", Path("/nonexistent"))
         assert "--drive" in opts[1], opts
         assert names == ("words", ["alpha"]), names
+
+
+class TestInvokingUser:  # pylint: disable=missing-function-docstring
+    """Z2: zark.log names the uid behind each run, before the lock."""
+
+    @staticmethod
+    def _who(env: dict[str, str], *, getuid: int = 0) -> tuple[int, str, str]:
+        from lib import invoker  # pylint: disable=import-outside-toplevel
+
+        def _pw(uid: int) -> Any:
+            if uid == 4242:
+                raise KeyError(uid)
+            return type("Pw", (), {"pw_name": {0: "root", 1000: "juanmi", 1001: "eli"}[uid]})
+
+        with (
+            patch.object(invoker.os, "getuid", return_value=getuid),
+            patch.object(invoker.pwd, "getpwuid", side_effect=_pw),
+        ):
+            return invoker.invoker(env)
+
+    def test_each_source(self):
+        assert self._who({"PKEXEC_UID": "1000"}) == (1000, "juanmi", "pkexec")
+        assert self._who({"SUDO_UID": "1001"}) == (1001, "eli", "sudo")
+        assert self._who({}) == (0, "root", "root")
+
+    def test_pkexec_comes_before_sudo(self):
+        got = self._who({"PKEXEC_UID": "1000", "SUDO_UID": "1001"})
+        assert got == (1000, "juanmi", "pkexec"), got
+
+    def test_a_value_that_is_not_an_integer_is_ignored(self):
+        for bad in ("", "x", "-1", "10 00", "²"):
+            got = self._who({"PKEXEC_UID": bad, "SUDO_UID": "1001"})
+            assert got == (1001, "eli", "sudo"), (bad, got)
+            assert self._who({"SUDO_UID": bad}) == (0, "root", "root"), bad
+
+    def test_a_uid_with_no_passwd_entry_is_its_number(self):
+        assert self._who({"SUDO_UID": "4242"}) == (4242, "4242", "sudo")
+
+    def test_the_line(self):
+        from lib import invoker  # pylint: disable=import-outside-toplevel
+
+        with patch.object(invoker, "invoker", return_value=(1000, "juanmi", "sudo")):
+            line = invoker.run_line("backup", ["--drive", "alpha"])
+        assert line == "zark backup --drive alpha run by uid 1000 (juanmi) via sudo", line
+
+    def test_the_entry_point_logs_it_before_the_lock_and_prints_nothing(self):
+        # pylint: disable=import-outside-toplevel
+        import importlib.machinery
+        import importlib.util
+        import sys
+        from contextlib import ExitStack
+
+        from lib import lock
+
+        path = str(Path(__file__).resolve().parent.parent / "zark")
+        loader = importlib.machinery.SourceFileLoader("zark_entry", path)
+        spec = importlib.util.spec_from_file_location("zark_entry", path, loader=loader)
+        assert spec is not None
+        entry = importlib.util.module_from_spec(spec)
+        loader.exec_module(entry)
+        order: list[str] = []
+        out = StringIO()
+
+        def _held(*_a: Any) -> None:
+            order.append("guard")
+            raise SystemExit(75)
+
+        with ExitStack() as stack:
+            for cm in (
+                patch.object(sys, "argv", ["zark", "prune", "--dry-run"]),
+                patch("os.geteuid", return_value=0),
+                patch.dict(os.environ, {"SUDO_UID": "1000"}),
+                patch.object(Log, "file", lambda _s, m: order.append(f"file:{m}")),
+                patch.object(lock, "guard", side_effect=_held),
+                redirect_stdout(out),
+            ):
+                stack.enter_context(cm)
+            try:
+                entry.main()
+            except SystemExit as e:
+                assert e.code == 75, e.code
+        assert len(order) == 2 and order[1] == "guard", order
+        assert order[0].startswith("file:zark prune --dry-run run by uid 1000 ("), order
+        assert order[0].endswith(") via sudo"), order
+        assert out.getvalue() == "", out.getvalue()
