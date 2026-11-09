@@ -67,7 +67,7 @@ from dataclasses import asdict as dc_asdict, dataclass, replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NoReturn
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -570,6 +570,57 @@ _DPKG_LOCKS = (
 )
 
 
+# No test reads the real terminal. A test that reaches input(), a readline
+# of sys.stdin or getpass without feeding it an answer would wait for a key
+# whenever the suite runs from a terminal (carmen's `make fulltest`) and pass
+# where stdin is not one (CI, tox under a pipe). stdin is replaced by a
+# stream whose reads fail at once, and getpass (which opens /dev/tty itself)
+# by a stub that fails the same way; each attempt is also recorded, so the
+# runner fails the test that made it even when the code under test catches
+# the error. Tests that feed answers patch input, sys.stdin or getpass
+# themselves, which takes precedence over these for their duration.
+_TERMINAL_READS: list[str] = []
+
+
+class _NoTerminal(AssertionError):
+    """A test tried to read the real terminal."""
+
+
+def _no_terminal(what: str) -> NoReturn:
+    _TERMINAL_READS.append(what)
+    raise _NoTerminal(f"a test read the terminal ({what}) without feeding an answer")
+
+
+class _GuardedStdin:
+    """sys.stdin for the suite: never a terminal, every read fails."""
+
+    def isatty(self) -> bool:
+        """Never a terminal: the code under test takes its non-terminal paths."""
+        return False
+
+    def readable(self) -> bool:
+        """A stream that claims to read, so that a read reaches the guard."""
+        return True
+
+    def fileno(self) -> int:
+        """No descriptor to select() on or hand to a child."""
+        raise OSError(errno.EBADF, "the suite's stdin has no descriptor")
+
+    def read(self, _size: int | None = -1) -> str:
+        """Fails the test that read."""
+        _no_terminal("sys.stdin.read")
+
+    def readline(self, _size: int | None = -1) -> str:
+        """Fails the test that read; input() reads through this."""
+        _no_terminal("input() or sys.stdin.readline")
+
+
+_STDIN_GUARD = (
+    patch.object(sys, "stdin", _GuardedStdin()).start(),
+    patch("getpass.getpass", side_effect=lambda *_a, **_k: _no_terminal("getpass")).start(),
+)
+
+
 def _real_log_state() -> dict[str, tuple[int, int] | None]:
     """(size, mtime_ns) of each real log file, None when absent."""
     state: dict[str, tuple[int, int] | None] = {}
@@ -580,6 +631,28 @@ def _real_log_state() -> dict[str, tuple[int, int] | None]:
         except FileNotFoundError:
             state[path] = None
     return state
+
+
+# The real-log guard: every zark.log line goes through Log._to_file, so a
+# write by this process to a real log is caught there, named by its test,
+# and not made. The real files' size and mtime are still compared at the end,
+# but another process may append to them during a run (the hourly
+# zark-status timer, a zark run by the user): that is reported, not failed.
+# The suite's own child processes write to their own files (the harnesses
+# pass explicit log paths or patch Log.default_file).
+_REAL_LOG_WRITES: list[str] = []
+_REAL_LOG_PATHS = frozenset(os.path.realpath(p) for p in _REAL_LOG_FILES)
+_TO_FILE = Log._to_file  # pylint: disable=protected-access
+
+
+def _guarded_to_file(self: Log, msg: str) -> None:
+    if os.path.realpath(self.log_file) in _REAL_LOG_PATHS:
+        _REAL_LOG_WRITES.append(self.log_file)
+        return
+    _TO_FILE(self, msg)
+
+
+_TO_FILE_GUARD = patch.object(Log, "_to_file", _guarded_to_file).start()
 
 
 def make_config(**overrides) -> Config:
@@ -29380,9 +29453,16 @@ def _run_one(name: str, method: Callable[[], object]) -> str:
     box) is kept off the terminal and shown only when it fails (M1P.20).
     """
     seen = StringIO()
+    reads, writes = len(_TERMINAL_READS), len(_REAL_LOG_WRITES)
     try:
         with redirect_stdout(seen), redirect_stderr(seen):
             method()
+        if len(_TERMINAL_READS) > reads:
+            raise _NoTerminal(f"it read the terminal: {', '.join(_TERMINAL_READS[reads:])}")
+        if len(_REAL_LOG_WRITES) > writes:
+            raise AssertionError(
+                f"it wrote a real log file: {', '.join(_REAL_LOG_WRITES[writes:])}"
+            )
     except SkipTest as e:
         print(f"    \033[0;33m-\033[0m {name}: skipped ({e})")
         return "skipped"
@@ -29463,8 +29543,9 @@ def main() -> int:
     finally:
         changed = [p for p, st in _real_log_state().items() if st != real_logs[p]]
         if changed:
-            print(f"\n    \033[0;31m✗\033[0m the run wrote a real log file: {', '.join(changed)}")
-            failed += 1
+            # Not this process (its writes are caught per test, above): another
+            # process appended during the run, the zark-status timer for one.
+            print(f"\n    note: changed during the run by another process: {', '.join(changed)}")
         print(f"\n  {passed} passed, {failed} failed" + (f", {skipped} skipped" if skipped else ""))
     return failed
 

@@ -58,6 +58,13 @@ from tests.test_status_files import problems
 POOL = "backup2"
 
 
+def _fed() -> Any:
+    """Enter for log.fatal's pause ("Press Enter to cleanup and exit"), as the
+    suite's other fatal tests answer it; without it the pause reads the real
+    terminal, and the runner fails the test (tests/test_unit.py)."""
+    return patch("builtins.input", return_value="")
+
+
 def _log() -> Log:
     return Log(log_file="/dev/null")
 
@@ -383,7 +390,7 @@ class TestFullcheckWords:  # pylint: disable=missing-function-docstring
     def test_anything_else_is_refused(self) -> None:
         for args in (["both"], ["scrub", "restore"]):
             try:
-                with redirect_stdout(StringIO()):
+                with _fed(), redirect_stdout(StringIO()):
                     _ = fc_cmd.parts_asked(args, _log())
             except SystemExit as e:
                 assert e.code == 1
@@ -429,6 +436,7 @@ class TestFullcheckPrecondition:  # pylint: disable=missing-function-docstring
             patch.object(fc_cmd, "restore_part") as rest,
             patch.object(fc_cmd, "scrub_part") as scr,
             patch.object(fc_cmd.sh, "is_live_usb", return_value=False),
+            _fed(),
             redirect_stdout(StringIO()),
         ):
             try:
@@ -471,6 +479,7 @@ class TestFullcheckFlow:  # pylint: disable=missing-function-docstring
             patch.object(fc_cmd, "_finish", side_effect=lambda *a: order.append("finish")),
             patch.object(fc_cmd.Cleanup, "register"),
             patch.object(fc_cmd.sh, "is_live_usb", return_value=live),
+            _fed(),
             redirect_stdout(StringIO()),
         ):
             try:
@@ -678,6 +687,7 @@ class TestRestoreCheck:  # pylint: disable=missing-function-docstring
             patch.object(fc_cmd.Keystore, "umount"),
             patch.object(fc_cmd, "build_plan", return_value=_plan(0)),
             patch.object(fc_cmd, "save", return_value=False) as save,
+            _fed(),
             redirect_stdout(StringIO()),
         ):
             try:
@@ -744,6 +754,7 @@ class TestScrubPart:  # pylint: disable=missing-function-docstring
             patch.object(fc_cmd.time, "sleep"),
             patch.object(fc_cmd.zfs_features, "check_drive"),
             patch.object(fc_cmd, "save", return_value=False),
+            _fed(),
             redirect_stdout(StringIO()),
         ):
             try:
