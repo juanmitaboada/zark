@@ -500,6 +500,91 @@ class TestFullcheckFlow:  # pylint: disable=missing-function-docstring
         assert self._run(["scrub"], live=True) == ([], 1)
 
 
+class TestRunRecords:  # pylint: disable=missing-function-docstring
+    """What `run` records when a part ends early: apt or dpkg at an import (M19R-12)."""
+
+    def _run(self, busy_at: str = "", skipped: str = "") -> tuple[list[dict[str, Any]], int, bool]:
+        drive = MagicMock(name="drive")
+        drive.name, drive.guid = POOL, GUID
+        saved: list[dict[str, Any]] = []
+        tracked: list[Any] = []
+
+        def restore_step(cr: Any, *_a: Any, **_k: Any) -> None:
+            if busy_at == "restore":
+                raise dpkg_lock.DpkgBusy([])
+            cr.check.restore = fullcheck.restore_record(3, fullcheck.ReadResult(), 1.0)
+
+        def scrub_step(cr: Any, *_a: Any, **_k: Any) -> bool:
+            if busy_at == "scrub":
+                raise dpkg_lock.DpkgBusy([])
+            cr.check.scrub = fullcheck.scrub_record(
+                "finished", examined=1, repaired=0, errors=0, permanent_errors=0, seconds=1
+            )
+            return True
+
+        def readback(*_a: Any, **_k: Any) -> Any:
+            if busy_at == "readback":
+                raise dpkg_lock.DpkgBusy([])
+            rb = MagicMock(skipped=skipped, ok=not skipped)
+            rb.describe.return_value = ["The read-back of backup2 was not done"]
+            rb.summary.return_value = "the read-back of backup2 was skipped by the operator"
+            return rb
+
+        def save(_guid: str, check: Any, _log: Any) -> bool:
+            saved.append(check.to_json())
+            return False
+
+        code, busy = 0, False
+        zfs = _zfs()
+        zfs.pool_exists.return_value = False
+        with (
+            patch.object(fc_cmd, "_choose", return_value=drive),
+            patch.object(fc_cmd, "precondition", return_value=""),
+            patch.object(fc_cmd, "backup_device", return_value=DEV),
+            patch.object(fc_cmd, "ZFS", return_value=zfs),
+            patch.object(fc_cmd, "restore_part", side_effect=restore_step),
+            patch.object(fc_cmd, "scrub_part", side_effect=scrub_step),
+            patch.object(zfs, "verify_exported_pool_readback", side_effect=readback),
+            patch.object(fc_cmd, "prompt_eject_or_attach"),
+            patch.object(fc_cmd, "save", side_effect=save),
+            patch.object(fc_cmd.Cleanup, "register"),
+            patch.object(fc_cmd.Cleanup, "track_action", side_effect=tracked.append),
+            patch.object(fc_cmd.Cleanup, "untrack_action", side_effect=tracked.remove),
+            patch.object(fc_cmd.sh, "is_live_usb", return_value=False),
+            _fed(),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                fc_cmd.run([])
+            except SystemExit as e:
+                code = int(e.code or 0)
+            except dpkg_lock.DpkgBusy:
+                busy = True
+            for action in list(tracked):  # what the cleanup runs at exit
+                action()
+        return saved, code, busy
+
+    def test_apt_at_the_first_import_records_nothing(self) -> None:
+        saved, _, busy = self._run(busy_at="restore")
+        assert busy and not saved
+
+    def test_apt_at_the_scrubs_import_keeps_the_restore_check(self) -> None:
+        saved, _, busy = self._run(busy_at="scrub")
+        assert busy and len(saved) == 1
+        assert saved[0]["result"] == "not_finished" and saved[0]["restore"] is not None
+        assert "apt or dpkg was running" in saved[0]["message"]
+        assert "fullcheck scrub" in saved[0]["message"]
+
+    def test_apt_at_the_read_backs_import_is_not_finished(self) -> None:
+        saved, _, busy = self._run(busy_at="readback")
+        assert busy and len(saved) == 1
+        assert saved[0]["result"] == "not_finished" and saved[0]["scrub"] is not None
+
+    def test_a_clean_run_is_recorded_clean(self) -> None:
+        saved, code, busy = self._run()
+        assert (code, busy) == (0, False) and [s["result"] for s in saved] == ["clean"]
+
+
 def _fake_tree(root: Path) -> Path:
     """A point's tree: files, a hard link, a symlink out of the tree, a fifo."""
     (root / "d" / "e").mkdir(parents=True)

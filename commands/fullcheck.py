@@ -47,6 +47,7 @@ from typing import NoReturn
 
 from lib import (
     cli_spec,
+    dpkg_lock,
     drive_marks,
     exclusions,
     progress,
@@ -647,25 +648,53 @@ def run(args: list[str]) -> None:  # pylint: disable=too-many-branches
     # Anything that ends the run before step 4 records it (nothing from a live).
     on_exit = _on_exit(cr, log)
     cleanup.track_action(on_exit)
+    try:
+        _parts(cr, zfs, device, cleanup, log, (do_restore, do_scrub))
+    except dpkg_lock.DpkgBusy:
+        # M19R-12: apt or dpkg at an import is temporary (exit 75, as a held
+        # zark.lock is): the previous last_check stands unless a part already ran.
+        cleanup.untrack_action(on_exit)
+        _busy(cr, log)
+        raise
+    cleanup.untrack_action(on_exit)
+    progress.set_check(None)
+    _finish(cr, zfs, device, cfg, log)
+
+
+def _parts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log, asked: tuple[bool, bool]
+) -> None:
+    """Steps 1 to 3, the parts asked; ``dpkg_lock.DpkgBusy`` from any import goes up."""
+    do_restore, do_scrub = asked
     if do_restore:
         restore_part(cr, zfs, device, cleanup, log, ask_repeat=do_scrub)
     else:
         log.step(1, TOTAL_STEPS, "Restore check: not asked")
     if do_scrub and scrub_part(cr, zfs, device, cleanup, log):
-        log.step(3, TOTAL_STEPS, f"Reading {drive.name} back after the scrub...")
+        log.step(3, TOTAL_STEPS, f"Reading {cr.pool} back after the scrub...")
         progress.set_check(check_doc("readback"))
-        rb = zfs.verify_exported_pool_readback(drive.name, device, cleanup, skip_note=SKIP_NOTE)
+        rb = zfs.verify_exported_pool_readback(cr.pool, device, cleanup, skip_note=SKIP_NOTE)
         if rb.skipped:
             cr.lines += rb.describe(again=False)
-            cr.record("not_finished", rb.summary(drive.name), log)
+            cr.record("not_finished", rb.summary(cr.pool), log)
         elif not rb.ok:
             cr.damage = True
             cr.lines += rb.describe(again=False)
     elif not do_scrub:
         log.step(2, TOTAL_STEPS, "Scrub: not asked")
-    cleanup.untrack_action(on_exit)
-    progress.set_check(None)
-    _finish(cr, zfs, device, cfg, log)
+
+
+def _busy(cr: CheckRun, log: Log) -> None:
+    """apt or dpkg at an import (M19R-12): nothing recorded when no part ran
+    yet; else ``not_finished``, so that the part that ran is not lost."""
+    if cr.check.scrub is not None:
+        where = "the read-back's import"
+    elif cr.check.restore is not None:
+        where = "the scrub's import"
+    else:
+        return
+    again = f"{zark_command()} fullcheck scrub"
+    cr.record("not_finished", f"apt or dpkg was running at {where}: run `{again}` again", log)
 
 
 def _on_exit(cr: CheckRun, log: Log) -> Callable[[], None]:
