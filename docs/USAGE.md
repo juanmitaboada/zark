@@ -15,7 +15,7 @@ The commands, a first backup and a recovery step by step, what zark needs, and i
 | `prepare`  | Initialize a new blank drive as a backup target |
 | `prune`    | Reclaim space in the source or on a backup drive (interactive) |
 | `purge`    | Securely wipe a managed backup drive |
-| `registry` | List, forget or fix drives; set each drive's retention |
+| `registry` | List, forget, fix or verify drives; set each drive's retention |
 
 ### Recovery (live USB)
 
@@ -66,6 +66,8 @@ On Ubuntu 26.10, where `/boot` is on ext4 and there is no bpool, `setup` asks to
 
 `prepare` asks its questions, creates the backup pool, sends the first backup point, reads the pool back and only then registers the drive's GUID in `etc/known_drives.json`. After this, `zark backup` finds the drive automatically every time you connect it.
 
+When apt held its locks through the read-back and it was skipped or timed out, `prepare` ends DRIVE NOT VERIFIED YET: the drive keeps its first backup and waits in `pending_drives.json`, next to `known_drives.json`, and `status`, the MOTD and `registry list` name it. Once apt has ended, with the drive still connected, `sudo ./zark registry verify <name>` reads it back and registers it; its next backup is incremental.
+
 ### Back up your system
 
 ```bash
@@ -73,7 +75,7 @@ On Ubuntu 26.10, where `/boot` is on ext4 and there is no bpool, `setup` asks to
 sudo ./zark backup
 ```
 
-zark detects the backup drive by GUID, takes one backup point `zark_<UTC>` of every dataset at once, and brings each dataset on the drive to it with an incremental raw send. Each backup adds a restore point; after a complete backup, the drive's retention removes what falls outside it (every snapshot of its window, 30 days by default, stays, and before that the newest point of each month; see [Retention on the drive](RETENTION.md#retention-on-the-drive)). A typical incremental backup takes seconds.
+zark detects the backup drive by GUID (with more than one connected it asks which; `zark backup --drive <name>` names it), takes one backup point `zark_<UTC>` of every dataset at once, and brings each dataset on the drive to it with an incremental raw send. Each backup adds a restore point; after a complete backup, the drive's retention removes what falls outside it (every snapshot of its window, 30 days by default, stays, and before that the newest point of each month; see [Retention on the drive](RETENTION.md#retention-on-the-drive)). A typical incremental backup takes seconds.
 
 To watch it, run `zark monitor` in another terminal, as any user: it shows the running command's step, the bytes sent, the rate and the time left, says when zark is waiting for an answer, and below that the pools, the drives and their last backups. It only reads zark's status files (`docs/STATUS-FILES.md`) and lists the pools with `zfs list` and `zpool list`; it never takes the lock or imports a pool. `zark monitor --once` prints one screen, and `--once --state` only the state word, for scripts.
 

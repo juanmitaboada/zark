@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### M20 - readers and small fixes (2.3.0-rc4)
+
+#### Added
+
+- **`zark registry verify <name>`** (M20-4 4a, M20-5 5a): a drive whose
+  first read-back `prepare` could not run (apt or dpkg held their locks,
+  and the wait was skipped or timed out) is no longer left unregistered
+  with its anchors dropped. `prepare` keeps the anchors, writes the
+  registry entry it would have written to `pending_drives.json` next to
+  `known_drives.json`, and ends DRIVE NOT VERIFIED YET (exit status 1).
+  `registry verify` reads the drive back later, by its exact device, with
+  M18's wait for apt, and registers it; its next backup is incremental. A
+  read-back that fails, or a disk that holds another pool, drops the
+  waiting entry and its anchors.
+- **A waiting drive shows wherever drives are listed** (M20-6 6b): a
+  `drive_pending` notice in `status.json` (level `warning`; the indicator
+  state is unchanged) and so the status MOTD, `zark status`, a "Waiting
+  for a read-back" section in `registry list`, `explore` (listed as
+  PENDING and never offered for auto-registration) and `backup`'s "No
+  known backup drives detected", each with the command. `registry forget`
+  and `purge` drop it.
+- **`backup --drive <name>`** (Z4): picks the connected registered drive
+  by its exact name instead of asking which; an unregistered name, a
+  waiting one (with the `registry verify` command) or a drive that is not
+  connected is refused, and `--drive` without a name exits 2.
+- **The invoking user in zark.log** (Z2): a zark.log line for every command
+  names the uid and user behind it and how it was reached (pkexec, sudo or
+  root), before the lock, so a run refused for a held lock is attributed
+  too.
+- **`progress.json`'s optional `question`** (Z3): while a read waits, what
+  it asks (its kind, default, options, confirmation word, timeout, and
+  whether a yes changes the system; a passphrase's limit, when it has
+  one), for a program to answer in zark's place. Nothing typed is ever
+  written. Schema 1, additive; the schema file and the waiting fixtures
+  carry it.
+- **A table of candidate ages in `prune`** (M20-2 2a, M20-3 3a): before
+  "keep sanoid snapshots of how many days", the counts per kind, what each
+  age frees as a whole and each pool's use after it, for 1, 3, 7, 14, 30,
+  60 and 90 days and the oldest snapshot's age, measured by dry runs; a
+  row that touches a dataset where a registered drive has no anchor is
+  marked. The summary's per-kind figures say they do not add up.
+- **`zark status` names a drive's last run that calls for attention**
+  (M13E.2, M20-11 11a): `incomplete`, `interrupted` and `not_verified`,
+  with the datasets missing when there are any.
+- **Exit statuses declared an interface** (Z1): the manpage documents 2 (a
+  usage error) and says that the statuses, `last_run.result` and the
+  indicator state change only with `schema_version`.
+
+#### Changed
+
+- **The read-back checks the pool's GUID** (M20R-1) when `prepare` and
+  `registry verify` run it: a pool of the expected name with another GUID
+  is exported again and nothing is registered. The import is by name, so
+  a pool re-created on the disk would have passed.
+- **`prepare` drops the registry entries it replaces right after the
+  export** (M20R-2), whatever the read-back does and also after an
+  incomplete send: their pool went at `zpool create`. It also drops a
+  waiting registration of the same disk with its anchors (M20R-3); one
+  that matches only by the enclosure's name is asked about, default no.
+- **`repair-boot` stops, naming the mount, when a bind into the chroot
+  fails** (M20-10 10a), before `zpool.cache`, the guard, the initrd and
+  `update-grub`; nothing is bound under a failed parent and efivarfs is
+  tracked only when it mounted. **`zark chroot` uses the same helper, so
+  it now stops at the first failed bind where it tried all five**: a
+  `/proc` that fails no longer leaves a shell with `/sys`, `/dev`,
+  `/dev/pts` and `/run` bound. Its warning names the failed bind and the
+  ones not attempted; it still opens the shell (M20R-4).
+- **`exclude add ... snapshots` warns of a drained base only where it
+  applies** (M20-1 1a): for a dataset with sanoid snapshots to drain, and
+  only of a drive that holds it, or may (its contents never measured),
+  naming up to three datasets.
+- **The external-pool MOTD** (M20-7 7a) tells a pool only plugged in
+  (installs refused) from one imported (installs and kernel removals
+  refused, `update-grub` stops) and names the pools.
+- **`zark health`'s report** (M23T-1, M20-8 8b) is created with `mkstemp`
+  (a new name each time, never a planted file), mode 0600, owned by the
+  user who ran sudo.
+- **`zark simulate`'s OVMF variables and serial log** (M23T-2, M20-9 9a)
+  live in one private `mkdtemp` directory; the log is kept there.
+- `docs/STATUS-FILES.md` says that `datasets_missing` is 0 for
+  `interrupted` and means nothing there.
+
+#### Rejected
+
+- Naming a drive in `exclude`'s warning only when the dataset has sanoid
+  snapshots (1b: still names drives that never had it), or not naming a
+  drive whose contents were never measured (1c: silent for the 1.x drives
+  the warning was written for).
+- Candidate ages derived from the snapshots (2b): rows nobody asked for.
+- The per-drive anchor lines before the table for its worst row (3b), or
+  under every marked row (3c): the mark and the lines after the chosen age
+  say the same, readably.
+- One generic MOTD sentence for plugged in and imported (7b): it would say
+  neither what is refused nor what to do.
+- The health report readable by root only (8a): the person who ran the
+  check attaches it to an issue.
+- Removing `simulate`'s directory with the log at the end (9b): the log is
+  kept to compare runs.
+- The same bind check in recover's `finalize` (10b): it runs after
+  everything was received and deserves its own recover run; parked.
+- A count of missing datasets for an interruption inside the process
+  (11b): 0 would then mean "none" or "not known" with no way to tell.
+
 ### M19b - `zark fullcheck`'s findings on eli (2.3.0-rc3)
 
 #### Fixed

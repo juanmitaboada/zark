@@ -130,6 +130,7 @@ Present while a command that takes the lock runs; absent otherwise.
   "updated_at": "2026-10-24T09:19:41Z",
   "waiting_for_input": false,
   "waiting_for": null,
+  "question": null,
   "step": {"index": 7, "total": 8, "label": "Replicating (this may take a while)..."},
   "drive": {"name": "black", "guid": "...", "drive_id": "...", "space": {"...": "..."}},
   "point": "zark_2026-10-24_09:03:02Z",
@@ -150,6 +151,7 @@ Present while a command that takes the lock runs; absent otherwise.
 | `updated_at` | timestamp | last write: the heartbeat (see Orphan detection) |
 | `waiting_for_input` | boolean | the command is waiting for an answer in its terminal |
 | `waiting_for` | string or null | the question or prompt shown, for people only; null when not waiting |
+| `question` | object or null, optional | what the read asks, for programs (below); null when not waiting. Absent from a file an older zark wrote |
 | `step` | object or null | the command's last numbered step: `index` and `total` (integers from 1), `label` (for people only); null before the first one or for a command without steps |
 | `drive` | object or null | the backup drive the command works on, once chosen |
 | `point` | string or null | the backup point of this run (`zark_YYYY-MM-DD_HH:MM:SSZ`) once taken; backup only |
@@ -161,6 +163,22 @@ questions (timed ones and the eject prompt included), choices, text and
 number entries, the passphrase, "Press Enter" after a physical step, and the
 pause after a fatal error. It goes back to false as soon as the answer, or
 end of input, arrives.
+
+`question` (2.3):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | string, open enumeration | `yes_no` (a yes/no question), `timed` (a yes/no question whose default applies by itself at the end), `wait` (a wait that offers to skip it), `choice` (a numbered choice), `input` (free text), `word` (a typed confirmation word), `passphrase`, `enter` ("Press Enter" after a physical step), `pause` (after a fatal error). Generic case: show `waiting_for` |
+| `default` | boolean, integer, string or null | `yes_no` and `timed`: the answer Enter gives (and the end of `timed`); `choice`: the 0-based index of the default option; `input`: the default text; null otherwise |
+| `options` | array of strings or null | `choice` only: the options, in the order shown |
+| `word` | string or null | `word` only: the word the confirmation accepts |
+| `timeout_s` | integer or null | `timed`, `wait`, and a `passphrase` with a limit (a full check's, M19bR-1): the whole timeout, in seconds |
+| `destructive` | boolean | true for `word`, and for a `yes_no` question whose yes changes the system (end of input answers no); false otherwise |
+
+Nothing typed is ever written: the passphrase stays in the terminal, and
+`word` and `options` are what zark itself shows. A timed question or a wait
+with no terminal reads nothing, so neither `waiting_for_input` nor
+`question` is set.
 
 `drive`:
 
@@ -674,7 +692,8 @@ colour and an icon without parsing text.
 | `boot_capacity` | an ext4 `/boot` at or above a threshold; `subject` is `/boot` | `warning` or `critical` |
 | `backup_age` | days since each drive's last backup | `warning` when the newest is older than `rpo_warning_days`, else `info` |
 | `no_anchor` | a drive with no anchor in the source, one per drive | `warning` |
-| `read_error` | the source pools, or their datasets, could not be read | `warning` |
+| `drive_pending` | a drive `prepare` wrote but could not read back (apt held its locks), one per drive; `subject` is its pool name, which is not in `drives`; `zark registry verify` finishes it | `warning` |
+| `read_error` | the source pools, their datasets, or `pending_drives.json` (next to `known_drives.json`) could not be read | `warning` |
 | `origin_residues` | snapshots in the source no registered drive needs | `info` |
 | `drive_check` | a drive whose last `zark fullcheck` did not pass, one per drive | `critical` for `damage`, `warning` for `not_finished` and `failed` |
 | `selftest` | a subscribed self-test warning | `warning` |
@@ -734,6 +753,9 @@ What any program may rely on, and how to read the files safely.
   A writer drops the optional fields it does not know when it rewrites an
   entry (an older zark run from a stick, say), so a field present once may
   be gone from the next file.
+- `last_run.result`, the indicator state's seven values and their rules,
+  and zark's exit statuses (`zark(1)`, EXIT STATUS) are an interface; they
+  change only with `schema_version`.
 - Both files are replaced atomically: a reader never sees a partial file.
 - Nothing in them is secret, and nothing needs root: files 0644, directories
   0755, and every read the orphan rules need works unprivileged on a

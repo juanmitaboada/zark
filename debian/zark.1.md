@@ -87,9 +87,10 @@ end-to-end sequences.
 
 ## Backup
 
-**backup** \[**--no-snapshot**\]
+**backup** \[**--no-snapshot**\] \[**--drive** *name*\]
 :   Back up this system to the connected, registered backup drive.
-    Auto-detects which known drive is plugged in and imports it by its
+    Auto-detects which known drive is plugged in (with more than one, it
+    asks which, or **--drive** *name* names it) and imports it by its
     exact device with **-N** and an alternate root, so nothing it holds is
     mounted and it never enters */etc/zfs/zpool.cache*. A drive whose
     metadata names another system (**org.zark:origin-machine-id** differs
@@ -372,6 +373,13 @@ end-to-end sequences.
     **--no-snapshot** is accepted and has no effect: the backup point is
     taken by **zark** itself.
 
+    **--drive** *name* uses that registered drive without asking, among the
+    connected ones **backup** would offer; the name is matched exactly. A
+    name that is not registered is refused, with the registered names and,
+    for a drive waiting for a read-back, the **registry verify** command; a
+    registered drive that is not connected is refused, naming the ones that
+    are. **--drive** with no name is a usage error (exit status 2).
+
     **backup** refuses to run from an Ubuntu Live USB: the live filesystem
     is not the system the user means to back up, and confusing the two
     would destroy good data on the backup drive.
@@ -395,7 +403,9 @@ end-to-end sequences.
     snapshots and let **sanoid** remove the ones it took at its next prune
     (a recursive rule would apply to it otherwise); **add** says how many
     that removes, and names a registered drive with no **zark** 2 anchor
-    there, whose base may be one of them. **remove** clears the property
+    there that holds a copy of the subtree (or whose contents were never
+    measured), with up to three of the datasets: its base may be one of
+    them. **remove** clears the property
     (only on the dataset where it was set: a child cannot be included
     alone) and says, for each registered drive, whether its next backup
     is an incremental from the copy it kept or a full send. A user
@@ -453,10 +463,20 @@ end-to-end sequences.
     real load. The drive is registered, with *last_backup_at* set, only
     when every dataset and the keystore landed and the read-back is
     **ONLINE**; otherwise it is **not** registered and **prepare** exits 1.
-    Its read-back waits for **apt** as **backup**'s does, and one that was
-    skipped or timed out leaves the drive unregistered. **prepare** checks
-    dpkg's locks before its first question, and creates the pool only
-    while neither is held.
+    Its read-back waits for **apt** as **backup**'s does, and checks that
+    the pool it imported has the GUID **prepare** created. One that was
+    skipped or timed out leaves the drive waiting for a read-back: its
+    entry is kept in *pending_drives.json* next to **known_drives.json**,
+    its anchors in the source stay, and **prepare** ends **DRIVE NOT
+    VERIFIED YET** (exit status 1) with the command that finishes it,
+    **registry verify** *name*. A waiting drive is named by **status**, the
+    MOTD, **registry list**, **explore** (as *pending*, never offered for
+    registration) and **backup** when it is the one connected; **purge** of
+    its pool and **registry forget** drop it. Registry entries this disk
+    replaces, and a registration of this disk still waiting, go with their
+    anchors right after the pool is exported, whatever the read-back does.
+    **prepare** checks dpkg's locks before its first question, and creates
+    the pool only while neither is held.
 
 **prune**
 :   Reclaim space, interactively, in the source or on a connected registered
@@ -469,7 +489,11 @@ end-to-end sequences.
     freeing in the background) and, per kind of
     snapshot, how many there are, the oldest and what removing them frees;
     then **sanoid**'s snapshots older than a number of days (typed
-    **PRUNE**; */etc/sanoid/sanoid.conf* is not changed), the legacy
+    **PRUNE**; */etc/sanoid/sanoid.conf* is not changed), after a table of
+    candidate ages (1, 3, 7, 14, 30, 60 and 90 days and the oldest
+    snapshot's age) with, for each, how many of each kind go, what the row
+    frees as a whole (measured by dry runs) and each pool's use after it,
+    then the legacy
     residues (**syncoid_\*** snapshots left by **zark** 1.x on datasets
     where every registered drive has an anchor, and the keystore's
     **prepare_\*** snapshots; yes/no), the backup points left in the source
@@ -529,18 +553,30 @@ end-to-end sequences.
     step has to run again. Both banners list every step and check as
     done, failed or not done, so they show what state the disk is in.
 
-**registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\] | **retention** *name* \[**window=***N*\] \[**max_age=***N*|**off**\] \[**margin=***N*\]\]
+**registry** \[**list** | **forget** *name*|*GUID* | **fix** \[*name*\] | **verify** *name* | **retention** *name* \[**window=***N*\] \[**max_age=***N*|**off**\] \[**margin=***N*\]\]
 :   Inspect and repair **known_drives.json** without editing it by hand.
     **list** (the default) shows every entry, whether its disk is connected
     and whether the pool GUID on the disk matches; on the installed system
     also every drive GUID that holds anchors in the source without an
     entry, and how many backup points were left there by interrupted runs
-    or by a run whose anchor failed.
+    or by a run whose anchor failed; drives waiting for a read-back are
+    listed apart.
     **forget** removes, on the installed system, a drive's anchors in the
     source (its bookmarks on **rpool** and snapshots on **bpool**) and then
     its entry; the drive itself is not touched. Given a pool GUID with no
     entry, it removes only that GUID's anchors. When no drive is left
-    registered it offers to remove the backup points left in the source. **fix** corrects *drive_id* and
+    registered it offers to remove the backup points left in the source.
+    The name or GUID of a drive waiting for a read-back drops it and its
+    anchors. **verify** reads back, on the installed system, a drive
+    **prepare** could not read back (see **prepare**): with its disk
+    connected and its pool not imported, it imports the pool by its exact
+    device, checks its GUID and health and exports it, waiting for **apt**
+    as **backup** does. When it passes the drive is registered (**DRIVE
+    REGISTERED**) and its next **backup** is incremental; when it is
+    skipped again nothing changes (exit status 1); when it fails, or the
+    disk holds another pool, the waiting entry and its anchors go, and the
+    drive needs **purge** and **prepare**. With its anchors gone it asks
+    before registering, since the next backup would be a full one. **fix** corrects *drive_id* and
     *enclosure_id* from the connected disk that carries the registered pool
     GUID (the disk's own name and the enclosure it is seen under) and writes
     every missing key; **backup** does the same once the GUID is verified.
@@ -823,7 +859,9 @@ end-to-end sequences.
 
     For drives in the last three categories, **explore** prints the exact
     JSON snippet that should be added to **known_drives.json** to register
-    them.
+    them. A pool waiting for a read-back (see **prepare**) is listed as
+    *pending*, with the **registry verify** command, and never offered for
+    registration.
 
 **fullcheck** \[**scrub** | **restore**\]
 :   Verify a registered backup drive's copies without altering them. With
@@ -924,7 +962,8 @@ end-to-end sequences.
     check's risks end with 0.
 
     Whenever a risk (a warning) or test failure is found, a self-contained diagnostic
-    report is written to */tmp* (environment, drive, bridge VID:PID, findings,
+    report is written to a new file in */tmp* (mode 0600, owned by the
+    user who ran **sudo**; environment, drive, bridge VID:PID, findings,
     dmesg tail) with instructions for filing a GitHub issue; you may choose to
     obfuscate serials/GUIDs. See the enclosure notes in **docs/HARDWARE.md**.
     The read-only check also runs at the start of **prepare**.
@@ -1041,7 +1080,9 @@ end-to-end sequences.
     from 90 %), the days since every registered drive's last backup, what
     a drive with no anchor in the source still shares with it (see
     **backup**), the legacy residues **prune** can remove and how many
-    datasets are excluded from backups (with a line when
+    datasets are excluded from backups, each drive whose last backup did
+    not complete (its result, and how many datasets it missed) and each
+    drive waiting for a read-back (with a line when
     */etc/sanoid/sanoid.conf* does not keep the snapshot exclusions, and
     each exclusion **zark** ignores). **status --refresh** writes
     */run/zark/status.motd*; with **--notify** it also sends a desktop
@@ -1338,6 +1379,12 @@ roll its backup points back).
     the drive's **window_days**, **max_age_days** and **margin_pct**; see
     **registry retention**.
 
+*pending_drives.json*
+:   Next to *known_drives.json*: the drives **prepare** wrote but could not
+    read back, each with the registry entry it would have written, when
+    and the exact device; **registry verify** moves an entry to the
+    registry. Removed when empty.
+
 */run/zark/status.motd*, */etc/update-motd.d/97-zark-status*, */etc/systemd/system/zark-status.service*, */etc/systemd/system/zark-status.timer*
 :   The status alerts; see **alerts**.
 
@@ -1452,6 +1499,11 @@ roll its backup points back).
     would import a backup pool (see **NOTES**, "apt guard"); the message
     names the process.
 
+**2**
+:   A usage error: an unknown word or a missing value; nothing was done.
+    **selftest**, **setup** and **monitor** use it, and **backup
+    --drive** with no name.
+
 **130**, **143**, **129**, **141**
 :   The run was stopped by **Ctrl-C** (SIGINT), SIGTERM, SIGHUP (a closed
     terminal), or because the reader of its output went away. **zark**
@@ -1467,6 +1519,10 @@ roll its backup points back).
     partial transfer needs it; the next backup resumes them and removes
     it. The log names every point snapshot removed or kept, with the
     reason.
+
+These statuses are an interface: programs may rely on them. A status is
+added, or its meaning changed, only with a new major version of **zark**'s
+status files (*schema_version*, see *docs/STATUS-FILES.md*).
 
 # DEPENDENCIES
 
@@ -1606,7 +1662,8 @@ keep protecting a recovered system after the live USB is gone. Bypass them
 once for a deliberate operation with **ZARK_INTERNAL=1**; remove
 */etc/apt/apt.conf.d/09zark-zfs-backup-guard* to disable the hook. A
 login-time reminder (*/etc/update-motd.d/99-zark-external-pool*) warns when
-an external pool is attached.
+a backup pool is imported, naming it, and names any other one that is only
+plugged in; with none imported, it names the ones plugged in.
 
 **zark** does not import a backup pool while **apt**, **dpkg** or
 **unattended-upgrades** runs. Before every import of a backup pool on the
