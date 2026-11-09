@@ -32,8 +32,9 @@ This module deposits four small, self-contained files onto a target system:
     dpkg's level: every kernel package's prerm runs it before any file is
     deleted, so a ``dpkg -r`` by hand, or a backup imported after APT's hook
     ran, cannot leave a kernel half-removed.
-  * ``/etc/update-motd.d/99-zark-external-pool`` - a login-time reminder that
-    an external pool is attached and boot updates are therefore blocked.
+  * ``/etc/update-motd.d/99-zark-external-pool`` - a login-time reminder of
+    what the guards refuse while a backup pool is plugged in (boot-critical
+    installs) or imported (those, kernel removals and update-grub).
 
 Crucially, all four are **standalone**: they detect pools with ``zpool``
 directly and never call ``zark``. The recovered system runs without zark
@@ -316,20 +317,30 @@ imported="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altro
     fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
     if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
 done || true)"
-extra=""
-for pool in $available $imported; do
-    is_allowed=false
-    for a in $ALLOWED_POOLS; do
-        [ "$pool" = "$a" ] && is_allowed=true
-    done
-    $is_allowed || extra="$extra $pool"
+# What the guards refuse depends on the state (M18): an install of a
+# boot-critical package while a pool is plugged in or imported; a kernel's
+# removal and update-grub only while one is imported (M20-7 7a).
+held=""
+for pool in $imported; do held="$held $pool"; done
+plugged=""
+for pool in $available; do
+    case " $ALLOWED_POOLS $held " in *" $pool "*) continue ;; esac
+    plugged="$plugged $pool"
 done
 
-[ -n "$extra" ] || exit 0
+[ -n "$plugged$held" ] || exit 0
 
-printf '\\n\\033[1;33mWARNING (zark):\\033[0m external ZFS pool(s) connected:%s\\n' "$extra"
-printf '  Kernel / GRUB / ZFS upgrades are blocked while these are attached.\\n'
-printf '  Disconnect them before upgrading (sudo zark umount ends a zark mount).\\n\\n'
+if [ -n "$held" ]; then
+    printf '\\n\\033[1;33mWARNING (zark):\\033[0m backup pool(s) imported:%s\\n' "$held"
+    if [ -n "$plugged" ]; then printf '  Also plugged in:%s\\n' "$plugged"; fi
+    printf '  Kernel, GRUB, shim and ZFS installs and kernel removals are refused, and\\n'
+    printf '  update-grub stops, while a pool is imported. When the zark backup, mount or\\n'
+    printf '  full check ends (or after sudo zark umount), run apt again.\\n\\n'
+else
+    printf '\\n\\033[1;33mWARNING (zark):\\033[0m backup pool(s) plugged in:%s\\n' "$plugged"
+    printf '  Installs and upgrades of kernel, GRUB, shim and ZFS packages are refused\\n'
+    printf '  while they are plugged in; unplug them before upgrading.\\n\\n'
+fi
 """
 
 

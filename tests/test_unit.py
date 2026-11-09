@@ -9191,6 +9191,60 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
         assert rc == 0, out
         assert "backup" in out
 
+    # ── the MOTD's two texts (M20-7 7a) ──────────────────────────────────
+
+    def test_motd_says_nothing_without_a_backup_pool(self):
+        for imported in (self._SYSTEM, self._TANK):
+            rc, out = self._run(apt_guard.MOTD_SCRIPT, "", imported)
+            assert rc == 0 and out == "", out
+
+    def test_motd_for_a_pool_only_plugged_in(self):
+        rc, out = self._run(apt_guard.MOTD_SCRIPT, "   pool: black\\n", self._SYSTEM)
+        flat = " ".join(out.split())
+        assert rc == 0 and "backup pool(s) plugged in: black" in flat, out
+        assert "Installs and upgrades of kernel, GRUB, shim and ZFS packages are refused" in flat
+        assert "removals" not in flat and "update-grub" not in flat, out
+        assert "rpool" not in flat and "bpool" not in flat, out
+
+    def test_motd_for_a_pool_imported(self):
+        rc, out = self._run(apt_guard.MOTD_SCRIPT, "", self._BACKUP)
+        flat = " ".join(out.split())
+        assert rc == 0 and "backup pool(s) imported: backup" in flat, out
+        assert "kernel removals are refused, and update-grub stops" in flat, out
+        assert "plugged in" not in flat and "rpool" not in flat, out
+
+    def test_motd_never_lists_the_system_pools(self):
+        # Every pool reads as a zark drive here (the stub's format): rpool and
+        # bpool are still not named.
+        rc, out = self._run(apt_guard.MOTD_SCRIPT, "", self._TANK, fmt="2")
+        flat = " ".join(out.split())
+        assert rc == 0 and "backup pool(s) imported: tank " in flat + " ", out
+        assert "rpool" not in flat and "bpool" not in flat, out
+        rc, out = self._run(
+            apt_guard.MOTD_SCRIPT, "   pool: rpool\\n   pool: black\\n", self._SYSTEM
+        )
+        flat = " ".join(out.split())
+        assert rc == 0 and "plugged in: black " in flat + " " and "rpool" not in flat, out
+
+    def test_motd_for_one_imported_and_one_plugged_in(self):
+        rc, out = self._run(apt_guard.MOTD_SCRIPT, "   pool: black\\n", self._BACKUP)
+        flat = " ".join(out.split())
+        assert rc == 0 and "backup pool(s) imported: backup" in flat, out
+        assert "Also plugged in: black" in flat and "update-grub stops" in flat, out
+
+    def test_an_older_motd_is_not_current(self):
+        with tempfile.TemporaryDirectory() as td:
+            apt_guard.install(td, make_log())
+            assert apt_guard.is_current(td)
+            motd = Path(td) / apt_guard.MOTD_RELATIVE_PATH
+            motd.write_text(
+                motd.read_text(encoding="utf-8").replace(
+                    "backup pool(s) plugged in:", "external ZFS pool(s) connected:"
+                ),
+                encoding="utf-8",
+            )
+            assert not apt_guard.is_current(td)
+
     def test_grub_guard_refuses_with_a_backup_imported(self):
         rc, out = self._run(grub_guard.GUARD_SCRIPT, "", self._BACKUP)
         assert rc == 1, out
