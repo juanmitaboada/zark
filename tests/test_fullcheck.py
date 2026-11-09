@@ -20,6 +20,9 @@ records.
 finds them; run that file, not this one.
 """
 
+# pylint: disable=too-many-lines
+
+import contextlib
 import errno
 import json
 import os
@@ -507,7 +510,8 @@ class TestFullcheckFlow:  # pylint: disable=missing-function-docstring
 
 
 class TestRunRecords:  # pylint: disable=missing-function-docstring
-    """What `run` records when a part ends early: apt or dpkg at an import (M19R-12)."""
+    """What `run` records when a part ends early: apt or dpkg at an import (M19R-12),
+    a skipped read-back (M19R-14)."""
 
     def _run(self, busy_at: str = "", skipped: str = "") -> tuple[list[dict[str, Any]], int, bool]:
         drive = MagicMock(name="drive")
@@ -586,6 +590,12 @@ class TestRunRecords:  # pylint: disable=missing-function-docstring
         assert busy and len(saved) == 1
         assert saved[0]["result"] == "not_finished" and saved[0]["scrub"] is not None
 
+    def test_a_skipped_read_back_is_not_finished(self) -> None:
+        saved, code, busy = self._run(skipped="operator")
+        assert not busy and code == 1 and len(saved) == 1
+        assert saved[0]["result"] == "not_finished"
+        assert saved[0]["message"] == "the read-back of backup2 was skipped by the operator"
+
     def test_a_clean_run_is_recorded_clean(self) -> None:
         saved, code, busy = self._run()
         assert (code, busy) == (0, False) and [s["result"] for s in saved] == ["clean"]
@@ -646,6 +656,34 @@ class TestRestoreReader:  # pylint: disable=missing-function-docstring
                 got = _bounded(root)
         assert got.errors == 1 and got.files == 2, got
         assert got.error_paths == [f"{root}/d/b: Input/output error"]
+
+    def test_another_file_system_below_is_not_read(self) -> None:
+        """M19R-14: what is mounted below the snapshot is not the point's.
+        The mount is made by reporting another st_dev for one directory, so
+        the test needs no mount and runs unprivileged."""
+        real_scandir = os.scandir
+
+        class Other:  # pylint: disable=too-few-public-methods
+            """One entry as scandir gives it, on another device."""
+
+            def __init__(self, entry: Any) -> None:
+                self.entry, self.path, self.name = entry, entry.path, entry.name
+
+            def stat(self, *, follow_symlinks: bool = True) -> Any:
+                st = self.entry.stat(follow_symlinks=follow_symlinks)
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev + 1, *st[3:]))
+
+        @contextlib.contextmanager
+        def scandir(path: Any) -> Any:
+            with real_scandir(path) as it:
+                yield [Other(e) if e.name == "d" else e for e in it]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _fake_tree(Path(tmp) / "point")
+            with patch.object(fullcheck.os, "scandir", side_effect=scandir):
+                got = _bounded(root)
+        # a, read once through its two names minus d/hard; d/b and d/e/c not reached
+        assert got.files == 1 and got.bytes == 3000 and got.errors == 0, got
 
     def test_a_read_that_fails_midway_is_named_and_the_walk_goes_on(self) -> None:
         """EIO comes from read(2), not open(2), when a block fails its checksum."""
@@ -728,6 +766,27 @@ def _plan(n: int) -> Any:
 
 class TestRestoreCheck:  # pylint: disable=missing-function-docstring
     """M19 2.2: the point's rows read, the keystore read-only, a key that does not load."""
+
+    def test_an_export_that_fails_after_step_1_is_fatal(self) -> None:
+        """M19R-14: step 2 must not meet the pool still imported read-only."""
+        cr = _cr()
+        zfs = _zfs()
+        zfs.pool_export.return_value = False
+        code = 0
+        with (
+            patch.object(fc_cmd.zfs_features, "check_drive"),
+            patch.object(fc_cmd, "_open_point", return_value=(MagicMock(), _plan(1))),
+            patch.object(fc_cmd, "_read_point"),
+            patch.object(fc_cmd, "save", return_value=False),
+            _fed(),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                fc_cmd.restore_part(cr, zfs, DEV, fc_cmd.Cleanup(_log()), _log(), ask_repeat=False)
+            except SystemExit as e:
+                code = int(e.code or 0)
+        assert code == 1 and cr.check.result == "failed"
+        assert "Could not export" in cr.check.message
 
     def test_every_row_read_and_the_result_kept(self) -> None:
         cr = _cr()
