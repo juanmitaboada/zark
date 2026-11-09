@@ -57,10 +57,12 @@ gtk,gl=on for crisp, scalable, hardware-accelerated rendering.
 Otherwise it falls back to virtio-vga + EDID with a warning.
 """
 
+import contextlib
 import os
 import shutil
 import signal
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -522,8 +524,11 @@ def run(
     log.ok(f"OVMF code: {ovmf_code}")
     log.ok(f"OVMF vars: {ovmf_vars_src}")
 
-    # OVMF vars must be writable (UEFI writes boot entries)
-    ovmf_vars_tmp = f"/tmp/zark_ovmf_vars_{os.getpid()}.fd"
+    # OVMF vars must be writable (UEFI writes boot entries). The copy and
+    # the serial log go into a directory of this run's own (0700, a random
+    # name), never at a name in /tmp anyone could plant first (M23T-2).
+    run_dir = tempfile.mkdtemp(prefix="zark-simulate-")
+    ovmf_vars_tmp = os.path.join(run_dir, "OVMF_VARS.fd")
     _ = shutil.copy2(ovmf_vars_src, ovmf_vars_tmp)
     os.chmod(ovmf_vars_tmp, 0o600)
     log.dbg(f"OVMF vars copy: {ovmf_vars_tmp}")
@@ -601,7 +606,7 @@ def run(
     # corrupt state both during and after the run. Routing serial to a
     # file keeps the parent terminal intact and still preserves the
     # kernel boot log for inspection.
-    serial_log = f"/tmp/zark_simulate_{os.getpid()}.log"
+    serial_log = os.path.join(run_dir, "serial.log")
 
     cmd = [
         "qemu-system-x86_64",
@@ -693,9 +698,12 @@ def run(
 
     # Surface the serial log path so the operator can inspect kernel
     # output if anything went wrong inside the guest. The file is left
-    # in /tmp deliberately: tmpfs cleanup on next reboot, and the
-    # operator may want to diff successive runs.
+    # in its run's directory deliberately: the next reboot clears /tmp,
+    # and the operator may want to diff successive runs.
     if Path(serial_log).exists():
         log.info(f"Kernel/serial log saved at: {serial_log}")
+    else:
+        with contextlib.suppress(OSError):
+            os.rmdir(run_dir)  # nothing in it to keep
 
     log.ok("Simulation ended")

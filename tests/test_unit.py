@@ -396,6 +396,7 @@ from tests.test_fullcheck import (  # pylint: disable=wrong-import-position # no
 )
 from tests.test_readers import (  # pylint: disable=wrong-import-position # noqa: E402
     TestHealthReportFile,
+    TestSimulateTempFiles,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -487,7 +488,10 @@ FULLCHECK_SUITES = (
 )
 
 # M20's readers and small fixes live in their own module, named here for the same reason.
-READERS_SUITES = (TestHealthReportFile,)
+READERS_SUITES = (
+    TestHealthReportFile,
+    TestSimulateTempFiles,
+)
 
 # ═════════════════════════════════════════════════════════════════════════
 #  Helpers
