@@ -28,6 +28,7 @@ import json
 import os
 import signal
 import tempfile
+import time
 from contextlib import redirect_stdout
 from datetime import UTC, datetime
 from io import StringIO
@@ -52,7 +53,7 @@ from lib import (
 )
 from lib.cleanup import Cleanup
 from lib.config import Config, DriveInfo
-from lib.log import Log
+from lib.log import Log, PromptTimeout
 from lib.selftest import Bench
 from lib.zfs import ZFS, parse_damage
 from tests.mock_sh import MockShell, patch_sh
@@ -1111,8 +1112,11 @@ class TestDamageNamed:  # pylint: disable=missing-function-docstring
                 raise KeyboardInterrupt
             return answers.pop(0)
 
-        def open_ks(ks: Any, _pool: str, _log: Log, *, readonly: bool = False) -> bool:
+        def open_ks(
+            ks: Any, _pool: str, _log: Log, *, readonly: bool = False, timeout: int | None = None
+        ) -> bool:
             assert ks in cleanup._keystores  # pylint: disable=protected-access
+            assert timeout == fc_cmd.NAME_PASSPHRASE_TIMEOUT  # never waited for ever (M19bR-1)
             opened.append(readonly)
             order.append("open")
             if opens is None:
@@ -1209,6 +1213,64 @@ class TestDamageNamed:  # pylint: disable=missing-function-docstring
             ]
             assert cr.check.scrub is not None and cr.check.scrub["permanent_errors"] == 0
             assert f"  {counters[0]}" in cr.lines and any("not named" in x for x in cr.lines)
+
+    @staticmethod
+    def _stuck(*_args: Any, **_kwargs: Any) -> str:
+        """A passphrase prompt nobody answers. Bounded here, not by the code
+        under test: past 5 s it fails the test instead of the suite hanging."""
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            time.sleep(0.05)  # SIGALRM interrupts the sleep; its handler raises
+        raise AssertionError("the passphrase prompt waited for ever (M19bR-1)")
+
+    def test_nobody_at_the_passphrase_times_out_and_exports(self) -> None:
+        # M19bR-1: the real prompt (Log.ask_password through open_keystore),
+        # nobody answering; with the limit at 1 s the run goes on as at EOF.
+        cr = _cr()
+        zfs = _zfs()
+        zfs.pool_damage.return_value = fc_cmd.Damage(unlisted=True)
+        scan = scrub.parse_json(status_json(**scanning(state="FINISHED", errors=2)), POOL)
+        assert scan is not None
+        saved: list[str] = []
+        before = signal.getsignal(signal.SIGALRM)
+        with (
+            patch.object(fc_cmd, "NAME_PASSPHRASE_TIMEOUT", 1, create=True),
+            patch("lib.log.getpass.getpass", side_effect=self._stuck),
+            patch.object(fc_cmd.Keystore, "mount") as mount,
+            patch.object(fc_cmd.Keystore, "load_pool_keys") as load,
+            patch.object(fc_cmd, "save", side_effect=lambda _g, c, _l: saved.append(c.result)),
+            redirect_stdout(StringIO()),
+        ):
+            got = fc_cmd._scrub_ended(cr, zfs, scan, 45.0, fc_cmd.Cleanup(_log()), _log())  # pylint: disable=protected-access
+        assert got is True and cr.damage
+        assert not mount.called and not load.called and not zfs.unload_keys.called
+        assert zfs.pool_export.called
+        assert any("not named" in line for line in cr.lines)
+        assert saved[:1] == ["damage"]  # written before the question (1a), kept
+        assert cr.check.scrub is not None and cr.check.scrub["permanent_errors"] == 0
+        assert signal.getsignal(signal.SIGALRM) is before and signal.alarm(0) == 0
+
+    def test_the_passphrase_has_a_limit_only_when_asked(self) -> None:
+        log = _log()
+        with (
+            patch("lib.log.getpass.getpass", side_effect=self._stuck),
+            redirect_stdout(StringIO()),
+        ):
+            with contextlib.suppress(PromptTimeout):
+                _ = log.ask_password("Passphrase for x", timeout=1)
+                raise AssertionError("no PromptTimeout")
+        with (
+            patch("lib.log.getpass.getpass", return_value="p") as got,
+            redirect_stdout(StringIO()),
+        ):
+            assert log.ask_password("Passphrase for x") == "p"
+            assert signal.alarm(0) == 0 and got.called  # no alarm set without a limit
+            before = signal.getsignal(signal.SIGALRM)
+            assert log.ask_password("Passphrase for x", timeout=30) == "p"
+            # An answer in time leaves no alarm pending and the handler as it was.
+            assert signal.alarm(0) == 0 and signal.getsignal(signal.SIGALRM) is before
+        assert issubclass(PromptTimeout, EOFError)  # its callers' EOF path takes it
+        assert fc_cmd.NAME_PASSPHRASE_TIMEOUT == 600
 
     def test_no_terminal_to_ask_on_leaves_the_files_unnamed(self) -> None:
         cr = _cr()

@@ -96,6 +96,10 @@ REPORT_EVERY_S = 60.0
 DISK_RATE, SSD_RATE = 100 * 1000**2, 400 * 1000**2
 SKIP_NOTE = "It would be reported as not done."
 UNNAMED = "the damaged files are not named: the drive's keys were not loaded"
+# The passphrase that names the damaged files is waited for this long, then
+# the drive is exported with them unnamed: an unattended check must not keep
+# it imported read-write, every other zark command refused (M19bR-1).
+NAME_PASSPHRASE_TIMEOUT = 600
 R2 = (
     "The scrub writes only its own progress, the pool's labels and history, and "
     + "rewrites a damaged metadata copy from a good one; it changes no file, "
@@ -621,9 +625,13 @@ def _named(cr: CheckRun, zfs: ZFS, damage: Damage, cleanup: Cleanup, log: Log) -
     log.info(f"The damaged files of {pool} are listed only with its keys loaded")
     ks = Keystore(log)
     cleanup.track_keystore(ks)  # before it opens: a signal in between closes it
+    log.info(
+        f"The passphrase is waited for {NAME_PASSPHRASE_TIMEOUT // 60} minutes at most;"
+        " then the files stay unnamed and the drive is exported"
+    )
     try:
-        opened = open_keystore(ks, pool, log, readonly=True)
-    except EOFError:  # no terminal to ask on
+        opened = open_keystore(ks, pool, log, readonly=True, timeout=NAME_PASSPHRASE_TIMEOUT)
+    except EOFError:  # no terminal to ask on, or nobody answered in time (PromptTimeout)
         opened = False
     if not opened:
         log.warn(f"The damaged files of {pool} are not named: its keystore did not open")

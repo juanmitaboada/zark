@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Damage.unlisted`). Self-test POOL-17 (revision 2) corrupts a block of
   an encrypted dataset too and checks that the list is refused without its
   key and names both files with it.
+- **The passphrase that names the damaged files is waited for 10 minutes
+  at most** (M19bR-1, `NAME_PASSPHRASE_TIMEOUT`): past it the files stay
+  unnamed and the drive is exported, as with no terminal, so an unattended
+  check that finds damage no longer keeps the drive imported read-write,
+  and every other zark command refused, until someone answers.
 - **The restore check's total is the bytes it reads** (M19E-2): the sum of
   each snapshot's `logicalreferenced`, not of its `referenced`, which
   counts the copies compressed; on eli the percent reached 100 with two

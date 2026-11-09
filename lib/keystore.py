@@ -248,14 +248,17 @@ def open_keystore(
     log: Log,
     *,
     readonly: bool = False,
+    timeout: int | None = None,
 ) -> bool:
     """Ask for the passphrase and open ``pool``'s keystore, re-asking on a typo.
 
     Up to :data:`MAX_PASSPHRASE_ATTEMPTS` prompts while LUKS reports a wrong
     passphrase; any other failure (no zvol, mount error) returns at once.
+    ``timeout``: each prompt's limit in seconds; past it ``ask_password``
+    raises ``PromptTimeout`` (an ``EOFError``) to the caller.
     """
     for attempt in range(1, MAX_PASSPHRASE_ATTEMPTS + 1):
-        passphrase = log.ask_password(f"Passphrase for {pool}")
+        passphrase = log.ask_password(f"Passphrase for {pool}", timeout=timeout)
         if ks.mount(pool, passphrase, readonly=readonly):
             return True
         if not ks.bad_passphrase:

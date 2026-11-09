@@ -856,7 +856,9 @@ end-to-end sequences.
     read-only, the keys are loaded for that one read, which names the
     damaged files, and unloaded before the export; nothing is mounted. The
     scrub's result and the damage are recorded before that question, so an
-    interrupt there leaves them recorded (the check not finished). After
+    interrupt there leaves them recorded (the check not finished). That
+    passphrase is waited for 10 minutes at most; then the files stay
+    unnamed and the drive is exported. After
     the scrub the drive is read back as after a backup, waiting for apt as
     the backup's read-back does.
 

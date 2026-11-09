@@ -24,6 +24,7 @@ import os
 import re
 import select
 import shutil
+import signal
 import stat
 import sys
 import time
@@ -57,6 +58,40 @@ def watch(
     _ON_STEP[:] = [on_step] if on_step else []
     _ON_WAIT[:] = [on_wait] if on_wait else []
     _ON_FATAL[:] = [on_fatal] if on_fatal else []
+
+
+class PromptTimeout(EOFError):
+    """A prompt nobody answered in time. An ``EOFError``: its caller goes
+    on as at end of input, where nobody answered either (M19bR-1)."""
+
+
+class _Deadline:
+    """At most ``seconds`` for one read of the terminal: SIGALRM interrupts
+    the read with :class:`PromptTimeout`; the previous handler and no
+    pending alarm are restored after, whatever ends it. ``None``: no limit."""
+
+    def __init__(self, seconds: int | None):
+        self._seconds = seconds
+        self._old: object = None
+
+    @staticmethod
+    def _expired(_signum: int, _frame: object) -> None:
+        raise PromptTimeout
+
+    def __enter__(self) -> None:
+        if self._seconds is not None:
+            self._old = signal.signal(signal.SIGALRM, self._expired)
+            signal.alarm(self._seconds)
+
+    def __exit__(
+        self,
+        _kind: type[BaseException] | None,
+        _exc: BaseException | None,
+        _tb: TracebackType | None,
+    ) -> None:
+        if self._seconds is not None:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, self._old)  # type: ignore[arg-type]
 
 
 class _Reading:
@@ -621,8 +656,9 @@ class Log:
         self._answer_to_file(label or prompt.strip(), shown)
         return answer
 
-    def ask_password(self, question: str) -> str:
-        """Password input (no echo)."""
+    def ask_password(self, question: str, *, timeout: int | None = None) -> str:
+        """Password input (no echo). With ``timeout``, at most that many
+        seconds: then :class:`PromptTimeout` (an ``EOFError``), logged."""
 
         self._show(self._box(f"{self.Y}🔑{self.N} {question}"), after=False)
         self._to_file(f"[PROMPT]  {self._strip(question)} → (passphrase, not logged)")
@@ -632,8 +668,14 @@ class Log:
         # (CPython Lib/getpass.py:52-58).
         sys.stdout.flush()
         try:
-            with _Reading(question):
+            # getpass restores the echo in its own finally, so an alarm's
+            # exception leaves the terminal as it found it (Lib/getpass.py, unix_getpass).
+            with _Reading(question), _Deadline(timeout):
                 return getpass.getpass("    Passphrase: ", stream=sys.stdout)
+        except PromptTimeout:
+            sys.stdout.write("\n")  # getpass's own newline comes only after a line
+            self._answer_to_file(question, "<timeout>")
+            raise
         finally:
             sys.stdout.flush()  # getpass writes its closing newline unflushed (:101)
 
