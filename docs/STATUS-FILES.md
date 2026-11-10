@@ -697,6 +697,7 @@ colour and an icon without parsing text.
 | `origin_residues` | snapshots in the source no registered drive needs | `info` |
 | `drive_check` | a drive whose last `zark fullcheck` did not pass, one per drive | `critical` for `damage`, `warning` for `not_finished` and `failed` |
 | `selftest` | a subscribed self-test warning | `warning` |
+| `upgrade_risk` | this Ubuntu 24.04 system's upgrade to 26.04 would stop rpool's mounts halfway (zfsutils-linux 2.2, an encrypted rpool mounted through `/etc/zfs/zfs-list.cache/rpool` with its units bound to `zfs-load-key-rpool.service`); `docs/UPGRADING.md` says what to do | `warning` |
 
 ## Reading the files
 

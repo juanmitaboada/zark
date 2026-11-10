@@ -68,6 +68,24 @@ sudo ./zark repair-boot
 
 `repair-boot` regenerates `grub.cfg` from inside the recovered system, which produces UUIDs and hints matching the current firmware layout.
 
+### The machine resets by itself before GRUB, again and again, after a recovery
+
+Symptom: after `zark recover` (or anything else that reinstalls GRUB and shim on the ESP: `zark finish`, `zark repair-boot`, a GRUB or shim update), the machine restarts before GRUB's menu appears, at every boot, with Secure Boot on. Some firmware shows `Reset System` for a moment first; some drops into its own setup screen instead. Seen on the maintainer's Dell XPS 13 9333 (Phoenix firmware) with Ubuntu 26.10.
+
+Cause: the firmware ignores the boot entry the system created and starts the removable-media path `\EFI\BOOT\BOOTX64.EFI`, which is shim. shim then runs its fallback, which creates the boot entries it finds on the ESP and, on a machine with a TPM, resets the system instead of starting the entry (shim 15.8, `fallback.c:1181-1224`). A firmware that ignores that entry too comes back to the fallback at the next boot: a reset loop. `grub-install` itself replaces the entries it considers its own: it removes every `Boot####` entry whose `efibootmgr` line contains the distributor's name (`ubuntu`, case ignored) before it creates its new one (GRUB's `grub_install_remove_efi_entries_by_distributor`, `grub-core/osdep/unix/platform.c`), so an entry added by hand under a name containing "ubuntu" goes at the next `grub-install`.
+
+What to do:
+
+1. Start Ubuntu once from the firmware's one-time boot menu (F12 on Dell machines), choosing the Ubuntu or disk entry it offers.
+2. In the running system, tell shim's fallback not to reset:
+
+   ```bash
+   sudo mokutil --set-fallback-noreboot true
+   ```
+
+   It writes shim's variable `FB_NO_REBOOT` (GUID `605dab50-e046-4300-abb6-3dd810dd8b23`; mokutil 0.6.0 and later, `set_fallback_noreboot` in `src/mokutil.c`), and the fallback then starts the first boot entry instead of resetting (`fallback.c:1186-1189` in shim 15.8). The variable lives in the firmware, not on the disk, so later recoveries keep it; resetting the firmware to its factory settings clears it, and then both steps are needed again. `sudo mokutil --set-fallback-noreboot false` removes it.
+3. Do not delete boot entries to clean up: the firmware's own entries may be the only ones it starts. If the firmware's setup screen can add an entry for `\EFI\ubuntu\shimx64.efi`, give it a name without "ubuntu", so that the next `grub-install` keeps it (see Cause).
+
 ## FAQ
 
 **Can I use multiple backup drives?**

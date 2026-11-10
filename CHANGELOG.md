@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### M25 - the release
+
+#### Changed
+
+- **Docs: a recovery that ends in a reset loop** (M25-4 4a):
+  `docs/TROUBLESHOOTING.md` explains firmware that ignores the boot entry
+  the system creates, so that shim's fallback resets the machine at every
+  boot when a TPM is present, and the way out: one start from the
+  firmware's boot menu, then `sudo mokutil --set-fallback-noreboot true`;
+  boot entries are not to be deleted. Nothing zark does changes.
+- **Docs: the `upgrade_risk` notice** in `docs/STATUS-FILES.md`'s notice
+  table (the code has written it since 2.2.0). Nothing zark does changes.
+
 ### M20 - readers and small fixes (2.3.0-rc4)
 
 #### Added
