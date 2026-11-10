@@ -46,6 +46,8 @@ _RESET = "\033[0m"
 _ON_STEP: list[Callable[[int, int, str], None]] = []
 _ON_WAIT: list[Callable[[str | None, dict[str, Any] | None], None]] = []
 _ON_FATAL: list[Callable[[str], None]] = []
+# Whether take_terminal() has signalled this process's group (M20E-1).
+_TOOK_TERMINAL: list[bool] = [False]
 
 
 def watch(
@@ -92,6 +94,31 @@ class _Deadline:
         if self._seconds is not None:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, self._old)  # type: ignore[arg-type]
+
+
+def take_terminal() -> None:
+    """Make sure a ``select()`` on stdin can see what is typed (M20E-1).
+
+    sudo-rs runs zark on a pty of its own, in a process group that is not
+    that pty's foreground until zark reads the terminal: a blocking read
+    from the background raises SIGTTIN, and sudo-rs answers by giving zark
+    the foreground. ``select()`` raises nothing, so a wait whose first read
+    of the terminal is a ``select()`` never sees an answer. Before such a
+    read, when stdin is a terminal and zark is not its foreground, zark
+    sends itself that SIGTTIN, once per process: under sudo-rs it comes
+    back in the foreground; in a shell that really runs it in the
+    background it stops, as a blocking read would.
+    """
+    if _TOOK_TERMINAL[0] or not sys.stdin.isatty():
+        return
+    try:
+        fd = sys.stdin.fileno()
+        if os.tcgetpgrp(fd) == os.getpgrp():
+            return
+    except (OSError, ValueError):
+        return  # no controlling terminal to take
+    _TOOK_TERMINAL[0] = True
+    os.killpg(os.getpgrp(), signal.SIGTTIN)
 
 
 def _q(  # pylint: disable=too-many-arguments
@@ -525,6 +552,7 @@ class Log:
             self._answer_to_file(question, f"<no tty> ({'yes' if default else 'no'})")
             return default
 
+        take_terminal()
         with _Reading(question, _q("timed", default=default, timeout_s=timeout)):
             return self._countdown(question, default, timeout, prompt)
 
@@ -589,6 +617,7 @@ class Log:
             return "done"
         rows = [f"{self.Y}?{self.N} {question}"] + ([f"  {tail}"] if tail else [])
         self._show(self._box(*rows), after=False)
+        take_terminal()
         with _Reading(question, _q("wait", timeout_s=timeout)):
             return self._wait_on_terminal(question, end, done, clock, poll)
 

@@ -709,3 +709,113 @@ class TestQuestionObject:  # pylint: disable=missing-function-docstring
         assert not problems(older, "progress")
         for bad in ({"kind": "yes_no"}, {**self._q("choice"), "options": [1]}, "yes_no"):
             assert problems({**doc, "question": bad}, "progress"), bad
+
+
+class TestTakeTerminal:  # pylint: disable=missing-function-docstring
+    """M20E-1: before a select() read, zark takes its terminal's foreground
+    (a SIGTTIN to its own group, once) when stdin is a terminal it is not
+    the foreground of, as sudo-rs runs it."""
+
+    @staticmethod
+    def _run(
+        ask: Any, *, tty: bool = True, fg: int = 200, pgrp: int = 100, raises: bool = False
+    ) -> list[tuple[int, int]]:
+        # pylint: disable=import-outside-toplevel,too-many-locals
+        import signal
+        from contextlib import ExitStack, redirect_stderr
+        from unittest.mock import MagicMock
+
+        from lib import log as log_mod
+
+        sent: list[tuple[int, int]] = []
+        stdin = MagicMock()
+        stdin.isatty.return_value = tty
+        stdin.fileno.return_value = 0
+        stdin.readline.return_value = "y\n"
+
+        def _tcgetpgrp(_fd: int) -> int:
+            if raises:
+                raise OSError(25, "Inappropriate ioctl for device")
+            return fg
+
+        def _killpg(group: int, sig: int) -> None:
+            assert sig == signal.SIGTTIN, sig
+            sent.append((group, sig))
+
+        with ExitStack() as stack:
+            for cm in (
+                patch.object(log_mod, "_TOOK_TERMINAL", [False]),
+                patch("lib.log.sys.stdin", stdin),
+                patch("lib.log.os.tcgetpgrp", side_effect=_tcgetpgrp),
+                patch("lib.log.os.getpgrp", return_value=pgrp),
+                patch("lib.log.os.killpg", side_effect=_killpg),
+                patch("lib.log.select.select", return_value=([stdin], [], [])),
+                redirect_stdout(StringIO()),
+                redirect_stderr(StringIO()),
+            ):
+                stack.enter_context(cm)
+            ask(Log(os.devnull))
+        return sent
+
+    def test_a_wait_in_the_background_takes_the_terminal_once(self):
+        def twice(log: Any) -> None:
+            assert log.ask_wait("Skip?", 30, lambda: False) == "skip"
+            assert log.ask_wait("Skip?", 30, lambda: False) == "skip"
+
+        assert self._run(twice) == [(100, signal_ttin())]
+
+    def test_a_timed_question_in_the_background_takes_it_too(self):
+        def timed(log: Any) -> None:
+            assert log.ask_timeout("Eject?", False, 10) is True
+
+        assert self._run(timed) == [(100, signal_ttin())]
+
+    def test_nothing_in_the_foreground_or_without_a_terminal(self):
+        def wait(log: Any) -> None:
+            assert log.ask_wait("Skip?", 30, lambda: True) in ("done", "skip")
+
+        assert not self._run(wait, fg=100, pgrp=100)
+        assert not self._run(wait, tty=False)
+        assert not self._run(wait, raises=True)
+
+    def test_take_terminal_alone_sends_nothing_without_a_terminal(self):
+        # pylint: disable=import-outside-toplevel
+        from lib import log as log_mod
+
+        def call(_log: Any) -> None:
+            log_mod.take_terminal()
+
+        assert not self._run(call, tty=False)
+        assert self._run(call) == [(100, signal_ttin())]
+
+    def test_the_signal_comes_before_the_select(self):
+        # pylint: disable=import-outside-toplevel
+        from lib import log as log_mod
+
+        order: list[str] = []
+
+        def _take() -> None:
+            order.append("take")
+
+        def _select(*_a: Any) -> tuple[list[Any], list[Any], list[Any]]:
+            order.append("select")
+            return [log_mod.sys.stdin], [], []
+
+        with (
+            patch.object(log_mod, "take_terminal", _take),
+            patch("lib.log.sys.stdin") as stdin,
+            patch("lib.log.select.select", side_effect=_select),
+            redirect_stdout(StringIO()),
+        ):
+            stdin.isatty.return_value = True
+            stdin.readline.return_value = "y\n"
+            _ = Log(os.devnull).ask_wait("Skip?", 30, lambda: False)
+            _ = Log(os.devnull).ask_timeout("Eject?", False, 10)
+        assert order == ["take", "select", "take", "select"], order
+
+
+def signal_ttin() -> int:
+    """SIGTTIN's number."""
+    import signal  # pylint: disable=import-outside-toplevel
+
+    return int(signal.SIGTTIN)

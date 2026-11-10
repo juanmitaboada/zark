@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Changed
 
+- **A wait or a timed question reads its answer under sudo-rs** (M20E-1):
+  sudo-rs runs zark on a pty of its own and gives it that pty's foreground
+  only at a blocking read, so a `select()` read that came first, such as
+  `registry verify`'s wait for apt, never saw the answer typed. Before such
+  a read zark now takes the foreground once, as a blocking read would
+  (SIGTTIN to its own process group); nothing changes without a terminal
+  or when zark already has it.
 - **The read-back checks the pool's GUID** (M20R-1) when `prepare` and
   `registry verify` run it: a pool of the expected name with another GUID
   is exported again and nothing is registered. The import is by name, so

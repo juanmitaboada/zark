@@ -402,6 +402,7 @@ from tests.test_readers import (  # pylint: disable=wrong-import-position # noqa
     TestQuestionObject,
     TestSimulateTempFiles,
     TestStatusLastRun,
+    TestTakeTerminal,
 )
 from tests.test_site import (  # pylint: disable=wrong-import-position # noqa: E402
     TestSiteCertificates,
@@ -501,6 +502,7 @@ READERS_SUITES = (
     TestBackupDriveOption,
     TestInvokingUser,
     TestQuestionObject,
+    TestTakeTerminal,
 )
 
 # ═════════════════════════════════════════════════════════════════════════
