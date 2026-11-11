@@ -1,89 +1,37 @@
-zark (2.3.0~rc4-1) UNRELEASED; urgency=medium
+zark (2.3.0-1) stable; urgency=medium
 
-  * Milestone M20 of zark 2.3 (readers and small fixes). Not for release:
-    nothing is published until the final 2.3.0.
-  * zark registry verify <name>: a drive whose first read-back prepare
-    could not run (apt held its locks) waits in pending_drives.json with
-    its anchors kept, is named by status, the MOTD, registry list, explore
-    and backup, and is registered once read back. The read-back checks
-    the pool's GUID; prepare drops the entries it replaces at the export.
-  * backup --drive <name> picks the connected registered drive by name;
-    zark.log names the user behind each command; progress.json gains the
-    optional question object; exit status 2 and the statuses' stability
-    are documented.
-  * prune shows a table of candidate ages; exclude warns of a drained base
-    only where a drive may hold the dataset; zark status names a drive's
-    last run that needs attention; the external-pool MOTD tells plugged in
-    from imported.
-  * repair-boot stops when a bind into the chroot fails; zark chroot stops
-    at the first failed bind and names the ones not attempted.
-  * health's report and simulate's files are created privately in /tmp.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 10 Nov 2026 00:24:41 +0100
-
-zark (2.3.0~rc3-1) UNRELEASED; urgency=medium
-
-  * Milestone M19b of zark 2.3 (zark fullcheck's findings on eli). Not
-    for release: nothing is published until the final 2.3.0.
-  * When the scrub finds damage on an encrypted drive, zark fullcheck asks
-    the passphrase again and names the damaged files: ZFS lists them only
-    while their keys are loaded. The keystore is opened read-only, the
-    keys are unloaded before the export and nothing is mounted.
-  * The restore check's total is the logical size it reads, so its
-    percent no longer reaches 100 early on a compressed drive.
-  * The estimates keep each part's last measured rate (check_rates in
-    known_drives.json) across a check that measured nothing.
-  * Self-test check POOL-17, revision 2: the encrypted case too.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 10 Nov 2026 00:13:02 +0100
-
-zark (2.3.0~rc2-1) UNRELEASED; urgency=medium
-
-  * Milestone M19 of zark 2.3 (zark fullcheck). Not for release: nothing
-    is published until the final 2.3.0.
-  * zark fullcheck [scrub | restore] verifies a backup drive's copies
-    without altering them: a read-only restore check (the keys loaded, a
-    point's snapshots mounted read-only and every file read) and a scrub
-    of the whole pool, then the read-back. The result is a banner, exit 1
-    unless clean, and the drive's last_check in known_drives.json, shown
-    by zark status, zark monitor and status.json (the MOTD unless clean).
-  * No zpool scrub runs unless the pool is read-write and not suspended
-    (on OpenZFS 2.2 such a scrub never returns). A scrub an interrupted
-    check left running is paused at the next read-write import by another
-    command and resumed by the next fullcheck.
-  * The guards' messages name a full check; sudo zark setup rewrites the
-    files 2.3.0-rc1 installed.
-  * Self-test check POOL-17: a scrub names a corrupted file; a read-only
-    pool is refused before any zpool scrub.
-
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 09 Nov 2026 00:32:21 +0100
-
-zark (2.3.0~rc1-1) UNRELEASED; urgency=medium
-
-  * Milestone M18 of zark 2.3 (kernel updates with a backup drive
-    plugged in). Not for release: nothing is published until the final
-    2.3.0.
-  * /etc/default/grub.d/zark-backup-guard.cfg keeps a backup drive that
-    is only plugged in out of update-grub's scan: a kernel removed by
-    autoremove or unattended-upgrades no longer leaves dpkg half-done.
-  * The APT hook asks for protocol version 3 and refuses a boot-critical
-    removal while a backup pool is imported; installs are refused while a
-    drive is plugged in, as before. /etc/kernel/prerm.d/00-zark-backup-guard
-    refuses a kernel removal at dpkg's level while one is imported.
-  * zark does not import a backup pool while apt or dpkg runs (exit 75),
+  * zark 2.3. Kernel updates with a backup drive plugged in:
+    /etc/default/grub.d/zark-backup-guard.cfg keeps a drive that is only
+    plugged in out of update-grub's scan, so a kernel removed by autoremove
+    or unattended-upgrades no longer leaves dpkg half-done. The APT hook
+    asks for protocol version 3 and refuses a boot-critical removal while
+    a backup pool is imported; installs are refused while a drive is
+    plugged in, as before. /etc/kernel/prerm.d/00-zark-backup-guard
+    refuses a kernel removal at dpkg's level while one is imported; the
+    hook counts 26.10's linux-main-modules-* as boot-critical.
+  * /etc/grub.d/99_zark_cfg_check stops update-grub when the grub.cfg it
+    is writing has no kernel entry: the previous grub.cfg stays.
+  * zark does not import a backup pool while apt or dpkg runs (exit 75)
     and holds dpkg's frontend lock for the import; the read-back waits for
     apt up to 15 minutes and a skipped one is reported as not read back.
-  * /etc/grub.d/99_zark_cfg_check stops update-grub when the grub.cfg it
-    is writing has no kernel entry in 10_linux_zfs's or 10_linux's section
-    (10_linux_zfs failing on a busy mount and exiting 0): the previous
-    grub.cfg stays. Another system's os-prober entry does not count.
-  * The APT hook counts 26.10's linux-main-modules-* as boot-critical.
+  * zark fullcheck [scrub | restore] verifies a backup drive's copies
+    without altering them: a read-only restore check of a point (every
+    file read) and a scrub of the whole pool, naming damaged files on an
+    encrypted drive too. The result is a banner, exit 1 unless clean, and
+    the drive's last_check in known_drives.json, shown by zark status,
+    zark monitor and status.json.
+  * zark registry verify <name> registers a drive whose first read-back
+    prepare could not run; it waits in pending_drives.json meanwhile. The
+    read-back checks the pool's GUID.
+  * backup --drive <name>; prune's table of candidate ages; zark.log names
+    the user behind each command; repair-boot and chroot stop at a failed
+    bind. Self-test check POOL-17.
   * finish names boot packages dpkg left half-done. Run sudo zark setup
-    after the upgrade; sudo apt -f install finishes a system 2.2 left
+    once after the upgrade; sudo apt -f install finishes a system 2.2 left
     half-done.
   * debian/watch in format version 5.
 
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Sat, 07 Nov 2026 13:10:54 +0100
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Wed, 11 Nov 2026 20:15:00 +0100
 
 zark (2.2.0-1) stable; urgency=medium
 

@@ -1,6 +1,6 @@
 % ZARK(1) zark @VERSION@ | User Commands
 %
-% October 28, 2026
+% November 11, 2026
 
 # NAME
 
@@ -1501,7 +1501,7 @@ roll its backup points back).
 
 **2**
 :   A usage error: an unknown word or a missing value; nothing was done.
-    **selftest**, **setup** and **monitor** use it, and **backup
+    **exclude**, **selftest**, **setup** and **monitor** use it, and **backup
     --drive** with no name.
 
 **130**, **143**, **129**, **141**

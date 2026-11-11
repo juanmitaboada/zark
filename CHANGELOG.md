@@ -5,9 +5,28 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.3.0] - 2026-11-11
+
+### For zark 2.2 users
+
+Nothing on a drive or in `/etc/zark/known_drives.json` changes;
+`pending_drives.json`, next to it, appears only when a new drive's first
+read-back could not run. The package upgrade leaves the installed guards as
+they are: run `sudo zark setup` once per system after it. It installs
+`/etc/default/grub.d/zark-backup-guard.cfg`, `/etc/grub.d/99_zark_cfg_check`
+and `/etc/kernel/prerm.d/00-zark-backup-guard`, and the APT hook's line that
+lets it see removals; until then `zark finish` says what `setup` would do.
+A kernel removal zark 2.2 left half-done (`dpkg -l` shows `rH`) is finished
+by `sudo apt -f install` after it. zark no longer imports a backup pool
+while apt, dpkg or unattended-upgrades runs: the command stops with exit
+status 75 and names the process. zark 2.2.0 reads everything 2.3 writes;
+the way back is in [docs/UPGRADING.md](docs/UPGRADING.md).
 
 ### M25 - the release
+
+2.3.0 was accepted on eli as `2.3.0-rc4`. What it adds to that candidate
+changes nothing zark does: the docs below, the certificates, the version
+and the changelogs.
 
 #### Changed
 
@@ -19,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot entries are not to be deleted. Nothing zark does changes.
 - **Docs: the `upgrade_risk` notice** in `docs/STATUS-FILES.md`'s notice
   table (the code has written it since 2.2.0). Nothing zark does changes.
+- **Docs read against the code**: the manpage's exit status 2 names
+  `exclude` too, and `docs/TESTING.md` names CI's SonarQube Cloud analysis
+  and the `.deb` installed on 26.10 as well. `docs/TROUBLESHOOTING.md`'s
+  reset loop entry says how Ubuntu's `grub-install` picks the boot entries
+  it replaces (a label equal to `ubuntu`, not one containing it; M25R-1);
+  the advice is unchanged.
+- **The self-test's certificates for 2.3.0**: five from eli, run on
+  `2.3.0-rc4`: Ubuntu 26.10 installed with `/boot` on ext4 (levels 1 and
+  2), and the Ubuntu 26.10, 26.04 and 24.04.5 lives (level 1). POOL-17
+  passed on all five.
 
 ### M20 - readers and small fixes (2.3.0-rc4)
 
