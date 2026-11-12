@@ -579,6 +579,11 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
         # :4614-4632); the kernel's ENODEV check (dmu_recv.c:791-796) applies
         # only when an origin is given. SND-10 certifies it (M4sP.1).
         clone = [f"-o origin={_q(self._dst(clone_from))}"] if clone_from else []
+        sh.warn_replaced(
+            self._dst(rel),
+            [("org.zark:canmount", o.canmount), ("org.zark:mountpoint", o.mountpoint)],
+            self.log,
+        )
         props = [
             *clone,
             "-o canmount=noauto",

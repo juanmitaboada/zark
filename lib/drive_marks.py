@@ -50,6 +50,7 @@ def write_metadata(pool: str, fields: dict[str, str], log: Log) -> bool:
     """Record ``org.zark:<key>=<value>`` on the backup pool's root dataset
     (M2 decision 17a): readable without the passphrase, and a user property
     mounts nothing, so the zvol rule does not apply."""
+    sh.warn_replaced(pool, [(f"org.zark:{k}", v) for k, v in sorted(fields.items())], log)
     pairs = " ".join(_q(f"org.zark:{k}={v}") for k, v in sorted(fields.items()) if v)
     r = sh.run(f"zfs set {pairs} {_q(pool)}", log=log)
     if not r.ok:

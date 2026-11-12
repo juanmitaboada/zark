@@ -498,7 +498,9 @@ def record(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     goes in the same zfs set: origin's pools (M6-5)."""
     if not rels:
         return True
-    props = [f"{k}={v}" for k, v in (*record_props(mark), *extra)]
+    pairs = [*record_props(mark), *extra]
+    sh.warn_replaced(f"{pool}@{point}", pairs, log)
+    props = [f"{k}={v}" for k, v in pairs]
     r = sh.run(["zfs", "set", *props, *(f"{pool}/{rel}@{point}" for rel in rels)], log=log)
     if not r.ok:
         also = " and how origin's pools were" if extra else ""

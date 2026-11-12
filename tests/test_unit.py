@@ -1193,6 +1193,39 @@ class TestSh:  # pylint: disable=missing-function-docstring
         assert run("cat", input="contrase\u00f1a\n").stdout == "contrase\u00f1a\n"
 
 
+class TestWarnReplaced:  # pylint: disable=missing-function-docstring
+    """M26R-15: a value read with U+FFFD is not written back silently."""
+
+    def test_one_warning_per_replaced_value(self):
+        out = StringIO()
+        with redirect_stdout(out):
+            _sh.warn_replaced(
+                "backup/rpool/home",
+                [("org.zark:mountpoint", "/home/\ufffd"), ("org.zark:canmount", "on")],
+                make_log(),
+            )
+        text = out.getvalue()
+        assert text.count("held a byte this locale cannot read") == 1, text
+        assert "backup/rpool/home: org.zark:mountpoint" in text
+
+    def test_the_receive_names_a_replaced_mountpoint(self):
+        out = StringIO()
+        with redirect_stdout(out):
+            eng = engine.Run("backup", "111", make_log(), "zark_2026-11-13_00:00:00Z")
+            eng.origin = {"rpool/home": repl.Origin("rpool/home", "filesystem", "on", "/ho\ufffde")}
+            cmd = eng._recv("rpool/home", False)  # pylint: disable=protected-access
+        assert "org.zark:mountpoint" in out.getvalue() and "U+FFFD" in out.getvalue()
+        assert "zfs receive -s -u" in cmd
+
+    def test_drive_metadata_names_a_replaced_value(self):
+        mock = MockShell()
+        mock.on_prefix("zfs set").succeeds()
+        out = StringIO()
+        with patch_sh(mock), redirect_stdout(out):
+            assert drive_marks.write_metadata("backup", {"source_host": "h\ufffd"}, make_log())
+        assert "org.zark:source_host held a byte" in out.getvalue()
+
+
 class TestShRunPipe:  # pylint: disable=missing-function-docstring
     """Tests for run_pipe() pipeline behavior, especially p1-side failures."""
 

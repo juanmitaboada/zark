@@ -388,6 +388,19 @@ def run_pipe(
     )
 
 
+def warn_replaced(where: str, values: list[tuple[str, str]], log: Log) -> None:
+    """One warning per value that holds U+FFFD, about to be written to
+    ``where`` (a dataset or snapshot): it was read with a byte the locale
+    could not decode (``run``'s ``errors="replace"``), and the drive gets
+    the replacement, not the byte (M26R-15)."""
+    for prop, value in values:
+        if "\ufffd" in value:
+            log.warn(
+                f"{where}: {prop} held a byte this locale cannot read; "
+                + "it is recorded with U+FFFD in its place"
+            )
+
+
 # ── ENOSPC detection ─────────────────────────────────────────────────────
 # Marker substrings (case-insensitive) that indicate an out-of-space
 # condition. List sourced from real ZFS / kernel error messages observed
