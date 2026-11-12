@@ -180,6 +180,7 @@
               "pattern": "^[0-9]+$"
             },
             "drive_id": {
+              "description": "The disk's /dev/disk/by-id name without -part1; the drive is connected when <drive_id>-part1 exists there",
               "type": "string",
               "minLength": 1
             },

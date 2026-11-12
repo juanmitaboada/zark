@@ -459,10 +459,13 @@ def age_days(last_backup_at: object, now: datetime) -> int | None:
 
 
 def drive_connected(drive_id: object, by_id: Path = BY_ID) -> bool:
-    """Whether ``/dev/disk/by-id/<drive_id>`` exists (a link, followed or not)."""
+    """Whether ``/dev/disk/by-id/<drive_id>-part1`` exists (a link, followed
+    or not). The disk's own link stays after Files ejects the drive, while
+    its partitions' links go (A1E-4); every drive zark registers has its pool
+    on partition 1."""
     if not isinstance(drive_id, str) or drive_id in ("", ".", "..") or "/" in drive_id:
         return False
-    return os.path.lexists(by_id / drive_id)
+    return os.path.lexists(by_id / f"{drive_id}-part1")
 
 
 # ── drive contents (optional in schema 1: "Drive contents") ─────────────

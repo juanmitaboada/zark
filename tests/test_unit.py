@@ -28572,14 +28572,27 @@ class TestStatusReaderFigures:  # pylint: disable=missing-function-docstring
         assert sreader.byte_fraction({**t, "bytes_done": None}) is None  # a null is never a zero
         assert sreader.byte_fraction({**t, "bytes_total": 0}) is None
 
-    def test_a_drive_is_connected_by_its_link(self) -> None:
+    def test_a_drive_is_connected_by_its_partition_s_link(self) -> None:
+        """A1E-4: the disk's link stays after an eject; its partition's goes."""
         with tempfile.TemporaryDirectory() as td:
             by_id = Path(td)
-            (by_id / "usb-X-0:0").symlink_to("../../sdz")  # dangling, as udev's are relative
+            (by_id / "usb-X-0:0").symlink_to("../../sdz")
+            assert not sreader.drive_connected("usb-X-0:0", by_id)  # ejected: the disk only
+            (by_id / "usb-X-0:0-part1").symlink_to("../../sdz1")  # dangling, as udev's are relative
             assert sreader.drive_connected("usb-X-0:0", by_id)
             assert not sreader.drive_connected("usb-Y-0:0", by_id)
             for bad in ("", ".", "..", "../etc", None, 3):
                 assert not sreader.drive_connected(bad, by_id), bad
+
+    def test_the_monitor_says_not_connected_after_an_eject(self) -> None:
+        """A1E-4: zark monitor's drive row reads the partition's link."""
+        with tempfile.TemporaryDirectory() as td:
+            by_id = Path(td)
+            drive = {"name": "black", "drive_id": "usb-X-0:0"}
+            (by_id / "usb-X-0:0").symlink_to("../../sdz")
+            assert mview._where(drive, False, by_id) == "not connected"  # pylint: disable=protected-access
+            (by_id / "usb-X-0:0-part1").symlink_to("../../sdz1")
+            assert mview._where(drive, False, by_id) == "connected"  # pylint: disable=protected-access
 
 
 def _drive_with_contents(**changes: Any) -> dict[str, Any]:

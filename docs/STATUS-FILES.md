@@ -187,7 +187,7 @@ with no terminal reads nothing, so neither `waiting_for_input` nor
 |---|---|---|
 | `name` | string | pool name, the registry key |
 | `guid` | string | pool GUID, decimal |
-| `drive_id` | string | registry `drive_id`, a `/dev/disk/by-id` name |
+| `drive_id` | string | registry `drive_id`, a `/dev/disk/by-id` name of the disk, without `-part1` |
 | `space` | Space object or null | the drive's space while zark has it imported; null before the first read |
 
 `transfer`:
@@ -449,7 +449,7 @@ pool has.
 |---|---|---|
 | `name` | string | pool name, the registry key |
 | `guid` | string | pool GUID, decimal |
-| `drive_id` | string | registry `drive_id`; readers match it against `/dev/disk/by-id` to tell whether the drive is connected |
+| `drive_id` | string | registry `drive_id`, the disk's `/dev/disk/by-id` name without `-part1`; readers look for `<drive_id>-part1` there to tell whether the drive is connected |
 | `enclosure_id` | string, optional | registry `enclosure_id`: the bus name (`usb-...`) the drive was last seen under, present when `drive_id` is the disk's own name. Information only: readers must not use it to tell whether the drive is connected, since the enclosure's link exists with any disk in it |
 | `autoeject` | boolean | registry `autoeject` |
 | `retention` | object | the effective policy: `window_days`, `max_age_days` (0: off), `margin_pct` |
@@ -744,7 +744,11 @@ from both files. First match wins:
 
 ### Drives and live figures
 
-- A drive is connected when a `/dev/disk/by-id/<drive_id>` link exists.
+- A drive is connected when a `/dev/disk/by-id/<drive_id>-part1` link
+  exists, followed or not. The disk's own link is not enough: it stays
+  after the desktop ejects the drive, while its partitions' links go. A
+  drive whose pool sits on the whole disk (accepted by zark, never made by
+  `zark prepare`) reads as not connected.
   A drive entry's `enclosure_id`, when present, is not consulted: the enclosure's link exists with any disk in it.
 - A reader never imports a pool: an imported backup pool trips zark's GRUB
   and apt guards and blocks kernel upgrades. A drive's live fill comes from
@@ -840,6 +844,8 @@ figures of "Space object", "Source pool entry" (with what the root's
 - It also reads a drive's optional contents, when a writer records them
   (`drive_contents`, `drive_margin_bytes`, `retention_next_is_floor`); a
   file without them gives None.
+- `drive_connected(drive_id, by_id)` applies "Drives and live figures":
+  true when `<by_id>/<drive_id>-part1` exists.
 - `proc_hides_root(proc)` is orphan rule 4's probe: true when `/proc/1` does
   not exist for the reader, so `/proc` hides root's processes from it.
 - It never writes, takes no lock and runs no command. The fixtures in
