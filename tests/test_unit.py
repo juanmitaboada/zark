@@ -11188,6 +11188,45 @@ class TestForensics:  # pylint: disable=missing-function-docstring
         assert "zpool history -il black | tail -n 200" in text
         assert "kernel line" in text and "sda 1.8T" in text
 
+    def test_a_section_that_is_not_utf8_is_kept(self):
+        # A1E-10: zpool history of a damaged pool held raw bytes (B8d).
+        mock = MockShell()
+        mock.on_prefix("zpool history -il black").succeeds("load-key input: \ufffd\ufffd")
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            path = forensics.capture("black", "pre-check: ONLINE with errors", make_log())
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        finally:
+            os.unlink(path)
+        assert "load-key input: \ufffd\ufffd" in text
+
+    def test_a_section_that_raises_is_kept_with_its_error(self):
+        real = _sh.run
+
+        def fake_run(cmd: str, *args: Any, **kwargs: Any) -> RunResult:
+            if cmd.startswith("zpool history"):
+                raise UnicodeDecodeError("utf-8", b"\xde", 0, 1, "invalid continuation byte")
+            if cmd.startswith(("zpool", "journalctl", "lsblk", "dmesg")):
+                return RunResult(0, "ok", "", cmd)
+            return real(cmd, *args, **kwargs)
+
+        with patch.object(forensics.sh, "run", side_effect=fake_run), redirect_stdout(StringIO()):
+            path = forensics.capture("black", "pre-check: DEGRADED", make_log())
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        finally:
+            os.unlink(path)
+        assert "(not run)\nUnicodeDecodeError" in text, text
+
+    def test_a_capture_never_raises(self):
+        out = StringIO()
+        with (
+            patch.object(forensics.sh, "run", side_effect=RuntimeError("boom")),
+            redirect_stdout(out),
+        ):
+            assert forensics.capture("black", "pre-check: DEGRADED", make_log()) == ""
+        assert "Could not complete the forensic capture of black" in out.getvalue()
+
     def test_readback_captures_while_the_pool_is_still_imported(self):
         dev = "/dev/disk/by-id/usb-Micron_X_SERIAL-0:0-part1"
         mock = MockShell()
@@ -11257,6 +11296,28 @@ class TestBackupHealthCheck:  # pylint: disable=missing-function-docstring,prote
             except SystemExit:
                 exited = True
         return out.getvalue(), exited, cap
+
+    def test_a_capture_that_fails_still_asks(self):
+        # A1E-10: the capture failed and the run ended FATAL before the question.
+        mock = MockShell()
+        mock.on("zpool list -H -o health black").succeeds("DEGRADED")
+        mock.on("zpool status -vp black").succeeds(_damaged_status("DEGRADED", 2, 0))
+        out = StringIO()
+        exited = False
+        with (
+            patch_sh(mock),
+            patch.object(
+                forensics, "_capture", side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "x")
+            ),
+            patch("builtins.input", return_value="n"),
+            redirect_stdout(out),
+        ):
+            try:
+                backup_mod._check_health(ZFS(make_log()), "black", make_log())
+            except SystemExit:
+                exited = True
+        assert exited and "Continue anyway" in out.getvalue()
+        assert "Aborted: black is DEGRADED" in out.getvalue()
 
     def test_clean_online_passes_without_question_or_capture(self):
         out, exited, cap = self._check("ONLINE", _damaged_status("ONLINE", 0, 0))
