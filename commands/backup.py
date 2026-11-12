@@ -967,6 +967,10 @@ def _show_table(res: engine.Result, point: str, log: Log) -> None:
             mark = "excluded from backups"  # as the plan's line says (M5bP.1)
         elif p.state is State.EXCLUDED:
             mark = f"NOT BACKED UP ({p.note})"
+        elif out is None and res.lost:
+            # Never its planned state: a plan made as the drive went away
+            # says nothing about the drive (A1E-8).
+            mark = "NOT at the point: not attempted (the drive went away)"
         elif out is None:
             mark = f"NOT at the point: not attempted ({p.state})"
         elif res.unverified and out.ok:
@@ -988,6 +992,10 @@ def _next_step(p: DatasetPlan, out: engine.Outcome | None, res: engine.Result) -
     """What the next backup does with a dataset that missed the point."""
     failed = out is not None and not out.ok
     steps = (  # first match wins
+        (
+            out is None and bool(res.lost),
+            "not attempted (the drive went away): the next backup plans it again",
+        ),
         (p.state is State.RESUME, "partial transfer kept: the next backup resumes it"),
         (
             p.state in (State.ROLLBACK, State.DIVERGED),
@@ -1017,7 +1025,16 @@ def _incomplete_lines(res: engine.Result, point: str) -> tuple[list[str], int]:
     groups: dict[str, list[str]] = {}  # first seen first
     for p in missing:
         groups.setdefault(_next_step(p, res.outcomes.get(p.rel), res), []).append(p.rel)
-    lines = [f"The result could not be checked: {res.unverified}", ""] if res.unverified else []
+    if res.lost:
+        lines = [f"{res.lost}.", ""]
+        if not missing:
+            # No count of 0 (M26R-2): every dataset reached the point, or
+            # none was planned.
+            return [*lines, "Run backup again once the drive is checked."], 0
+    elif res.unverified:
+        lines = [f"The result could not be checked: {res.unverified}", ""]
+    else:
+        lines = []
     if res.stale and not missing:
         # Every dataset reached the point, but /boot changed under it (M12R-7).
         return [res.stale, "", "Run backup again."], 0
@@ -1388,6 +1405,7 @@ def run(
         observer=progress.TransferProgress() if progress.active() else None,
         layout=layout,
         before_point=boot.refresh if boot is not None else None,
+        lost=watch.sentence,
     )
     _notify("🔄 Backup started", f"{cfg.source_pool} → {pool_name}")
     log.info(f"Tip: run '{zark_command(sudo=False)} monitor' in another terminal for progress")
@@ -1494,7 +1512,13 @@ def run(
     if not res.ok:
         lines, missing = _incomplete_lines(res, eng.point)
         log.banner_error("BACKUP INCOMPLETE", lines)
-        why = f"{missing} dataset(s) not backed up" if missing or not res.stale else res.stale
+        why = (
+            "the drive went away"
+            if res.lost
+            else f"{missing} dataset(s) not backed up"
+            if missing or not res.stale
+            else res.stale
+        )
         _notify("❌ Backup incomplete", why)
         record.result("incomplete", missing=missing, message=why)
         raise SystemExit(1)

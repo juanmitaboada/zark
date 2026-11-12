@@ -166,10 +166,18 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
     layout: Layout = "bpool"
     # Runs after sanoid is paused and before the point (the copy of an ext4 /boot).
     before_point: Callable[[], bool] | None = None
+    # backup's drive watch: "" while the drive was never seen gone, else the
+    # sentence that says when (A1E-7, A1E-8, M26R-14). A latched fact, not a
+    # probe of the state now.
+    lost: Callable[[], str] | None = None
     _timer_was_active: bool = False
     # `zfs send -nvP` sizes by their exact arguments (M7-8 8a): a round's
     # planning asks again only for a send whose plan changed.
     _estimates: dict[str, int] = field(default_factory=dict)
+
+    def drive_lost(self) -> str:
+        """The watch's sentence, "" when the drive was never seen gone."""
+        return self.lost() if self.lost is not None else ""
 
     # ── sanoid ───────────────────────────────────────────────────────────
 
@@ -946,6 +954,9 @@ class Result:  # pylint: disable=too-many-instance-attributes
     enospc: bool = False
     error: str = ""
     unverified: str = ""  # why the state after the transfers could not be read
+    # The run's drive went away (the watch's sentence): what was not
+    # attempted is reported as such, never by its planned state (A1E-8).
+    lost: str = ""
     stale: str = ""  # why the point does not hold what it should (an ext4 /boot that changed)
 
     @property
@@ -976,24 +987,47 @@ def replicate(run: Run, decide: Decide) -> Result:
             plans = run.survey()
     except ReadError as e:
         res.aborted, res.error = True, str(e)
+        res.lost = run.drive_lost()
+        if res.lost:
+            res.error = res.lost
         return res
-    if not decide(plans, run):
+    # The drive's loss is asked of the watch before and after the questions:
+    # nothing is asked about, or sent to, a drive that went away (M26R-25).
+    if _lost(run, res) or not decide(plans, run) or _lost(run, res):
         res.aborted = True
         return res
+    # The plans the questions were asked on: what the report lists when a
+    # later survey fails (M26R-2).
+    res.plans = plans
     try:
         _transfer(run, res)
-        res.plans = run.survey()
+        if not res.lost:
+            res.plans = run.survey()
     except ReadError as e:
         # After the user's choices were applied: the run is not a success,
         # and nothing in origin is anchored or removed on a guess.
-        res.unverified = str(e)
+        res.lost = res.lost or run.drive_lost()
+        res.unverified = res.lost or str(e)
         run.log.error(f"Cannot check the backup: {e}")
+        return res
+    if res.lost:
+        # Nothing anchored or removed on a pool whose drive went away.
+        res.unverified = res.lost
         return res
     at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
     res.anchor_failed = run.anchor(at_point)
     _ = run.anchor_held()
     _ = run.drop(run.drop_check())
     return res
+
+
+def _lost(run: Run, res: Result) -> bool:
+    """True, with the watch's sentence as the run's error, once the drive
+    was seen gone."""
+    if lost := run.drive_lost():
+        res.error, res.lost = lost, lost
+        return True
+    return False
 
 
 def _transfer(run: Run, res: Result) -> None:
@@ -1056,6 +1090,11 @@ def _rounds(run: Run, res: Result, obs: TransferObserver) -> None:
         again = False
         _announce(run, todo, obs)
         for p in todo:
+            if lost := run.drive_lost():
+                # What was in flight may have finished; nothing more starts
+                # (M26R-1): the next backup sends the rest.
+                res.lost = lost
+                return
             # Only a NEW child needs its parent on the drive (M2X.1, M4b-12).
             if p.state is State.NEW and blocked_by_parent(p.rel, failed):
                 res.outcomes[p.rel] = Outcome(p.rel, False, "parent did not reach the point")
@@ -1071,21 +1110,44 @@ def _rounds(run: Run, res: Result, obs: TransferObserver) -> None:
                 again = again or p.state is State.RESUME
                 continue
             failed.add(p.rel)
+            if _named_lost(run, res, out):
+                return
             run.log.error(f"  {p.rel}: {out.error}")
             if out.enospc:
                 res.enospc = True
                 break
-            if p.state is State.RESUME:
-                why = run.resume_impossible(p.rel)
-                if why and run.abort_partial(p.rel):
-                    # Only the partial state goes; the dataset is planned afresh.
-                    run.log.warn(f"  {p.rel}: partial receive discarded: {why}")
-                    again = True
-                elif not why:
-                    out.error += "; partial receive kept, run backup again"
-                    run.log.info(f"  {p.rel}: partial receive kept for the next run")
+            again = _after_failed_resume(run, p, out) or again
         if res.enospc or not again:
             break
+
+
+def _named_lost(run: Run, res: Result, out: Outcome) -> bool:
+    """A failed transfer on a drive that went away: libzfs reads a suspended
+    pool's EAGAIN as "destination ... does not exist" (libzfs_sendrecv.c),
+    so the outcome names the drive, and nothing more starts (A1E-8)."""
+    lost = run.drive_lost()
+    if not lost:
+        return False
+    out.error = f"{lost}: {out.error}"
+    res.lost = lost
+    run.log.error(f"  {out.rel}: {out.error}")
+    return True
+
+
+def _after_failed_resume(run: Run, p: DatasetPlan, out: Outcome) -> bool:
+    """A failed RESUME: discard a partial receive that can never resume
+    (True: the dataset is planned afresh this run) or keep it."""
+    if p.state is not State.RESUME:
+        return False
+    why = run.resume_impossible(p.rel)
+    if why and run.abort_partial(p.rel):
+        # Only the partial state goes; the dataset is planned afresh.
+        run.log.warn(f"  {p.rel}: partial receive discarded: {why}")
+        return True
+    if not why:
+        out.error += "; partial receive kept, run backup again"
+        run.log.info(f"  {p.rel}: partial receive kept for the next run")
+    return False
 
 
 def execute(run: Run, cleanup: Cleanup, decide: Decide) -> Result:
@@ -1100,6 +1162,9 @@ def execute(run: Run, cleanup: Cleanup, decide: Decide) -> Result:
             return Result(aborted=True, error="sanoid is still running after the wait")
         if run.before_point is not None and not run.before_point():
             return Result(aborted=True, error="could not copy /boot before the point")
+        if lost := run.drive_lost():
+            # No point in origin for a drive that went away (M26R-25).
+            return Result(aborted=True, error=lost, lost=lost)
         # Tracked first: rpool's point is taken before bpool's, so a failure
         # or an interrupt between the two calls leaves rpool's to undo.
         cleanup.track_action(run.undo_point)

@@ -19325,6 +19325,163 @@ P1, P2, P3 = (
 )
 
 
+class _Latch:
+    """A drive watch's latched sentence, set by a test at a chosen moment."""
+
+    def __init__(self) -> None:
+        self.text = ""
+
+    def __call__(self) -> str:
+        return self.text
+
+    def set(self) -> None:
+        """The drive goes away now."""
+        self.text = "backup's drive went away at 00:10:00 (pool suspended)"
+
+
+def _lost_run(
+    fake: FakeZfs, latch: _Latch, point: str, decide: "engine.Decide | None" = None
+) -> "engine.Result":
+    with patch_sh(fake), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+        log = Log()
+        eng = engine.Run("backup", "111", log, point, sleep=lambda _s: None, lost=latch)
+        return engine.execute(eng, Cleanup(log), decide or (lambda _p, _r: True))
+
+
+def _sends(fake: FakeZfs) -> list[str]:
+    return [c for c in fake.calls if c.startswith("zfs send") and " | " in c]
+
+
+class TestEngineDriveLost:  # pylint: disable=missing-function-docstring
+    """A1E-8: a run whose drive went away (M26R-2, M26R-14, M26R-25)."""
+
+    def test_no_point_is_taken_for_a_drive_already_gone(self):
+        fake, latch = _fresh_fake(), _Latch()
+        latch.set()
+        res = _lost_run(fake, latch, P1)
+        assert res.aborted and res.lost == latch.text and res.error == latch.text
+        assert not _origin_points(fake)
+        assert not [c for c in fake.calls if c.startswith("zfs snapshot")], fake.calls
+
+    def test_nothing_is_asked_about_a_drive_gone_before_the_questions(self):
+        fake, latch = _fresh_fake(), _Latch()
+        asked: list[bool] = []
+        real_survey = engine.Run.survey
+
+        def fake_survey(self: engine.Run) -> list["repl.DatasetPlan"]:
+            plans = real_survey(self)
+            latch.set()
+            return plans
+
+        def decide(_p: object, _r: object) -> bool:
+            asked.append(True)
+            return True
+
+        with patch.object(engine.Run, "survey", fake_survey):
+            res = _lost_run(fake, latch, P1, decide)
+        assert res.aborted and res.lost and not asked
+        assert not _origin_points(fake)  # the point was taken, then undone
+
+    def test_a_drive_gone_during_the_questions_sends_nothing(self):
+        fake, latch = _fresh_fake(), _Latch()
+
+        def decide(_p: list["repl.DatasetPlan"], _r: engine.Run) -> bool:
+            latch.set()
+            return True
+
+        res = _lost_run(fake, latch, P1, decide)
+        assert res.aborted and res.lost and not _sends(fake)
+        assert not _origin_points(fake)
+
+    def test_nothing_more_starts_once_the_drive_is_gone(self):
+        fake, latch = _fresh_fake(), _Latch()
+        real = fake.mock_run_pipe
+
+        def pipe(*a: Any, **kw: Any) -> RunResult:
+            r = real(*a, **kw)
+            latch.set()  # the drive goes away during the first transfer
+            return r
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        res = _lost_run(fake, latch, P1)
+        assert len(_sends(fake)) == 1, _sends(fake)
+        assert res.lost == latch.text and res.unverified == latch.text and not res.ok
+        assert len(res.plans) > 1  # the plans the questions were asked on
+        assert len(res.outcomes) == 1
+
+    def test_a_failed_transfer_names_the_drive(self):
+        fake, latch = _fresh_fake(), _Latch()
+
+        def pipe(*_a: Any, **_kw: Any) -> RunResult:
+            latch.set()
+            return RunResult(1, "", "cannot receive: destination 'backup/rpool' does not exist", "")
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        res = _lost_run(fake, latch, P1)
+        out = next(iter(res.outcomes.values()))
+        assert out.error.startswith(latch.text + ": cannot receive"), out.error
+        assert res.lost and len(res.outcomes) == 1
+
+    @staticmethod
+    def _failing_survey(latch: _Latch, fail_at: int) -> Callable[[engine.Run], list[Any]]:
+        real_survey = engine.Run.survey
+        calls = {"n": 0}
+
+        def fake_survey(self: engine.Run) -> list[Any]:
+            calls["n"] += 1
+            if calls["n"] == fail_at:
+                latch.set()
+                raise survey_mod_error()
+            return real_survey(self)
+
+        return fake_survey
+
+    def test_a_failed_read_of_a_lost_drive_is_named(self):
+        # B8: with the strict reads, the round's survey fails (M26R-2).
+        for fail_at in (1, 2, 3):
+            fake, latch = _fresh_fake(), _Latch()
+            with patch.object(engine.Run, "survey", self._failing_survey(latch, fail_at)):
+                res = _lost_run(fake, latch, P1)
+            assert res.lost == latch.text, (fail_at, res)
+            if fail_at == 1:
+                assert res.aborted and res.error == latch.text
+            else:
+                assert res.unverified == latch.text and res.plans, res
+                assert not _sends(fake)
+
+    def test_the_next_run_plans_resume_or_incremental_only(self):
+        fake = _fresh_fake()
+        _ = _engine_run(fake, "backup", "111", P1)
+        _tick(fake, "2026-10-08_00:00:00_daily")
+        latch = _Latch()
+        real = fake.mock_run_pipe
+
+        def pipe(*a: Any, **kw: Any) -> RunResult:
+            r = real(*a, **kw)
+            latch.set()
+            return r
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        _ = _lost_run(fake, latch, P2)
+        fake.mock_run_pipe = real  # type: ignore[method-assign]
+        _tick(fake, "2026-10-09_00:00:00_daily")
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            states = {
+                p.state
+                for p in engine.plan(
+                    survey.read_origin(survey.source_pools(), strict=True),
+                    survey.read_dest("backup", strict=True),
+                    P3,
+                )
+            }
+        assert not states & {engine.State.ROLLBACK, engine.State.DIVERGED}, states
+
+
+def survey_mod_error() -> survey.ReadError:
+    """A strict read that failed, as zfs list's stderr makes it."""
+    return survey.ReadError("could not read: zfs list (cannot iterate filesystems)")
+
+
 class TestEngineExclusions:
     """D8 replicate=no (M5b-9, M5b-11): an excluded subtree is not expected."""
 
@@ -21930,6 +22087,37 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
 
 class TestIncompleteBanner:
     """M2F-11b: BACKUP INCOMPLETE says, per dataset, what the next run does."""
+
+    def test_a_lost_drive_reports_not_attempted_never_diverged(self) -> None:
+        """A1E-8: B8 called 18 datasets "needs a decision (diverged)"."""
+        lost = "backup's drive went away at 07:38:01 (pool suspended)"
+        plans = [repl.DatasetPlan(f"rpool/d{i}", repl.State.DIVERGED) for i in range(18)]
+        plans.append(repl.DatasetPlan("rpool/home", repl.State.INCREMENTAL))
+        err = f"{lost}: cannot receive: destination 'backup/rpool/home' does not exist"
+        res = engine.Result(
+            plans=plans,
+            outcomes={"rpool/home": engine.Outcome("rpool/home", False, err)},
+            unverified=lost,
+            lost=lost,
+        )
+        lines, missing = backup_mod._incomplete_lines(res, P1)  # pylint: disable=protected-access
+        text = "\n".join(lines)
+        assert missing == 19 and lines[0] == f"{lost}."
+        assert "needs a decision" not in text and "could not be checked" not in text
+        assert "not attempted (the drive went away): the next backup plans it again (18)" in text
+        out = StringIO()
+        with redirect_stdout(out):
+            _show_table(res, P1, Log())
+        table = out.getvalue()
+        assert table.count("not attempted (the drive went away)") == 18
+        assert "(diverged)" not in table and lost in table
+
+    def test_a_lost_drive_with_nothing_missing_prints_no_count(self) -> None:
+        """M26R-2: no count of 0 when the drive went away before any survey."""
+        lost = "backup's drive went away at 07:38:01"
+        res = engine.Result(plans=[], lost=lost, unverified=lost)
+        lines, missing = backup_mod._incomplete_lines(res, P1)  # pylint: disable=protected-access
+        assert missing == 0 and lines[0] == f"{lost}." and "0 dataset" not in "\n".join(lines)
 
     def test_each_dataset_says_what_the_next_backup_does(self) -> None:
         """Resume, decisions, a failure and a dataset not attempted each get
