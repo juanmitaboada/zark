@@ -116,10 +116,33 @@ end-to-end sequences.
 
     Before the transfer, **backup** checks the health of the source pool
     and of the drive. A pool that is DEGRADED, or ONLINE with non-zero
-    read, write or checksum error counters, is captured (see
-    **zark-forensics** under **FILES**), its counters and first permanent
-    errors are shown, and the run continues only on a yes (default no).
-    Any other state stops the run.
+    read, write or checksum error counters or a count of data errors above
+    zero (listed or not), is captured (see **zark-forensics** under
+    **FILES**), its counters, count and first permanent errors are shown,
+    and the run continues only on a yes (default no). Any other state
+    stops the run. The drive's count of data errors is read again before
+    its export and at its read-back: new errors, or a count the read-back
+    cannot read, end the run **BACKUP NOT VERIFIED**, naming **fullcheck**.
+
+    While the drive's pool is imported, **backup** watches it: its
+    */dev/disk/by-id* partition and its state in
+    */proc/spl/kstat/zfs/*\<pool\>*/state*, every 2 seconds, without
+    running **zpool**. When the drive goes away it says so in the
+    terminal, in zark.log and in a desktop notification, names the two
+    ways out (plug the drive back in and run **zpool clear** *pool* in
+    another terminal, or reboot with it unplugged) and starts no further
+    transfer; **progress.json** gains **drive_gone**. At the end of such a
+    run it waits for the drive: once the drive is back, the pool ONLINE or
+    DEGRADED and a **zpool sync -f** has returned 0, the run's last steps
+    run once and it ends **BACKUP NOT VERIFIED** (writes the drive had
+    accepted before it lost power may be lost; run **fullcheck**). Ctrl+C
+    in the wait ends the run and leaves the pool imported: **zpool clear**
+    if it is suspended, then **clean**. **backup** never unloads the keys
+    of, nor exports, a read-write pool that is gone, not ONLINE or
+    DEGRADED, or not probed since its drive went away: OpenZFS waits
+    holding a lock that only a reboot releases. Any command refuses a
+    pool left imported that is not ONLINE or DEGRADED before it runs
+    **zpool**.
 
     On a system whose */boot* is an ext4 partition, **backup** and
     **prepare** refuse to run without **rpool/ROOT/**\<be\>**/zark-boot**
@@ -1106,7 +1129,10 @@ end-to-end sequences.
     **nsenter** (only copies of its own tree: a dataset of the pool, or
     a mount with the same type and source as one the tree had here) and
     tries the export again; what still cannot be released is named with
-    the namespace's process, and it exits 1.
+    the namespace's process, and it exits 1. A read-write backup pool
+    whose state is not ONLINE or DEGRADED, or whose drive is gone, is not
+    touched at all (no unmount, no export, no **export -f**): **umount**
+    says it is left imported, with what to do, and exits 1.
 
     With the *target* **local** (aliases **system**, **rpool**) it exports
     the installed system's pools mounted by **mount local**, unmounting
@@ -1135,7 +1161,11 @@ end-to-end sequences.
     *\<pool\>-ks* on the keystore zvol of one of those pools, and a mount
     on top of */run/keystore/rpool* that comes from one; a **sanoid** timer left
     stopped by an interrupted **backup**; **zvol_inhibit_dev=1** left by
-    **fix-rpool-mountpoint**. It also names the imported pools it leaves
+    **fix-rpool-mountpoint**. A pool left imported by a run whose drive went
+    away is exported only when its state is ONLINE or DEGRADED, its
+    devices are there and, imported read-write, a **zpool sync -f**
+    returned 0; otherwise **clean** says what to do and leaves it
+    imported. It also names the imported pools it leaves
     alone (a pool without an alternate root, such as the running system's
     **rpool** and **bpool** or one imported by hand, is never touched).
     After a yes (default no) it unmounts, closes and exports, without

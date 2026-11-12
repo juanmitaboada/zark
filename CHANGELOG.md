@@ -5,6 +5,95 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### M26 - a drive that goes away during a backup (2.3.1-rc1)
+
+Fixes of what the GNOME app's first run on eli found (A1E-4, A1E-7 to
+A1E-10). Nothing on a drive or in `/etc/zark` changes; zark 2.3.0 reads
+everything 2.3.1 writes.
+
+#### Fixed
+
+- **A forensic capture no longer kills a backup** (A1E-10, M26-1 1a):
+  command output that is not valid UTF-8 (a pool's history can hold such
+  bytes) is read with U+FFFD in place of each bad byte instead of raising
+  in the middle of a run. A capture never stops a run: a section that
+  fails keeps its error as its body, and a capture that fails as a whole
+  is one warning. A passphrase the current locale cannot encode is named
+  as such (`the passphrase holds a character the current locale (...)
+  cannot encode`), not as a wrong passphrase, and is not counted as an
+  attempt. A value zark read with an undecodable byte and writes back to a
+  drive (`org.zark:canmount`, `org.zark:mountpoint`, the exclusion and
+  pool records) is a warning naming the dataset and property (M26R-15).
+- **A backup whose drive goes away no longer hangs** (A1E-7, M26-3 3b,
+  M26-4 4b, M26-5 5a, M26-6 6a, M26-10 10a, M26R-28 28a): `backup`
+  opens the drive's keystore read-only and watches the drive while its
+  pool is imported (its `/dev/disk/by-id` partition and its kstat state
+  file, every 2 s, with no `zpool` command). When the drive goes away it
+  says so (terminal, zark.log, a desktop notification) with the two ways
+  out: plug it back in and run `sudo zpool clear <pool>` in another
+  terminal, or reboot with it unplugged. `progress.json` gains the
+  optional `drive_gone` object, shown by `zark monitor`. The run takes no
+  point and asks nothing once the drive is gone, starts no further
+  transfer, and at its end waits for the drive: once the drive is back,
+  the pool ONLINE or DEGRADED and a `zpool sync -f` has returned 0, the
+  last steps run once and the run ends BACKUP NOT VERIFIED, never
+  COMPLETED (writes the drive had accepted before it lost power may be
+  lost: `sudo zark fullcheck`). Ctrl+C in the wait leaves
+  the pool imported. Cleanup, `zark clean`, `zark umount`, `prepare` and
+  `fullcheck` never unload the keys of, or export, a read-write backup
+  pool that is gone, not ONLINE or DEGRADED, or not probed since its drive
+  went away; they say it is left imported and what to do. Every command
+  refuses a pool left imported that is not ONLINE or DEGRADED before it
+  runs `zpool`. `zark clean` probes a read-write pool (`zpool sync -f`)
+  before it exports it.
+- **Datasets are no longer called diverged after the drive went away**
+  (A1E-8, M26-7 7a): a strict listing fails on anything written to
+  stderr, not only on its exit status (`zfs list -r` exits 0 after a
+  child it could not read), and the drive's root datasets are read with
+  one strict listing. A run whose drive went away reports every dataset
+  it did not reach as `not attempted (the drive went away)`; the next
+  backup plans it again.
+- **The read-back no longer says ONLINE over data errors** (A1E-9, M26-8
+  8a revised): one measure, `zpool status -p` (read with no key loaded),
+  gives the error counters and the count of data errors at step 3, before
+  the export and at the read-back. Step 3 asks about a count above zero
+  even when the list waits for the keys. New errors during the run, or a
+  count the read-back cannot read, end BACKUP NOT VERIFIED with the three
+  counts; errors accepted at step 3 with nothing new keep the outcome,
+  with a warning. `prepare` and `registry verify` call any count or
+  counter not verified; `fullcheck`'s read-back line shows the count.
+- **`zark monitor` no longer says "connected" after an eject** (A1E-4,
+  M26-9 9a): a drive is connected when `/dev/disk/by-id/<drive_id>-part1`
+  exists; the disk's own link stays after the desktop ejects the drive.
+  `docs/STATUS-FILES.md` and both schemas say so.
+
+#### Known limitations
+
+- A pool whose drive never returns stays imported and suspended until a
+  reboot: OpenZFS cannot export a suspended pool on any series. zark
+  says so.
+- A drive unplugged during an export itself (after a probe passed, with no
+  loss seen, or after `umount`'s or `prepare`'s and `fullcheck`'s checks
+  passed) makes the export wait holding the pool namespace lock: `zpool
+  clear` and every pool command wait with it, and only a reboot ends it.
+  `zpool export -f` and `-F` wait the same way.
+- On noble's 2.2.2 module, `zpool sync -f` run on a pool that is already
+  suspended did not return and left `zpool clear` waiting behind it until
+  a reboot (seen in a virtual machine). zark never runs it on a pool that
+  is not ONLINE or DEGRADED; the same command typed by hand meets it.
+- `purge`'s destroy and `recover`'s exports of a read-write backup pool
+  are not covered yet.
+- A read-only pool is exported without the probe or the device checks (its
+  export does not wait for a transaction group); one already suspended is
+  left imported.
+- A pool resumed by `zpool clear` after its drive lost power may have lost
+  writes the drive had acknowledged: zark marks that run NOT VERIFIED and
+  names `zark fullcheck`.
+- The drive-loss path is validated on hardware on Ubuntu 26.10 (OpenZFS
+  2.4.4) only; this release has no test bench for the other series.
+
 ## [2.3.0] - 2026-11-11
 
 ### For zark 2.2 users

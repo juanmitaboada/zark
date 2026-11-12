@@ -1,3 +1,25 @@
+zark (2.3.1~rc1-1) UNRELEASED; urgency=medium
+
+  * Milestone M26 of zark 2.3.1 (a drive that goes away during a backup).
+    Not for release: nothing is published until the final 2.3.1.
+  * A forensic capture no longer kills a backup: command output that is
+    not UTF-8 is read with replacement characters, and a capture never
+    stops a run. A passphrase the locale cannot encode is named as such.
+  * backup opens the drive's keystore read-only and watches the drive
+    while its pool is imported: when it goes away the run says how to
+    resume it (zpool clear) or leave it (reboot), starts no transfer,
+    waits for the drive at its end and is never marked complete;
+    progress.json gains drive_gone. No command unloads the keys of or
+    exports a read-write backup pool that is gone, unhealthy or not
+    probed with zpool sync -f; it is left imported for zark clean.
+  * Strict listings fail on stderr: no dataset is called diverged after
+    the drive went away.
+  * One measure of data errors (zpool status -p) at step 3, before the
+    export and at the read-back: new errors are not verified.
+  * zark monitor: a drive is connected when its -part1 link exists.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Fri, 13 Nov 2026 00:19:53 +0100
+
 zark (2.3.0-1) stable; urgency=medium
 
   * zark 2.3. Kernel updates with a backup drive plugged in:

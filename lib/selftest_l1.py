@@ -93,7 +93,7 @@ def _origin(b: Bench, cid: str, kib: int = 256) -> str:
 
 
 def _send_full(b: Bench, src: str, dst: str) -> None:
-    """The engine's NEW transfer (lib/engine.py:444-465)."""
+    """The engine's NEW transfer (lib/engine.py:452-473)."""
     _ = b.pipe_ok(f"zfs send -w {_q(src)}", f"zfs receive -s -u {_recv_props()} {_q(dst)}")
 
 
@@ -119,7 +119,7 @@ def _load_key(b: Bench, ds: str) -> None:
     1,
     "create and import with -R leave zpool.cache alone",
     depends=(
-        "I-G: ZFS.import_backup_pool (lib/zfs.py:456)",
+        "I-G: ZFS.import_backup_pool (lib/zfs.py:496)",
         "prepare's zpool create -R",
         "health's test pool",
     ),
@@ -709,7 +709,7 @@ def _zfs_userland(b: Bench) -> str:
     1,
     1,
     "one zfs snapshot call is one txg, and one pool",
-    depends=("I-C: Run.take_point (lib/engine.py:187)",),
+    depends=("I-C: Run.take_point (lib/engine.py:195)",),
     fake=True,
 )
 def snp_01(b: Bench) -> None:
@@ -976,7 +976,7 @@ def snd_01(b: Bench) -> None:
     1,
     1,
     "receive -u -o/-x: local properties, nothing mounted",
-    depends=("Run._recv (lib/engine.py:446)", "I-G", "the at-rest protection"),
+    depends=("Run._recv (lib/engine.py:454)", "I-G", "the at-rest protection"),
     fake=True,
 )
 def snd_02(b: Bench) -> None:
@@ -1018,7 +1018,7 @@ def snd_02(b: Bench) -> None:
     1,
     1,
     "-I carries intermediates; bookmarks as incremental sources",
-    depends=("VIA_BOOKMARK's two steps (lib/engine.py:246-261)", "anchors (I-B, D16, F5)"),
+    depends=("VIA_BOOKMARK's two steps (lib/engine.py:254-269)", "anchors (I-B, D16, F5)"),
     fake=True,
 )
 def snd_03(b: Bench) -> None:
@@ -1104,7 +1104,7 @@ def snd_04(b: Bench) -> None:
     1,
     1,
     "a cut receive -s resumes with send -t",
-    depends=("RESUME (lib/engine.py:238-239, :448-449)",),
+    depends=("RESUME (lib/engine.py:246-247, :448-449)",),
     fake=True,
 )
 def snd_05(b: Bench) -> None:
@@ -1140,7 +1140,7 @@ def snd_05(b: Bench) -> None:
     1,
     1,
     "a stale token is refused by name; receive -A drops only the partial state",
-    depends=("M2R-10's discard (lib/engine.py:497-502)", "abort_partial (lib/engine.py:523)"),
+    depends=("M2R-10's discard (lib/engine.py:505-510)", "abort_partial (lib/engine.py:531)"),
     fake=True,
 )
 def snd_06(b: Bench) -> None:
@@ -1173,7 +1173,7 @@ def snd_06(b: Bench) -> None:
     1,
     1,
     "a resume onto a written head fails at its end; abort, roll back, resend",
-    depends=("M2V-1's DISCARD (Run.discard_changes, lib/engine.py:295)",),
+    depends=("M2V-1's DISCARD (Run.discard_changes, lib/engine.py:303)",),
     fake=True,
 )
 def snd_07(b: Bench) -> None:
@@ -1208,7 +1208,7 @@ def snd_07(b: Bench) -> None:
     1,
     1,
     "rollback: to the newest without -r, older only with -r",
-    depends=("DISCARD", "ROLLBACK's roll back option (lib/engine.py:289-293)"),
+    depends=("DISCARD", "ROLLBACK's roll back option (lib/engine.py:297-301)"),
     fake=True,
 )
 def snd_08(b: Bench) -> None:
@@ -1243,7 +1243,7 @@ def snd_08(b: Bench) -> None:
     1,
     1,
     "send -nvP sizes; a clone estimated from its origin with -i",
-    depends=("Run.estimate (lib/engine.py:263) and its -i for a clone (M3 7a)", "the space check"),
+    depends=("Run.estimate (lib/engine.py:271) and its -i for a clone (M3 7a)", "the space check"),
     fake=True,
 )
 def snd_09(b: Bench) -> None:
@@ -1276,7 +1276,7 @@ def _size(b: Bench, cmd: str) -> int:
     1,
     1,
     "a clone sent from its origin is attached to that origin by GUID",
-    depends=("O3 (lib/engine.py:240-243, :451-453)",),
+    depends=("O3 (lib/engine.py:248-251, :451-453)",),
     fake=True,
 )
 def snd_10(b: Bench) -> None:
@@ -1829,7 +1829,7 @@ def _listing(b: Bench) -> dict[str, Dest]:
     1,
     1,
     "branch a raw lineage with its key unloaded",
-    depends=("ROLLBACK's keep (Run.branch, lib/engine.py:326; M4b-5, M4bF-9)",),
+    depends=("ROLLBACK's keep (Run.branch, lib/engine.py:334; M4b-5, M4bF-9)",),
     fake=True,
 )
 def cln_01(b: Bench) -> None:
@@ -1896,7 +1896,7 @@ def key_01(b: Bench) -> None:
     1,
     1,
     "the keystore zvol: zvol_id, LUKS read-only, ext4 ro,noload",
-    depends=("Keystore.find_zvol_for_pool (lib/keystore.py:113, H11)", "its read-only open"),
+    depends=("Keystore.find_zvol_for_pool (lib/keystore.py:118, H11)", "its read-only open"),
 )
 def key_02(b: Bench) -> None:
     """A zvol: ``zvol_id /dev/zdN`` prints its dataset name and udev makes
@@ -2038,7 +2038,7 @@ def pool_16(b: Bench) -> None:
     of that name the device holds; ``import_backup_pool(..., guid=)`` reads
     its GUID (``zpool get guid``) and exports it when it is not the expected
     one, so a pool of that name on another disk is neither read nor written.
-    With the right GUID it stays imported. lib/zfs.py:456-537; OpenZFS
+    With the right GUID it stays imported. lib/zfs.py:496-568; OpenZFS
     cmd/zpool/zpool_main.c:4416-4423 (the import with ``-R``)."""
     c = b.make_pool("c")
     try:
