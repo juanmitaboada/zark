@@ -21794,6 +21794,22 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
                 rc = int(e.code or 0)
         return cfg, rc
 
+    def test_the_drives_keystore_is_opened_read_only(self) -> None:
+        """A1E-7, M26-6 6a: a read-write keystore's umount waited in state D
+        for a drive that was gone."""
+        opened = MagicMock(return_value=True)
+        out = StringIO()
+        _, rc = self._run(
+            _fresh_fake(),
+            patch.object(ZFS, "datasets_needing_key", return_value=["backup/rpool/ROOT"]),
+            patch.object(backup_mod, "open_keystore", opened),
+            patch.object(Keystore, "load_pool_keys", return_value=1),
+            redirect_stdout(out),
+        )
+        assert rc == 0, out.getvalue()
+        opened.assert_called_once()
+        assert opened.call_args.kwargs.get("readonly") is True, opened.call_args
+
     def test_an_ext4_run_refreshes_the_copy_before_the_point(self) -> None:
         """M13R-4 (M37, M38, M44): the engine gets the layout and the
         BootRefresh's own refresh, which takes the manifest before the copy."""

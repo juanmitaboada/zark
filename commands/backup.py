@@ -1343,7 +1343,10 @@ def run(
         if not log.ask("Key already loaded. Proceed with backup?", default=True):
             log.fatal("Aborted by user")
     else:
-        if not open_keystore(ks, pool_name, log):
+        # Read-only: backup needs system.key and nothing else, and a keystore
+        # mounted read-write writes to the drive's zvol at its umount, which
+        # waits for ever once the drive is gone (A1E-7, M26-6 6a).
+        if not open_keystore(ks, pool_name, log, readonly=True):
             log.fatal(
                 "Cannot open keystore",
                 causes=["Wrong passphrase (3 attempts)", "Keystore zvol not found"],
