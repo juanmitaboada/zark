@@ -99,9 +99,10 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         log: Log,
         *,
         notify: Callable[[str, str], None] | None = None,
-        kstat_dir: Path = pool_state.KSTAT_DIR,
+        kstat_dir: Path | None = None,
         clock: Callable[[], float] = time.time,
         runner: Callable[[list[str], float], pool_state.Bounded] = pool_state.run_bounded,
+        prober: Callable[[str], pool_state.Bounded] = pool_state.probe,
     ) -> None:
         self.pool = pool
         self.device = device
@@ -110,6 +111,12 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         self._kstat_dir = kstat_dir
         self._clock = clock
         self._runner = runner
+        self._prober = prober
+        # The probe (M26R-19, M26R-27): when the latch was set or the pool
+        # last entered SUSPENDED, and when a zpool sync -f last returned 0.
+        self._changed_at: float | None = None
+        self._probe_ok_at: float | None = None
+        self._probe_child: pool_state.Child | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -169,6 +176,59 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         tail = " (pool suspended)" if suspended else ""
         return f"{self.pool}'s drive went away at {local_time(latch.lost_at)}{tail}"
 
+    # ── the probe (M26R-19, M26R-26, M26R-27) ───────────────────────────
+
+    def probe(self) -> bool:
+        """Run (or poll) ``zpool sync -f`` on the pool, from the command's
+        own flow; True once one returned 0 after the latch and after the
+        pool's last entry into SUSPENDED. A probe still running is kept and
+        polled at the next call, never waited for."""
+        child = self._probe_child
+        if child is not None:
+            if child.poll() is None:
+                return self.probed()
+            self._probe_child = None
+            if child.returncode == 0:
+                self._probe_passed()
+            return self.probed()
+        kdir = self._kstat_dir if self._kstat_dir is not None else pool_state.KSTAT_DIR
+        if kdir.is_dir() and pool_state.state(self.pool, kdir) not in pool_state.HEALTHY:
+            # Never on a pool that is not ONLINE or DEGRADED: on noble's 2.2.2
+            # module a zpool sync -f on a suspended pool did not return and
+            # left zpool clear waiting behind it (seen in a virtual machine).
+            return self.probed()
+        got = self._prober(self.pool)
+        if got.rc is None:
+            self._probe_child = got.child
+            self.log.warn(
+                f"zpool sync -f {self.pool} has not returned: its drive may be gone again"
+            )
+        elif got.ok:
+            self._probe_passed()
+        else:
+            self.log.dbg(f"zpool sync -f {self.pool}: {got.stderr.strip() or got.rc}")
+        return self.probed()
+
+    def _probe_passed(self) -> None:
+        with self._lock:
+            self._probe_ok_at = self._clock()
+
+    def probed(self) -> bool:
+        """A probe returned 0 since the latch's last change."""
+        with self._lock:
+            return (
+                self._probe_ok_at is not None
+                and self._changed_at is not None
+                and self._probe_ok_at > self._changed_at
+            )
+
+    def why_not_export(self) -> str:
+        """Cleanup's rule 3: why the pool stays imported, "" when it may be
+        exported (never latched, or probed since)."""
+        if self.latched is None or self.probed():
+            return ""
+        return "its drive went away during the run and no zpool sync -f has passed since"
+
     # ── one look ─────────────────────────────────────────────────────────
 
     def tick(self) -> None:
@@ -184,6 +244,8 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             self._prev_state = state
             if state == "SUSPENDED":
                 self._suspended_now = True
+            if latched_now or (self._latch is not None and entered):
+                self._changed_at = now
             latch = self._latch
         if latched_now and latch is not None:
             self._announce(latch)

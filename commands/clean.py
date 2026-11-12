@@ -41,8 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from commands.umount import Mount, _unmount_tree, release_elsewhere
-from lib import engine, sh
-from lib.keystore import KEYSTORE_MOUNT
+from lib import engine, pool_state, sh
+from lib.keystore import KEYSTORE_MOUNT, Keystore
 from lib.log import Log
 from lib.zfs import BACKUP_ALTROOT_BASE
 
@@ -220,6 +220,31 @@ def _export(pool: str, log: Log) -> bool:
     return False
 
 
+def _held_back(pool: str) -> str:
+    """Why ``pool`` must not be touched now, "" when it may be exported
+    (A1E-7, M26R-19, M26R-26): its state ONLINE or DEGRADED and its devices
+    there, and for a read-write pool a probe (``zpool sync -f``, run here,
+    in the command's flow) that returned 0. A read-only pool needs no probe:
+    its export does not wait for a transaction group."""
+    why = pool_state.export_refusal(pool)
+    if why or not pool_state.imported(pool):
+        return why
+    info = pool_state.kept(pool) or pool_state.read_kept(pool)
+    if info is not None and info.readonly:
+        return ""
+    got = pool_state.probe(pool)
+    if got.rc is None:
+        return "it suspended while zark checked it"
+    if not got.ok:
+        return f"zpool sync -f {pool} failed: {got.stderr.strip() or got.rc}"
+    return ""
+
+
+def _belongs(path: str, pool: str) -> bool:
+    """A mount or altroot path of ``pool``'s tree (zark names them after the pool)."""
+    return pool in Path(path).parts
+
+
 def _export_pools(pools: list[str], trees: dict[str, frozenset[Mount]], log: Log) -> None:
     """Export each pool; when one is busy, release the copies other mount
     namespaces keep below the unmounted trees (W-1; ``trees`` maps each top
@@ -230,6 +255,33 @@ def _export_pools(pools: list[str], trees: dict[str, frozenset[Mount]], log: Log
             _ = release_elsewhere(top, log, pools, had)
         for pool in busy:
             _ = _export(pool, log)
+
+
+def _release(inv: Inventory, log: Log) -> tuple[dict[str, str], dict[str, frozenset[Mount]]]:
+    """Unmount zark's trees and close its keystores, but nothing of a pool
+    that must stay imported (returned with why); the trees' mounts by top."""
+    # A pool left by a run whose drive went away: nothing of it is touched
+    # until it is ONLINE and has passed the probe (A1E-7, plan 4.8).
+    held = {pool: why for pool in inv.pools if (why := _held_back(pool))}
+    for pool, why in held.items():
+        for line in pool_state.left_imported_lines(pool, why):
+            log.error(line)
+    trees: dict[str, frozenset[Mount]] = {}
+    for top in _tops(inv.mounts):
+        if any(_belongs(top, pool) for pool in held):
+            continue
+        log.info(f"Unmounting {top}...")
+        _, trees[top] = _unmount_tree(top, inv.pools)
+    if inv.keystore_mounted and held:
+        # It may be a held pool's keystore: an umount that never waits.
+        _ = pool_state.run_bounded(["umount", KEYSTORE_MOUNT], pool_state.BOUNDED_READ_S)
+    elif inv.keystore_mounted:
+        _ = sh.run(f"umount {KEYSTORE_MOUNT}", log=log)
+    for name in inv.keystores:
+        if any(name == Keystore.mapper_name_for(pool) for pool in held):
+            continue
+        _ = sh.run(f"cryptsetup close {name}", log=log)
+    return held, trees
 
 
 def run(args: list[str]) -> None:
@@ -250,15 +302,8 @@ def run(args: list[str]) -> None:
         log.info("Aborted: nothing changed")
         return
 
-    trees: dict[str, frozenset[Mount]] = {}
-    for top in _tops(inv.mounts):
-        log.info(f"Unmounting {top}...")
-        _, trees[top] = _unmount_tree(top, inv.pools)
-    if inv.keystore_mounted:
-        _ = sh.run(f"umount {KEYSTORE_MOUNT}", log=log)
-    for name in inv.keystores:
-        _ = sh.run(f"cryptsetup close {name}", log=log)
-    _export_pools(inv.pools, trees, log)
+    held, trees = _release(inv, log)
+    _export_pools([p for p in inv.pools if p not in held], trees, log)
     if inv.zvol_inhibited and not inventory().pools:
         try:
             _ = Path(ZVOL_INHIBIT).write_text("0\n", encoding="ascii")

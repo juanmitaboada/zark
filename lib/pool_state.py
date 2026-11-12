@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
+from lib.config import zark_command
+
 KSTAT_DIR = Path("/proc/spl/kstat/zfs")
 HEALTHY = frozenset({"ONLINE", "DEGRADED"})
 # States that say at once that the drive is not usable (spa_state_to_name).
@@ -52,8 +54,13 @@ MISSING = "(missing)"
 UNREADABLE = "(unreadable)"
 
 
-def state(pool: str, kstat_dir: Path = KSTAT_DIR) -> str:
+def _kstat(kstat_dir: Path | None) -> Path:
+    return kstat_dir if kstat_dir is not None else KSTAT_DIR
+
+
+def state(pool: str, kstat_dir: Path | None = None) -> str:
     """The pool's state word, :data:`MISSING` or :data:`UNREADABLE`."""
+    kstat_dir = _kstat(kstat_dir)
     if not pool or "/" in pool or pool in (".", ".."):
         return UNREADABLE
     try:
@@ -64,8 +71,9 @@ def state(pool: str, kstat_dir: Path = KSTAT_DIR) -> str:
         return UNREADABLE
 
 
-def imported(pool: str, kstat_dir: Path = KSTAT_DIR) -> bool:
-    """Whether the module holds ``pool`` (its kstat directory exists)."""
+def imported(pool: str, kstat_dir: Path | None = None) -> bool:
+    """Whether the module holds ``pool`` (its kstat directory exists); with
+    no kstat directory at all (no module loaded) nothing is."""
     return state(pool, kstat_dir) != MISSING
 
 
@@ -141,3 +149,114 @@ def run_bounded(
             return Bounded(None, "", "", child)
         sleep(0.05)
     return Bounded(rc, child.stdout, child.stderr, child)
+
+
+# ── what an export needs (A1E-7, M26R-19, M26R-26, M26R-28) ──────────────
+#
+# zpool export of a read-write pool waits for a transaction group with the
+# pool namespace lock held, before any branch that looks at -f or -F
+# (spa_export_common, OpenZFS 2.4.1 spa.c:7703-7705), and zfs unload-key
+# waits for one too (dsl_crypt.c:936-937). On a pool whose drive is gone but
+# which has not suspended yet, the forced write fails, the pool suspends
+# under them and they wait: zpool clear and every pool command by name wait
+# behind the export, and only a reboot ends it. A read-only pool has no sync
+# thread: neither waits (spa_sync_on is set by a writeable import only).
+#
+# So an export of a read-write backup pool needs rules 1 and 2: its state is
+# ONLINE or DEGRADED, and every leaf device path it was imported from
+# exists. A run whose drive was seen gone needs rule 3 too: a probe, zpool
+# sync -f, that returned 0. -f dirties the vdev configuration, so the
+# labels and uberblocks are written (zfs_ioc_pool_sync; without it a pool
+# with nothing dirty writes nothing, vdev_label.c vdev_config_sync); it is
+# refused at once on a suspended pool and otherwise waits without the
+# namespace lock, so a pool it makes suspend leaves the clear free.
+
+BOUNDED_READ_S = 10.0
+PROBE_DEADLINE_S = 30.0
+
+
+@dataclass(frozen=True)
+class Kept:
+    """How zark imported a pool: its mode and its leaf device paths."""
+
+    readonly: bool
+    paths: tuple[str, ...]
+
+
+_KEPT: dict[str, Kept] = {}
+
+
+def remember(pool: str, readonly: bool, paths: list[str]) -> None:
+    """Keep ``pool``'s mode and leaf paths, read right after its import."""
+    _KEPT[pool] = Kept(readonly, tuple(paths))
+
+
+def kept(pool: str) -> Kept | None:
+    """What :func:`remember` kept for ``pool``, None when zark did not import it."""
+    return _KEPT.get(pool)
+
+
+def leaf_paths(text: str) -> list[str]:
+    """The device paths of ``zpool list -vHP``'s vdev lines."""
+    out: list[str] = []
+    for line in text.splitlines()[1:]:
+        path = line.strip().split("\t")[0]
+        if path.startswith("/dev/"):
+            out.append(path)
+    return out
+
+
+def read_kept(pool: str) -> Kept | None:
+    """Mode and paths of a pool zark did not import in this process, through
+    the bounded runner; None when either cannot be read in time."""
+    mode = run_bounded(["zpool", "get", "-H", "-o", "value", "readonly", pool], BOUNDED_READ_S)
+    if not mode.ok or mode.stdout.strip() not in ("on", "off"):
+        return None
+    listing = run_bounded(["zpool", "list", "-vHP", pool], BOUNDED_READ_S)
+    paths = leaf_paths(listing.stdout) if listing.ok else []
+    return Kept(mode.stdout.strip() == "on", tuple(paths)) if paths else None
+
+
+def export_refusal(pool: str, kstat_dir: Path | None = None, *, read: bool = True) -> str:
+    """Why ``pool`` must not be exported now (rules 1 and 2), "" when it may.
+
+    A read-only pool is refused only when suspended (both calls would be
+    refused anyway). ``read``: a pool zark did not import in this process
+    has its mode and paths read through the bounded runner; when they cannot
+    be read it is treated as read-write with unknown devices, and refused.
+    """
+    if not _kstat(kstat_dir).is_dir():
+        # No ZFS module here to hold the pool (a unit test, a host without
+        # zfs loaded): nothing these rules could judge.
+        return ""
+    word = state(pool, kstat_dir)
+    info = kept(pool) or (read_kept(pool) if read else None)
+    if info is not None and info.readonly:
+        return "its pool is suspended" if word == "SUSPENDED" else ""
+    if word not in HEALTHY:
+        what = "cannot be read" if word in (MISSING, UNREADABLE) else f"is {word}"
+        return f"its state {what}"
+    if info is None:
+        return "its devices could not be read"
+    gone = [p for p in info.paths if not os.path.lexists(p)]
+    if gone:
+        return f"its device {gone[0]} is gone"
+    return ""
+
+
+def probe(pool: str, deadline_s: float = PROBE_DEADLINE_S) -> Bounded:
+    """``zpool sync -f <pool>``: 0 means labels and uberblocks were written
+    through the vdev as it is. Read-write pools only (refused read-only)."""
+    return run_bounded(["zpool", "sync", "-f", pool], deadline_s)
+
+
+def left_imported_lines(pool: str, why: str) -> list[str]:
+    """What the user does with a pool zark leaves imported (plan 4.8)."""
+    return [
+        f"{pool} is left imported: {why}.",
+        f"Plug its drive back in; if `zpool status {pool}` says it is suspended:",
+        f"  sudo zpool clear {pool}",
+        "then, to close its keystore and export it:",
+        f"  {zark_command()} clean",
+        "Or reboot with the drive unplugged: nothing imports it at boot.",
+    ]

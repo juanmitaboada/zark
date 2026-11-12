@@ -27,6 +27,8 @@ import re
 from pathlib import Path
 from typing import Protocol
 
+from lib import pool_state
+from lib.config import zark_command
 from lib.log import Log
 from lib.sh import INPUT_NOT_ENCODABLE, INPUT_NOT_ENCODABLE_TEXT, run
 
@@ -78,6 +80,7 @@ class Keystore:
         self._mapper_name: str | None = None
         self._mounted = False
         self.bad_passphrase = False
+        self.pool = ""  # the pool whose keystore is open (Cleanup's rules, A1E-7)
 
     @staticmethod
     def mapper_name_for(pool: str) -> str:
@@ -106,6 +109,7 @@ class Keystore:
         held, which hangs a subsequent ``zpool export`` in ``taskq_wait``).
         """
         self._mapper_name = Keystore.mapper_name_for(pool)
+        self.pool = pool
         # If the device-mapper node exists, the keystore is open from a prior
         # invocation; reflect that so umount() actually tears it down.
         if Path(f"/dev/mapper/{self._mapper_name}").exists():
@@ -159,6 +163,7 @@ class Keystore:
             return False
 
         self._mapper_name = Keystore.mapper_name_for(pool)
+        self.pool = pool
         mnt = Path(KEYSTORE_MOUNT)
         mnt.mkdir(parents=True, exist_ok=True)
 
@@ -213,6 +218,25 @@ class Keystore:
             run(f"cryptsetup close {self._mapper_name}")
         self._mounted = False
         self.log.dbg("Keystore unmounted")
+
+    def umount_only(self) -> None:
+        """Unmount the keystore and leave its mapping open: the pool's drive
+        is gone, and ``cryptsetup close`` reads the LUKS header from the zvol
+        (cryptsetup's _init_by_name_crypt), a read that waits for the drive.
+        The ext4 is read-only for backup, so its umount reads and writes
+        nothing; it still goes through the bounded runner. ``zark clean``
+        closes the mapping once the pool is resumed (A1E-7, M26R-4)."""
+        if not self._mounted:
+            return
+        mnt = Path(KEYSTORE_MOUNT)
+        if mnt.is_mount():
+            got = pool_state.run_bounded(["umount", str(mnt)], pool_state.BOUNDED_READ_S)
+            if not got.ok:
+                self.log.warn(f"Could not unmount {mnt} (left for {zark_command()} clean)")
+        self._mounted = False
+        self.log.warn(
+            f"Keystore mapping {self._mapper_name} left open: {zark_command()} clean closes it"
+        )
 
     @property
     def is_mounted(self) -> bool:

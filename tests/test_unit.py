@@ -1532,6 +1532,308 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
             assert not mock.calls and not b.runs
 
 
+class _Kstat:
+    """A temporary /proc/spl/kstat/zfs for lib.pool_state, and a clean slate
+    of the pools it keeps."""
+
+    def __init__(self, td: str, **states: str) -> None:
+        self.dir = Path(td) / "kstat"
+        self.dir.mkdir()
+        for pool, word in states.items():
+            self.set(pool, word)
+        self.stack = ExitStack()
+        _ = self.stack.enter_context(patch.object(pool_state, "KSTAT_DIR", self.dir))
+        _ = self.stack.enter_context(patch.dict(pool_state._KEPT, clear=True))  # pylint: disable=protected-access
+
+    def set(self, pool: str, word: str) -> None:
+        """Write ``pool``'s kstat state."""
+        (self.dir / pool).mkdir(exist_ok=True)
+        _ = (self.dir / pool / "state").write_text(word + "\n", encoding="ascii")
+
+    def __enter__(self) -> "_Kstat":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.stack.close()
+
+
+class TestExportRules:  # pylint: disable=missing-function-docstring
+    """A1E-7, M26R-19, M26R-26, M26R-28: when a backup pool may be exported."""
+
+    def test_a_read_write_pool_needs_its_state_and_its_devices(self):
+        with tempfile.TemporaryDirectory() as td:
+            dev = Path(td) / "part1"
+            dev.touch()
+            with _Kstat(td, backup="ONLINE") as k:
+                pool_state.remember("backup", False, [str(dev)])
+                assert pool_state.export_refusal("backup") == ""
+                dev.unlink()
+                assert "is gone" in pool_state.export_refusal("backup")
+                dev.touch()
+                for word in ("SUSPENDED", "REMOVED", "UNAVAIL", "FAULTED", "TRANSITIONING"):
+                    k.set("backup", word)
+                    assert word in pool_state.export_refusal("backup"), word
+                k.set("backup", "")
+                assert "cannot be read" in pool_state.export_refusal("backup")
+                k.set("backup", "DEGRADED")
+                assert pool_state.export_refusal("backup") == ""
+
+    def test_a_read_only_pool_is_refused_only_when_suspended(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="REMOVED") as k:
+            pool_state.remember("backup", True, ["/nonexistent/part1"])
+            assert pool_state.export_refusal("backup") == ""
+            k.set("backup", "SUSPENDED")
+            assert pool_state.export_refusal("backup") == "its pool is suspended"
+
+    def test_a_pool_whose_mode_and_devices_cannot_be_read_is_refused(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE"):
+            with patch.object(pool_state, "read_kept", return_value=None):
+                assert pool_state.export_refusal("backup") == "its devices could not be read"
+
+    def test_no_kstat_directory_means_nothing_to_judge(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(pool_state, "KSTAT_DIR", Path(td) / "none"):
+                assert pool_state.export_refusal("backup") == ""
+
+    def test_mode_and_paths_are_read_bounded_for_a_pool_zark_did_not_import(self):
+        seen: list[list[str]] = []
+
+        def runner(argv: list[str], _d: float) -> pool_state.Bounded:
+            seen.append(argv)
+            if argv[1] == "get":
+                return pool_state.Bounded(0, "off\n")
+            return pool_state.Bounded(0, "backup\t1\n\t/dev/disk/by-id/ata-X-part1\t1\n")
+
+        with patch.object(pool_state, "run_bounded", side_effect=runner):
+            got = pool_state.read_kept("backup")
+        assert got == pool_state.Kept(False, ("/dev/disk/by-id/ata-X-part1",))
+        assert seen[0][:2] == ["zpool", "get"] and seen[1][:2] == ["zpool", "list"]
+
+    def test_the_probe_is_zpool_sync_f(self):
+        # M26R-27: without -f a pool with nothing dirty writes nothing.
+        with patch.object(pool_state, "run_bounded", return_value=pool_state.Bounded(0)) as rb:
+            assert pool_state.probe("backup").ok
+        assert rb.call_args.args[0] == ["zpool", "sync", "-f", "backup"]
+
+    def test_cleanup_leaves_a_gone_pool_imported_and_its_mapper_open(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE"):
+            pool_state.remember("backup", False, [str(Path(td) / "gone-part1")])
+            mock = MockShell()
+            mock.on("zpool list backup").succeeds()
+            ks = Keystore(make_log())
+            ks.pool, ks._mounted, ks._mapper_name = "backup", True, "zark_ks_backup"  # pylint: disable=protected-access
+            cleanup = Cleanup(make_log())
+            cleanup.track_pool("backup")
+            cleanup.track_keystore(ks)
+            out = StringIO()
+            with (
+                patch_sh(mock),
+                patch.object(pool_state, "run_bounded", return_value=pool_state.Bounded(0)),
+                redirect_stdout(out),
+            ):
+                cleanup.run()
+            calls = mock.calls
+            assert not any(
+                c.startswith(("zfs unload-key", "zpool export", "cryptsetup close")) for c in calls
+            ), calls
+            assert (
+                "backup is left imported" in out.getvalue()
+                and f"{zark_command()} clean" in out.getvalue()
+            )
+            assert "backup" not in cleanup.exported_pools()
+
+    def test_cleanup_asks_the_guard_of_a_read_write_pool_only(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE"):
+            dev = Path(td) / "part1"
+            dev.touch()
+            for readonly, exported in ((False, False), (True, True)):
+                pool_state.remember("backup", readonly, [str(dev)])
+                mock = MockShell()
+                mock.on("zpool list backup").succeeds()
+                mock.on_prefix("zfs unload-key").succeeds()
+                mock.on("zpool export backup").succeeds()
+                mock.on("sync").succeeds()
+                cleanup = Cleanup(make_log())
+                cleanup.track_pool("backup")
+                cleanup.guard_pool("backup", lambda: "no probe passed")
+                with (
+                    patch_sh(mock),
+                    patch("lib.cleanup.USB_FLUSH_DELAY_SEC", 0),
+                    redirect_stdout(StringIO()),
+                ):
+                    cleanup.run()
+                assert ("backup" in cleanup.exported_pools()) is exported, readonly
+
+    def test_a_suspended_pool_left_imported_is_refused_before_any_zpool_call(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED"):
+            mock = MockShell()
+            out = StringIO()
+            with patch_sh(mock), redirect_stdout(out):
+                assert not ZFS(make_log()).import_backup_pool("backup", "/dev/x-part1")
+            assert not mock.calls, mock.calls
+            assert "sudo zpool clear backup" in out.getvalue()
+
+    def test_an_import_keeps_the_mode_and_the_paths(self):
+        mock = MockShell()
+        mock.on_prefix("zpool list -vHP backup").succeeds(
+            "backup\t1\t1\n\t/dev/disk/by-id/ata-X-part1\t1\t1"
+        )
+        mock.on_prefix("zpool import").succeeds()
+        with (
+            tempfile.TemporaryDirectory() as td,
+            _Kstat(td),
+            patch_sh(mock),
+            patch.object(ZFS, "pool_exists", return_value=False),
+            patch.object(dpkg_lock, "hold", return_value=nullcontext()),
+            redirect_stdout(StringIO()),
+        ):
+            assert ZFS(make_log()).import_backup_pool(
+                "backup", "/dev/disk/by-id/ata-X-part1", readonly=True
+            )
+            assert pool_state.kept("backup") == pool_state.Kept(
+                True, ("/dev/disk/by-id/ata-X-part1",)
+            )
+
+    def test_pool_export_leaves_a_gone_read_write_pool_imported(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE"):
+            pool_state.remember("backup", False, [str(Path(td) / "gone")])
+            mock = MockShell()
+            mock.on("zpool list backup").succeeds()
+            out = StringIO()
+            with patch_sh(mock), redirect_stdout(out):
+                assert not ZFS(make_log()).pool_export("backup", wait_udev=True)
+            assert not any("export" in c or "cachefile" in c for c in mock.calls), mock.calls
+            assert "backup is left imported" in out.getvalue()
+
+    def test_umount_touches_nothing_of_a_gone_read_write_pool(self):
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "ata-X", autoeject=False)
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds()
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(Config, "load", return_value=cfg),
+            patch.object(pool_state, "export_refusal", return_value="its device /dev/x is gone"),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            try:
+                umount_mod.run([])
+            except SystemExit as e:
+                assert e.code == 1
+            else:
+                raise AssertionError("umount went on")
+        assert [c for c in mock.calls if not c.startswith("zpool list")] == [], mock.calls
+        assert "BACKUP NOT UNMOUNTED" in out.getvalue() and "is left imported" in out.getvalue()
+
+    def test_clean_holds_back_a_pool_until_it_is_probed(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
+            # Nothing kept and the mode unread: treated as read-write, refused.
+            with patch.object(pool_state, "read_kept", return_value=None):
+                assert "SUSPENDED" in clean_mod._held_back("backup")  # pylint: disable=protected-access
+            k.set("backup", "ONLINE")
+            dev = Path(td) / "part1"
+            dev.touch()
+            pool_state.remember("backup", True, [str(dev)])
+            with patch.object(pool_state, "probe") as probe:
+                assert clean_mod._held_back("backup") == ""  # pylint: disable=protected-access
+            probe.assert_not_called()
+            pool_state.remember("backup", False, [str(dev)])
+            for got, why in (
+                (pool_state.Bounded(None), "suspended while zark checked it"),
+                (pool_state.Bounded(1, "", "cannot sync"), "cannot sync"),
+                (pool_state.Bounded(0), ""),
+            ):
+                with patch.object(pool_state, "probe", return_value=got):
+                    assert why in clean_mod._held_back("backup")  # pylint: disable=protected-access
+                    if not why:
+                        assert clean_mod._held_back("backup") == ""  # pylint: disable=protected-access
+
+
+class TestWatchProbe:  # pylint: disable=missing-function-docstring
+    """Rule 3: a latched run exports only after a zpool sync -f since the latch."""
+
+    def test_the_probe_counts_only_after_the_last_suspension(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            results = [pool_state.Bounded(0), pool_state.Bounded(0)]
+            b.watch._prober = lambda _p: results.pop(0)  # pylint: disable=protected-access
+            assert b.watch.why_not_export() == ""
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            assert "no zpool sync -f has passed" in b.watch.why_not_export()
+            b.set_state("ONLINE")
+            b.tick()
+            assert b.watch.probe() and b.watch.why_not_export() == ""
+            b.set_state("SUSPENDED")
+            b.tick()
+            assert not b.watch.probed()
+
+    def test_only_a_probe_that_returned_0_counts(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            results = [pool_state.Bounded(1, "", "cannot sync"), pool_state.Bounded(0)]
+            b.watch._prober = lambda _p: results.pop(0)  # pylint: disable=protected-access
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")
+            b.tick()
+            with redirect_stdout(StringIO()):
+                assert not b.watch.probe()
+                assert b.watch.probe()
+
+    def test_no_probe_on_a_pool_that_is_not_online_or_degraded(self):
+        # On noble's 2.2.2 module a zpool sync -f on a suspended pool did not
+        # return and left zpool clear waiting behind it (seen in a virtual machine).
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            calls: list[str] = []
+
+            def prober(p: str) -> pool_state.Bounded:
+                calls.append(p)
+                return pool_state.Bounded(0)
+
+            b.watch._prober = prober  # pylint: disable=protected-access
+            b.tick()
+            for word in ("SUSPENDED", "REMOVED", "UNAVAIL"):
+                b.set_state(word)
+                b.tick()
+                assert not b.watch.probe(), word
+            b.set_state(None)
+            assert not b.watch.probe()
+            assert not calls
+            b.set_state("DEGRADED")
+            assert b.watch.probe() and calls == ["backup"]
+
+    def test_a_probe_that_blocks_is_polled_never_waited_for(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            child = MagicMock()
+            child.poll.return_value = None
+            calls: list[str] = []
+
+            def prober(p: str) -> pool_state.Bounded:
+                calls.append(p)
+                return pool_state.Bounded(None, child=child)
+
+            b.watch._prober = prober  # pylint: disable=protected-access
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")  # resumed; the probe's write suspends it again
+            b.tick()
+            with redirect_stdout(StringIO()):
+                assert not b.watch.probe()
+                assert not b.watch.probe()
+            assert len(calls) == 1
+            child.poll.return_value = 0
+            child.returncode = 0
+            assert b.watch.probe()
+
+
 class TestMonitorDriveGone:  # pylint: disable=missing-function-docstring,too-few-public-methods
     """M26-10: zark monitor shows drive_gone."""
 

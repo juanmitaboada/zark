@@ -23,7 +23,7 @@ import shlex
 from collections.abc import Collection
 from pathlib import Path
 
-from lib import cli_spec, sh
+from lib import cli_spec, pool_state, sh
 from lib.cleanup import BUSY_HINT, flush_device_cache, prompt_eject_or_attach
 from lib.config import Config
 from lib.identity import BY_ID_DIR, whole_disk
@@ -353,6 +353,14 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
             [f"{p}  (at {MNT_BASE}/{p})" for p in mounted],
         )
         selected = mounted[idx]
+
+    # A read-write pool whose drive is gone or which is not ONLINE: nothing of
+    # it is touched. A dirty dataset waits for a transaction group at its
+    # unmount (zfsvfs_teardown), and the export, -f included, waits for one
+    # holding the pool namespace lock (M26R-28 28a).
+    if why := pool_state.export_refusal(selected):
+        log.banner_error("BACKUP NOT UNMOUNTED", pool_state.left_imported_lines(selected, why))
+        raise SystemExit(1)
 
     # Only this pool's tree: `zfs unmount -a` would also try every dataset
     # of the running system. zpool export unmounts anything left.

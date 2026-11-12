@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from lib import dpkg_lock, forensics, scrub
+from lib import dpkg_lock, forensics, pool_state, scrub
 from lib.config import now_utc_iso, zark_command
 from lib.identity import BY_ID_DIR
 from lib.log import Log
@@ -484,26 +484,16 @@ class ZFS:
         scrub that an interrupted ``zark fullcheck`` left running (it resumed
         with the import) is paused (M19-5 5a); ``fullcheck`` alone passes
         False (M19R-10). A read-only import never reads the scan state.
+
+        A pool already imported whose state (the kstat file, read before any
+        ``zpool`` call) is not ONLINE or DEGRADED is refused: a run left it
+        so when its drive went away, and every call on it could wait (A1E-7,
+        M26R-25). The mode and leaf device paths of the pool imported or
+        accepted are kept for the export's rules (``lib.pool_state``).
         """
-        if self.pool_exists(name):
-            current = run(f"zpool get -H -o value altroot {name}").output
-            is_ro = run(f"zpool get -H -o value readonly {name}").output == "on"
-            actual = self.pool_guid(name)
-            problem = ""
-            if current in ("", "-"):
-                problem = "without an altroot"
-            elif guid and actual != guid:
-                problem = f"with GUID {actual}, not {guid} (another disk)"
-            elif is_ro != readonly:
-                problem = "read-only" if is_ro else "read-write"
-            if problem:
-                self.log.error(
-                    f"Pool {name} is already imported {problem} - "
-                    + f"export it first: sudo zpool export {name}",
-                )
-                return False
-            self.log.dbg(f"Pool {name} already imported (altroot={current})")
-            return True
+        already = self._already_imported(name, readonly, guid)
+        if already is not None:
+            return already
         if not device:
             self.log.error(f"Cannot import {name}: no exact device path is known")
             return False
@@ -534,7 +524,44 @@ class ZFS:
             return False
         if pause_scrub and not readonly:
             scrub.pause_interrupted(name, self.log)
+        self._remember(name, readonly)
         return True
+
+    def _already_imported(self, name: str, readonly: bool, guid: str | None) -> bool | None:
+        """``import_backup_pool``'s answer for a pool that is already
+        imported, None when it is not (the import goes on)."""
+        word = pool_state.state(name)
+        if word != pool_state.MISSING and word not in pool_state.HEALTHY:
+            for line in pool_state.left_imported_lines(name, f"it is already imported and {word}"):
+                self.log.error(line)
+            return False
+        if not self.pool_exists(name):
+            return None
+        current = run(f"zpool get -H -o value altroot {name}").output
+        is_ro = run(f"zpool get -H -o value readonly {name}").output == "on"
+        actual = self.pool_guid(name)
+        problem = ""
+        if current in ("", "-"):
+            problem = "without an altroot"
+        elif guid and actual != guid:
+            problem = f"with GUID {actual}, not {guid} (another disk)"
+        elif is_ro != readonly:
+            problem = "read-only" if is_ro else "read-write"
+        if problem:
+            self.log.error(
+                f"Pool {name} is already imported {problem} - "
+                + f"export it first: sudo zpool export {name}",
+            )
+            return False
+        self.log.dbg(f"Pool {name} already imported (altroot={current})")
+        self._remember(name, readonly)
+        return True
+
+    def _remember(self, name: str, readonly: bool) -> None:
+        """Keep the mode and leaf paths of a pool just imported (healthy, so
+        an ordinary read) for the export's rules (M26R-19, M26R-28)."""
+        r = run(f"zpool list -vHP {name}")
+        pool_state.remember(name, readonly, pool_state.leaf_paths(r.stdout) if r.ok else [])
 
     def _is_expected(self, name: str, guid: str, device: str, root: str) -> bool:
         """After an import: the pool is the one expected (M16-7). A pool of
@@ -562,19 +589,22 @@ class ZFS:
         ``wait_udev``: the pool's zvols appeared moments ago (prepare's
         keystore receive), so udev's and udisks' probes may still hold
         them: each try waits for ``udevadm settle`` as the read-back's do,
-        not a fixed second (M13R-15)."""
+        not a fixed second (M13R-15).
+
+        A backup pool (any but the system's rpool and bpool) imported
+        read-write is exported only when its state is ONLINE or DEGRADED and
+        its devices are there (M26R-28 28a): otherwise the export, ``-f``
+        included, would wait for a transaction group that cannot be written,
+        holding the pool namespace lock. It is left imported and False
+        returned, with what to do."""
+        if name not in ("rpool", "bpool") and self._left_imported(name):
+            return False
         if not self.pool_exists(name):
             return True
 
         r = run(f"zpool set cachefile=none {name}")
         if wait_udev:
-            if self._export_after_udev(name, "Export"):
-                self.log.ok(f"Pool {name} exported")
-                run("sync")
-                remove_altroot_dir(backup_altroot(name))
-                return True
-            self.log.warn(f"Could not export {name}")
-            return False
+            return self._export_waiting_udev(name)
         run("sleep 1")
         r = run(f"zpool export {name}", log=self.log)
         if r.ok:
@@ -804,6 +834,26 @@ class ZFS:
             if attempt < READBACK_EXPORT_TRIES:
                 time.sleep(1)
         return run(f"zpool export -f {name}", log=self.log).ok
+
+    def _export_waiting_udev(self, name: str) -> bool:
+        """``pool_export``'s export after ``udevadm settle``, each try."""
+        if self._export_after_udev(name, "Export"):
+            self.log.ok(f"Pool {name} exported")
+            run("sync")
+            remove_altroot_dir(backup_altroot(name))
+            return True
+        self.log.warn(f"Could not export {name}")
+        return False
+
+    def _left_imported(self, name: str) -> bool:
+        """True, after saying why, when a pool the module holds must stay
+        imported (``lib.pool_state.export_refusal``)."""
+        if not pool_state.imported(name):
+            return False
+        why = pool_state.export_refusal(name)
+        for line in pool_state.left_imported_lines(name, why) if why else []:
+            self.log.error(line)
+        return bool(why)
 
     def pool_guid(self, name: str) -> str:
         """Get pool GUID (decimal string)."""

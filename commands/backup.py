@@ -1317,6 +1317,8 @@ def run(
     # Until the export: a drive that goes away is said at once (A1E-7, M26-3 3b).
     watch = drive_watch.start(pool_name, device or "", log, _notify)
     cleanup.track_action(watch.stop)
+    # Rule 3 of the export: a latched run exports only after a probe (M26R-19).
+    cleanup.guard_pool(pool_name, watch.why_not_export)
     # By content, not only by the registry: a drive of another system is
     # refused before anything is asked or written.
     drive_marks.check_drive_owner(pool_name, log)
@@ -1460,10 +1462,17 @@ def run(
         record.measure_contents(pool_name, policy, log)
 
     # ── Export and read back ─────────────────────────────────────────────
+    # A latched run's export needs a probe that returned 0, run here where
+    # a signal is handled, never in Cleanup (M26R-19, M26R-27).
+    if watch.latched is not None:
+        _ = watch.probe()
     # The watch ends before the export and the read-back's import (M26-3 3b).
     watch.stop()
     cleanup.untrack_action(watch.stop)
-    ks.umount()
+    if cleanup.keep_imported(pool_name):
+        ks.umount_only()  # cryptsetup close would read the gone drive (A1E-7)
+    else:
+        ks.umount()
     cleanup.run()
     elapsed = int(time.time() - started)  # P0-2: the whole run
     mins, secs = divmod(elapsed, 60)

@@ -40,9 +40,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from lib import signals
+from lib import pool_state, signals
 from lib.config import zark_command
-from lib.keystore import KeystoreLike
+from lib.keystore import Keystore, KeystoreLike
 from lib.log import Log
 from lib.sh import run
 from lib.zfs import backup_altroot, remove_altroot_base, remove_altroot_dir
@@ -230,6 +230,8 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self._keystores: list[KeystoreLike] = []  # keystores to close
         self._dirs: list[str] = []  # temp dirs to remove
         self._actions: list[Callable[[], None]] = []  # run first, newest first
+        # Rule 3 of an export (M26R-19): why a pool must stay imported, "" when not.
+        self._guards: dict[str, Callable[[], str]] = {}
         self._exported_pools: list[str] = []  # populated by run() - query via exported_pools()
         self._registered = False
         self._disabled = False
@@ -291,6 +293,13 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         if name not in self._pools:
             self._pools.append(name)
 
+    def guard_pool(self, name: str, why_not: Callable[[], str]) -> None:
+        """Before exporting ``name``, ask ``why_not``: a reason keeps the pool
+        imported (backup: its drive was seen gone and no probe passed since,
+        M26R-19). Called from Cleanup, where signals are ignored, so it must
+        not wait."""
+        self._guards[name] = why_not
+
     def track_mount(self, path: str):
         """Track a mount point for unmounting on exit. Call after mounting."""
         if path not in self._mounts:
@@ -310,6 +319,20 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         """'Stop tracking a pool. Call if you export or close it manually."""
         if name in self._pools:
             self._pools.remove(name)
+
+    def keep_imported(self, pool: str) -> str:
+        """Why ``pool`` stays imported, "" when it may be exported: rules 1
+        and 2 for a read-write pool (``lib.pool_state``; a read-only one only
+        when suspended), then this run's guard (rule 3, read-write only:
+        M26R-26). A pool the module does not hold is not this rule's case."""
+        if not pool_state.imported(pool):
+            return ""
+        why = pool_state.export_refusal(pool)
+        info = pool_state.kept(pool)
+        guard = self._guards.get(pool)
+        if not why and guard is not None and not (info is not None and info.readonly):
+            why = guard()
+        return why
 
     def exported_pools(self) -> list[str]:
         """Pools that the most recent ``run()`` call exported successfully.
@@ -361,9 +384,20 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
                     self.log.dbg(f"Lazy unmounted {mnt}")
         self._mounts.clear()
 
+        # A pool whose drive is gone, unhealthy or unprobed stays imported:
+        # its key unload and export would wait for a transaction group that
+        # cannot be written, the export holding the pool namespace lock
+        # (A1E-7, M26R-19). Decided before its keystore is touched.
+        left = {pool: why for pool in self._pools if (why := self.keep_imported(pool))}
+
         # Close keystores
         for ks in self._keystores:
-            ks.umount()
+            if isinstance(ks, Keystore) and ks.pool in left:
+                # cryptsetup close reads the LUKS header from the zvol
+                # (cryptsetup lib/setup.c, _init_by_name_crypt): not run.
+                ks.umount_only()
+            else:
+                ks.umount()
         self._keystores.clear()
 
         # Export pools - each successful export is followed by the
@@ -372,6 +406,10 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         # based on whether the operator intends to disconnect now.
         # See flush_device_cache() and eject_device() in this module.
         for pool in self._pools:
+            if pool in left:
+                for line in pool_state.left_imported_lines(pool, left[pool]):
+                    self.log.error(line)
+                continue
             if run(f"zpool list {pool}").ok:
                 run(f"zfs unload-key -r {pool}")
                 exported_ok = False
@@ -391,6 +429,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
                     flush_device_cache(self.log)
                     self._exported_pools.append(pool)
         self._pools.clear()
+        self._guards.clear()
         remove_altroot_base()
 
         # Remove temp dirs
