@@ -22,12 +22,13 @@ The keystore's zvol device is found by its dataset name (zvol_id), never
 by the order of the /dev/zd* devices.
 """
 
+import locale
 import re
 from pathlib import Path
 from typing import Protocol
 
 from lib.log import Log
-from lib.sh import run
+from lib.sh import INPUT_NOT_ENCODABLE, INPUT_NOT_ENCODABLE_TEXT, run
 
 # Prints a zvol device's dataset name; Ubuntu's zfsutils-linux installs it
 # here, and udev's 60-zvol.rules builds /dev/zvol/<dataset> from it.
@@ -170,6 +171,9 @@ class Keystore:
         )
         # cryptsetup exits 2 for "no permission (bad passphrase)".
         self.bad_passphrase = r.returncode == 2
+        if r.returncode == INPUT_NOT_ENCODABLE and r.stderr.startswith(INPUT_NOT_ENCODABLE_TEXT):
+            self.log.error(f"Cannot open keystore LUKS on {zd_dev}: {r.stderr}")
+            return False
         if not r.ok:
             self.log.error(f"Cannot open keystore LUKS on {zd_dev} - wrong passphrase?")
             self.log.dbg(f"cryptsetup stderr: {r.stderr.strip()}")
@@ -257,11 +261,32 @@ def open_keystore(
     ``timeout``: each prompt's limit in seconds; past it ``ask_password``
     raises ``PromptTimeout`` (an ``EOFError``) to the caller.
     """
-    for attempt in range(1, MAX_PASSPHRASE_ATTEMPTS + 1):
+    attempt = skipped = 0
+    while attempt < MAX_PASSPHRASE_ATTEMPTS:
         passphrase = log.ask_password(f"Passphrase for {pool}", timeout=timeout)
+        if (why := unencodable(passphrase)) is not None:
+            # Not a wrong passphrase: cryptsetup would get other bytes than
+            # the ones typed (M26R-15). Asked again, not counted as one.
+            skipped += 1
+            log.warn(f"The passphrase {why}")
+            if skipped >= MAX_PASSPHRASE_ATTEMPTS:
+                return False
+            continue
+        attempt += 1
         if ks.mount(pool, passphrase, readonly=readonly):
             return True
         if not ks.bad_passphrase:
             return False
         log.warn(f"Wrong passphrase ({attempt}/{MAX_PASSPHRASE_ATTEMPTS})")
     return False
+
+
+def unencodable(text: str) -> str | None:
+    """Why ``text`` cannot reach a child as typed (the locale's encoding
+    lacks one of its characters, :func:`lib.sh.run`), None when it can."""
+    encoding = locale.getpreferredencoding(False)
+    try:
+        _ = text.encode(encoding)
+    except UnicodeEncodeError:
+        return f"holds a character the current locale ({encoding}) cannot encode"
+    return None

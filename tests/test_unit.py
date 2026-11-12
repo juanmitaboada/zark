@@ -1169,6 +1169,29 @@ class TestSh:  # pylint: disable=missing-function-docstring
         assert inherited.output == "/dev/null", inherited
         assert fed.output == "from zark", fed
 
+    def test_output_that_is_not_utf8_is_read_with_replacement_characters(self):
+        # A1E-10: a damaged pool's history held raw bytes and the strict
+        # decode ended the backup at step 3.
+        for status in (0, 1):
+            r = run(["sh", "-c", f"printf 'a\\377b'; printf 'e\\336' >&2; exit {status}"])
+            assert r.returncode == status, r
+            assert r.stdout == "a\ufffdb", repr(r.stdout)
+            assert r.stderr == "e\ufffd", repr(r.stderr)
+        assert run(["printf", "\u00f1\n"]).output == "\u00f1"
+
+    def test_input_the_locale_cannot_encode_starts_no_child(self):
+        # M26R-15, M26R-22: checked strictly, never altered by the replacement.
+        with tempfile.TemporaryDirectory() as d:
+            marker = Path(d) / "ran"
+            with patch("lib.sh.locale.getpreferredencoding", return_value="ascii"):
+                r = run(f"touch {marker}; cat", input="\u00e9")
+            assert r.returncode == _sh.INPUT_NOT_ENCODABLE, r
+            assert r.stderr.startswith(_sh.INPUT_NOT_ENCODABLE_TEXT), r.stderr
+            assert not marker.exists()
+
+    def test_input_that_encodes_reaches_the_child_unchanged(self):
+        assert run("cat", input="contrase\u00f1a\n").stdout == "contrase\u00f1a\n"
+
 
 class TestShRunPipe:  # pylint: disable=missing-function-docstring
     """Tests for run_pipe() pipeline behavior, especially p1-side failures."""
@@ -11068,6 +11091,48 @@ class TestKeystoreReadonlyAndRetry:  # pylint: disable=missing-function-docstrin
         ):
             assert open_keystore(ks, "backup", make_log())
         assert ks.calls == ["typo", "typo2", "right"]
+
+    def test_a_passphrase_the_locale_cannot_encode_is_named_and_not_counted(self):
+        # M26R-15: not "Wrong passphrase (n/3)".
+        mock_ks = _FakeKeystore()
+        out = StringIO()
+        with (
+            patch.object(_FakeKeystore, "mount", return_value=True) as mount,
+            patch("lib.keystore.locale.getpreferredencoding", return_value="ascii"),
+            patch("lib.log.getpass.getpass", side_effect=["\u00e9", "\u00e9", "right"]),
+            redirect_stdout(out),
+        ):
+            assert open_keystore(mock_ks, "backup", make_log())
+        assert mount.call_count == 1 and mount.call_args.args[1] == "right"
+        assert "cannot encode" in out.getvalue() and "Wrong passphrase" not in out.getvalue()
+
+    def test_three_unencodable_passphrases_give_up(self):
+        mock_ks = _FakeKeystore()
+        with (
+            patch.object(_FakeKeystore, "mount", return_value=True) as mount,
+            patch("lib.keystore.locale.getpreferredencoding", return_value="ascii"),
+            patch("lib.log.getpass.getpass", return_value="\u00e9"),
+            redirect_stdout(StringIO()),
+        ):
+            assert not open_keystore(mock_ks, "backup", make_log())
+        mount.assert_not_called()
+
+    def test_mount_names_input_the_locale_cannot_encode(self):
+        mock = MockShell()
+        mock.on_prefix("cryptsetup open").returns(
+            _sh.INPUT_NOT_ENCODABLE, stderr=f"{_sh.INPUT_NOT_ENCODABLE_TEXT} (ascii) cannot encode"
+        )
+        ks = Keystore(make_log())
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(Keystore, "find_zvol_for_pool", return_value="/dev/zd0"),
+            patch("lib.keystore.Path.mkdir"),
+            redirect_stdout(out),
+        ):
+            assert not ks.mount("backup", "x")
+        assert not ks.bad_passphrase
+        assert "cannot encode" in out.getvalue()
 
     def test_open_keystore_gives_up_after_three(self):
         mock_ks = _FakeKeystore()

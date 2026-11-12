@@ -18,6 +18,7 @@ Every command is logged before and after execution.
 No 2>/dev/null anywhere - everything is captured and visible.
 """
 
+import locale
 import os
 import shlex
 import signal
@@ -57,6 +58,13 @@ class RunResult:
     def lines(self) -> list[str]:
         """stdout split into non-empty lines."""
         return [li for li in self.stdout.strip().splitlines() if li.strip()]
+
+
+# What run() returns, without starting the child, when ``input`` cannot be
+# encoded in the locale's encoding: 126, as a shell says it of a command it
+# cannot execute.
+INPUT_NOT_ENCODABLE = 126
+INPUT_NOT_ENCODABLE_TEXT = "the input holds a character this locale"
 
 
 # ── nosec B602 rationale ─────────────────────────────────────────────
@@ -109,6 +117,21 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
     if log:
         log.cmd(cmd_str)
 
+    if input is not None:
+        # The text mode encodes ``input`` with ``errors="replace"`` too:
+        # checked strictly first, so that what reaches the child is exactly
+        # what zark was given (M26R-15, M26R-22).
+        encoding = locale.getpreferredencoding(False)
+        try:
+            _ = input.encode(encoding)
+        except UnicodeEncodeError:
+            return RunResult(
+                returncode=INPUT_NOT_ENCODABLE,
+                stdout="",
+                stderr=f"{INPUT_NOT_ENCODABLE_TEXT} ({encoding}) cannot encode",
+                command=cmd_str,
+            )
+
     # A process group of its own: zark passes a signal on to the whole group
     # (lib.signals), shell included. dash 0.5.12 does not exec the last
     # command of `sh -c` (it stays the parent), so a quoted command relies on
@@ -122,6 +145,9 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # Output that is not valid in the locale's encoding (a damaged
+            # pool's history, A1E-10) is read with U+FFFD, never fatal.
+            errors="replace",
             process_group=0,
         )
     except FileNotFoundError as e:
