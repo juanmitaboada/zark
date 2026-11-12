@@ -345,7 +345,7 @@ def run(
             ],
         )
         raise SystemExit(1)
-    if rb is None or not rb.ok:
+    if rb is None or not rb.ok or rb.damaged():  # any damage is not verified (A1E-9)
         lines = (
             rb.describe(again=False)
             if rb

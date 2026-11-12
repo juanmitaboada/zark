@@ -179,11 +179,27 @@ class Damage:
     # stderr: "List of errors unavailable: permission denied", rc 0), as it does
     # while a damaged block's dataset is encrypted and its key is not loaded.
     unlisted: bool = False
+    # The "errors:" line's count of data errors (A1E-9): 0 for "No known
+    # data errors", N for "N data errors, use '-v' for a list" (zpool status
+    # without -v), None when the line is absent or lists files instead.
+    count: int | None = None
+    total: int = 0  # READ + WRITE + CKSUM over every vdev line
 
     @property
     def any(self) -> bool:
-        """True when a counter is non-zero or an object is listed."""
-        return bool(self.counters or self.errors)
+        """True when a counter or the count is non-zero or an object is listed."""
+        return bool(self.counters or self.errors or self.count)
+
+
+def _error_count(words: list[str]) -> int | None:
+    """The count on ``zpool status``'s errors: line (zpool_main.c,
+    status_callback: "No known data errors" or "%llu data errors, use '-v'
+    for a list"; OpenZFS 2.2.2 :8824-8836, 2.4.4 :11127-11141)."""
+    if words[:3] == ["No", "known", "data"]:
+        return 0
+    if len(words) >= 3 and words[0].isdigit() and words[1:3] == ["data", "errors,"]:
+        return int(words[0])
+    return None
 
 
 def parse_damage(text: str) -> Damage:
@@ -200,6 +216,7 @@ def parse_damage(text: str) -> Damage:
             seen_errors = True
             in_config = False
             in_errors = "Permanent errors" in line
+            damage.count = _error_count(words[1:])
             continue
         if in_config:
             if not words:
@@ -207,6 +224,7 @@ def parse_damage(text: str) -> Damage:
             elif len(words) >= 5 and all(w.isdigit() for w in words[2:5]):
                 if any(int(w) for w in words[2:5]):
                     damage.counters.append(" ".join(words))
+                    damage.total += sum(int(w) for w in words[2:5])
         elif in_errors and words:
             damage.errors.append(line.strip())
     damage.unlisted = seen_config and not seen_errors
@@ -230,6 +248,9 @@ class Readback:  # pylint: disable=too-many-instance-attributes
     # The GUID found at the device when it was not the one expected, or
     # "unreadable" (M20R-1): another pool of that name is on the disk.
     foreign: str = ""
+    # zpool status -p of the re-imported pool (A1E-9, M3): its count of data
+    # errors; None when it was not imported or the count could not be read.
+    damage: Damage | None = None
 
     @property
     def ok(self) -> bool:
@@ -290,7 +311,26 @@ class Readback:  # pylint: disable=too-many-instance-attributes
             lines += [f"  {line}" for line in self.status.splitlines() if line.strip()][:20]
         if not self.reexported:
             lines.append("The read-back import could not be exported again: it is still imported.")
+        damaged = self.damaged()
+        if damaged:
+            lines.append(damaged)
         return lines
+
+    def damaged(self) -> str:
+        """Damage measured at the read-back (A1E-9), "" when none: any count
+        of data errors or counter above zero, or a count that could not be
+        read. For prepare and registry, where any damage is not verified."""
+        d = self.damage
+        if not self.imported or self.skipped or self.foreign:
+            return ""
+        if d is None or d.count is None:
+            return f"The read-back could not read {self.pool or 'the pool'}'s count of data errors."
+        if d.count or d.counters:
+            return (
+                f"The read-back found {d.count} data error(s) and "
+                + f"{len(d.counters)} vdev(s) with error counters above zero."
+            )
+        return ""
 
 
 @dataclass
@@ -726,8 +766,26 @@ class ZFS:
             # While it is still imported: zpool status -v needs the pool.
             _ = forensics.capture(name, f"read-back health {health}", self.log)
 
-        reexported = self._reexport(name, root, cleanup)
-        return Readback(imported=True, health=health, status=status, reexported=reexported)
+        # Keyword arguments are evaluated in order: the measure (M3) is read
+        # while the pool is still imported, before the export.
+        return Readback(
+            imported=True,
+            health=health,
+            status=status,
+            damage=self._readback_measure(name),
+            reexported=self._reexport(name, root, cleanup),
+            pool=name,
+        )
+
+    def _readback_measure(self, name: str) -> Damage:
+        """M3 (A1E-9): the re-imported pool's count of data errors, said when
+        it is not zero or could not be read."""
+        damage = self.pool_measure(name)
+        if damage.count is None:
+            self.log.warn(f"Read-back of {name}: its count of data errors could not be read")
+        elif damage.count:
+            self.log.warn(f"Read-back of {name}: {damage.count} data error(s) recorded")
+        return damage
 
     def _reexport(self, name: str, root: str, cleanup: PoolTracker | None) -> bool:
         """The read-back's export, checked and logged (I12)."""
@@ -869,6 +927,14 @@ class ZFS:
         """Non-zero counters and permanent errors of an imported pool (I8)."""
         # -p: exact counters; "1.2K" would not parse as a number.
         r = run(f"zpool status -vp {name}")
+        return parse_damage(r.stdout) if r.ok else Damage()
+
+    def pool_measure(self, name: str) -> Damage:
+        """``zpool status -p``: the vdev counters and the errors: line's count
+        of data errors, read with no key loaded (A1E-9: one measure at step
+        3, before the export and at the read-back). The count is None when
+        the status could not be read."""
+        r = run(f"zpool status -p {name}")
         return parse_damage(r.stdout) if r.ok else Damage()
 
     def unload_keys(self, name: str) -> bool:

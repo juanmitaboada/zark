@@ -108,6 +108,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         self.clock = 1_700_000_000
         self.inject: dict[str, tuple[str, int]] = {}  # dest dataset → (kind, after)
         self.fail_cmds: set[str] = set()  # a command containing one of these fails
+        self.data_errors: dict[str, int] = {}  # pool → `zpool status`'s count
         self.importable: set[str] = set()  # pools `zpool import` lists (exported here)
         self.capacity: dict[str, int] = {}  # pool → `zpool list -o capacity` (50 when unset)
 
@@ -187,6 +188,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             ("zfs", "hold"): self._hold(1),
             ("zfs", "release"): self._hold(-1),
             ("zpool", "sync"): lambda _a: _ok(),
+            ("zpool", "status"): self._zpool_status,
             ("systemctl", "is-active"): self._is_active,
             ("systemctl", "stop"): self._unit_set("inactive"),
             ("systemctl", "start"): self._unit_set("active"),
@@ -217,6 +219,23 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             return _err(f"pool '{name}' already exists")
         self.pool(name)
         return _ok()
+
+    # Data errors a pool's `zpool status` counts (A1E-9); 0 when unset.
+    STATUS = (
+        "  pool: {name}\n state: ONLINE\nconfig:\n\n"
+        + "\tNAME        STATE     READ WRITE CKSUM\n"
+        + "\t{name}      ONLINE       0     0     0\n\n"
+        + "errors: {errors}\n"
+    )
+
+    def _zpool_status(self, args: list[str]) -> RunResult:
+        """``zpool status [-p] <pool>``: a healthy pool and its count of data errors."""
+        name = args[-1] if args else ""
+        if name not in self.pools:
+            return _err(f"cannot open '{name}': no such pool")
+        n = self.data_errors.get(name, 0)
+        errors = f"{n} data errors, use '-v' for a list" if n else "No known data errors"
+        return _ok(self.STATUS.format(name=name, errors=errors))
 
     def _zpool_import_list(self, args: list[str]) -> RunResult:
         """``zpool import`` without a pool name: list the importable pools."""

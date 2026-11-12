@@ -364,7 +364,7 @@ def _verify(cfg: Config, log: Log, name: str) -> None:  # pylint: disable=too-ma
         skip_note="It would be reported as not done; the drive stays waiting.",
         guid=held.guid,
     )
-    if rb.ok:
+    if rb.ok and not rb.damaged():  # any damage is not verified (A1E-9)
         # The registry first, the pending entry last: an interruption between
         # them leaves the drive registered, and step one names the leftover.
         cfg.known_drives[name] = held.info

@@ -328,6 +328,7 @@ from lib.selftest_l2 import (  # pylint: disable=wrong-import-position # noqa: E
 from lib.sh import RunResult, part, run  # pylint: disable=wrong-import-position # noqa: E402
 from lib.zfs import (  # pylint: disable=wrong-import-position # noqa: E402
     ZFS,
+    Damage,
     DatasetInfo,
     KeyStatusError,
     PoolInfo,
@@ -1931,7 +1932,7 @@ class TestBackupLatched:  # pylint: disable=missing-function-docstring
 
         def readback(*_a: Any, **_k: Any) -> Readback:
             seen.append(watch.stopped)
-            return Readback(imported=True, health="ONLINE", reexported=True)
+            return Readback(imported=True, health="ONLINE", reexported=True, damage=Damage(count=0))
 
         rc, text, _ = self._run(watch, patch.object(ZFS, "verify_exported_pool_readback", readback))
         assert rc == 0 and seen == [True], text
@@ -12194,6 +12195,123 @@ def _damaged_status(state: str, cksum: int, objects: int) -> str:
     return _STATUS_HEAD.format(state=state, cksum=cksum, errors=errors)
 
 
+def _counted(cksum: int, n: int | None) -> str:
+    """``zpool status -p`` with no -v: the count on the errors: line."""
+    errors = "No known data errors" if not n else f"{n} data errors, use '-v' for a list"
+    text = _STATUS_HEAD.format(state="ONLINE", cksum=cksum, errors=errors)
+    return text if n is not None else text.replace(f"errors: {errors}\n", "")
+
+
+class TestDamageMeasure:  # pylint: disable=missing-function-docstring,protected-access
+    """A1E-9 (M26-8 8a revised, M26R-23): one measure at three moments."""
+
+    def test_the_count_on_the_errors_line(self):
+        assert parse_damage(_counted(0, 0)).count == 0
+        assert parse_damage(_counted(0, 4)).count == 4
+        assert parse_damage(_counted(0, None)).count is None
+        listed = parse_damage(_damaged_status("ONLINE", 0, 2))
+        assert listed.count is None and len(listed.errors) == 2
+        assert parse_damage(_counted(3, 0)).total == 3
+
+    def test_a_count_alone_makes_step_3_ask(self):
+        mock = MockShell()
+        mock.on("zpool list -H -o health black").succeeds("ONLINE")
+        mock.on("zpool status -p black").succeeds(_counted(0, 2))
+        unlisted = _counted(0, 0).replace("errors: No known data errors\n", "")
+        mock.on("zpool status -vp black").succeeds(unlisted)
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            patch.object(backup_mod.forensics, "capture", return_value=""),
+            patch("builtins.input", return_value="y"),
+            redirect_stdout(out),
+        ):
+            m1 = backup_mod._check_health(ZFS(make_log()), "black", make_log())
+        text = out.getvalue()
+        assert "ONLINE with errors" in text and "Continue anyway" in text
+        assert "data errors counted: 2" in text and "keys are loaded" in text
+        assert m1.count == 2
+
+    @staticmethod
+    def _rule(m1: tuple[int, int | None], m2: tuple[int, int | None] | None, m3: int | None) -> str:
+        def d(total: int, count: int | None) -> Damage:
+            return Damage(count=count, total=total, counters=["x"] if total else [])
+
+        return backup_mod._new_damage(
+            "backup",
+            d(*m1),
+            d(*m2) if m2 is not None else None,
+            Damage(count=m3),
+        )
+
+    def test_the_outcome_table(self):
+        assert self._rule((0, 0), (0, 0), 0) == ""
+        assert "counters grew" in self._rule((0, 0), (1, 0), 0)
+        assert self._rule((1, 0), (1, 0), 0) == ""  # accepted at step 3
+        assert "counters grew" in self._rule((1, 0), (2, 0), 0)
+        assert "new data errors" in self._rule((0, 0), (0, 0), 2)
+        assert self._rule((0, 2), (0, 2), 2) == ""
+        assert "new data errors" in self._rule((0, 2), (0, 2), 3)
+        assert self._rule((0, 2), (0, 3), 2) == ""  # M2's count alone decides nothing
+        assert "could not be read" in self._rule((0, 0), (0, 0), None)
+        assert "new data errors" in self._rule((0, None), None, 1)
+
+    def _backup(self, fake: FakeZfs, m3: int | None, *extra: AbstractContextManager[object]):
+        out = StringIO()
+        rb = Readback(imported=True, health="ONLINE", reexported=True, damage=Damage(count=m3))
+        _, rc = TestBackupCommand()._run(
+            fake,
+            patch.object(ZFS, "verify_exported_pool_readback", return_value=rb),
+            *extra,
+            redirect_stdout(out),
+        )
+        return rc, Log._STRIP_RE.sub("", out.getvalue())
+
+    def test_new_errors_at_the_read_back_are_not_verified(self):
+        rc, text = self._backup(_fresh_fake(), 3)
+        assert rc == 1 and "BACKUP NOT VERIFIED" in text, text
+        assert "recorded new data errors during this run" in text
+        assert "Data errors counted: 0 at step 3, 0 before the export, 3 at the read-back" in text
+        assert "zark fullcheck" in text and "BACKUP COMPLETED" not in text
+
+    def test_an_unreadable_count_is_not_zero(self):
+        rc, text = self._backup(_fresh_fake(), None)
+        assert rc == 1 and "could not be read at its read-back" in text, text
+
+    def test_errors_accepted_at_step_3_keep_the_outcome_with_a_warning(self):
+        fake = _fresh_fake()
+        fake.data_errors["backup"] = 2
+        rc, text = self._backup(fake, 2)
+        assert rc == 0 and "BACKUP COMPLETED" in text, text
+        assert "still records 2 data error(s), accepted at step 3" in text
+
+    def test_the_read_back_reads_its_count(self):
+        fake = _fresh_fake()
+        fake.data_errors["backup"] = 5
+        with patch_sh(fake):
+            got = ZFS(make_log()).pool_measure("backup")
+        assert got.count == 5 and fake.calls[-1] == "zpool status -p backup"
+
+    def test_prepare_and_registry_call_any_damage_not_verified(self):
+        assert (
+            Readback(
+                imported=True, health="ONLINE", reexported=True, damage=Damage(count=0)
+            ).damaged()
+            == ""
+        )
+        assert (
+            "1 data error"
+            in Readback(
+                imported=True, health="ONLINE", reexported=True, damage=Damage(count=1)
+            ).damaged()
+        )
+        assert (
+            "could not read" in Readback(imported=True, health="ONLINE", reexported=True).damaged()
+        )
+        skipped = Readback(imported=False, skipped="operator")
+        assert skipped.damaged() == ""
+
+
 class TestBackupHealthCheck:  # pylint: disable=missing-function-docstring,protected-access
     """I8 (M4a-10): counters and objects are shown before the question."""
 
@@ -13076,7 +13194,9 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring,too-man
         ident = disk or _purge_ident(None)
         report = type("R", (), {"has_risk": False, "findings": [], "device": "/dev/sdb"})()
         if readback is None:
-            readback = Readback(imported=True, health="ONLINE", reexported=True)
+            readback = Readback(
+                imported=True, health="ONLINE", reexported=True, damage=Damage(count=0)
+            )
         rc = 0
         with ExitStack() as stack:
             for cm in (
@@ -13504,7 +13624,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring,too-man
         cfg_dir = Path(tempfile.mkdtemp())
         registry_write_atomic(cfg_dir / "known_drives.json", {})
         seen: list[dict[str, Any]] = []
-        rb = Readback(imported=True, health="ONLINE", reexported=True)
+        rb = Readback(imported=True, health="ONLINE", reexported=True, damage=Damage(count=0))
 
         def readback(*_a: Any, **k: Any) -> Readback:
             seen.append(k)
@@ -14634,7 +14754,9 @@ class TestRegistryVerify:  # pylint: disable=missing-function-docstring
 
         def readback(_self: ZFS, name: str, **k: Any) -> Readback:
             seen.append({"name": name, **k})
-            return rb or Readback(imported=True, health="ONLINE", reexported=True)
+            return rb or Readback(
+                imported=True, health="ONLINE", reexported=True, damage=Damage(count=0)
+            )
 
         eject = MagicMock()
         out, rc = StringIO(), 0
@@ -22763,7 +22885,7 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
             "backup", "111", "usb-X-0:0", "/dev/sdb", True, False, False, "exported"
         )
         rc = 0
-        readback = Readback(imported=True, health="ONLINE", reexported=True)
+        readback = Readback(imported=True, health="ONLINE", reexported=True, damage=Damage(count=0))
         info = PoolInfo("x", used_bytes=10**9, avail_bytes=10**13, size_bytes=10**13)
         with ExitStack() as stack:
             for cm in (

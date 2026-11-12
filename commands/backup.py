@@ -97,7 +97,7 @@ from lib.retention import (
     space_candidates,
     whole_datasets,
 )
-from lib.zfs import ZFS, KeyStatusError, PoolInfo, Space, read_space
+from lib.zfs import ZFS, Damage, KeyStatusError, PoolInfo, Space, read_space
 
 # Remediation for a full backup drive. `zark purge` erases the whole drive,
 # so it is never the answer to "out of space" (hallazgo 8).
@@ -1086,27 +1086,34 @@ def _heal_drive_id(cfg: Config, pool_name: str, device: str | None, log: Log) ->
 SHOWN_ERRORS = 20
 
 
-def _check_health(zfs: ZFS, pool: str, log: Log) -> None:
-    """Pre-check of one pool (I8, M4a-10).
+def _check_health(zfs: ZFS, pool: str, log: Log) -> Damage:
+    """Pre-check of one pool (I8, M4a-10); returns its measure (M1, A1E-9).
 
-    ONLINE with zero counters passes. DEGRADED, or ONLINE with non-zero
-    READ/WRITE/CKSUM counters, is captured (M4a-9), its counters and first
-    permanent errors shown, and the run continues only on an explicit yes.
-    Any other health is captured and fatal.
+    ONLINE with zero counters and no data error counted passes. DEGRADED,
+    or ONLINE with non-zero READ/WRITE/CKSUM counters or a count of data
+    errors above zero (listed or not), is captured (M4a-9), its counters,
+    count and first permanent errors shown, and the run continues only on
+    an explicit yes. Any other health is captured and fatal.
     """
     health = zfs.pool_health(pool)
     if health not in ("ONLINE", "DEGRADED"):
         _ = forensics.capture(pool, f"pre-check: {health}", log)
         log.fatal(f"{pool} is {health}", solutions=[f"Run: zpool status -v {pool}"])
+    measure = zfs.pool_measure(pool)
     damage = zfs.pool_damage(pool)
-    if health == "ONLINE" and not damage.any:
+    if health == "ONLINE" and not damage.any and not measure.any:
         log.ok(f"{pool}: ONLINE")
-        return
+        return measure
     state = health if health == "DEGRADED" else "ONLINE with errors"
     log.warn(f"{pool}: {state}")
     path = forensics.capture(pool, f"pre-check: {state}", log)
     for line in damage.counters:
         log.warn(f"  errors (READ WRITE CKSUM): {line}")
+    if measure.count:
+        log.warn(f"  data errors counted: {measure.count}")
+        if damage.unlisted and not damage.errors:
+            # M19E-1: zpool refuses the list while the dataset's key is not loaded.
+            log.warn("    not listed until the drive's keys are loaded")
     if damage.errors:
         log.warn(f"  permanent errors in {len(damage.errors)} object(s):")
         for obj in damage.errors[:SHOWN_ERRORS]:
@@ -1119,6 +1126,28 @@ def _check_health(zfs: ZFS, pool: str, log: Log) -> None:
             f"Aborted: {pool} is {state}",
             solutions=[f"Run: zpool status -v {pool}"],
         )
+    return measure
+
+
+def _count(damage: Damage | None) -> str:
+    """A measure's count of data errors as the banner shows it."""
+    return "unknown" if damage is None or damage.count is None else str(damage.count)
+
+
+def _new_damage(pool: str, m1: Damage, m2: Damage | None, m3: Damage | None) -> str:
+    """Rule 2 of the outcome (A1E-9, M26-8 8a revised): why the run is not
+    verified, "" when no new damage was measured. M2's counters against
+    M1's (the same import), M3's count against M1's (the read-back is a new
+    import, its counters start at zero); M2's count decides nothing alone,
+    as it may count an old error twice until the next transaction group
+    (M26R-23). An unreadable count at M3 is not zero."""
+    if m3 is None or m3.count is None:
+        return f"{pool}'s count of data errors could not be read at its read-back"
+    if m2 is not None and m2.total > m1.total:
+        return f"{pool} recorded new data errors during this run (its error counters grew)"
+    if m3.count > (m1.count or 0):
+        return f"{pool} recorded new data errors during this run"
+    return ""
 
 
 # How often the wait for a drive looks, how long a pool may be gone from the
@@ -1383,8 +1412,10 @@ def run(
     # ── Check health ─────────────────────────────────────────────────────
     log.step(3, TOTAL_STEPS, "Checking pool health...")
 
+    m1 = Damage()
     for pool in (cfg.source_pool, pool_name):
-        _check_health(zfs, pool, log)
+        measured = _check_health(zfs, pool, log)
+        m1 = measured if pool == pool_name else m1
 
     # ── Pool info summary ────────────────────────────────────────────────
     log.step(4, TOTAL_STEPS, "Gathering pool info...")
@@ -1537,9 +1568,12 @@ def run(
     # The watch ends before the export and the read-back's import (M26-3 3b).
     watch.stop()
     cleanup.untrack_action(watch.stop)
+    m2: Damage | None = None
     if cleanup.keep_imported(pool_name):
         ks.umount_only()  # cryptsetup close would read the gone drive (A1E-7)
     else:
+        m2 = zfs.pool_measure(pool_name)  # M2: still imported read-write (A1E-9)
+        log.dbg(f"{pool_name} before its export: data errors {_count(m2)}")
         ks.umount()
     cleanup.run()
     elapsed = int(time.time() - started)  # P0-2: the whole run
@@ -1617,6 +1651,37 @@ def run(
         _notify("❌ Backup NOT verified", f"{pool_name}'s drive went away during the run")
         record.result("not_verified", message=watch.sentence())
         raise SystemExit(1)
+
+    counts = (
+        f"Data errors counted: {_count(m1)} at step 3, {_count(m2)} before the export, "
+        + f"{_count(rb.damage)} at the read-back."
+    )
+    new = _new_damage(pool_name, m1, m2, rb.damage)
+    if new:
+        log.banner_error(
+            "BACKUP NOT VERIFIED",
+            [
+                f"{new}.",
+                counts,
+                f"Check the drive: {zark_command()} fullcheck",
+                *marked,
+            ],
+        )
+        _notify("❌ Backup NOT verified", new)
+        record.result("not_verified", message=new)
+        raise SystemExit(1)
+    if m1.any:
+        # Rule 3: damage accepted at step 3 and nothing new; the outcome stands.
+        n = rb.damage.count if rb.damage is not None else None
+        log.warn(
+            (
+                f"{pool_name} still records {n} data error(s), accepted at step 3: "
+                if n
+                else f"{pool_name}'s error counters were above zero at step 3 (accepted): "
+            )
+            + f"{zark_command()} fullcheck checks them"
+        )
+        log.dbg(counts)
 
     if not res.ok:
         lines, missing = _incomplete_lines(res, eng.point)

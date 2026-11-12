@@ -755,6 +755,13 @@ def _parts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         elif not rb.ok:
             cr.damage = True
             cr.lines += rb.describe(again=False)
+        else:
+            # The read-back's line gains its count (A1E-9); the result is unchanged.
+            count = rb.damage.count if rb.damage is not None else None
+            log.info(
+                f"{cr.pool} read back: data errors counted: "
+                + ("unknown" if count is None else str(count))
+            )
     elif not do_scrub:
         log.step(2, TOTAL_STEPS, "Scrub: not asked")
 
