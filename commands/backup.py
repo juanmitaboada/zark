@@ -51,6 +51,7 @@ from lib import (
     notify,
     pending,
     pool_record,
+    pool_state,
     progress,
     reclaim,
     sh,
@@ -1120,6 +1121,59 @@ def _check_health(zfs: ZFS, pool: str, log: Log) -> None:
         )
 
 
+# How often the wait for a drive looks, how long a pool may be gone from the
+# module before the run ends, and how often an unattended wait is logged.
+WAIT_TICK_S = 1.0
+NOT_IMPORTED_S = 60.0
+WAIT_LOG_S = 600.0
+
+
+def _wait_for_drive(  # pylint: disable=too-many-arguments
+    watch: drive_watch.DriveWatch,
+    pool: str,
+    log: Log,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Wait for a latched run's pool: True once its drive is there, its state
+    ONLINE or DEGRADED and a probe (zpool sync -f) returned 0 since the
+    latch's last change; False when the module no longer holds the pool
+    (exported by hand) for :data:`NOT_IMPORTED_S` (M26-5 5a, M26R-21,
+    M26R-29). In backup's own flow, so a signal ends it: the pool is then
+    left imported, said once, and the signal goes on."""
+    log.warn(
+        f"Waiting for {pool}'s drive. Plug it back in; if `zpool status {pool}` "
+        + f"says suspended, run in another terminal: sudo zpool clear {pool}. "
+        + "Ctrl+C ends the run and leaves the pool imported."
+    )
+    missing_since: float | None = None
+    logged = clock()
+    try:
+        while True:
+            word = pool_state.state(pool)
+            if word == pool_state.MISSING:
+                missing_since = clock() if missing_since is None else missing_since
+                if clock() - missing_since >= NOT_IMPORTED_S:
+                    log.error(f"{pool} is no longer imported")
+                    return False
+            else:
+                missing_since = None
+            here = os.path.lexists(watch.device) if watch.device else True
+            if word in pool_state.HEALTHY and here and watch.probe():
+                log.ok(f"{pool} is back and answers: the run goes on")
+                return True
+            if clock() - logged >= WAIT_LOG_S:
+                log.info(f"Still waiting for {pool}'s drive ({word})")
+                logged = clock()
+            sleep(WAIT_TICK_S)
+    except (KeyboardInterrupt, SystemExit):
+        log.error("Interrupted while waiting for the drive: the rest of the run is skipped")
+        for line in pool_state.left_imported_lines(pool, "the run was interrupted"):
+            log.error(line)
+        raise
+
+
 # The dry runs at a backup's end (M9a-5): black's 230 take about 25 s on eli
 # (plan, section 8); what is not reached is null, oldest month first.
 CONTENTS_BUDGET_S = 60.0
@@ -1427,11 +1481,25 @@ def run(
     log.step(7, TOTAL_STEPS, "Replicating (this may take a while)...")
     res = engine.execute(eng, cleanup, decide)
     if res.aborted:
+        if res.lost:
+            # The drive went away before anything was sent: the pool is
+            # exported only once it is back and probed (M26-5 5a).
+            _ = _wait_for_drive(watch, pool_name, log)
         log.fatal(f"Backup not started: {res.error or 'aborted'}")
     if boot is not None:
         res.stale = boot.stale
 
     _show_table(res, eng.point, log)
+    # A run whose drive went away waits for it before anything more is
+    # written to the pool (M26-5 5a, M26R-12), and is never complete
+    # (M26R-1): no completion mark, no retention, no last_backup_at.
+    if watch.latched is not None and not _wait_for_drive(watch, pool_name, log):
+        log.fatal(
+            f"{pool_name} is no longer imported: the run ends here",
+            causes=[watch.sentence()],
+            solutions=[f"Check the drive: {zark_command()} fullcheck"],
+        )
+    complete = res.ok and watch.latched is None
     # What the point leaves out, on whatever of it reached the drive (M5b-7).
     _ = exclusions.record(
         pool_name,
@@ -1446,7 +1514,7 @@ def run(
     pruned = (0, 0)
     shared: dict[str, list[Ref]] | None = None
     meta: dict[str, str] = {}
-    if res.ok:
+    if complete:
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
         _ = drive_marks.record_complete(pool_name, eng.point, at_point, log)
         pruned = _apply_retention(pool_name, policy, log)
@@ -1456,8 +1524,8 @@ def run(
         # After retention, which may remove shared intermediates (decision 5e).
         shared = eng.shared_with_origin()
         meta = drive_marks.read_metadata(pool_name)
-    _write_metadata(pool_name, cfg.source_pool, eng.point if res.ok else "", log)
-    if res.ok:
+    _write_metadata(pool_name, cfg.source_pool, eng.point if complete else "", log)
+    if complete:
         # After retention and the drive's properties, before the export (M9a-2).
         record.measure_contents(pool_name, policy, log)
 
@@ -1486,17 +1554,24 @@ def run(
             f"{pool_name} already records {eng.point} as its last backup point (written "
             + "before the export); the registry's last backup was not updated.",
         ]
-        if res.ok
+        if complete
         else []
     )
     if pool_name not in cleanup.exported_pools():
         # H17: an export that failed is a failed backup, never a skipped check.
+        left = cleanup.keep_imported(pool_name)
         log.banner_error(
             "BACKUP NOT VERIFIED",
             [
                 f"{pool_name} could not be exported, so it was not read back.",
-                "Do NOT disconnect the drive. Check: zpool status; then",
-                f"  sudo zpool export {pool_name}",
+                *(
+                    pool_state.left_imported_lines(pool_name, left)
+                    if left
+                    else [
+                        "Do NOT disconnect the drive. Check: zpool status; then",
+                        f"  sudo zpool export {pool_name}",
+                    ]
+                ),
                 *marked,
             ],
         )
@@ -1517,6 +1592,31 @@ def run(
         record.result("not_verified", message=rb.summary(pool_name))
         raise SystemExit(1)
     log.ok(f"{pool_name} verified reimportable (ONLINE)")
+
+    if watch.latched is not None:
+        # Whoever resumed the pool, writes the drive had accepted before it
+        # lost power may be lost (M26R-1): never complete.
+        resumed = watch.resumed_at
+        lines, missing = _incomplete_lines(res, eng.point)
+        details = (lines[2:] if res.lost else lines) if missing else []
+        log.banner_error(
+            "BACKUP NOT VERIFIED",
+            [
+                f"{watch.sentence()} during this run"
+                + (
+                    f" and its pool was resumed at {drive_watch.local_time(resumed)}."
+                    if resumed
+                    else "."
+                ),
+                "Writes it had accepted before it lost power may be lost. Check the drive: "
+                + f"{zark_command()} fullcheck",
+                *([""] if details else []),
+                *details,
+            ],
+        )
+        _notify("❌ Backup NOT verified", f"{pool_name}'s drive went away during the run")
+        record.result("not_verified", message=watch.sentence())
+        raise SystemExit(1)
 
     if not res.ok:
         lines, missing = _incomplete_lines(res, eng.point)

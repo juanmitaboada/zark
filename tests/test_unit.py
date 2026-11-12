@@ -67,7 +67,7 @@ from dataclasses import asdict as dc_asdict, dataclass, replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
-from typing import Any, ClassVar, NoReturn
+from typing import Any, ClassVar, NoReturn, cast
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1749,6 +1749,216 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
                     assert why in clean_mod._held_back("backup")  # pylint: disable=protected-access
                     if not why:
                         assert clean_mod._held_back("backup") == ""  # pylint: disable=protected-access
+
+
+class _FakeWatch:  # pylint: disable=missing-function-docstring
+    """What backup asks of its drive watch, set by the test."""
+
+    def __init__(
+        self, device: str = "", latched: bool = False, probes: tuple[bool, ...] = ()
+    ) -> None:
+        self.device = device
+        self._latched = drive_watch.Latch(1_000_000.0, True) if latched else None
+        self.probes = list(probes)
+        self.probed_n = 0
+        self.resumed_at: float | None = 1_000_100.0 if latched else None
+        self.on_probe: Callable[[], None] | None = None
+        self.stopped = False
+
+    @property
+    def latched(self) -> "drive_watch.Latch | None":
+        return self._latched
+
+    def latch(self) -> None:
+        self._latched = drive_watch.Latch(1_000_000.0, True)
+        self.resumed_at = 1_000_100.0
+
+    def sentence(self) -> str:
+        return "backup's drive went away at 00:10:00 (pool suspended)" if self._latched else ""
+
+    def probe(self) -> bool:
+        self.probed_n += 1
+        if self.on_probe is not None:
+            self.on_probe()
+        return self.probes.pop(0) if self.probes else True
+
+    def why_not_export(self) -> str:
+        return ""
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+class TestWaitForDrive:  # pylint: disable=missing-function-docstring
+    """M26-5 5a, M26R-21, M26R-29: the wait's table."""
+
+    @staticmethod
+    def _wait(watch: _FakeWatch, k: "_Kstat", steps: list[Callable[[], None]]) -> tuple[bool, str]:
+        clock = {"t": 0.0}
+
+        def sleep(_s: float) -> None:
+            clock["t"] += 1.0
+            if steps:
+                steps.pop(0)()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            got = backup_mod._wait_for_drive(  # pylint: disable=protected-access
+                cast("drive_watch.DriveWatch", watch),
+                "backup",
+                make_log(),
+                sleep=sleep,
+                clock=lambda: clock["t"],
+            )
+        del k
+        return got, out.getvalue()
+
+    def test_it_goes_on_only_with_the_drive_healthy_and_probed(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
+            dev = Path(td) / "part1"
+            watch = _FakeWatch(str(dev), latched=True, probes=(False, True))
+            steps: list[Callable[[], None]] = [
+                lambda: k.set("backup", "REMOVED"),
+                dev.touch,
+                lambda: k.set("backup", "ONLINE"),
+            ]
+            got, out = self._wait(watch, k, steps)
+            assert got and watch.probed_n == 2, out
+            assert "sudo zpool clear backup" in out and "the run goes on" in out
+
+    def test_no_probe_while_suspended_or_gone(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
+            dev = Path(td) / "part1"
+            dev.touch()
+            watch = _FakeWatch(str(dev), latched=True)
+            steps: list[Callable[[], None]] = [lambda: None] * 5 + [
+                lambda: k.set("backup", "ONLINE")
+            ]
+            got, _ = self._wait(watch, k, steps)
+            assert got and watch.probed_n == 1
+
+    def test_it_waits_for_the_link_and_for_a_healthy_state(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE") as k:
+            dev = Path(td) / "part1"
+            watch = _FakeWatch(str(dev), latched=True)
+            steps: list[Callable[[], None]] = [lambda: None, lambda: None, dev.touch]
+            got, _ = self._wait(watch, k, steps)
+            assert got and not steps  # it went on only once the link was back
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
+            dev = Path(td) / "part1"
+            dev.touch()
+            watch = _FakeWatch(str(dev), latched=True)
+            steps = [lambda: None, lambda: None, lambda: k.set("backup", "ONLINE")]
+            got, _ = self._wait(watch, k, steps)
+            assert got and not steps  # and only once the pool was ONLINE
+
+    def test_a_pool_no_longer_imported_ends_the_wait(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td) as k:
+            watch = _FakeWatch(str(Path(td) / "gone"), latched=True)
+            got, out = self._wait(watch, k, [])
+            assert not got and "backup is no longer imported" in out
+
+    def test_a_signal_in_the_wait_leaves_the_pool_imported_and_goes_on(self):
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
+            watch = _FakeWatch(str(Path(td) / "gone"), latched=True)
+
+            def interrupt() -> None:
+                raise KeyboardInterrupt
+
+            out = StringIO()
+            try:
+                _ = self._wait(watch, k, [interrupt])
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("the signal was swallowed")
+            del out
+
+
+class TestBackupLatched:  # pylint: disable=missing-function-docstring
+    """M26R-1: a run whose drive went away is never complete."""
+
+    def _run(
+        self, watch: _FakeWatch, *extra: AbstractContextManager[object]
+    ) -> tuple[int, str, Any]:
+        complete = MagicMock(return_value=True)
+        retention = MagicMock(return_value=(0, 0))
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE"):
+            dev = Path(td) / "part1"
+            dev.touch()
+            watch.device = str(dev)
+            pool_state.remember("backup", False, [str(dev)])
+            _, rc = TestBackupCommand()._run(  # pylint: disable=protected-access
+                _fresh_fake(),
+                patch.object(backup_mod.drive_watch, "start", return_value=watch),
+                patch.object(drive_marks, "record_complete", complete),
+                patch.object(backup_mod, "_apply_retention", retention),
+                *extra,
+                redirect_stdout(out),
+            )
+        return rc, Log._STRIP_RE.sub("", out.getvalue()), (complete, retention)  # pylint: disable=protected-access
+
+    def test_a_drive_that_went_away_and_came_back_is_not_verified(self):
+        watch = _FakeWatch(latched=False)
+        real = engine.execute
+
+        def execute(*a: Any, **kw: Any) -> engine.Result:
+            res = real(*a, **kw)
+            watch.latch()  # after every dataset reached the point
+            return res
+
+        rc, text, (complete, retention) = self._run(watch, patch.object(engine, "execute", execute))
+        assert rc == 1, text
+        complete.assert_not_called()
+        retention.assert_not_called()
+        assert "BACKUP NOT VERIFIED" in text and "went away at 00:10:00" in text
+        assert "zark fullcheck" in text and "BACKUP COMPLETED" not in text
+        assert "0 dataset" not in text
+
+    def test_a_drive_gone_before_anything_was_sent_waits_then_ends_not_started(self):
+        watch = _FakeWatch(latched=True)
+        lost = watch.sentence()
+        res = engine.Result(aborted=True, error=lost, lost=lost)
+        rc, text, _ = self._run(watch, patch.object(engine, "execute", return_value=res))
+        assert rc == 1 and watch.probed_n >= 1, text
+        assert f"Backup not started: {lost}" in text
+
+    def test_the_watch_stops_before_the_read_back_imports(self):
+        # M26-3 3b: the read-back's import is not the run's pool to watch.
+        watch = _FakeWatch(latched=False)
+        seen: list[bool] = []
+
+        def readback(*_a: Any, **_k: Any) -> Readback:
+            seen.append(watch.stopped)
+            return Readback(imported=True, health="ONLINE", reexported=True)
+
+        rc, text, _ = self._run(watch, patch.object(ZFS, "verify_exported_pool_readback", readback))
+        assert rc == 0 and seen == [True], text
+
+    def test_the_drive_is_written_to_only_after_the_wait(self):
+        watch = _FakeWatch(latched=False)
+        real = engine.execute
+
+        def execute(*a: Any, **kw: Any) -> engine.Result:
+            res = real(*a, **kw)
+            watch.latch()
+            return res
+
+        order: list[str] = []
+        watch.on_probe = lambda: order.append("probe")
+        real_record = backup_mod.exclusions.record
+
+        def record(*a: Any, **kw: Any) -> bool:
+            order.append("record")
+            return real_record(*a, **kw)
+
+        rc, _text, _ = self._run(
+            watch,
+            patch.object(engine, "execute", execute),
+            patch.object(backup_mod.exclusions, "record", record),
+        )
+        assert rc == 1 and order[:2] == ["probe", "record"], order
 
 
 class TestWatchProbe:  # pylint: disable=missing-function-docstring
