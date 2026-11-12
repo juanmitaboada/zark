@@ -39,7 +39,7 @@ from lib.restore_points import (
     retention_points,
 )
 from lib.retention import point_times
-from lib.survey import ReadError, checked, read_dest, read_origin, source_pools
+from lib.survey import ReadError, checked, existing_roots, read_dest, read_origin, source_pools
 
 
 def _q(word: str) -> str:
@@ -244,8 +244,9 @@ def drive_snapshots(pool: str, strict: bool = False) -> list[Snap]:
     ``strict`` raises :class:`ReadError` when a listing of a root that
     exists fails."""
     snaps: list[Snap] = []
+    roots = existing_roots(pool, strict)
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        if strict and not sh.run(f"zfs list -H -o name {_q(root)}").ok:
+        if roots is not None and root not in roots:
             continue
         r = checked(
             sh.run(f"zfs list -Hp -t snapshot -o name,guid,createtxg,creation -r {root}"), strict
@@ -321,8 +322,9 @@ def drive_pins(pool: str, strict: bool = False) -> dict[str, str]:
     snapshot by snapshot and misreport what it kept."""
     out: dict[str, str] = {}
     strip = f"{pool}/"
+    roots = existing_roots(pool, strict)
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
-        if strict and not sh.run(f"zfs list -H -o name {_q(root)}").ok:
+        if roots is not None and root not in roots:
             continue
         r = checked(
             sh.run(f"zfs list -Hp -t snapshot -o name,clones,userrefs -r {_q(root)}"), strict

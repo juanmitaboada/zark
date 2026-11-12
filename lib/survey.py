@@ -70,10 +70,31 @@ class ReadError(Exception):
 
 
 def checked(r: sh.RunResult, strict: bool) -> sh.RunResult:
-    """``r``, or ReadError when ``strict`` and the read failed."""
-    if strict and not r.ok:
-        raise ReadError(f"could not read: {r.command or 'zfs list'}")
+    """``r``, or ReadError when ``strict`` and the read failed.
+
+    A strict read fails on a non-zero status and on anything written to
+    stderr: ``zfs list -r`` and ``zfs get -r`` exit 0 after failing to
+    iterate a child (cmd/zfs/zfs_iter.c, ``zfs_callback``, the iteration's
+    result ignored), libzfs having printed ``cannot iterate filesystems``,
+    so the listing is partial. On a suspended pool that turned 18 datasets
+    into DIVERGED plans (A1E-8, M26-7 7a). A ``-H`` listing that succeeds
+    writes nothing to stderr. The error carries the whole stderr (M26R-18).
+    """
+    if strict and (not r.ok or r.stderr.strip()):
+        why = f" ({r.stderr.strip()})" if r.stderr.strip() else ""
+        raise ReadError(f"could not read: {r.command or 'zfs list'}{why}")
     return r
+
+
+def existing_roots(pool: str, strict: bool) -> set[str] | None:
+    """Children of ``pool`` from one listing (``zfs list -d 1``), read
+    strictly when ``strict``; None when not strict, the caller probing
+    each root as before. A root is missing only when it is not in the
+    listing, never because its own probe failed for another reason
+    (M2V-7 d, M26R-11)."""
+    if not strict:
+        return None
+    return set(checked(sh.run(f"zfs list -H -o name -d 1 {_q(pool)}"), strict).lines)
 
 
 def read_origin(pools: list[str], strict: bool = False) -> dict[str, Origin]:
@@ -114,11 +135,7 @@ def read_dest(pool: str, strict: bool = False) -> dict[str, Dest]:
     """
     dest: dict[str, Dest] = {}
     strip = f"{pool}/"
-    children: list[str] | None = None
-    if strict:
-        # One listing: a root is missing only when it is not in it, never
-        # because its own probe failed for another reason (M2V-7 d).
-        children = checked(sh.run(f"zfs list -H -o name -d 1 {_q(pool)}"), strict).lines
+    children = existing_roots(pool, strict)
     for root in (f"{pool}/rpool", f"{pool}/bpool"):
         if children is not None and root not in children:
             continue

@@ -1226,6 +1226,70 @@ class TestWarnReplaced:  # pylint: disable=missing-function-docstring
         assert "org.zark:source_host held a byte" in out.getvalue()
 
 
+class TestStrictReads:  # pylint: disable=missing-function-docstring
+    """A1E-8, M26-7 7a, M26R-11: a strict read that reported an error is a failed read."""
+
+    PARTIAL = "cannot iterate filesystems: pool I/O is currently suspended"
+
+    def test_a_listing_with_stderr_fails_a_strict_read(self):
+        r = RunResult(0, "backup/rpool\n", self.PARTIAL, "zfs list -H -r backup")
+        try:
+            survey.checked(r, True)
+        except survey.ReadError as e:
+            assert self.PARTIAL in str(e), e
+        else:
+            raise AssertionError("a partial listing passed a strict read")
+        assert survey.checked(r, False) is r
+        assert survey.checked(RunResult(0, "x\n", "", "zfs list"), True).ok
+
+    def test_read_dest_refuses_a_partial_snapshot_listing(self):
+        # B8: the snapshot listing came back rc 0 without the datasets' snapshots,
+        # and they were planned DIVERGED ("no snapshot on backup").
+        mock = MockShell()
+        mock.on("zfs list -H -o name -d 1 backup").succeeds("backup\nbackup/rpool")
+        mock.on_prefix("zfs list -Hp -t filesystem,volume").succeeds(
+            "backup/rpool\tfilesystem\t-\t-\t1\t0\t-\nbackup/rpool/home\tfilesystem\t-\t-\t1\t0\t-"
+        )
+        mock.on_prefix("zfs get -H -s local").succeeds("")
+        mock.on_prefix("zfs list -Hp -t snapshot").returns(0, "", self.PARTIAL)
+        with patch_sh(mock):
+            try:
+                survey.read_dest("backup", strict=True)
+            except survey.ReadError as e:
+                assert "cannot iterate" in str(e)
+            else:
+                raise AssertionError("a partial listing was planned on")
+
+    def _probe_mock(self, probe_ok: bool) -> MockShell:
+        mock = MockShell()
+        if probe_ok:
+            mock.on("zfs list -H -o name -d 1 backup").succeeds("backup\nbackup/rpool")
+        else:
+            mock.on("zfs list -H -o name -d 1 backup").fails("pool I/O is currently suspended")
+        mock.on_prefix("zfs list -Hp -t snapshot").succeeds("")
+        mock.on_prefix("zfs get").succeeds("")
+        return mock
+
+    def test_drive_snapshots_and_pins_raise_when_the_roots_cannot_be_listed(self):
+        # M26R-11: a probe that failed for I/O skipped the root silently.
+        for read in (drive_marks.drive_snapshots, drive_marks.drive_pins):
+            with patch_sh(self._probe_mock(False)):
+                try:
+                    _ = read("backup", strict=True)
+                except survey.ReadError:
+                    pass
+                else:
+                    raise AssertionError(f"{read.__name__} skipped a root it could not list")
+
+    def test_drive_snapshots_and_pins_skip_a_root_that_is_not_there(self):
+        for read in (drive_marks.drive_snapshots, drive_marks.drive_pins):
+            mock = self._probe_mock(True)
+            with patch_sh(mock):
+                _ = read("backup", strict=True)
+            assert any("-r backup/rpool" in c for c in mock.calls), mock.calls
+            assert not any("backup/bpool" in c for c in mock.calls), mock.calls
+
+
 class TestShRunPipe:  # pylint: disable=missing-function-docstring
     """Tests for run_pipe() pipeline behavior, especially p1-side failures."""
 
