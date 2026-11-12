@@ -44,6 +44,7 @@ from lib import (
     cli_spec,
     drive_contents,
     drive_marks,
+    drive_watch,
     engine,
     exclusions,
     forensics,
@@ -1296,6 +1297,9 @@ def run(
         )
 
     log.ok(f"Pool {pool_name} imported (GUID: {actual_guid} ✓)")
+    # Until the export: a drive that goes away is said at once (A1E-7, M26-3 3b).
+    watch = drive_watch.start(pool_name, device or "", log, _notify)
+    cleanup.track_action(watch.stop)
     # By content, not only by the registry: a drive of another system is
     # refused before anything is asked or written.
     drive_marks.check_drive_owner(pool_name, log)
@@ -1438,6 +1442,9 @@ def run(
         record.measure_contents(pool_name, policy, log)
 
     # ── Export and read back ─────────────────────────────────────────────
+    # The watch ends before the export and the read-back's import (M26-3 3b).
+    watch.stop()
+    cleanup.untrack_action(watch.stop)
     ks.umount()
     cleanup.run()
     elapsed = int(time.time() - started)  # P0-2: the whole run

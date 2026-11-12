@@ -223,6 +223,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
     transfer: dict[str, Any] | None = None
     meter: ByteMeter | None = None
     check: dict[str, Any] | None = None  # zark fullcheck's part under way (M19)
+    drive_gone: dict[str, Any] | None = None  # backup's drive watch (A1E-7, M26-10)
     updates: dict[str, DriveUpdate] = field(default_factory=dict)
     error: str = ""  # the last fatal error's message, or a crash's
     on_end: list[Callable[[], None]] = field(default_factory=list)
@@ -256,6 +257,7 @@ class _State:  # pylint: disable=too-many-instance-attributes
             "point": self.point,
             "transfer": self._transfer(),
             **({"check": self.check} if self.command == "fullcheck" else {}),
+            **({"drive_gone": self.drive_gone} if self.command == "backup" else {}),
         }
 
     def _transfer(self) -> dict[str, Any] | None:
@@ -513,6 +515,13 @@ def set_transfer(transfer: dict[str, Any] | None, meter: ByteMeter | None = None
 def set_check(check: dict[str, Any] | None) -> None:
     """``zark fullcheck``'s part under way (the ``check`` object), None between parts."""
     _changed(lambda r: setattr(r, "check", dict(check) if check is not None else None))
+
+
+def set_drive_gone(gone: dict[str, Any] | None) -> None:
+    """``backup``'s ``drive_gone`` (the drive watch, M26-10 10a), None while
+    the drive is there. Set under the run's lock from the watch's thread;
+    the heartbeat writes it (M26R-17)."""
+    _changed(lambda r: setattr(r, "drive_gone", dict(gone) if gone is not None else None))
 
 
 def record(guid: str, update: DriveUpdate) -> None:

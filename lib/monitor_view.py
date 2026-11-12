@@ -359,6 +359,7 @@ def _active_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     if isinstance(pdoc.get("point"), str):
         info += f"   point {clean(pdoc['point'])}"
     lines.append([(info, "")])
+    lines += _drive_gone_lines(pdoc.get("drive_gone"))
     updated = _ts(pdoc.get("updated_at"))
     if r.progress_class == "stalled" and updated is not None:
         silent = fmt_duration((r.now - updated).total_seconds())
@@ -374,6 +375,20 @@ def _active_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     if isinstance(check, dict):
         return lines + _check_lines(check, opt, style)
     return lines + _step_meter(pdoc, opt, style)
+
+
+def _drive_gone_lines(gone: object) -> list[Line]:
+    """``progress.json``'s ``drive_gone`` (M26-10): the run's drive went away."""
+    if not isinstance(gone, dict):
+        return []
+    hint = gone.get("hint")
+    state = "suspended" if gone.get("suspended") is True else "not suspended"
+    back = "plugged in again" if gone.get("back") is True else "not there"
+    resumed = " (resumed)" if isinstance(gone.get("resumed_at"), str) else ""
+    lines: list[Line] = [[(f"  drive gone: pool {state}, drive {back}{resumed}", "crit")]]
+    if isinstance(hint, str) and not resumed:
+        lines.append([(f"  {clean(hint)}", "warn")])
+    return lines
 
 
 _PHASES = {"restore": "restore check", "scrub": "scrub", "readback": "read-back"}

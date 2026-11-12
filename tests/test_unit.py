@@ -183,10 +183,12 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     dpkg_lock,
     drive_contents,
     drive_marks,
+    drive_watch,
     engine,
     forensics,
     grub_guard,
     pool_record,
+    pool_state,
     reclaim,
     recover_ext4,
     restore_plan,
@@ -679,6 +681,51 @@ def _guarded_to_file(self: Log, msg: str) -> None:
 
 
 _TO_FILE_GUARD = patch.object(Log, "_to_file", _guarded_to_file).start()
+
+
+# Nor the machine's ZFS module and tools. lib.pool_state reads
+# /proc/spl/kstat/zfs and starts its children through its own bounded runner,
+# which patch_sh does not see: on a host with the module loaded (carmen) a
+# test would read the real pools' states and run zpool on them (zpool sync
+# needs no privilege). The kstat directory is one that does not exist, as on
+# a host without the module, and a start of a host tool is recorded and
+# refused as a missing tool is; the runner fails the test that made it.
+# Tests of the kstat reader and of the runner patch them themselves.
+_HOST_TOOLS = frozenset({"zpool", "zfs", "zdb", "cryptsetup", "dmsetup", "mount", "umount"})
+_HOST_TOOL_STARTS: list[str] = []
+_pool_state_start = pool_state.start
+
+
+def _guarded_start(argv: list[str]) -> pool_state.Child:
+    if os.path.basename(argv[0]) in _HOST_TOOLS:
+        _HOST_TOOL_STARTS.append(" ".join(argv))
+        raise FileNotFoundError(errno.ENOENT, "not started by the unit tests", argv[0])
+    return _pool_state_start(argv)
+
+
+_POOL_STATE_GUARD = (
+    patch.object(pool_state, "KSTAT_DIR", Path(_TEST_LOG_DIR, "no-zfs-module")).start(),
+    patch.object(pool_state, "start", _guarded_start).start(),
+)
+
+# A drive watch a test started and left running is stopped when the test
+# ends, as the end of a real run's process ends it: the commands' tests
+# disable Cleanup's exit hook, which stops it in a run.
+_WATCHES: list[drive_watch.DriveWatch] = []
+_WATCH_START = drive_watch.DriveWatch.start
+
+
+def _tracked_watch_start(self: drive_watch.DriveWatch) -> drive_watch.DriveWatch:
+    _WATCHES.append(self)
+    return _WATCH_START(self)
+
+
+def _stop_watches() -> None:
+    while _WATCHES:
+        _WATCHES.pop().stop()
+
+
+_WATCH_GUARD = patch.object(drive_watch.DriveWatch, "start", _tracked_watch_start).start()
 
 
 def make_config(**overrides) -> Config:
@@ -1288,6 +1335,268 @@ class TestStrictReads:  # pylint: disable=missing-function-docstring
                 _ = read("backup", strict=True)
             assert any("-r backup/rpool" in c for c in mock.calls), mock.calls
             assert not any("backup/bpool" in c for c in mock.calls), mock.calls
+
+
+class _WatchBench:  # pylint: disable=too-many-instance-attributes
+    """A drive watch on a temporary by-id link and kstat file, a clock moved
+    by hand and a runner that answers ``zpool status -p`` (or never)."""
+
+    def __init__(self, td: str, *, status_never_returns: bool = False) -> None:
+        self.dev = Path(td) / "by-id" / "ata-X_SN-part1"
+        self.dev.parent.mkdir()
+        self.dev.symlink_to("/dev/null")
+        self.kstat = Path(td) / "kstat"
+        (self.kstat / "backup").mkdir(parents=True)
+        self.set_state("ONLINE")
+        self.now = 1_000_000.0
+        self.runs: list[list[str]] = []
+        self.never = status_never_returns
+        self.notes: list[str] = []
+        self.out = StringIO()
+        self.watch = drive_watch.DriveWatch(
+            "backup",
+            str(self.dev),
+            make_log(),
+            notify=lambda t, b: self.notes.append(f"{t}: {b}"),
+            kstat_dir=self.kstat,
+            clock=lambda: self.now,
+            runner=self.runner,
+        )
+
+    def runner(self, argv: list[str], _deadline: float) -> pool_state.Bounded:
+        """The watch's bounded runner: a status that never returns, or one."""
+        self.runs.append(argv)
+        if self.never:
+            child = MagicMock()
+            child.poll.return_value = None
+            return pool_state.Bounded(None, child=child)
+        text = "config:\n\n\tNAME  STATE  READ WRITE CKSUM\n\tbackup  SUSPENDED  3  1  0\n\n"
+        return pool_state.Bounded(0, text + "errors: 4 data errors, use '-v' for a list\n")
+
+    def set_state(self, word: str | None) -> None:
+        """Write the pool's kstat state; None removes the file."""
+        f = self.kstat / "backup" / "state"
+        if word is None:
+            f.unlink(missing_ok=True)
+        else:
+            _ = f.write_text(word + "\n", encoding="ascii")
+
+    def tick(self, seconds: float = 2.0) -> None:
+        """One look of the watch, then the clock moves on."""
+        with redirect_stdout(self.out), patch.object(drive_watch.progress, "set_drive_gone"):
+            self.watch.tick()
+        self.now += seconds
+
+
+class TestDriveWatch:  # pylint: disable=missing-function-docstring
+    """A1E-7: backup's drive watch (M26-3 3b, M26R-3, M26R-21, M26R-24, M26R-29)."""
+
+    def test_a_link_missing_once_does_not_latch(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            b.dev.unlink()
+            b.tick()
+            b.dev.symlink_to("/dev/null")
+            b.tick()
+            assert b.watch.latched is None and not b.notes
+
+    def test_a_link_missing_twice_latches_at_the_first_time(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            first = b.now
+            b.dev.unlink()
+            b.tick()
+            b.tick()
+            latch = b.watch.latched
+            assert latch is not None and latch.lost_at == first and not latch.suspended
+            text = b.out.getvalue()
+            assert "drive went away at" in text and "is not suspended yet" in text
+            assert (
+                "sudo zpool clear backup" in text
+                and "zark fullcheck" in text
+                and "--drive" not in text
+            )
+            assert "reboot with the drive unplugged" in text
+            assert len(b.notes) == 1
+
+    def test_a_suspension_latches_at_once_and_is_never_cleared(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            latch = b.watch.latched
+            assert latch is not None and latch.suspended
+            assert "(pool suspended)" in b.watch.sentence()
+            b.set_state("ONLINE")
+            b.tick()
+            assert b.watch.latched == latch and b.watch.resumed_at is not None
+
+    def test_states_that_latch_at_once_and_on_two_ticks(self):
+        for word in ("REMOVED", "UNAVAIL", "FAULTED", "OFFLINE"):
+            with tempfile.TemporaryDirectory() as td:
+                b = _WatchBench(td)
+                b.tick()
+                b.set_state(word)
+                b.tick()
+                assert b.watch.latched is not None, word
+        for odd in ("TRANSITIONING", None, ""):
+            with tempfile.TemporaryDirectory() as td:
+                b = _WatchBench(td)
+                b.tick()
+                b.set_state(odd)
+                b.tick()
+                assert b.watch.latched is None, odd
+                b.tick()
+                assert b.watch.latched is not None, odd
+
+    def test_what_was_never_seen_is_not_watched(self):
+        # A module without the kstat file, a path that never existed.
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.set_state(None)
+            b.dev.unlink()
+            for _ in range(4):
+                b.tick()
+            assert b.watch.latched is None
+
+    def test_every_new_suspension_repeats_the_clear(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            assert "is suspended now" in b.out.getvalue()
+            doc = b.watch.document()
+            assert doc is not None and doc["suspended"] is True and doc["resumed_at"]
+
+    def test_a_drive_back_but_not_reopened_is_named_after_ten_seconds(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            b.set_state("REMOVED")
+            for _ in range(7):
+                b.tick()
+            assert b.out.getvalue().count("has not reopened its drive") == 1
+
+    def test_evidence_is_read_while_away_one_child_at_a_time(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td, status_never_returns=True)
+            b.tick()
+            b.set_state("SUSPENDED")
+            for _ in range(40):
+                b.tick()
+            assert b.runs == [["zpool", "status", "-p", "backup"]], b.runs
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            assert "backup SUSPENDED 3 1 0" in b.out.getvalue(), b.out.getvalue()
+            assert "4 data errors" in b.out.getvalue()
+
+    def test_the_document_matches_the_schema(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            assert b.watch.document() is None
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            doc = b.watch.document()
+        assert doc is not None
+        assert set(doc) == {"since", "pool", "suspended", "back", "resumed_at", "hint"}
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", doc["since"])
+
+    def test_the_thread_starts_ticks_and_stops_within_its_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            with patch.object(drive_watch, "TICK_S", 0.01), redirect_stdout(StringIO()):
+                _ = b.watch.start()
+                time.sleep(0.1)
+                b.watch.stop()
+            assert b.watch.state == "ONLINE"
+
+    def test_the_watch_reads_no_state_through_zpool(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            mock = MockShell()
+            with patch_sh(mock):
+                for _ in range(3):
+                    b.tick()
+            assert not mock.calls and not b.runs
+
+
+class TestMonitorDriveGone:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M26-10: zark monitor shows drive_gone."""
+
+    def test_the_run_line_names_a_drive_gone_and_its_hint(self):
+        gone = {"suspended": True, "back": False, "resumed_at": None, "hint": "plug it in"}
+        lines = mview._drive_gone_lines(gone)  # pylint: disable=protected-access
+        text = " ".join(t for line in lines for t, _ in line)
+        assert "drive gone: pool suspended, drive not there" in text and "plug it in" in text
+        assert not mview._drive_gone_lines(None)  # pylint: disable=protected-access
+        resumed = mview._drive_gone_lines(  # pylint: disable=protected-access
+            {**gone, "resumed_at": "2026-11-13T00:00:00Z", "back": True}
+        )
+        assert len(resumed) == 1 and "(resumed)" in resumed[0][0][0]
+
+
+class TestPoolState:  # pylint: disable=missing-function-docstring
+    """The reads that never wait on a gone drive (A1E-7)."""
+
+    def test_state_missing_unreadable_and_a_word(self):
+        with tempfile.TemporaryDirectory() as td:
+            k = Path(td)
+            assert pool_state.state("backup", k) == pool_state.MISSING
+            (k / "backup").mkdir()
+            (k / "backup" / "state").write_text("SUSPENDED\n", encoding="ascii")
+            assert pool_state.state("backup", k) == "SUSPENDED"
+            assert pool_state.imported("backup", k)
+            (k / "backup" / "state").write_text("", encoding="ascii")
+            assert pool_state.state("backup", k) == pool_state.UNREADABLE
+            assert pool_state.state("../x", k) == pool_state.UNREADABLE
+
+    def test_a_bounded_child_is_abandoned_at_its_deadline(self):
+        got = pool_state.run_bounded(["sleep", "5"], 0.2)
+        assert got.rc is None and got.child is not None
+        assert got.child.poll() is None
+        got.child.proc.kill()
+        _ = got.child.proc.wait()
+        done = pool_state.run_bounded(["sh", "-c", "echo out; echo err >&2; exit 3"], 5)
+        assert (done.rc, done.stdout, done.stderr) == (3, "out\n", "err\n")
+
+    def test_the_suite_starts_no_zfs_tool_on_the_host(self):
+        # A unit test never reaches the machine's pools (zpool sync needs no
+        # privilege): the suite's guard refuses the start and records it.
+        assert not pool_state.KSTAT_DIR.exists()
+        before = len(_HOST_TOOL_STARTS)
+        got = pool_state.run_bounded(["zpool", "sync", "-f", "rpool"], 5)
+        assert got.rc == 126 and "not started by the unit tests" in got.stderr, got
+        assert _HOST_TOOL_STARTS[before:] == ["zpool sync -f rpool"]
+        del _HOST_TOOL_STARTS[before:]  # this test's own start is not a fault
+
+    def test_the_child_has_its_own_session_and_the_c_locale(self):
+        got = pool_state.run_bounded(["sh", "-c", 'echo "$LC_ALL $(ps -o sid= -p $$)"'], 5)
+        assert got.ok and got.stdout.split()[0] == "C"
+        assert int(got.stdout.split()[1]) != os.getsid(0)
+
+
+class TestProgressDriveGone:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """M26-10 10a: drive_gone in progress.json."""
+
+    def test_only_backup_carries_drive_gone(self):
+        with tempfile.TemporaryDirectory() as td:
+            for command, present in (("backup", True), ("prune", False)):
+                state = progress_mod._State(  # pylint: disable=protected-access
+                    command, 1, 1, "b", "2026-11-13T00:00:00Z", Path(td) / "p.json", make_log()
+                )
+                assert ("drive_gone" in state.document()) is present
 
 
 class TestShRunPipe:  # pylint: disable=missing-function-docstring
@@ -30642,9 +30951,15 @@ def _run_one(name: str, method: Callable[[], object]) -> str:
     """
     seen = StringIO()
     reads, writes = len(_TERMINAL_READS), len(_REAL_LOG_WRITES)
+    starts = len(_HOST_TOOL_STARTS)
     try:
         with redirect_stdout(seen), redirect_stderr(seen):
-            method()
+            try:
+                method()
+            finally:
+                _stop_watches()
+        if len(_HOST_TOOL_STARTS) > starts:
+            raise AssertionError(f"it started a host tool: {', '.join(_HOST_TOOL_STARTS[starts:])}")
         if len(_TERMINAL_READS) > reads:
             raise _NoTerminal(f"it read the terminal: {', '.join(_TERMINAL_READS[reads:])}")
         if len(_REAL_LOG_WRITES) > writes:

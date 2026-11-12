@@ -157,6 +157,7 @@ Present while a command that takes the lock runs; absent otherwise.
 | `point` | string or null | the backup point of this run (`zark_YYYY-MM-DD_HH:MM:SSZ`) once taken; backup only |
 | `transfer` | object or null | non-null only while a backup moves data (step 7); null otherwise and for every other command |
 | `check` | object or null, optional | `fullcheck` only: the part under way; null between parts. Absent for every other command |
+| `drive_gone` | object or null, optional | `backup` only: its drive went away while its pool was imported (below); null while the drive is there. Absent for every other command and from a file an older zark wrote |
 
 `waiting_for_input` is true during every read of the terminal: yes/no
 questions (timed ones and the eject prompt included), choices, text and
@@ -218,6 +219,22 @@ with no terminal reads nothing, so neither `waiting_for_input` nor
 
 The byte counters follow the rules below; a reader without `bytes_total`
 shows `percent` when it is set.
+
+`drive_gone` (`zark backup`, 2.3.1): the run's drive was seen gone (its
+partition's link missing, or the pool not usable). A pool without
+redundancy then suspends at its first failed write, and every call that
+needs it waits until the drive is plugged back in and `zpool clear` is run,
+or until a reboot; zark does not run the clear itself. The run can no
+longer end `completed`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `since` | timestamp | when the drive was first seen gone |
+| `pool` | string | the backup pool |
+| `suspended` | boolean or null | the pool is suspended now; null when its state cannot be read |
+| `back` | boolean | the partition's link is there again |
+| `resumed_at` | timestamp or null | when the pool last left the suspended state, whoever resumed it; null if it has not |
+| `hint` | string | what to do, for people only |
 
 #### Byte counters
 

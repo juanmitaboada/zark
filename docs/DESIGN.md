@@ -24,6 +24,7 @@ zark/
 │   ├── dpkg_lock.py           # dpkg's locks: no backup pool imported while apt or dpkg runs
 │   ├── drive_contents.py      # What a backup drive holds, for status.json (read-only)
 │   ├── drive_marks.py         # What zark records on a backup drive and reads back
+│   ├── drive_watch.py         # backup's watch of its drive while the pool is imported
 │   ├── drives.py              # Drive detection and identification
 │   ├── engine.py              # Backup executor: point, send/receive, anchors
 │   ├── exclusions.py          # Datasets left out of backups or snapshots
@@ -48,6 +49,7 @@ zark/
 │   ├── pending.py             # pending_drives.json: drives prepare could not read back yet
 │   ├── platform_facts.py      # The platform, as the self-test records it
 │   ├── pool_record.py         # How origin's pools were at a backup point (features, versions)
+│   ├── pool_state.py          # A pool's state without waiting on its drive; when it may be exported
 │   ├── progress.py            # /run/zark/progress.json: what the running command does
 │   ├── reclaim.py             # What removing snapshots from a drive frees
 │   ├── recover_checks.py      # What recover refuses from a point's record, before erasing

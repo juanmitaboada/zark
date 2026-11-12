@@ -50,6 +50,7 @@ no `reclaim_bytes` is a ZFS figure.
 | `idle` | absent | hourly refresh; black 1 day, blue 13 days; rpool `warning` notice | `ok` |
 | `running` | backup to black, step 7, 9 of 21 transfers, 7.0 of 17.0 GiB at 107 MiB/s | as `idle` | `running` |
 | `stalled` | as `running`, heartbeat 95 s old | as `idle` | `running` |
+| `drive-gone` | as `running`, with `drive_gone`: black's drive went away, its pool suspended | as `idle` | `running` |
 | `waiting` | backup at step 5, asking for the passphrase | as `idle` | `waiting` |
 | `waiting-eject` | backup at step 8, the eject prompt | already `completed` | `waiting` |
 | `completed` | absent | black `completed`: new point, new space | `ok` |
