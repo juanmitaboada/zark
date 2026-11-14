@@ -112,10 +112,14 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         self._clock = clock
         self._runner = runner
         self._prober = prober
-        # The probe (M26R-19, M26R-27): when the latch was set or the pool
-        # last entered SUSPENDED, and when a zpool sync -f last returned 0.
-        self._changed_at: float | None = None
-        self._probe_ok_at: float | None = None
+        # The probe (M26R-19, M26R-27, M26R-35): a count of the changes that
+        # void a probe (the latch, each entry into SUSPENDED, each loss of the
+        # link after the latch), the count when the last probe started, and
+        # whether that probe returned 0 with no change since it started.
+        self._changes = 0
+        self._probe_from: int | None = None
+        self._probe_ok = False
+        self._prev_link = True
         self._probe_child: pool_state.Child | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -180,9 +184,10 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
 
     def probe(self) -> bool:
         """Run (or poll) ``zpool sync -f`` on the pool, from the command's
-        own flow; True once one returned 0 after the latch and after the
-        pool's last entry into SUSPENDED. A probe still running is kept and
-        polled at the next call, never waited for."""
+        own flow; True once one returned 0 with no change (the latch, an entry
+        into SUSPENDED, a loss of the link) since it started. Starting a
+        probe voids the pass of an earlier one (M26R-35). A probe still
+        running is kept and polled at the next call, never waited for."""
         child = self._probe_child
         if child is not None:
             if child.poll() is None:
@@ -198,6 +203,8 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             # config lock and leaves zpool clear waiting behind it until a
             # reboot (M26R-32; pool_state.SETTLE_S is the wait's half of it).
             return self.probed()
+        with self._lock:
+            self._probe_ok, self._probe_from = False, self._changes
         got = self._prober(self.pool)
         if got.rc is None:
             self._probe_child = got.child
@@ -212,16 +219,13 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
 
     def _probe_passed(self) -> None:
         with self._lock:
-            self._probe_ok_at = self._clock()
+            self._probe_ok = self._probe_from == self._changes
 
     def probed(self) -> bool:
-        """A probe returned 0 since the latch's last change."""
+        """The last probe returned 0 after the latch, with no change since it
+        started."""
         with self._lock:
-            return (
-                self._probe_ok_at is not None
-                and self._changed_at is not None
-                and self._probe_ok_at > self._changed_at
-            )
+            return self._latch is not None and self._probe_ok
 
     def why_not_export(self) -> str:
         """Cleanup's rule 3: why the pool stays imported, "" when it may be
@@ -242,11 +246,13 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             latched_now = self._latch is None and self._check_latch(now, state, link)
             entered = state == "SUSPENDED" and self._prev_state != "SUSPENDED"
             left = self._prev_state == "SUSPENDED" and state != "SUSPENDED"
-            self._prev_state = state
+            link_lost = self._prev_link and not link
+            self._prev_state, self._prev_link = state, link
             if state == "SUSPENDED":
                 self._suspended_now = True
-            if latched_now or (self._latch is not None and entered):
-                self._changed_at = now
+            if latched_now or (self._latch is not None and (entered or link_lost)):
+                self._changes += 1
+                self._probe_ok = False
             latch = self._latch
         if latched_now and latch is not None:
             self._announce(latch)

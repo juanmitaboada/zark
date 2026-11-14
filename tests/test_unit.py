@@ -2107,6 +2107,62 @@ class TestWatchProbe:  # pylint: disable=missing-function-docstring
             b.set_state("DEGRADED")
             assert b.watch.probe() and calls == ["backup"]
 
+    def test_a_later_probe_that_does_not_pass_voids_the_earlier_pass(self):
+        # M26R-35: starting a probe clears the pass of the one before.
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            results = [pool_state.Bounded(0), pool_state.Bounded(1, "", "cannot sync")]
+            b.watch._prober = lambda _p: results.pop(0)  # pylint: disable=protected-access
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")
+            b.tick()
+            with redirect_stdout(StringIO()):
+                assert b.watch.probe()
+                assert not b.watch.probe()
+            assert not b.watch.probed() and b.watch.why_not_export()
+
+    def test_a_link_lost_after_the_pass_voids_it(self):
+        # M26R-35: the link going and coming back is a change.
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.watch._prober = lambda _p: pool_state.Bounded(0)  # pylint: disable=protected-access
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")
+            b.tick()
+            assert b.watch.probe()
+            b.dev.unlink()
+            b.tick()
+            b.dev.symlink_to("/dev/null")
+            b.tick()
+            assert not b.watch.probed()
+            assert b.watch.probe()
+
+    def test_a_probe_that_returns_after_a_change_does_not_pass(self):
+        # M26R-35: a probe started before the pool suspended again proves nothing.
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            child = MagicMock()
+            child.poll.return_value = None
+            b.watch._prober = lambda _p: pool_state.Bounded(None, child=child)  # pylint: disable=protected-access
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")
+            b.tick()
+            with redirect_stdout(StringIO()):
+                assert not b.watch.probe()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")
+            b.tick()
+            child.poll.return_value = 0
+            child.returncode = 0
+            assert not b.watch.probe()
+
     def test_a_probe_that_blocks_is_polled_never_waited_for(self):
         with tempfile.TemporaryDirectory() as td:
             b = _WatchBench(td)
