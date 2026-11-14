@@ -1561,6 +1561,17 @@ class _Kstat:
 class TestExportRules:  # pylint: disable=missing-function-docstring
     """A1E-7, M26R-19, M26R-26, M26R-28: when a backup pool may be exported."""
 
+    def test_leaf_paths_are_devices_and_files_not_groups(self):
+        # M26R-31: a self-test pool's vdevs are files.
+        text = (
+            "zst0123abcdc\t1\t1\n\tmirror-0\t1\t1\n\t\t/var/tmp/zst/a.img\t1\t1\n"
+            "\t\t/dev/disk/by-id/ata-X-part1\t1\t1\nlogs\t-\t-\n"
+        )
+        assert pool_state.leaf_paths(text) == [
+            "/var/tmp/zst/a.img",
+            "/dev/disk/by-id/ata-X-part1",
+        ]
+
     def test_a_read_write_pool_needs_its_state_and_its_devices(self):
         with tempfile.TemporaryDirectory() as td:
             dev = Path(td) / "part1"
@@ -4100,6 +4111,41 @@ class TestClean:  # pylint: disable=missing-function-docstring
         assert "keystore: /dev/mapper/zst0123abcdc-ks (close)" in out.getvalue()
         close = mock.calls.index("cryptsetup close zst0123abcdc-ks")
         assert close < mock.calls.index("zpool export zst0123abcdc"), mock.calls
+
+    def test_a_selftest_pool_on_a_file_vdev_is_probed_and_exported(self):
+        # M26R-31: with the module loaded, a pool an interrupted self-test
+        # left (file vdevs) has paths to check, is probed and exported.
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, zst0123abcdc="ONLINE"):
+            _, altroot, stack = self._env(td)
+            img = Path(td, "zst0123abcdc.img")
+            img.touch()
+            mock = MockShell()
+            mock.on("zpool list -H -o name,altroot").succeeds(
+                f"rpool\t-\nzst0123abcdc\t{altroot}/zst0123abcdc"
+            )
+            mock.on("findmnt -rn -o TARGET,SOURCE").succeeds("/ rpool/ROOT/be")
+            mock.on("systemctl is-active sanoid.timer").succeeds("active")
+            mock.on_prefix("zpool export").succeeds()
+            reads = {
+                "zpool get -H -o value readonly zst0123abcdc": "off\n",
+                "zpool list -vHP zst0123abcdc": f"zst0123abcdc\t1\t1\n\t{img}\t1\t1\n",
+            }
+            probed: list[str] = []
+
+            def bounded(argv: list[str], _deadline: float) -> pool_state.Bounded:
+                return pool_state.Bounded(0, reads[" ".join(argv)], "")
+
+            def probe(pool: str, *_a: object) -> pool_state.Bounded:
+                probed.append(pool)
+                return pool_state.Bounded(0)
+
+            _ = stack.enter_context(patch.object(pool_state, "run_bounded", bounded))
+            _ = stack.enter_context(patch.object(pool_state, "probe", probe))
+            out = StringIO()
+            _ = self._run(mock, stack, out=out)
+        assert probed == ["zst0123abcdc"], probed
+        assert mock.was_called("zpool export zst0123abcdc"), (mock.calls, out.getvalue())
+        assert "left imported" not in out.getvalue(), out.getvalue()
 
     def test_a_pool_imported_by_hand_is_left_alone(self):
         with tempfile.TemporaryDirectory() as td:

@@ -197,11 +197,13 @@ def kept(pool: str) -> Kept | None:
 
 
 def leaf_paths(text: str) -> list[str]:
-    """The device paths of ``zpool list -vHP``'s vdev lines."""
+    """The leaf paths of ``zpool list -vHP``'s vdev lines: devices and, for
+    the self-test's pools, files (M26R-31). Group lines (mirror-0, logs,
+    cache) are not paths."""
     out: list[str] = []
     for line in text.splitlines()[1:]:
         path = line.strip().split("\t")[0]
-        if path.startswith("/dev/"):
+        if path.startswith("/"):
             out.append(path)
     return out
 
