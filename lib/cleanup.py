@@ -233,6 +233,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         # Rule 3 of an export (M26R-19): why a pool must stay imported, "" when not.
         self._guards: dict[str, Callable[[], str]] = {}
         self._exported_pools: list[str] = []  # populated by run() - query via exported_pools()
+        self._left: dict[str, str] = {}  # pools run() left imported, and why (left_pools())
         self._registered = False
         self._disabled = False
 
@@ -345,6 +346,12 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         """
         return list(self._exported_pools)
 
+    def left_pools(self) -> dict[str, str]:
+        """Pools the most recent ``run()`` left imported, with why: its guards
+        are cleared at its end, so asking :meth:`keep_imported` afterwards
+        would lose rule 3's reason (M26R-34)."""
+        return dict(self._left)
+
     def run(self):
         """Execute cleanup. Safe to call multiple times.
 
@@ -365,6 +372,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         self.log.info("Cleaning up...")
 
         self._exported_pools = []
+        self._left = {}
 
         actions, self._actions = list(reversed(self._actions)), []
         for action in actions:
@@ -389,6 +397,7 @@ class Cleanup:  # pylint: disable=too-many-instance-attributes
         # cannot be written, the export holding the pool namespace lock
         # (A1E-7, M26R-19). Decided before its keystore is touched.
         left = {pool: why for pool in self._pools if (why := self.keep_imported(pool))}
+        self._left = dict(left)
 
         # Close keystores
         for ks in self._keystores:

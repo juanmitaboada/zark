@@ -1601,7 +1601,7 @@ def run(
     )
     if pool_name not in cleanup.exported_pools():
         # H17: an export that failed is a failed backup, never a skipped check.
-        left = cleanup.keep_imported(pool_name)
+        left = cleanup.left_pools().get(pool_name) or cleanup.keep_imported(pool_name)
         log.banner_error(
             "BACKUP NOT VERIFIED",
             [

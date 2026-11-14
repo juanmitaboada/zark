@@ -1675,6 +1675,8 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
                 ):
                     cleanup.run()
                 assert ("backup" in cleanup.exported_pools()) is exported, readonly
+                # M26R-34: rule 3's reason outlives the run's cleared guards.
+                assert cleanup.left_pools() == ({} if exported else {"backup": "no probe passed"})
 
     def test_a_suspended_pool_left_imported_is_refused_before_any_zpool_call(self):
         with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED"):
@@ -1824,6 +1826,13 @@ class _FakeWatch:  # pylint: disable=missing-function-docstring
 
     def stop(self) -> None:
         self.stopped = True
+
+
+class _RefusingWatch(_FakeWatch):  # pylint: disable=missing-function-docstring
+    """A latched watch whose rule 3 keeps the pool imported."""
+
+    def why_not_export(self) -> str:
+        return "its drive went away and no probe passed"
 
 
 class TestWaitForDrive:  # pylint: disable=missing-function-docstring
@@ -1993,6 +2002,16 @@ class TestBackupLatched:  # pylint: disable=missing-function-docstring
         rc, text, _ = self._run(watch, patch.object(engine, "execute", return_value=res))
         assert rc == 1 and watch.probed_n >= 1, text
         assert f"Backup not started: {lost}" in text
+
+    def test_a_pool_cleanup_left_for_rule_3_keeps_its_reason_in_the_banner(self):
+        # M26R-34: not the bare export this milestone removed.
+        watch = _RefusingWatch(latched=True)
+        lost = watch.sentence()
+        res = engine.Result(plans=[], lost=lost, unverified=lost)
+        rc, text, _ = self._run(watch, patch.object(engine, "execute", return_value=res))
+        assert rc == 1, text
+        assert "backup is left imported: its drive went away and no probe passed" in text, text
+        assert "sudo zpool export backup" not in text, text
 
     def test_the_watch_stops_before_the_read_back_imports(self):
         # M26-3 3b: the read-back's import is not the run's pool to watch.
