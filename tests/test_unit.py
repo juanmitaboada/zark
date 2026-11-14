@@ -20056,6 +20056,43 @@ class TestEngineDriveLost:  # pylint: disable=missing-function-docstring
         assert out.error.startswith(latch.text + ": cannot receive"), out.error
         assert res.lost and len(res.outcomes) == 1
 
+    def test_a_drive_gone_during_the_last_transfer_anchors_and_drops_nothing(self):
+        # M26R-30: the drive goes away during the round's last transfer, is
+        # resumed, and that transfer ends well: no later transfer asks the
+        # latch, so it is asked once more before the survey and the anchors.
+        plain = _fresh_fake()
+        _ = _engine_run(plain, "backup", "111", P1)
+        sends = len(_sends(plain))
+        assert sends > 1, sends
+        fake, latch = _fresh_fake(), _Latch()
+        real = fake.mock_run_pipe
+
+        def pipe(*a: Any, **kw: Any) -> RunResult:
+            r = real(*a, **kw)
+            if len(_sends(fake)) == sends:
+                latch.set()  # during the last transfer, which ends well
+            return r
+
+        fake.mock_run_pipe = pipe  # type: ignore[method-assign]
+        after: list[str] = []
+        real_survey = engine.Run.survey
+
+        def survey_after(self: engine.Run) -> list[Any]:
+            if len(_sends(fake)) == sends:
+                after.append("survey")
+            return real_survey(self)
+
+        with (
+            patch.object(engine.Run, "survey", survey_after),
+            patch.object(engine.Run, "anchor", side_effect=lambda *_a: after.append("anchor")),
+            patch.object(engine.Run, "anchor_held", side_effect=lambda *_a: after.append("held")),
+            patch.object(engine.Run, "drop", side_effect=lambda *_a: after.append("drop")),
+        ):
+            res = _lost_run(fake, latch, P1)
+        assert len(_sends(fake)) == sends and all(o.ok for o in res.outcomes.values())
+        assert res.lost == latch.text and res.unverified == latch.text and not res.ok, res
+        assert not after, after
+
     @staticmethod
     def _failing_survey(latch: _Latch, fail_at: int) -> Callable[[engine.Run], list[Any]]:
         real_survey = engine.Run.survey

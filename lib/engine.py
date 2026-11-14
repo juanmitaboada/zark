@@ -1001,6 +1001,9 @@ def replicate(run: Run, decide: Decide) -> Result:
     res.plans = plans
     try:
         _transfer(run, res)
+        # The last transfer may have ended well on a pool resumed under it:
+        # no later transfer asks, so ask once more before the survey (M26R-30).
+        res.lost = res.lost or run.drive_lost()
         if not res.lost:
             res.plans = run.survey()
     except ReadError as e:
