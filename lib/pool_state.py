@@ -240,7 +240,11 @@ def export_refusal(pool: str, kstat_dir: Path | None = None, *, read: bool = Tru
         # zfs loaded): nothing these rules could judge.
         return ""
     word = state(pool, kstat_dir)
-    info = kept(pool) or (read_kept(pool) if read else None)
+    info = kept(pool)
+    if info is None and read and word != "SUSPENDED":
+        # The state first: a suspended pool is refused in either mode, so its
+        # two zpool reads would be waited for and abandoned for nothing (M26R-36).
+        info = read_kept(pool)
     return refusal_for(info, word)
 
 

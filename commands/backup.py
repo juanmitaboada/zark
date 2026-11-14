@@ -1129,6 +1129,15 @@ def _check_health(zfs: ZFS, pool: str, log: Log) -> Damage:
     return measure
 
 
+def _away_line(ev: drive_watch.Evidence) -> list[str]:
+    """The last ``zpool status -p`` read while the drive was away, one line
+    for the banner (plan 4.5, M26R-36); none when nothing was read."""
+    parts = [ev.errors_line] if ev.errors_line else []
+    if ev.counters:
+        parts.append("READ WRITE CKSUM " + "; ".join(ev.counters))
+    return [f"While the drive was away: {', '.join(parts)}."] if parts else []
+
+
 def _count(damage: Damage | None) -> str:
     """A measure's count of data errors as the banner shows it."""
     return "unknown" if damage is None or damage.count is None else str(damage.count)
@@ -1145,6 +1154,11 @@ def _new_damage(pool: str, m1: Damage, m2: Damage | None, m3: Damage | None) -> 
         return f"{pool}'s count of data errors could not be read at its read-back"
     if m2 is not None and m2.total > m1.total:
         return f"{pool} recorded new data errors during this run (its error counters grew)"
+    if m1.count is None and m3.count:
+        return (
+            f"{pool} counts {m3.count} data error(s) at its read-back, and its count "
+            + "at step 3 could not be read"
+        )
     if m3.count > (m1.count or 0):
         return f"{pool} recorded new data errors during this run"
     return ""
@@ -1538,7 +1552,7 @@ def run(
             causes=[watch.sentence()],
             solutions=[f"Check the drive: {zark_command()} fullcheck"],
         )
-    complete = res.ok and watch.latched is None
+    complete = res.ok
     # What the point leaves out, on whatever of it reached the drive (M5b-7).
     _ = exclusions.record(
         pool_name,
@@ -1553,9 +1567,14 @@ def run(
     pruned = (0, 0)
     shared: dict[str, list[Ref]] | None = None
     meta: dict[str, str] = {}
+    # Never complete with the latch (M26R-1), read right before each step
+    # that only a complete run takes: it may be set at any time (M26R-36).
+    complete = complete and watch.latched is None
     if complete:
         at_point = [p.rel for p in res.plans if p.state is State.AT_POINT]
         _ = drive_marks.record_complete(pool_name, eng.point, at_point, log)
+        complete = watch.latched is None
+    if complete:
         pruned = _apply_retention(pool_name, policy, log)
         used_after = _space_after_retention(zfs, pool_name, used_after, pruned[0], log)
         if pruned[0]:
@@ -1652,6 +1671,7 @@ def run(
                 ),
                 "Writes it had accepted before it lost power may be lost. Check the drive: "
                 + f"{zark_command()} fullcheck",
+                *_away_line(watch.evidence),
                 *([""] if details else []),
                 *details,
             ],

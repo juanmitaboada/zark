@@ -63,7 +63,16 @@ EVIDENCE_DEADLINE_S = 10.0
 REOPEN_HINT_S = 10.0
 JOIN_LIMIT_S = 5.0
 # What latches on two ticks, not one (M26R-24, M26R-29).
-_DOUBTFUL = frozenset({pool_state.MISSING, pool_state.UNREADABLE, "TRANSITIONING"})
+# A state file not there or not readable says nothing of the module; any word
+# that is neither healthy nor lost (TRANSITIONING, UNKNOWN, a word a later
+# module adds) is doubtful: two looks latch it (M26R-29, M26R-36).
+_NO_WORD = frozenset({pool_state.MISSING, pool_state.UNREADABLE})
+
+
+def _doubtful(state: str) -> bool:
+    return state not in pool_state.HEALTHY and state not in pool_state.LOST
+
+
 _NOT_REOPENED = frozenset({"REMOVED", "UNAVAIL", "FAULTED", "OFFLINE"})
 
 
@@ -277,12 +286,12 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         the kstat file, or a device path that never existed, says nothing
         about this drive."""
         self._link_seen = self._link_seen or link
-        self._state_seen = self._state_seen or state not in _DOUBTFUL
+        self._state_seen = self._state_seen or state not in _NO_WORD
         if state in pool_state.LOST:
             first = self._first_doubt if self._first_doubt is not None else now
             self._latch = Latch(first, state == "SUSPENDED")
             return True
-        doubtful = (self._link_seen and not link) or (self._state_seen and state in _DOUBTFUL)
+        doubtful = (self._link_seen and not link) or (self._state_seen and _doubtful(state))
         if not doubtful:
             self._first_doubt = None
             return False
@@ -346,7 +355,10 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
     def _keep_evidence(self, now: float, text: str) -> None:
         damage = parse_damage(text)
         errors = next((ln.strip() for ln in text.splitlines() if ln.startswith("errors:")), "")
+        same = (damage.counters, errors) == (self.evidence.counters, self.evidence.errors_line)
         self.evidence = Evidence(now, damage.counters, errors)
+        if same:
+            return  # logged when it changes, not every 30 s (M26R-36)
         for line in damage.counters:
             self.log.warn(f"  {self.pool} while its drive was away (READ WRITE CKSUM): {line}")
         if errors:

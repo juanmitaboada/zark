@@ -1443,7 +1443,8 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
                 b.set_state(word)
                 b.tick()
                 assert b.watch.latched is not None, word
-        for odd in ("TRANSITIONING", None, ""):
+        # M26R-36: any word neither healthy nor lost is doubtful.
+        for odd in ("TRANSITIONING", "UNKNOWN", "SOMETHING_NEW", None, ""):
             with tempfile.TemporaryDirectory() as td:
                 b = _WatchBench(td)
                 b.tick()
@@ -1501,6 +1502,12 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
             b.tick()
             assert "backup SUSPENDED 3 1 0" in b.out.getvalue(), b.out.getvalue()
             assert "4 data errors" in b.out.getvalue()
+            # M26R-36: read every 30 s, logged again only when it changed.
+            for _ in range(3):
+                b.tick(31.0)
+            assert len(b.runs) == 3, b.runs
+            assert b.out.getvalue().count("4 data errors") == 1, b.out.getvalue()
+            assert b.watch.evidence.errors_line.startswith("errors: 4")
 
     def test_the_document_matches_the_schema(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1741,6 +1748,16 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
         assert [c for c in mock.calls if not c.startswith("zpool list")] == [], mock.calls
         assert "BACKUP NOT UNMOUNTED" in out.getvalue() and "is left imported" in out.getvalue()
 
+    def test_a_suspended_pool_is_refused_before_its_mode_is_read(self):
+        # M26R-36: the state first; the two zpool reads only when it can matter.
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
+            with patch.object(pool_state, "read_kept", return_value=None) as read:
+                assert "SUSPENDED" in pool_state.export_refusal("backup")
+                read.assert_not_called()
+                k.set("backup", "ONLINE")
+                assert "could not be read" in pool_state.export_refusal("backup")
+                read.assert_called_once_with("backup")
+
     def test_clean_holds_back_a_pool_until_it_is_probed(self):
         with (
             tempfile.TemporaryDirectory() as td,
@@ -1790,7 +1807,7 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
             assert pool_state.SETTLE_S == 10.0
 
 
-class _FakeWatch:  # pylint: disable=missing-function-docstring
+class _FakeWatch:  # pylint: disable=missing-function-docstring,too-many-instance-attributes
     """What backup asks of its drive watch, set by the test."""
 
     def __init__(
@@ -1803,6 +1820,7 @@ class _FakeWatch:  # pylint: disable=missing-function-docstring
         self.resumed_at: float | None = 1_000_100.0 if latched else None
         self.on_probe: Callable[[], None] | None = None
         self.stopped = False
+        self.evidence = drive_watch.Evidence()
 
     @property
     def latched(self) -> "drive_watch.Latch | None":
@@ -1994,6 +2012,56 @@ class TestBackupLatched:  # pylint: disable=missing-function-docstring
         assert "BACKUP NOT VERIFIED" in text and "went away at 00:10:00" in text
         assert "zark fullcheck" in text and "BACKUP COMPLETED" not in text
         assert "0 dataset" not in text
+
+    def test_the_banner_says_what_was_read_while_the_drive_was_away(self):
+        # Plan 4.5, M26R-36: one line, the count and the counters.
+        watch = _FakeWatch(latched=True)
+        watch.evidence = drive_watch.Evidence(
+            1.0, ["backup SUSPENDED 3 1 0"], "errors: 4 data errors, use '-v' for a list"
+        )
+        lost = watch.sentence()
+        res = engine.Result(plans=[], lost=lost, unverified=lost)
+        rc, text, _ = self._run(watch, patch.object(engine, "execute", return_value=res))
+        flat = " ".join(w for w in text.split() if w != "║")
+        assert rc == 1, text
+        assert (
+            "While the drive was away: errors: 4 data errors, use '-v' for a list, "
+            + "READ WRITE CKSUM backup SUSPENDED 3 1 0."
+        ) in flat, text
+
+    def _latched_late(self, when: str) -> tuple[int, str, MagicMock, MagicMock]:
+        watch = _FakeWatch(latched=False)
+        real_record = backup_mod.exclusions.record
+        real_complete = drive_marks.record_complete
+
+        def record(*a: Any, **kw: Any) -> bool:
+            if when == "before the mark":
+                watch.latch()
+            return real_record(*a, **kw)
+
+        def complete_then(*a: Any, **kw: Any) -> Any:
+            if when == "before the retention":
+                watch.latch()
+            return real_complete(*a, **kw)
+
+        marks = MagicMock(side_effect=complete_then)
+        retention = MagicMock(return_value=(0, 0))
+        rc, text, _ = self._run(
+            watch,
+            patch.object(backup_mod.exclusions, "record", record),
+            patch.object(drive_marks, "record_complete", marks),
+            patch.object(backup_mod, "_apply_retention", retention),
+        )
+        return rc, text, marks, retention
+
+    def test_a_latch_set_after_the_engine_stops_the_mark_and_the_retention(self):
+        # M26R-36: the latch is read again before record_complete and before
+        # the retention, not once after the wait.
+        for when in ("before the mark", "before the retention"):
+            rc, text, marks, retention = self._latched_late(when)
+            assert rc == 1 and "BACKUP NOT VERIFIED" in text, (when, text)
+            assert marks.called is (when == "before the retention"), when
+            retention.assert_not_called()
 
     def test_a_drive_gone_before_anything_was_sent_waits_then_ends_not_started(self):
         watch = _FakeWatch(latched=True)
@@ -12434,7 +12502,9 @@ class TestDamageMeasure:  # pylint: disable=missing-function-docstring,protected
         assert "new data errors" in self._rule((0, 2), (0, 2), 3)
         assert self._rule((0, 2), (0, 3), 2) == ""  # M2's count alone decides nothing
         assert "could not be read" in self._rule((0, 0), (0, 0), None)
-        assert "new data errors" in self._rule((0, None), None, 1)
+        # M26R-36: an unknown count at step 3 is said, not called new.
+        assert "its count at step 3 could not be read" in self._rule((0, None), None, 1)
+        assert self._rule((0, None), None, 0) == ""
 
     def _backup(self, fake: FakeZfs, m3: int | None, *extra: AbstractContextManager[object]):
         out = StringIO()
