@@ -193,9 +193,10 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             return self.probed()
         kdir = self._kstat_dir if self._kstat_dir is not None else pool_state.KSTAT_DIR
         if kdir.is_dir() and pool_state.state(self.pool, kdir) not in pool_state.HEALTHY:
-            # Never on a pool that is not ONLINE or DEGRADED: on noble's 2.2.2
-            # module a zpool sync -f on a suspended pool did not return and
-            # left zpool clear waiting behind it (seen in a virtual machine).
+            # Never on a pool that is not ONLINE or DEGRADED: a zpool sync -f
+            # admitted just before a failing write suspends the pool holds its
+            # config lock and leaves zpool clear waiting behind it until a
+            # reboot (M26R-32; pool_state.SETTLE_S is the wait's half of it).
             return self.probed()
         got = self._prober(self.pool)
         if got.rc is None:

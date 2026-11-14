@@ -37,7 +37,7 @@ everything 2.3.1 writes.
   optional `drive_gone` object, shown by `zark monitor`. The run takes no
   point and asks nothing once the drive is gone, starts no further
   transfer, and at its end waits for the drive: once the drive is back,
-  the pool ONLINE or DEGRADED and a `zpool sync -f` has returned 0, the
+  the pool ONLINE or DEGRADED for 10 s and a `zpool sync -f` has returned 0, the
   last steps run once and the run ends BACKUP NOT VERIFIED, never
   COMPLETED (writes the drive had accepted before it lost power may be
   lost: `sudo zark fullcheck`). Ctrl+C in the wait leaves
@@ -47,7 +47,7 @@ everything 2.3.1 writes.
   went away; they say it is left imported and what to do. Every command
   refuses a pool left imported that is not ONLINE or DEGRADED before it
   runs `zpool`. `zark clean` probes a read-write pool (`zpool sync -f`)
-  before it exports it.
+  before it exports it, after reading its state again 10 s later.
 - **Datasets are no longer called diverged after the drive went away**
   (A1E-8, M26-7 7a): a strict listing fails on anything written to
   stderr, not only on its exit status (`zfs list -r` exits 0 after a
@@ -79,10 +79,12 @@ everything 2.3.1 writes.
   passed) makes the export wait holding the pool namespace lock: `zpool
   clear` and every pool command wait with it, and only a reboot ends it.
   `zpool export -f` and `-F` wait the same way.
-- On noble's 2.2.2 module, `zpool sync -f` run on a pool that is already
-  suspended did not return and left `zpool clear` waiting behind it until
-  a reboot (seen in a virtual machine). zark never runs it on a pool that
-  is not ONLINE or DEGRADED; the same command typed by hand meets it.
+- On every series (OpenZFS 2.2.2, 2.4.1, 2.4.4), a `zpool sync -f` that
+  arrives while a pool is writing to a drive that then fails can leave
+  `zpool clear` waiting behind it until a reboot (seen in a virtual machine
+  on 2.2.2). zark never starts one on a pool that is not ONLINE or
+  DEGRADED, and waits 10 s after a resume before it does; the same command
+  typed by hand meets it.
 - `purge`'s destroy and `recover`'s exports of a read-write backup pool
   are not covered yet.
 - A read-only pool is exported without the probe or the device checks (its

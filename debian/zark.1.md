@@ -133,7 +133,7 @@ end-to-end sequences.
     another terminal, or reboot with it unplugged) and starts no further
     transfer; **progress.json** gains **drive_gone**. At the end of such a
     run it waits for the drive: once the drive is back, the pool ONLINE or
-    DEGRADED and a **zpool sync -f** has returned 0, the run's last steps
+    DEGRADED for 10 s and a **zpool sync -f** has returned 0, the run's last steps
     run once and it ends **BACKUP NOT VERIFIED** (writes the drive had
     accepted before it lost power may be lost; run **fullcheck**). Ctrl+C
     in the wait ends the run and leaves the pool imported: **zpool clear**
@@ -1163,8 +1163,8 @@ end-to-end sequences.
     stopped by an interrupted **backup**; **zvol_inhibit_dev=1** left by
     **fix-rpool-mountpoint**. A pool left imported by a run whose drive went
     away is exported only when its state is ONLINE or DEGRADED, its
-    devices are there and, imported read-write, a **zpool sync -f**
-    returned 0; otherwise **clean** says what to do and leaves it
+    devices are there and, imported read-write, its state still reads so
+    10 s later and a **zpool sync -f** returned 0; otherwise **clean** says what to do and leaves it
     imported. It also names the imported pools it leaves
     alone (a pool without an alternate root, such as the running system's
     **rpool** and **bpool** or one imported by hand, is never touched).

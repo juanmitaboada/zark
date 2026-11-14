@@ -1166,8 +1166,9 @@ def _wait_for_drive(  # pylint: disable=too-many-arguments
     clock: Callable[[], float] = time.monotonic,
 ) -> bool:
     """Wait for a latched run's pool: True once its drive is there, its state
-    ONLINE or DEGRADED and a probe (zpool sync -f) returned 0 since the
-    latch's last change; False when the module no longer holds the pool
+    ONLINE or DEGRADED for :data:`pool_state.SETTLE_S` without a break, and a
+    probe (zpool sync -f) started after that returned 0 since the latch's
+    last change (M26R-32); False when the module no longer holds the pool
     (exported by hand) for :data:`NOT_IMPORTED_S` (M26-5 5a, M26R-21,
     M26R-29). In backup's own flow, so a signal ends it: the pool is then
     left imported, said once, and the signal goes on."""
@@ -1177,6 +1178,7 @@ def _wait_for_drive(  # pylint: disable=too-many-arguments
         + "Ctrl+C ends the run and leaves the pool imported."
     )
     missing_since: float | None = None
+    healthy_since: float | None = None
     logged = clock()
     try:
         while True:
@@ -1189,7 +1191,13 @@ def _wait_for_drive(  # pylint: disable=too-many-arguments
             else:
                 missing_since = None
             here = os.path.lexists(watch.device) if watch.device else True
-            if word in pool_state.HEALTHY and here and watch.probe():
+            if word in pool_state.HEALTHY and here:
+                healthy_since = clock() if healthy_since is None else healthy_since
+            else:
+                healthy_since = None
+            # No probe until the resumed pool has settled (M26R-32).
+            settled = healthy_since is not None and clock() - healthy_since >= pool_state.SETTLE_S
+            if settled and watch.probe():
                 log.ok(f"{pool} is back and answers: the run goes on")
                 return True
             if clock() - logged >= WAIT_LOG_S:

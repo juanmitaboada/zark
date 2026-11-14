@@ -173,6 +173,14 @@ def run_bounded(
 
 BOUNDED_READ_S = 10.0
 PROBE_DEADLINE_S = 30.0
+# How long a pool reads ONLINE or DEGRADED with its devices there before a
+# probe starts: a zpool sync -f admitted while a transaction group is being
+# written queues as a writer of the pool's config lock, and if that write
+# then fails the pool suspends with the lock held, so every later reader
+# (zpool clear's own stats read among them) waits behind it until a reboot
+# (M26R-32; the window is there on 2.2.2, 2.4.1 and 2.4.4). Right after a
+# resume the sync thread is finishing the group it was stuck in.
+SETTLE_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -233,6 +241,12 @@ def export_refusal(pool: str, kstat_dir: Path | None = None, *, read: bool = Tru
         return ""
     word = state(pool, kstat_dir)
     info = kept(pool) or (read_kept(pool) if read else None)
+    return refusal_for(info, word)
+
+
+def refusal_for(info: Kept | None, word: str) -> str:
+    """Rules 1 and 2 for a pool whose mode and paths are ``info`` (None:
+    unknown) and whose kstat state is ``word``."""
     if info is not None and info.readonly:
         return "its pool is suspended" if word == "SUSPENDED" else ""
     if word not in HEALTHY:
@@ -244,6 +258,11 @@ def export_refusal(pool: str, kstat_dir: Path | None = None, *, read: bool = Tru
     if gone:
         return f"its device {gone[0]} is gone"
     return ""
+
+
+def settle() -> None:
+    """The pause before a probe of a pool that may have just been resumed."""
+    time.sleep(SETTLE_S)
 
 
 def probe(pool: str, deadline_s: float = PROBE_DEADLINE_S) -> Bounded:

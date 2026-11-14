@@ -1740,7 +1740,11 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
         assert "BACKUP NOT UNMOUNTED" in out.getvalue() and "is left imported" in out.getvalue()
 
     def test_clean_holds_back_a_pool_until_it_is_probed(self):
-        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
+        with (
+            tempfile.TemporaryDirectory() as td,
+            _Kstat(td, backup="SUSPENDED") as k,
+            patch.object(pool_state, "settle"),
+        ):
             # Nothing kept and the mode unread: treated as read-write, refused.
             with patch.object(pool_state, "read_kept", return_value=None):
                 assert "SUSPENDED" in clean_mod._held_back("backup")  # pylint: disable=protected-access
@@ -1761,6 +1765,27 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
                     assert why in clean_mod._held_back("backup")  # pylint: disable=protected-access
                     if not why:
                         assert clean_mod._held_back("backup") == ""  # pylint: disable=protected-access
+
+    def test_clean_reads_the_pool_again_after_the_pause_before_its_probe(self):
+        # M26R-32: a pool that suspends during the pause is not probed.
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE") as k:
+            dev = Path(td) / "part1"
+            dev.touch()
+            pool_state.remember("backup", False, [str(dev)])
+            order: list[str] = []
+
+            def settle() -> None:
+                order.append("settle")
+                k.set("backup", "SUSPENDED")
+
+            with (
+                patch.object(pool_state, "settle", settle),
+                patch.object(pool_state, "probe") as probe,
+            ):
+                why = clean_mod._held_back("backup")  # pylint: disable=protected-access
+            assert "SUSPENDED" in why and order == ["settle"], why
+            probe.assert_not_called()
+            assert pool_state.SETTLE_S == 10.0
 
 
 class _FakeWatch:  # pylint: disable=missing-function-docstring
@@ -1853,9 +1878,18 @@ class TestWaitForDrive:  # pylint: disable=missing-function-docstring
         with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE") as k:
             dev = Path(td) / "part1"
             watch = _FakeWatch(str(dev), latched=True)
-            steps: list[Callable[[], None]] = [lambda: None, lambda: None, dev.touch]
-            got, _ = self._wait(watch, k, steps)
-            assert got and not steps  # it went on only once the link was back
+            at: list[int] = []
+            ticks = {"n": 0}
+
+            def tick() -> None:
+                ticks["n"] += 1
+                if ticks["n"] == 15:
+                    dev.touch()  # the link is back after more than SETTLE_S
+
+            watch.on_probe = lambda: at.append(ticks["n"])
+            got, _ = self._wait(watch, k, [tick] * 40)
+            # Probed only once the link has been back for SETTLE_S (M26R-32).
+            assert got and at == [25], at
         with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
             dev = Path(td) / "part1"
             dev.touch()
@@ -1863,6 +1897,28 @@ class TestWaitForDrive:  # pylint: disable=missing-function-docstring
             steps = [lambda: None, lambda: None, lambda: k.set("backup", "ONLINE")]
             got, _ = self._wait(watch, k, steps)
             assert got and not steps  # and only once the pool was ONLINE
+
+    def test_no_probe_until_the_pool_has_settled_without_a_break(self):
+        # M26R-32: ONLINE with the link for SETTLE_S, counted afresh after a break.
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE") as k:
+            dev = Path(td) / "part1"
+            dev.touch()
+            watch = _FakeWatch(str(dev), latched=True)
+            at: list[int] = []
+            ticks = {"n": 0}
+
+            def tick() -> None:
+                ticks["n"] += 1
+                if ticks["n"] == 4:
+                    k.set("backup", "SUSPENDED")
+                if ticks["n"] == 5:
+                    k.set("backup", "ONLINE")
+
+            watch.on_probe = lambda: at.append(ticks["n"])
+            steps: list[Callable[[], None]] = [tick] * 30
+            got, _ = self._wait(watch, k, steps)
+            # healthy at ticks 0-3, broken at 4, healthy again from 5: 5 + 10.
+            assert got and at == [15], at
 
     def test_a_pool_no_longer_imported_ends_the_wait(self):
         with tempfile.TemporaryDirectory() as td, _Kstat(td) as k:
@@ -1904,6 +1960,8 @@ class TestBackupLatched:  # pylint: disable=missing-function-docstring
             _, rc = TestBackupCommand()._run(  # pylint: disable=protected-access
                 _fresh_fake(),
                 patch.object(backup_mod.drive_watch, "start", return_value=watch),
+                # The wait's settle time (M26R-32) is the wait's own tests' matter.
+                patch.object(pool_state, "SETTLE_S", 0.0),
                 patch.object(drive_marks, "record_complete", complete),
                 patch.object(backup_mod, "_apply_retention", retention),
                 *extra,
@@ -4141,6 +4199,7 @@ class TestClean:  # pylint: disable=missing-function-docstring
 
             _ = stack.enter_context(patch.object(pool_state, "run_bounded", bounded))
             _ = stack.enter_context(patch.object(pool_state, "probe", probe))
+            _ = stack.enter_context(patch.object(pool_state, "settle"))
             out = StringIO()
             _ = self._run(mock, stack, out=out)
         assert probed == ["zst0123abcdc"], probed

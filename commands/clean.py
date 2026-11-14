@@ -232,6 +232,12 @@ def _held_back(pool: str) -> str:
     info = pool_state.kept(pool) or pool_state.read_kept(pool)
     if info is not None and info.readonly:
         return ""
+    # Read again after a pause: a pool just resumed is not probed while its
+    # sync thread may still be writing the group it was stuck in (M26R-32).
+    pool_state.settle()
+    why = pool_state.refusal_for(info, pool_state.state(pool))
+    if why:
+        return why
     got = pool_state.probe(pool)
     if got.rc is None:
         return "it suspended while zark checked it"
