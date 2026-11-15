@@ -718,6 +718,51 @@ _POOL_STATE_GUARD = (
     patch.object(apt_guard, "GUARDS_ROOT", str(Path(_TEST_LOG_DIR, "no-guards"))).start(),
 )
 
+# Nor the host's kstat, block devices and udev records through a guard
+# script (lib/guard_sh.py): what a guard sees then depends on the machine
+# (a CI runner records no ZFS member, carmen does). A shell started with a
+# guard's host lines in its command, in a file it runs or in one it sources
+# is recorded and refused; _hermetic_guard gives a test lines of its own.
+_HOST_GUARD_LINES = (guard_sh.KSTAT_LINE, guard_sh.BLOCK_LINE, guard_sh.UDEV_LINE)
+_HOST_GUARD_RUNS: list[str] = []
+_SHELLS = frozenset({"sh", "bash", "dash"})
+_SOURCED = re.compile(r"""(?:^|[\s;&|(])(?:\.|source)\s+["']?([^"'\s;&|)]+)""")
+_POPEN_INIT = subprocess.Popen.__init__
+
+
+def _shell_texts(args: object) -> list[str]:
+    """What a shell started with ``args`` reads as script text: its -c
+    strings, the files it is given and the files those strings source."""
+    if isinstance(args, str):
+        argv = ["sh", "-c", args]
+    elif isinstance(args, (list, tuple)):
+        argv = [str(a) for a in args]
+    else:
+        return []
+    if not argv or os.path.basename(argv[0]) not in _SHELLS:
+        return []
+    texts = list(argv[1:])
+    paths = [a for a in argv[1:] if os.path.isabs(a)]
+    for text in argv[1:]:
+        paths += _SOURCED.findall(text)
+    for path in paths:
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) < 1 << 20:
+                texts.append(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+    return texts
+
+
+def _guarded_popen_init(self: subprocess.Popen[Any], args: Any, *a: Any, **kw: Any) -> None:
+    if any(line in t for t in _shell_texts(args) for line in _HOST_GUARD_LINES):
+        _HOST_GUARD_RUNS.append(" ".join(map(str, args)) if not isinstance(args, str) else args)
+        raise FileNotFoundError(errno.ENOENT, "a guard with the host's lines", "sh")
+    _POPEN_INIT(self, args, *a, **kw)
+
+
+_GUARD_LINES_GUARD = patch.object(subprocess.Popen, "__init__", _guarded_popen_init).start()
+
 # A drive watch a test started and left running is stopped when the test
 # ends, as the end of a real run's process ends it: the commands' tests
 # disable Cleanup's exit hook, which stops it in a run.
@@ -2593,6 +2638,42 @@ class TestPoolState:  # pylint: disable=missing-function-docstring
         assert got.rc == 126 and "not started by the unit tests" in got.stderr, got
         assert _HOST_TOOL_STARTS[before:] == ["zpool sync -f rpool"]
         del _HOST_TOOL_STARTS[before:]  # this test's own start is not a fault
+
+    def test_the_suite_runs_no_guard_with_the_host_lines(self):
+        # A guard sees the test's own kstat, block devices and udev records,
+        # never the machine's: run as a file, sourced, or as -c, it is refused.
+        before = len(_HOST_GUARD_RUNS)
+        with tempfile.TemporaryDirectory() as td:
+            script = Path(td, "guard")
+            script.write_text(apt_guard.MOTD_SCRIPT, encoding="utf-8")
+            for argv in (
+                ["sh", str(script)],
+                ["sh", "-c", f'. "{script}"'],
+                ["sh", "-c", guard_sh.UDEV_LINE],
+            ):
+                try:
+                    subprocess.run(argv, capture_output=True, check=False)
+                except FileNotFoundError as e:
+                    assert "the host's lines" in str(e), e
+                else:
+                    raise AssertionError(f"not refused: {argv}")
+            assert len(_HOST_GUARD_RUNS) - before == 3, _HOST_GUARD_RUNS[before:]
+            # Stubs first on its PATH line too, as the guard tests do: the
+            # machine's zpool is never started (a stand-in logs any call).
+            stub = Path(td, "stub")
+            stub.mkdir()
+            for tool in ("zpool", "zfs"):
+                Path(stub, tool).write_text("#!/bin/sh\nexit 0\n", encoding="ascii")
+                Path(stub, tool).chmod(0o755)
+            text = _hermetic_guard(apt_guard.MOTD_SCRIPT, td).replace(
+                "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"
+            )
+            assert f"PATH={stub}:" in text
+            script.write_text(text, encoding="utf-8")
+            done = subprocess.run(["sh", str(script)], capture_output=True, check=False)
+            assert done.returncode == 0, done
+        assert len(_HOST_GUARD_RUNS) - before == 3
+        del _HOST_GUARD_RUNS[before:]  # this test's own runs are not a fault
 
     def test_the_child_has_its_own_session_and_the_c_locale(self):
         got = pool_state.run_bounded(["sh", "-c", 'echo "$LC_ALL $(ps -o sid= -p $$)"'], 5)
@@ -10477,7 +10558,9 @@ class TestAptGuard:  # pylint: disable=missing-function-docstring
 
     def _written_hook(self, td: str) -> str:
         apt_guard.install(target_root=td, log=make_log())
-        return str(Path(td) / apt_guard.HOOK_RELATIVE_PATH)
+        hook = Path(td) / apt_guard.HOOK_RELATIVE_PATH
+        hook.write_text(_hermetic_guard(hook.read_text(encoding="utf-8"), td), encoding="utf-8")
+        return str(hook)
 
     def test_hook_exits_zero_when_internal(self):
         # ZARK_INTERNAL=1 must short-circuit before any pool scan.
@@ -11690,7 +11773,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
         with tempfile.TemporaryDirectory() as td:
             stub = self._stub(td, self._pools("backup2"))
             cfg = Path(td, "zark-backup-guard.cfg")
-            cfg.write_text(grub_guard.CFG_TEXT, encoding="utf-8")
+            cfg.write_text(_hermetic_guard(grub_guard.CFG_TEXT, td), encoding="utf-8")
             grub = Path(td, "grub")
             grub.write_text("GRUB_DISTRIBUTOR=Ubuntu\nGRUB_ENABLE_CRYPTODISK=\n", encoding="ascii")
             env = {k: v for k, v in os.environ.items() if k not in ("ZPOOL_IMPORT_PATH", "self")}
@@ -11751,7 +11834,9 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
             env["PATH"] = f"{stub}:/usr/bin:/bin"
             env.update(env_add or {})
             script = Path(td, "09")
-            script.write_text(grub_guard.GUARD_SCRIPT, encoding="utf-8")
+            # A device of its own that udev records as a ZFS member: the scan
+            # names it whatever the host's records say (a CI runner has none).
+            script.write_text(_hermetic_guard(grub_guard.GUARD_SCRIPT, td), encoding="utf-8")
             proc = subprocess.run(
                 ["sh", str(script)], capture_output=True, text=True, env=env, check=False
             )
@@ -32774,7 +32859,7 @@ def _run_one(name: str, method: Callable[[], object]) -> str:
     """
     seen = StringIO()
     reads, writes = len(_TERMINAL_READS), len(_REAL_LOG_WRITES)
-    starts = len(_HOST_TOOL_STARTS)
+    starts, guard_runs = len(_HOST_TOOL_STARTS), len(_HOST_GUARD_RUNS)
     try:
         with redirect_stdout(seen), redirect_stderr(seen):
             try:
@@ -32783,6 +32868,10 @@ def _run_one(name: str, method: Callable[[], object]) -> str:
                 _stop_watches()
         if len(_HOST_TOOL_STARTS) > starts:
             raise AssertionError(f"it started a host tool: {', '.join(_HOST_TOOL_STARTS[starts:])}")
+        if len(_HOST_GUARD_RUNS) > guard_runs:
+            raise AssertionError(
+                f"it ran a guard with the host's lines: {', '.join(_HOST_GUARD_RUNS[guard_runs:])}"
+            )
         if len(_TERMINAL_READS) > reads:
             raise _NoTerminal(f"it read the terminal: {', '.join(_TERMINAL_READS[reads:])}")
         if len(_REAL_LOG_WRITES) > writes:
