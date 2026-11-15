@@ -220,7 +220,7 @@ def _export(pool: str, log: Log) -> bool:
     return False
 
 
-def _held_back(pool: str) -> str:
+def _held_back(pool: str, log: Log | None = None) -> str:
     """Why ``pool`` must not be touched now, "" when it may be exported
     (A1E-7, M26R-19, M26R-26): its state ONLINE or DEGRADED and its devices
     there, and for a read-write pool a probe (``zpool sync -f``, run here,
@@ -239,6 +239,8 @@ def _held_back(pool: str) -> str:
     if why:
         return why
     got = pool_state.probe(pool)
+    if log is not None:
+        log.dbg(pool_state.probe_line(pool, got.rc))
     if got.rc is None:
         return "it suspended while zark checked it"
     if not got.ok:
@@ -268,7 +270,7 @@ def _release(inv: Inventory, log: Log) -> tuple[dict[str, str], dict[str, frozen
     that must stay imported (returned with why); the trees' mounts by top."""
     # A pool left by a run whose drive went away: nothing of it is touched
     # until it is ONLINE and has passed the probe (A1E-7, plan 4.8).
-    held = {pool: why for pool in inv.pools if (why := _held_back(pool))}
+    held = {pool: why for pool in inv.pools if (why := _held_back(pool, log))}
     for pool, why in held.items():
         for line in pool_state.left_imported_lines(pool, why):
             log.error(line)

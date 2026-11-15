@@ -459,7 +459,7 @@ def _prune_drive(cfg: Config, drive: ConnectedDrive, log: Log) -> None:  # pylin
     cleanup.register()
     device = backup_device(drive)
     if not zfs.import_backup_pool(pool, device, guid=drive.guid):
-        log.fatal(f"Cannot import pool {pool}", solutions=["Reconnect the drive and run again"])
+        zfs.import_fatal(pool, solutions=["Reconnect the drive and run again"])
     cleanup.track_pool(pool)
     drive_marks.check_drive_owner(pool, log)
     policy = cfg.drive_policy(pool)

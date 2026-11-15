@@ -359,7 +359,11 @@ def run(  # pylint: disable=too-many-branches,too-many-locals,too-many-statement
     # unmount (zfsvfs_teardown), and the export, -f included, waits for one
     # holding the pool namespace lock (M26R-28 28a).
     if why := pool_state.export_refusal(selected):
-        log.banner_error("BACKUP NOT UNMOUNTED", pool_state.left_imported_lines(selected, why))
+        # Outside the box: a box wraps long lines, and the reboot command is
+        # pasted whole (M26 eli revision 4, B6b).
+        for line in pool_state.left_imported_lines(selected, why):
+            log.error(line)
+        log.banner_error("BACKUP NOT UNMOUNTED", [f"{selected} is left imported: see above."])
         raise SystemExit(1)
 
     # Only this pool's tree: `zfs unmount -a` would also try every dataset

@@ -206,6 +206,7 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             if child.poll() is None:
                 return self.probed()
             self._probe_child = None
+            self.log.dbg(pool_state.probe_line(self.pool, child.returncode))
             if child.returncode == 0:
                 self._probe_passed()
             return self.probed()
@@ -219,6 +220,7 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         with self._lock:
             self._probe_ok, self._probe_from = False, self._changes
         got = self._prober(self.pool)
+        self.log.dbg(pool_state.probe_line(self.pool, got.rc))
         if got.rc is None:
             self._probe_child = got.child
             self.log.warn(

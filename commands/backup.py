@@ -40,6 +40,7 @@ from functools import partial
 from commands.setup import sanoid_conf_gap
 from lib import (
     anchors,
+    apt_guard,
     certificates,
     cli_spec,
     drive_contents,
@@ -1221,9 +1222,9 @@ def _wait_for_drive(  # pylint: disable=too-many-arguments
                 logged = clock()
             sleep(WAIT_TICK_S)
     except (KeyboardInterrupt, SystemExit):
+        # What to do with the pool is said once, by Cleanup, which leaves a
+        # latched pool imported and says why (M26 eli r4, B5c).
         log.error("Interrupted while waiting for the drive: the rest of the run is skipped")
-        for line in pool_state.left_imported_lines(pool, "the run was interrupted"):
-            log.error(line)
         raise
 
 
@@ -1349,6 +1350,8 @@ def run(
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")
+    if apt_guard.guards_stale():
+        log.warn(apt_guard.STALE_LINE)
     drives = scan_connected_drives(cfg, log)
     known = [d for d in drives if d.known]
 
@@ -1394,8 +1397,8 @@ def run(
 
     device = backup_device(drive)
     if not zfs.import_backup_pool(pool_name, device, guid=pool_guid):
-        log.fatal(
-            f"Cannot import pool {pool_name}",
+        zfs.import_fatal(
+            pool_name,
             causes=[
                 f"Device: {device or 'not found'}",
                 "The pool may be imported elsewhere, or the drive not fully connected",
@@ -1623,12 +1626,16 @@ def run(
     if pool_name not in cleanup.exported_pools():
         # H17: an export that failed is a failed backup, never a skipped check.
         left = cleanup.left_pools().get(pool_name) or cleanup.keep_imported(pool_name)
+        # The left-imported lines go above the box, not in it: a box wraps
+        # long lines and the reboot command is pasted whole (M26 eli r4, B6b).
+        for line in pool_state.left_imported_lines(pool_name, left) if left else []:
+            log.error(line)
         log.banner_error(
             "BACKUP NOT VERIFIED",
             [
                 f"{pool_name} could not be exported, so it was not read back.",
                 *(
-                    pool_state.left_imported_lines(pool_name, left)
+                    [f"{pool_name} is left imported: see above."]
                     if left
                     else [
                         "Do NOT disconnect the drive. Check: zpool status; then",

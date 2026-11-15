@@ -34,6 +34,7 @@ thread's running child (``lib.signals``).
 """
 
 import os
+import shlex
 import subprocess
 import tempfile
 import time
@@ -42,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
+from lib import dpkg_lock
 from lib.config import zark_command
 from lib.sh import CHILD_CWD
 
@@ -283,6 +285,13 @@ def probe(pool: str, deadline_s: float = PROBE_DEADLINE_S) -> Bounded:
     return run_bounded(["zpool", "sync", "-f", pool], deadline_s)
 
 
+def probe_line(pool: str, rc: int | None) -> str:
+    """The probe as zark.log records it (the bounded runner logs nothing of
+    its own; M26 eli revision 4, B5b)."""
+    got = "has not returned" if rc is None else f"rc {rc}"
+    return f"$ zpool sync -f {pool} (the probe): {got}"
+
+
 # Why every message offers the reboot first and the clear second: on eli
 # (2.4.4) the module panicked in zio_encrypt 3.5 s after the user's clear
 # resumed a raw receive, as OpenZFS #18394 reports on 2.4.1 (M26 eli, B1d).
@@ -301,6 +310,17 @@ REBOOT_WHY = (
     "A plain reboot is not offered: with a pool suspended the shutdown can hang "
     + "on processes it cannot end."
 )
+
+# What the forced reboot skips that an orderly shutdown does (M26R-49).
+REBOOT_SKIPS = (
+    "It closes nothing: save open work first, and do not run it while apt or dpkg is running."
+)
+
+# A step that never returns (a sync waiting behind the lost pool's namespace
+# lock, M26R-48's fourth case) still leaves the reboot alone, which takes no
+# pool lock (systemd's halt_now: sync(2), then reboot(2)).
+REBOOT_FORCED = "sudo systemctl reboot --force --force"
+REBOOT_STUCK = f"If a step does not return, run `{REBOOT_FORCED}` alone from another terminal."
 
 
 def _ext_boot(mounts: Path) -> bool:
@@ -323,31 +343,61 @@ def reboot_command(pool: str, kstat_dir: Path | None = None, mounts: Path | None
     alone; with none it would reach the suspended one too); an ext4 /boot is
     synced with ``sync -f``; then ``systemctl reboot --force --force``, which
     stops no service and unmounts nothing (systemd's ``halt_now``: sync(2),
-    then reboot(2)). All reads here are files, never a ``zpool`` call."""
+    then reboot(2)). All reads here are files, never a ``zpool`` call.
+
+    The syncs are best effort and the reboot is the point, so the steps are
+    joined with ``;``: a step that fails (a pool imported read-only, one that
+    went away since the line was printed) does not keep the reboot from
+    running (M26R-48). Each name is quoted; a name that begins with ``$`` is
+    a scan's or an import's transient pool (``$import-...``), never synced."""
     kstat_dir = _kstat(kstat_dir)
     try:
         names = sorted(
             d.name
             for d in kstat_dir.iterdir()
-            if d.name != pool and d.is_dir() and state(d.name, kstat_dir) in HEALTHY
+            if d.name != pool
+            and not d.name.startswith("$")
+            and d.is_dir()
+            and state(d.name, kstat_dir) in HEALTHY
         )
     except OSError:
         names = []
-    steps = [f"sudo zpool sync {' '.join(names)}"] if names else []
+    steps = [f"sudo zpool sync {' '.join(shlex.quote(n) for n in names)}"] if names else []
     if _ext_boot(mounts if mounts is not None else MOUNTS):
         steps.append("sudo sync -f /boot")
-    steps.append("sudo systemctl reboot --force --force")
-    return " && ".join(steps)
+    steps.append(REBOOT_FORCED)
+    return "; ".join(steps)
+
+
+def _apt_running() -> str:
+    """Who holds a dpkg lock now, "" when nobody does. Read without taking
+    the lock; while zark itself holds lock-frontend only ``lock`` is read,
+    since opening and closing lock-frontend would drop zark's own lock."""
+    try:
+        held = dpkg_lock.holders(skip_frontend=dpkg_lock.is_held())
+    except OSError:
+        return ""
+    return dpkg_lock.describe(held) if held else ""
+
+
+# The suite points this at nothing: a test never reads the host's dpkg locks.
+apt_running: Callable[[], str] = _apt_running
 
 
 def reboot_lines(pool: str, indent: str = "    ") -> list[str]:
     """The first way out, as every message gives it: the drive unplugged, the
-    command for this system, and why not a plain reboot."""
-    return [
+    command for this system on a line of its own (it is pasted whole, so no
+    caller puts it in a box that wraps), why not a plain reboot, what it
+    skips, and what to do when a step does not return."""
+    lines = [
         f"{indent}{reboot_command(pool)}",
         f"{indent}{REBOOT_WHY} Nothing imports the drive at boot, and its next import "
         + "starts from the last state it saved.",
+        f"{indent}{REBOOT_SKIPS} {REBOOT_STUCK}",
     ]
+    if apt := apt_running():
+        lines.append(f"{indent}apt or dpkg is running now ({apt}): let it end first.")
+    return lines
 
 
 def left_imported_lines(pool: str, why: str) -> list[str]:

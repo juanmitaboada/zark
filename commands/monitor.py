@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lib import cli_spec, live_pools, monitor_view as view, status_reader as sr
+from lib import apt_guard, cli_spec, live_pools, monitor_view as view, status_reader as sr
 from lib.config import VERSION, zark_command
 from lib.transfer_eta import TransferEta
 
@@ -192,6 +192,7 @@ class Session:  # pylint: disable=too-many-instance-attributes
             eta_model=self.eta_model,
             eta=self.eta.seconds(),
             proc_hidden=reading.progress_class == "stalled" and self.hides_root(),
+            guards_stale=apt_guard.guards_stale(),
         )
 
     def live_now(self) -> None:

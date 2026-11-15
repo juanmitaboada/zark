@@ -137,7 +137,12 @@ end-to-end sequences.
     can hang on processes it cannot end; nothing imports the drive at
     boot, and its next import starts from the last state it saved; or
     plug the drive back in and run **zpool clear** *pool* in another
-    terminal) and starts no further transfer; **progress.json** gains
+    terminal). The command's steps are joined with *;*, so a sync that
+    fails does not keep the reboot from running; if a step does not
+    return, run **systemctl reboot --force --force** alone from another
+    terminal. It closes nothing: save open work first, and do not run it
+    while **apt** or **dpkg** is running (the lines say so when either is).
+    It starts no further transfer; **progress.json** gains
     **drive_gone**. On OpenZFS 2.4 a clear of a pool whose drive went
     away with writes in flight can crash the ZFS module (OpenZFS
     #18394): writes to the pool then hang, and the reboot itself may need
@@ -148,7 +153,7 @@ end-to-end sequences.
     accepted before it lost power may be lost; run **fullcheck**). Ctrl+C
     in the wait ends the run and leaves the pool imported: the same forced
     reboot with the drive unplugged, or **zpool clear** if it is suspended,
-    then **clean**. Every child **zark** starts begins in */*, so one stuck
+    then **clean**. Every command **zark** runs through its runners begins in */*, so one stuck
     on a suspended pool keeps no other file system busy. **backup** never unloads the keys
     of, nor exports, a read-write pool that is gone, not ONLINE or
     DEGRADED, or not probed since its drive went away: OpenZFS waits
@@ -1709,12 +1714,19 @@ plugged in; with none imported, it names the ones plugged in.
 
 None of these scripts waits on a pool: each reads the pools' states from
 */proc/spl/kstat/zfs* first and starts no **zpool** or **zfs** command
-while a pool is not ONLINE or DEGRADED (a drive that went away); it scans
-disks and partitions only, never a zvol or a device-mapper device; and it
-waits at most 3 s (the reminder) or 10 s (the others) for a command. The
-reminder then names the pool, or says it could not check; the hook, the
-prerm script and the update-grub guard refuse. **setup** installs this
-version's copies: run it after upgrading **zark**.
+while a pool is not ONLINE or DEGRADED (a drive that went away), rpool
+and bpool included; it scans only the disks and partitions **udev**
+records as ZFS members (*/run/udev/data*, **ID_FS_TYPE=zfs_member**), so
+no device is opened to decide and a disk that sleeps is not woken (with
+no such records, every disk and partition), never a zvol, a
+device-mapper, md or loop device: a pool on LUKS, md or a loop device does
+not count as plugged in; and it waits at most 3 s (the reminder) or 10 s
+(the others) for a command, leaving one that does not end behind with
+none of its descriptors. The reminder then names the pool, or says why it
+could not check; the hook, the prerm script and the update-grub guard
+refuse. **setup** installs this version's copies: run it after upgrading
+**zark**; until then **backup** and **monitor** say *zark's guards are out
+of date: run sudo zark setup*.
 
 **zark** does not import a backup pool while **apt**, **dpkg** or
 **unattended-upgrades** runs. Before every import of a backup pool on the

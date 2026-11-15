@@ -66,13 +66,14 @@ if [ -n "$zark_unhealthy" ]; then
     echo "ERROR: ZFS pool(s) not ONLINE:$zark_unhealthy" >&2
     echo "" >&2
     echo "  update-grub cannot run while a pool's drive is gone: reboot with the" >&2
-    echo "  drive unplugged, then run: sudo update-grub" >&2
+    echo "  drive unplugged (a plain reboot can hang: zark and man zark give the" >&2
+    echo "  forced one), then run: sudo update-grub" >&2
     echo "" >&2
     exit 1
 fi
 if ! zark_scan 10 || ! zark_held 10; then
-    echo "ERROR: the ZFS pools could not be read within 10 s (a pool may not be" >&2
-    echo "  answering). update-grub stops; reboot, then run: sudo update-grub" >&2
+    echo "ERROR: the ZFS pools could not be read: $zark_why." >&2
+    echo "  update-grub stops; reboot, then run: sudo update-grub" >&2
     echo "" >&2
     exit 1
 fi
@@ -207,16 +208,18 @@ if [ "${self:-}" = "grub-mkconfig" ]; then
 __POOL_READ_SH__
     # The listing decides, whatever the status (M18R-19): a status-1 listing
     # that names a foreign rpool still keeps it in the menu. A pool that is
-    # not healthy, or a scan that does not end in 10 s, leaves the listing
-    # empty: nothing is scanned after this file, and 09_zfs_backup_guard
-    # stops update-grub.
+    # not healthy leaves the listing empty, nothing is scanned after this
+    # file, and 09_zfs_backup_guard stops update-grub. A scan that does not
+    # end in 10 s leaves the listing empty too: every importable pool is then
+    # left out of the menu's scan, and update-grub goes on unless the guard's
+    # own reads fail (M26R-46).
     zark_pools=""
     if zark_scan 10; then
         zark_pools="$zark_avail"
     elif [ -n "$zark_unhealthy" ]; then
         echo "zark: pool(s) not ONLINE:$zark_unhealthy: no device is scanned" >&2
     else
-        echo "zark: the importable pools could not be read within 10 s" >&2
+        echo "zark: the importable pools could not be read: $zark_why" >&2
     fi
     zark_hidden=""
     zark_system=false

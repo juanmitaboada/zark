@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from lib import status_reader as sr
+from lib import apt_guard, status_reader as sr
 from lib.live_pools import LiveFigures
 
 Span = tuple[str, str]  # (text, style)
@@ -178,7 +178,7 @@ def _ts(value: object) -> datetime | None:
 
 
 @dataclass(frozen=True)
-class Inputs:
+class Inputs:  # pylint: disable=too-many-instance-attributes
     """Everything one frame shows."""
 
     reading: sr.Reading
@@ -193,6 +193,8 @@ class Inputs:
     eta: float | None = None
     # /proc hides root's processes from this reader: a stalled run may be gone (M8P.1).
     proc_hidden: bool = False
+    # An older zark's guards are installed (lib.apt_guard.guards_stale, M26 item 22).
+    guards_stale: bool = False
 
 
 def _status_doc(inp: Inputs) -> tuple[Mapping[str, Any] | None, bool]:
@@ -936,7 +938,9 @@ def _notice_lines(inp: Inputs) -> list[Line]:
     doc, _older = _status_doc(inp)
     lines: list[Line] = [[("NOTICES", "head")]]
     notices = _dicts((doc or {}).get("notices"))
-    if not notices:
+    if inp.guards_stale:
+        lines.append([(f"  {'warning':<8} ", "warn"), (apt_guard.STALE_LINE, "")])
+    if not notices and not inp.guards_stale:
         lines.append([("  none", "dim")])
     for notice in notices:
         level = notice.get("level")

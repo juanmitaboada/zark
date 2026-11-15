@@ -1,4 +1,4 @@
-zark (2.3.1~rc1-1) UNRELEASED; urgency=medium
+zark (2.3.1~rc2-1) UNRELEASED; urgency=medium
 
   * Milestone M26 of zark 2.3.1 (a drive that goes away during a backup).
     Not for release: nothing is published until the final 2.3.1.
@@ -18,8 +18,13 @@ zark (2.3.1~rc1-1) UNRELEASED; urgency=medium
   * The login reminder, the APT hook, the kernel prerm guard and the
     update-grub guard no longer hang on a pool whose drive went away:
     the pools' states are read from the kstat first, no zpool or zfs
-    command starts while a pool is not healthy, only disks and partitions
-    are scanned, and no command is waited for more than 10 s.
+    command starts while a pool is not healthy, only the disks and
+    partitions udev records as ZFS members are scanned, and no command is
+    waited for more than 10 s. backup and zark monitor say when the
+    installed guards are an older zark's: run sudo zark setup.
+  * The forced reboot's steps are joined with ';', its lines say what it
+    skips and what to do when a step does not return, and it is never
+    printed inside a box.
   * Strict listings fail on stderr: no dataset is called diverged after
     the drive went away.
   * One measure of data errors (zpool status -p) at step 3, before the

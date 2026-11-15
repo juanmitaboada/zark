@@ -384,7 +384,7 @@ def run(
         readonly=readonly,
         guid=drive.guid,
     ):
-        log.fatal(f"Cannot import pool {pool_name}")
+        zfs.import_fatal(pool_name)
     cleanup.track_pool(pool_name)
     _ = drive_marks.log_metadata(pool_name, log)
 

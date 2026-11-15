@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### M26 - a drive that goes away during a backup (2.3.1-rc1)
+### For zark 2.3.0 users
+
+The guards zark installs (the login reminder, the APT hook, the kernel
+prerm guard, the update-grub guard and its scan file) are rewritten only
+by `sudo zark setup`, never by the package upgrade: run it once per system
+after upgrading. Until then 2.3.0's login reminder stays, and it hangs an
+ssh login while a backup pool is suspended (below). `zark backup` (at its
+step 1) and `zark monitor` say `zark's guards are out of date: run sudo zark
+setup` while an older zark's guards are installed; neither changes them.
+
+### M26 - a drive that goes away during a backup (2.3.1-rc2)
 
 Fixes of what the GNOME app's first run on eli found (A1E-4, A1E-7 to
 A1E-10). Nothing on a drive or in `/etc/zark` changes; zark 2.3.0 reads
@@ -17,18 +27,26 @@ everything 2.3.1 writes.
 
 - **An ssh login, `apt` or `update-grub` no longer hangs on a pool whose
   drive went away** (M26, eli): the login reminder
-  (`/etc/update-motd.d/99-zark-external-pool`), the APT hook, the kernel
-  prerm guard and the update-grub guard ran a bare `zpool import`, which
-  reads every block device; with a pool suspended it read that pool's
-  zvols and never returned, and every ssh login waited on it. The fault is
-  in 2.3.0 too. They now read the pools' states from
-  `/proc/spl/kstat/zfs` first and start no `zpool` or `zfs` command while a
-  pool is not ONLINE or DEGRADED; they scan disks and partitions only (no
-  zvol, device-mapper, md or loop device); and they wait at most 3 s (the
-  reminder) or 10 s (the others) for a command, leaving one that does not
-  end behind. The reminder then names the pool or says it could not check;
-  the APT hook, the prerm guard and the update-grub guard refuse. Run
-  `sudo zark setup` after upgrading to install them.
+  (`/etc/update-motd.d/99-zark-external-pool`) ran a bare `zpool import`,
+  which reads every block device; with a pool suspended it read that
+  pool's zvols and never returned, and every ssh login waited on it. The
+  APT hook and the update-grub guard ran the same scan (the hang was seen
+  at ssh logins; for them it follows from the same command). The fault is
+  in 2.3.0 too. Every guard now reads the pools' states from
+  `/proc/spl/kstat/zfs` first and starts no `zpool` or `zfs` command while
+  a pool is not ONLINE or DEGRADED; it scans only the disks and partitions
+  udev records as ZFS members (`ID_FS_TYPE=zfs_member`), so no device is
+  opened to decide and a disk that sleeps is not woken at each login (with
+  no udev records, every disk and partition), never a zvol, device-mapper,
+  md or loop device; and it waits at most 3 s (the reminder) or 10 s (the
+  others) for a command, leaving one that does not end behind, with none
+  of the guard's descriptors. The reminder then names the pool or says why
+  it could not check; the APT hook, the prerm guard and the update-grub
+  guard refuse. Two consequences: a pool on LUKS, md or a loop device no
+  longer counts as plugged in; and any pool that is not ONLINE or DEGRADED,
+  zark's or not, rpool and bpool included, refuses kernel, GRUB, shim and
+  ZFS installs and kernel removals and stops `update-grub` until it is
+  healthy or gone. Run `sudo zark setup` after upgrading to install them.
 - **A forensic capture no longer kills a backup** (A1E-10, M26-1 1a):
   command output that is not valid UTF-8 (a pool's history can hold such
   bytes) is read with U+FFFD in place of each bad byte instead of raising
@@ -47,14 +65,19 @@ everything 2.3.1 writes.
   file, every 2 s, with no `zpool` command). When the drive goes away it
   says so (terminal, zark.log, a desktop notification) with the two ways
   out: first, unplug it and reboot at once with the command zark prints
-  for the system (its healthy pools synced by name, an ext4 `/boot`
-  synced, then `sudo systemctl reboot --force --force`, which stops no
-  service and unmounts nothing: a plain reboot can hang, known
-  limitations below); or plug it back in and run `sudo zpool clear
-  <pool>` in another terminal, with the warning that on OpenZFS 2.4 the
-  clear can crash the module. Every child zark starts begins in `/`, so
-  one stuck on a suspended pool keeps no other file system busy. `progress.json` gains the optional `drive_gone` object, shown
-  by `zark monitor`. The run takes no
+  for the system on a line of its own (its healthy pools synced by name,
+  an ext4 `/boot` synced, then `sudo systemctl reboot --force --force`,
+  which stops no service and unmounts nothing: a plain reboot can hang,
+  known limitations below). The steps are joined with `;`, so a sync that
+  fails does not keep the reboot from running; if a step does not return,
+  `sudo systemctl reboot --force --force` alone from another terminal. It
+  closes nothing: save open work first, and do not run it while apt or
+  dpkg is running (zark says so when either is). Or plug it back in and
+  run `sudo zpool clear <pool>` in another terminal, with the warning that
+  on OpenZFS 2.4 the clear can crash the module. Every command zark runs
+  through its runners begins in `/`, so one stuck on a suspended pool
+  keeps no other file system busy. `progress.json` gains the optional
+  `drive_gone` object, shown by `zark monitor`. The run takes no
   point and asks nothing once the drive is gone, starts no further
   transfer, and at its end waits for the drive: once the drive is back,
   the pool ONLINE or DEGRADED for 10 s and a `zpool sync -f` has returned 0, the
@@ -131,7 +154,12 @@ everything 2.3.1 writes.
   writes the drive had acknowledged: zark marks that run NOT VERIFIED and
   names `zark fullcheck`.
 - The drive-loss path is validated on hardware on Ubuntu 26.10 (OpenZFS
-  2.4.4) only; this release has no test bench for the other series.
+  2.4.4) only; this release has no test bench for the other series. There
+  eli showed: the forced reboot ending at once after a drive lost during a
+  transfer and after Ctrl+C, the next backup taking the cut run up (a
+  receive resumed or sent again), and `zpool clear` with nothing in flight
+  resuming the pool. A clear with a transfer in flight is the one that
+  crashed the module (#18394, above).
 
 ## [2.3.0] - 2026-11-11
 

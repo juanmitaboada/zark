@@ -1061,7 +1061,7 @@ def run(
     # A drive using features this live's ZFS lacks is named before any import (M4s-11).
     zfs_features.check_drive(pool_name, device, log)
     if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
-        log.fatal(f"Cannot import pool {pool_name}")
+        zfs.import_fatal(pool_name)
     cleanup.track_pool(pool_name)
     # Strict (M3X.1, M4c-18): an unread last-point would make the drive a
     # legacy one and change which points count as complete.

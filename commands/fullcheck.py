@@ -223,6 +223,14 @@ def check_doc(  # pylint: disable=too-many-arguments
     }
 
 
+def _import_failure(zfs: ZFS, pool: str, mode: str) -> str:
+    """Why the import failed: a pool refused as left imported and not
+    healthy points at the lines already said (M26 eli revision 4, B3c)."""
+    if word := zfs.refused.get(pool):
+        return f"{pool} is left imported and {word}: what to do is said above"
+    return f"Cannot import {pool} {mode}"
+
+
 def _fail(cr: CheckRun, message: str, log: Log) -> NoReturn:
     """A check that could not run: recorded as ``failed``, then FATAL."""
     cr.record("failed", message, log)
@@ -256,7 +264,7 @@ def restore_part(  # pylint: disable=too-many-arguments,too-many-positional-argu
     cleanup.track_pool(pool)
     if not zfs.import_backup_pool(pool, device, readonly=True, guid=cr.guid):
         cleanup.untrack_pool(pool)
-        _fail(cr, f"Cannot import {pool} read-only", log)
+        _fail(cr, _import_failure(zfs, pool, "read-only"), log)
     if ask_repeat and not _repeat_restore(pool, log):
         log.info("Restore check skipped: the paused scrub goes on")
         if zfs.pool_export(pool, wait_udev=True):
@@ -481,7 +489,7 @@ def scrub_part(cr: CheckRun, zfs: ZFS, device: str, cleanup: Cleanup, log: Log) 
     cleanup.track_pool(pool)
     if not zfs.import_backup_pool(pool, device, readonly=False, guid=cr.guid, pause_scrub=False):
         cleanup.untrack_pool(pool)
-        _fail(cr, f"Cannot import {pool} read-write", log)
+        _fail(cr, _import_failure(zfs, pool, "read-write"), log)
     scan = scrub.read(pool)
     if scan is None:
         _fail(cr, f"Cannot read the scrub state of {pool}", log)

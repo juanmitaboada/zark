@@ -58,6 +58,7 @@ zark's own recovery flows import the backup pool on purpose; they export
 
 from pathlib import Path
 
+from lib import grub_guard
 from lib.guard_sh import POOL_READ_SH
 from lib.log import Log
 
@@ -213,15 +214,16 @@ __POOL_READ_SH__
 if [ -n "$zark_unhealthy" ]; then
     echo "zark: Refusing boot-critical package operation(s):$installs$removals:" >&2
     echo "  pool$zark_unhealthy is not ONLINE (its drive went away?). Reboot with the" >&2
-    echo "  drive unplugged, then run apt again." >&2
+    echo "  drive unplugged (a plain reboot can hang: zark and man zark give the" >&2
+    echo "  forced one), then run apt again." >&2
     echo "  (Installed by zark. Bypass once with ZARK_INTERNAL=1, or remove" >&2
     echo "  __APT_CONF_ABS__ to disable.)" >&2
     exit 1
 fi
 if ! zark_scan 10 || ! zark_held 10; then
     echo "zark: Refusing boot-critical package operation(s):$installs$removals:" >&2
-    echo "  the backup pools could not be read within 10 s (a pool may not be" >&2
-    echo "  answering). Run apt again later, or reboot first." >&2
+    echo "  the backup pools could not be read: $zark_why." >&2
+    echo "  Run apt again later, or reboot first." >&2
     echo "  (Installed by zark. Bypass once with ZARK_INTERNAL=1, or remove" >&2
     echo "  __APT_CONF_ABS__ to disable.)" >&2
     exit 1
@@ -302,10 +304,18 @@ export PATH
 [ "${ZARK_INTERNAL:-}" = "1" ] && exit 0
 
 __POOL_READ_SH__
-# A pool not healthy counts as imported, unread; a list that does not come
-# in 10 s refuses: the kernel stays as it was.
+# Any pool not healthy, rpool or bpool included, refuses (M26R-44): the
+# kernel's postrm would run update-grub, which the grub guard stops while a
+# pool is not ONLINE, after the files are gone. A list that does not come
+# in 10 s refuses too: the kernel stays as it was.
+if [ -n "$zark_unhealthy" ]; then
+    echo "zark: not removing kernel ${1:-}: pool(s) not ONLINE:$zark_unhealthy." >&2
+    echo "  Reboot with the drive unplugged (a plain reboot can hang: zark and" >&2
+    echo '  man zark give the forced one), then run: sudo apt -f install' >&2
+    exit 1
+fi
 if ! zark_held 10; then
-    echo "zark: not removing kernel ${1:-}: the backup pools could not be read within 10 s." >&2
+    echo "zark: not removing kernel ${1:-}: the backup pools could not be read: $zark_why." >&2
     echo '  Reboot, then run: sudo apt -f install' >&2
     exit 1
 fi
@@ -347,8 +357,7 @@ if [ -n "$zark_unhealthy" ]; then
     exit 0
 fi
 if ! zark_scan 3 || ! zark_held 3; then
-    printf '\\n\\033[1;33mWARNING (zark):\\033[0m backup pools not checked: a pool did not\\n'
-    printf '  answer within 3 s.\\n\\n'
+    printf '\\n\\033[1;33mWARNING (zark):\\033[0m backup pools not checked: %s.\\n\\n' "$zark_why"
     exit 0
 fi
 available="$zark_avail"
@@ -537,3 +546,37 @@ def is_current(target_root: str = "") -> bool:
         except (OSError, UnicodeDecodeError):
             return False
     return True
+
+
+# Said by backup's step 1 and zark monitor when an older zark's guards are
+# installed: only `zark setup` rewrites them, and 2.3.0's reminder hangs an
+# ssh login while a backup pool is suspended (M26 item 22).
+STALE_LINE = "zark's guards are out of date: run sudo zark setup"
+
+
+# The suite points this at a directory that does not exist: a test never
+# reads the host's guards.
+GUARDS_ROOT = ""
+
+
+def guards_stale(target_root: str | None = None) -> bool:
+    """True when zark's guards are installed (any of their files is there)
+    and are not this zark's (:func:`is_current` and the grub guard's). A read,
+    never a write; with none installed it is False."""
+    target_root = GUARDS_ROOT if target_root is None else target_root
+    root = target_root.rstrip("/")
+    base = f"{root}/" if root else "/"
+    rels = (
+        HOOK_RELATIVE_PATH,
+        APT_CONF_RELATIVE_PATH,
+        PRERM_RELATIVE_PATH,
+        MOTD_RELATIVE_PATH,
+        grub_guard.GUARD_RELATIVE_PATH,
+        grub_guard.CHECK_RELATIVE_PATH,
+        grub_guard.CFG_RELATIVE_PATH,
+    )
+    try:
+        installed = any(Path(f"{base}{rel}").exists() for rel in rels)
+    except OSError:
+        return False
+    return installed and not (is_current(target_root) and grub_guard.is_current(target_root))

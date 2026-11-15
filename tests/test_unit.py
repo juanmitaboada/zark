@@ -89,6 +89,7 @@ import commands.exclude as exclude_mod  # pylint: disable=wrong-import-position 
 import commands.explore as explore_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.finish as finish_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.fix_rpool_mountpoint as fix_rpool_mod  # pylint: disable=wrong-import-position # noqa: E402
+import commands.fullcheck as fullcheck_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.health as health_cmd  # pylint: disable=wrong-import-position # noqa: E402
 import commands.monitor as monitor_mod  # pylint: disable=wrong-import-position # noqa: E402
 import commands.mount as mount_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -711,6 +712,10 @@ _POOL_STATE_GUARD = (
     # The reboot command reads the host's mounts for an ext4 /boot: not here.
     patch.object(pool_state, "MOUNTS", Path(_TEST_LOG_DIR, "no-mounts")).start(),
     patch.object(pool_state, "start", _guarded_start).start(),
+    # Nor the host's dpkg locks (the reboot lines name apt when it runs).
+    patch.object(pool_state, "apt_running", lambda: "").start(),
+    # Nor the host's installed guards (backup's step 1 and zark monitor).
+    patch.object(apt_guard, "GUARDS_ROOT", str(Path(_TEST_LOG_DIR, "no-guards"))).start(),
 )
 
 # A drive watch a test started and left running is stopped when the test
@@ -1579,7 +1584,7 @@ class _Kstat:
         self.stack.close()
 
 
-class TestExportRules:  # pylint: disable=missing-function-docstring
+class TestExportRules:  # pylint: disable=missing-function-docstring,too-many-public-methods
     """A1E-7, M26R-19, M26R-26, M26R-28: when a backup pool may be exported."""
 
     def test_leaf_paths_are_devices_and_files_not_groups(self):
@@ -1708,6 +1713,47 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
             assert not mock.calls, mock.calls
             assert "sudo zpool clear backup" in out.getvalue()
 
+    def test_a_refused_suspended_pool_gets_no_generic_import_advice(self):
+        # M26 eli revision 4, B3c: the FATAL after the refusal named an export
+        # and a reconnect, what the lines above it warn against.
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED"):
+            zfs = ZFS(make_log())
+            out = StringIO()
+            with (
+                patch_sh(MockShell()),
+                patch("builtins.input", return_value=""),
+                redirect_stdout(out),
+            ):
+                assert not zfs.import_backup_pool("backup", "/dev/x-part1")
+                try:
+                    zfs.import_fatal(
+                        "backup", causes=["imported elsewhere"], solutions=["sudo zpool export"]
+                    )
+                except SystemExit:
+                    pass
+            text = out.getvalue()
+            assert "backup is left imported and SUSPENDED: what to do is said above" in text
+            assert "imported elsewhere" not in text and "sudo zpool export" not in text
+        zfs = ZFS(make_log())
+        out = StringIO()
+        with patch("builtins.input", return_value=""), redirect_stdout(out):
+            try:
+                zfs.import_fatal("other", solutions=["Reconnect the drive and run again"])
+            except SystemExit:
+                pass
+        assert "Cannot import pool other" in out.getvalue()
+        assert "Reconnect the drive" in out.getvalue()
+
+    def test_fullchecks_import_failure_names_a_refused_pool(self):
+        zfs = ZFS(make_log())
+        assert fullcheck_mod._import_failure(zfs, "b", "read-only") == (  # pylint: disable=protected-access
+            "Cannot import b read-only"
+        )
+        zfs.refused["b"] = "SUSPENDED"
+        assert "b is left imported and SUSPENDED" in fullcheck_mod._import_failure(  # pylint: disable=protected-access
+            zfs, "b", "read-only"
+        )
+
     def test_a_pool_left_imported_offers_the_reboot_first(self):
         lines = pool_state.left_imported_lines("backup", "its drive went away")
         text = "\n".join(lines)
@@ -1748,7 +1794,7 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
             )
         # backup2 is the pool whose drive went away, even while it still reads
         # ONLINE (the latch before the first failed write); never a bare sync.
-        assert got == "sudo zpool sync bpool rpool tank && sudo systemctl reboot --force --force"
+        assert got == "sudo zpool sync bpool rpool tank; sudo systemctl reboot --force --force"
 
     def test_the_reboot_syncs_an_ext4_boot(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1758,8 +1804,85 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
                 "/dev/nvme0n1p2 /boot ext4 rw 0 0\n/dev/x /boot/efi vfat rw 0 0\n",
             )
         assert got == (
-            "sudo zpool sync rpool && sudo sync -f /boot && sudo systemctl reboot --force --force"
+            "sudo zpool sync rpool; sudo sync -f /boot; sudo systemctl reboot --force --force"
         )
+
+    def test_a_boot_of_another_type_is_left_to_the_reboots_own_sync(self):
+        # M26R-51: only an ext2/3/4 /boot is named (halt_now's sync(2) covers
+        # the rest); a mutation that takes any type as ext survived before.
+        for fs in ("vfat", "xfs", "btrfs"):
+            with tempfile.TemporaryDirectory() as td:
+                got = self._reboot(td, {"rpool": "ONLINE"}, f"/dev/sda2 /boot {fs} rw 0 0\n")
+            assert got == "sudo zpool sync rpool; sudo systemctl reboot --force --force", fs
+
+    def test_the_reboot_quotes_names_and_never_syncs_a_transient_pool(self):
+        # M26R-48: a name with a space is one argument; a scan's or an
+        # import's transient pool ($import-<hex>-<pool>) is never named.
+        with tempfile.TemporaryDirectory() as td:
+            got = self._reboot(
+                td,
+                {"rpool": "ONLINE", "my pool": "ONLINE", "$import-ffff9a-black": "ONLINE"},
+                "",
+            )
+        assert got == "sudo zpool sync 'my pool' rpool; sudo systemctl reboot --force --force"
+
+    def test_the_reboot_lines_say_what_it_skips_and_what_to_do_when_a_step_hangs(self):
+        with patch.object(pool_state, "apt_running", lambda: ""):
+            text = "\n".join(pool_state.reboot_lines("backup2"))
+        assert pool_state.REBOOT_SKIPS in text and pool_state.REBOOT_STUCK in text
+        assert "save open work first" in text and "apt or dpkg is running now" not in text
+        with patch.object(pool_state, "apt_running", lambda: "pid 4242 (apt-get)"):
+            text = "\n".join(pool_state.reboot_lines("backup2"))
+        assert "apt or dpkg is running now (pid 4242 (apt-get)): let it end first." in text
+
+    def test_the_apt_check_never_drops_zarks_own_lock(self):
+        # Inside dpkg_lock.hold only `lock` is read: opening and closing
+        # lock-frontend there would drop zark's own fcntl lock.
+        seen: list[bool] = []
+
+        def holders(*, skip_frontend: bool = False) -> list[dpkg_lock.Holder]:
+            seen.append(skip_frontend)
+            return []
+
+        with (
+            patch.object(dpkg_lock, "holders", holders),
+            patch.object(dpkg_lock, "is_held", return_value=True),
+        ):
+            assert pool_state._apt_running() == ""  # pylint: disable=protected-access
+        with (
+            patch.object(dpkg_lock, "holders", holders),
+            patch.object(dpkg_lock, "is_held", return_value=False),
+        ):
+            assert pool_state._apt_running() == ""  # pylint: disable=protected-access
+        assert seen == [True, False]
+
+    def test_the_reboot_command_is_never_wrapped_in_a_box(self):
+        # M26 eli revision 4, B6b: in a box the command wrapped and its first
+        # line was a plain `systemctl reboot`. umount says the lines above
+        # its box; each line is printed whole.
+        cfg = make_config()
+        cfg.known_drives["backup"] = DriveInfo("backup", "111", "ata-X", autoeject=False)
+        mock = MockShell()
+        mock.on("zpool list backup").succeeds()
+        out = StringIO()
+        command = "sudo zpool sync rpool; sudo sync -f /boot; sudo systemctl reboot --force --force"
+        with (
+            patch_sh(mock),
+            patch.object(Config, "load", return_value=cfg),
+            patch.object(pool_state, "export_refusal", return_value="its state is SUSPENDED"),
+            patch.object(pool_state, "reboot_command", return_value=command),
+            patch.dict(os.environ, {"COLUMNS": "80"}),
+            patch("builtins.input", return_value=""),
+            redirect_stdout(out),
+        ):
+            try:
+                umount_mod.run([])
+            except SystemExit as e:
+                assert e.code == 1
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert any(ln.strip().endswith(command) for ln in text.splitlines()), text
+        box = text[text.index("BACKUP NOT UNMOUNTED") :]
+        assert "reboot" not in box and "backup is left imported: see above." in box
 
     def test_the_reboot_with_nothing_to_sync_is_the_reboot_alone(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2038,12 +2161,67 @@ class TestWaitForDrive:  # pylint: disable=missing-function-docstring
 
             out = StringIO()
             try:
-                _ = self._wait(watch, k, [interrupt])
+                with redirect_stdout(out):
+                    _ = backup_mod._wait_for_drive(  # pylint: disable=protected-access
+                        cast("drive_watch.DriveWatch", watch),
+                        "backup",
+                        make_log(),
+                        sleep=lambda _s: interrupt(),
+                        clock=lambda: 0.0,
+                    )
             except KeyboardInterrupt:
                 pass
             else:
                 raise AssertionError("the signal was swallowed")
-            del out
+            del k
+            # What to do with the pool is said once, by Cleanup (M26 eli r4, B5c).
+            assert "Interrupted while waiting" in out.getvalue()
+            assert "is left imported" not in out.getvalue(), out.getvalue()
+
+
+class TestGuardsStale:  # pylint: disable=missing-function-docstring
+    """M26 item 22: an older zark's guards are said, never rewritten, outside setup."""
+
+    def test_none_installed_current_and_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            assert not apt_guard.guards_stale(td)
+            with redirect_stdout(StringIO()):
+                apt_guard.install(target_root=td, log=make_log())
+                _ = grub_guard.install(target_root=td, log=make_log())
+            assert not apt_guard.guards_stale(td)
+            motd = Path(td, apt_guard.MOTD_RELATIVE_PATH)
+            motd.write_text(motd.read_text(encoding="utf-8") + "# 2.3.0\n", encoding="utf-8")
+            assert apt_guard.guards_stale(td)
+        with tempfile.TemporaryDirectory() as td:
+            # One guard file of an older zark, nothing else: stale too.
+            cfg = Path(td, grub_guard.CFG_RELATIVE_PATH)
+            cfg.parent.mkdir(parents=True)
+            cfg.write_text("# zark-backup-guard.cfg - an older one\n", encoding="utf-8")
+            assert apt_guard.guards_stale(td)
+
+    def test_the_default_root_is_the_one_the_suite_points_elsewhere(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, apt_guard.MOTD_RELATIVE_PATH).parent.mkdir(parents=True)
+            Path(td, apt_guard.MOTD_RELATIVE_PATH).write_text("old\n", encoding="utf-8")
+            with patch.object(apt_guard, "GUARDS_ROOT", td):
+                assert apt_guard.guards_stale()
+        assert not apt_guard.guards_stale()
+
+    def test_the_monitor_says_it_among_the_notices(self):
+        r = _reading_of(_STATUS_FIXTURES / "idle")
+        lines = mview.frame(
+            mview.Inputs(reading=r, by_id=Path("/nonexistent"), guards_stale=True),
+            mview.ViewOptions(width=100, version="2.1.0"),
+        )
+        text = "\n".join(mview.line_text(li) for li in lines)
+        notices = text[text.index("NOTICES") :]
+        assert apt_guard.STALE_LINE in notices
+        assert apt_guard.STALE_LINE not in _frame_text("idle", width=100)
+
+    def test_monitor_reads_it_for_each_frame(self):
+        with patch.object(apt_guard, "guards_stale", return_value=True) as stale:
+            inp = monitor_mod.Session.inputs(MagicMock(), _reading_of(_STATUS_FIXTURES / "idle"))
+        assert inp.guards_stale and stale.call_count == 1
 
 
 class TestBackupLatched:  # pylint: disable=missing-function-docstring
@@ -2156,6 +2334,9 @@ class TestBackupLatched:  # pylint: disable=missing-function-docstring
         assert rc == 1, text
         assert "backup is left imported: its drive went away and no probe passed" in text, text
         assert "sudo zpool export backup" not in text, text
+        # Above the box, not in it: the reboot command is never wrapped (eli r4, B6b).
+        box = text[text.index("BACKUP NOT VERIFIED") :]
+        assert "reboot" not in box and "backup is left imported: see above." in box, box
 
     def test_the_watch_stops_before_the_read_back_imports(self):
         # M26-3 3b: the read-back's import is not the run's pool to watch.
@@ -2213,6 +2394,37 @@ class TestWatchProbe:  # pylint: disable=missing-function-docstring
             b.set_state("SUSPENDED")
             b.tick()
             assert not b.watch.probed()
+
+    def test_the_probe_is_in_zarks_log(self):
+        # M26 eli revision 4, B5b: the bounded runner logs nothing of its own.
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.watch._prober = lambda _p: pool_state.Bounded(0)  # pylint: disable=protected-access
+            b.tick()
+            b.set_state("SUSPENDED")
+            b.tick()
+            b.set_state("ONLINE")
+            b.tick()
+            out = StringIO()
+            with redirect_stdout(out):
+                assert b.watch.probe()
+            assert pool_state.probe_line(b.watch.pool, 0) in out.getvalue()
+        assert pool_state.probe_line("p", None).endswith("(the probe): has not returned")
+        with (
+            tempfile.TemporaryDirectory() as td,
+            _Kstat(td, backup="ONLINE"),
+            patch.object(pool_state, "settle"),
+        ):
+            dev = Path(td) / "part1"
+            dev.touch()
+            pool_state.remember("backup", False, [str(dev)])
+            out = StringIO()
+            with (
+                patch.object(pool_state, "probe", return_value=pool_state.Bounded(0)),
+                redirect_stdout(out),
+            ):
+                assert clean_mod._held_back("backup", make_log()) == ""  # pylint: disable=protected-access
+            assert "$ zpool sync -f backup (the probe): rc 0" in out.getvalue()
 
     def test_only_a_probe_that_returned_0_counts(self):
         with tempfile.TemporaryDirectory() as td:
@@ -10438,21 +10650,40 @@ class TestSetupInstallsBothGuards:  # pylint: disable=missing-function-docstring
 
 
 def _hermetic_guard(
-    text: str, td: str, states: Mapping[str, str] | None = None, devices: Sequence[str] = ("sdz",)
+    text: str,
+    td: str,
+    states: Mapping[str, str] | None = None,
+    devices: Sequence[str] = ("sdz",),
+    members: Sequence[str] | None = None,
+    udev: bool = True,
 ) -> str:
-    """A guard script reading a kstat and a block directory of the test's own
-    (lib/guard_sh.py): the machine's pools and devices are never seen."""
+    """A guard script reading a kstat, a block directory and udev's records
+    of the test's own (lib/guard_sh.py): the machine's pools, devices and
+    records are never seen. ``members``: the devices udev records as ZFS
+    members (all of ``devices`` when None); ``udev`` False: no records at all."""
     kstat = Path(td, "kstat")
     block = Path(td, "block")
+    records = Path(td, "udev-data")
     for pool, word in (states or {}).items():
         Path(kstat, pool).mkdir(parents=True)
         Path(kstat, pool, "state").write_text(f"{word}\n", encoding="ascii")
     kstat.mkdir(exist_ok=True)
     block.mkdir()
-    for dev in devices:
-        Path(block, dev).touch()
-    return text.replace(guard_sh.KSTAT_LINE, f"zark_kstat={kstat}").replace(
-        guard_sh.BLOCK_LINE, f"zark_block={block}"
+    if udev:
+        records.mkdir()
+    for minor, dev in enumerate(devices):
+        Path(block, dev).mkdir()
+        Path(block, dev, "dev").write_text(f"8:{minor}\n", encoding="ascii")
+        fs = "zfs_member" if members is None or dev in members else "ext4"
+        if udev:
+            Path(records, f"b8:{minor}").write_text(
+                f"S:disk/by-id/x-{dev}\nE:ID_FS_TYPE={fs}\nE:ID_FS_USAGE=filesystem\n",
+                encoding="ascii",
+            )
+    return (
+        text.replace(guard_sh.KSTAT_LINE, f"zark_kstat={kstat}")
+        .replace(guard_sh.BLOCK_LINE, f"zark_block={block}")
+        .replace(guard_sh.UDEV_LINE, f"zark_udev={records}")
     )
 
 
@@ -11008,41 +11239,76 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
     _DEB = "/var/cache/apt/archives/linux-image-7.3.0-9-generic_7.3.0-9.9_amd64.deb\n"
     _SUSPENDED: ClassVar[dict[str, str]] = {"rpool": "ONLINE", "backup2": "SUSPENDED"}
 
-    def _run(  # pylint: disable=too-many-arguments,too-many-locals
+    @staticmethod
+    def _script(  # pylint: disable=too-many-arguments
+        text: str,
+        td: str,
+        *,
+        states: Mapping[str, str] | None = None,
+        hang_on: str = "",
+        listed: str = "rpool\\t-\\nbpool\\t-\\n",
+        devices: Sequence[str] = ("sdz",),
+        members: Sequence[str] | None = None,
+        udev: bool = True,
+        prepare: Callable[[str], None] | None = None,
+    ) -> str:
+        """The stubs and the script in ``td``; its path. ``hang_on``: the
+        subcommand that sleeps (``all``, ``list``, ``get``), a stand-in for
+        state D, which no test can make."""
+        stub = Path(td, "stub")
+        stub.mkdir()
+        sleep = f"echo $$ >> {td}/pids; exec sleep 30\n"
+        Path(stub, "zpool").write_text(
+            "#!/bin/sh\n"
+            f'echo "zpool $*" >> {td}/calls\n'
+            + (sleep if hang_on == "all" else "")
+            + (f'[ "$1" != list ] || {{ {sleep.strip()}; }}\n' if hang_on == "list" else "")
+            + 'case "$1" in\n'
+            "  import) printf '   pool: backup2\\n' ;;\n"
+            f"  list) printf '{listed}' ;;\n"
+            "esac\n",
+            encoding="ascii",
+        )
+        Path(stub, "zfs").write_text(
+            f'#!/bin/sh\necho "zfs $*" >> {td}/calls\n'
+            + (sleep if hang_on == "get" else "")
+            + 'printf -- "-\\n"\n',
+            encoding="ascii",
+        )
+        for name in ("zpool", "zfs"):
+            Path(stub, name).chmod(0o755)
+        if prepare is not None:
+            prepare(td)
+        script = Path(td, "script")
+        script.write_text(
+            _hermetic_guard(text, td, states, devices, members, udev).replace(
+                "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"
+            ),
+            encoding="utf-8",
+        )
+        return str(script)
+
+    @staticmethod
+    def _kill(td: str) -> None:
+        pids = Path(td, "pids")
+        for pid in pids.read_text(encoding="ascii").split() if pids.exists() else ():
+            with suppress(ProcessLookupError):
+                os.kill(int(pid), signal.SIGKILL)
+
+    def _run(  # pylint: disable=too-many-arguments
         self,
         text: str,
         *,
-        states: Mapping[str, str] | None = None,
         hang: bool = False,
-        devices: Sequence[str] = ("sdz",),
         env_add: Mapping[str, str] | None = None,
         source: bool = False,
+        **made: Any,
     ) -> tuple[int, str, str, float]:
         with tempfile.TemporaryDirectory() as td:
+            if hang:
+                made["hang_on"] = "all"
+            script = self._script(text, td, **made)
             stub = Path(td, "stub")
-            stub.mkdir()
-            Path(stub, "zpool").write_text(
-                "#!/bin/sh\n"
-                f'echo "zpool $*" >> {td}/calls\n'
-                + (f"echo $$ >> {td}/pids\nexec sleep 30\n" if hang else "")
-                + 'case "$1" in\n'
-                "  import) printf '   pool: backup2\\n' ;;\n"
-                "  list) printf 'rpool\\t-\\nbpool\\t-\\n' ;;\n"
-                "esac\n",
-                encoding="ascii",
-            )
-            Path(stub, "zfs").write_text(
-                f'#!/bin/sh\necho "zfs $*" >> {td}/calls\nprintf -- "-\\n"\n', encoding="ascii"
-            )
-            for name in ("zpool", "zfs"):
-                Path(stub, name).chmod(0o755)
-            script = Path(td, "script")
-            script.write_text(
-                _hermetic_guard(text, td, states, devices).replace(
-                    "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"
-                ),
-                encoding="utf-8",
-            )
             env = {
                 k: v
                 for k, v in os.environ.items()
@@ -11056,10 +11322,10 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
                     "-c",
                     'set -e; self=grub-mkconfig; . "$1"; echo "child=${ZPOOL_IMPORT_PATH-unset}"',
                     "sh",
-                    str(script),
+                    script,
                 ]
                 if source
-                else ["sh", str(script)]
+                else ["sh", script]
             )
             began = time.monotonic()
             try:
@@ -11075,10 +11341,7 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
                     timeout=25,
                 )
             finally:
-                pids = Path(td, "pids")
-                for pid in pids.read_text(encoding="ascii").split() if pids.exists() else ():
-                    with suppress(ProcessLookupError):
-                        os.kill(int(pid), signal.SIGKILL)
+                self._kill(td)
             took = time.monotonic() - began
             calls = (
                 Path(td, "calls").read_text(encoding="utf-8") if Path(td, "calls").exists() else ""
@@ -11104,22 +11367,118 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
         rc, out, calls, _ = self._run(apt_guard.HOOK_SCRIPT, states=self._SUSPENDED)
         assert rc == 1, out
         assert "pool backup2 is not ONLINE" in out and "linux-image-7.3.0-9-generic" in out, out
+        assert "forced one" in out, out  # a plain reboot can hang (eli r4, B1c2)
         assert calls == "", calls
 
     def test_the_hook_refuses_when_a_zpool_does_not_return(self):
         rc, out, _, took = self._run(apt_guard.HOOK_SCRIPT, hang=True)
         assert rc == 1, out
-        assert "could not be read within 10 s" in out, out
+        assert "could not be read: a pool did not answer within 10 s" in out, out
         assert took < 14, took
 
     def test_the_prerm_refuses_with_a_suspended_pool_and_starts_no_zpool(self):
         rc, out, calls, _ = self._run(apt_guard.PRERM_SCRIPT, states=self._SUSPENDED)
-        assert rc == 1 and "backup pool backup2 is imported" in out, out
+        assert rc == 1 and "pool(s) not ONLINE: backup2" in out, out
+        assert "forced one" in out and "sudo apt -f install" in out, out
         assert calls == "", calls
+
+    def test_the_prerm_refuses_when_only_a_system_pool_is_not_healthy(self):
+        # M26R-44 (a): the kernel's postrm would run update-grub, which the
+        # grub guard stops while any pool is not ONLINE, after the files are gone.
+        for states in ({"rpool": "ONLINE", "bpool": "SUSPENDED"}, {"rpool": "FAULTED"}):
+            rc, out, calls, _ = self._run(apt_guard.PRERM_SCRIPT, states=states)
+            assert rc == 1 and "pool(s) not ONLINE" in out, (states, out)
+            assert calls == "", calls
+
+    def test_the_prerm_refuses_when_its_list_or_a_get_does_not_return(self):
+        # M26R-47: the stand-in sleeps by subcommand, so each bound is reached.
+        rc, out, _, took = self._run(apt_guard.PRERM_SCRIPT, hang_on="list")
+        assert rc == 1 and "could not be read: a pool did not answer within 10 s" in out, out
+        assert took < 14, took
+        rc, out, _, took = self._run(
+            apt_guard.PRERM_SCRIPT, hang_on="get", listed="rpool\\t-\\nbackup2\\t-\\n"
+        )
+        assert rc == 1 and "backup pool backup2 is imported" in out, out
+        assert took < 14, took
+
+    def test_zark_held_starts_no_zpool_while_a_pool_is_not_healthy(self):
+        # Every installed guard refuses on zark_unhealthy before zark_held,
+        # so only a direct call shows its own early return still holds.
+        text = (
+            "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH\n"
+            + guard_sh.POOL_READ_SH
+            + 'zark_held 2; echo "rc=$? imp=[$zark_imp]"\n'
+        )
+        states = {"rpool": "ONLINE", "bpool": "SUSPENDED", "backup2": "SUSPENDED"}
+        rc, out, calls, took = self._run(text, states=states, hang=True)
+        assert rc == 0 and "rc=0 imp=[ backup2]" in out, out
+        assert calls == "", calls
+        assert took < 2, took
+
+    def test_an_unreadable_state_counts_as_not_healthy(self):
+        # M26R-44 (b), M26R-47: a state entry that is there but cannot be
+        # read (a directory, a dangling link) is not skipped.
+        def odd(kind: str) -> Callable[[str], None]:
+            def make(td: str) -> None:
+                state = Path(td, "kstat", "odd", "state")
+                state.parent.mkdir(parents=True)
+                if kind == "dir":
+                    state.mkdir()
+                else:
+                    state.symlink_to(Path(td, "nowhere"))
+
+            return make
+
+        for kind in ("dir", "link"):
+            rc, out, calls, _ = self._run(apt_guard.HOOK_SCRIPT, prepare=odd(kind))
+            assert rc == 1 and "pool odd is not ONLINE" in out, (kind, out)
+            assert calls == "", calls
+
+    def test_a_transient_import_pool_is_not_a_pool_whose_drive_went_away(self):
+        # M26R-45: a scan's or an import's $import-<hex>-<pool> entry reads
+        # TRANSITIONING while it is looked at.
+        states = {"rpool": "ONLINE", "$import-ffff9a-black": "TRANSITIONING"}
+        rc, out, _, _ = self._run(apt_guard.MOTD_SCRIPT, states=states)
+        assert rc == 0 and "not ONLINE" not in out, out
+
+    def test_no_temporary_directory_is_said_as_such(self):
+        # M26R-44 (c): refused, the safe side, with its own reason.
+        rc, out, _, _ = self._run(apt_guard.HOOK_SCRIPT, env_add={"TMPDIR": "/nonexistent/zark"})
+        assert rc == 1, out
+        assert "no temporary directory could be made (mktemp failed)" in out, out
+
+    def test_a_call_left_behind_keeps_no_descriptor_above_2(self):
+        # M26R-42: a child holding debconf's descriptor 3 would hold the
+        # frontend after the guard gave up.
+        with tempfile.TemporaryDirectory() as td:
+            script = self._script(apt_guard.MOTD_SCRIPT, td, hang_on="all")
+            reader, writer = os.pipe()
+            try:
+                began = time.monotonic()
+                proc = subprocess.Popen(  # pylint: disable=consider-using-with
+                    ["sh", "-c", f'exec 3>&{writer} {writer}>&-; exec sh "$0"', script],
+                    pass_fds=(writer,),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env={**os.environ, "PATH": f"{td}/stub:/usr/bin:/bin"},
+                )
+                os.close(writer)
+                writer = -1
+                _ = proc.wait(timeout=20)
+                # The reader's end of file comes when the script ends, not
+                # when the stand-in's 30 s sleep does.
+                assert os.read(reader, 1) == b""
+                assert time.monotonic() - began < 10
+            finally:
+                if writer >= 0:
+                    os.close(writer)
+                os.close(reader)
+                self._kill(td)
 
     def test_the_grub_guard_stops_with_a_suspended_pool_and_starts_no_zpool(self):
         rc, out, calls, _ = self._run(grub_guard.GUARD_SCRIPT, states=self._SUSPENDED)
         assert rc == 1 and "ZFS pool(s) not ONLINE: backup2" in out, out
+        assert "forced one" in out, out  # a plain reboot can hang (eli r4, B1c2)
         assert calls == "", calls
 
     def test_the_scan_file_scans_nothing_with_a_suspended_pool(self):
@@ -11162,6 +11521,25 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
             grub_guard.GUARD_SCRIPT, env_add={"ZPOOL_IMPORT_PATH": grub_guard.NO_IMPORT_PATH}
         )
         assert calls.splitlines()[0] == "zpool import", calls
+
+    def test_the_scan_names_only_what_udev_records_as_a_zfs_member(self):
+        # M26R-40: deciding opens no device, so a disk that sleeps is not
+        # woken at each login; checked on the four series (2.2.2 to 2.4.4).
+        devices = ("sda", "sda1", "sdb", "sdb1", "sdb9")
+        _, out, calls, _ = self._run(apt_guard.MOTD_SCRIPT, devices=devices, members=("sdb1",))
+        assert calls.splitlines()[0] == "zpool import -d /dev/sdb1", calls
+        assert "backup2" in out, out
+
+    def test_no_zfs_member_no_scan(self):
+        rc, out, calls, _ = self._run(apt_guard.MOTD_SCRIPT, devices=("sda", "sda1"), members=())
+        assert rc == 0 and "zpool import" not in calls and "backup2" not in out, (calls, out)
+
+    def test_without_udev_records_every_disk_and_partition_is_named(self):
+        # A chroot without /run: the scan of every disk and partition, as before.
+        _, _, calls, _ = self._run(
+            apt_guard.MOTD_SCRIPT, devices=("sda", "sda1", "zd0"), members=(), udev=False
+        )
+        assert calls.splitlines()[0] == "zpool import -d /dev/sda -d /dev/sda1", calls
 
 
 class TestGrubScanFile:  # pylint: disable=missing-function-docstring
@@ -23533,6 +23911,23 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         assert rc == 0, out.getvalue()
         opened.assert_called_once()
         assert opened.call_args.kwargs.get("readonly") is True, opened.call_args
+
+    def test_step_1_says_when_the_installed_guards_are_an_older_zarks(self) -> None:
+        """M26 item 22: one line, the run goes on."""
+        for stale in (True, False):
+            out = StringIO()
+            _, rc = self._run(
+                _fresh_fake(),
+                patch.object(apt_guard, "guards_stale", return_value=stale),
+                redirect_stdout(out),
+            )
+            text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+            assert rc == 0, text
+            assert (apt_guard.STALE_LINE in text) is stale, text
+            if stale:
+                assert text.index("Scanning for known backup drives") < text.index(
+                    apt_guard.STALE_LINE
+                )
 
     def test_an_ext4_run_refreshes_the_copy_before_the_point(self) -> None:
         """M13R-4 (M37, M38, M44): the engine gets the layout and the

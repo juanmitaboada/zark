@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
 
 from lib import dpkg_lock, forensics, pool_state, scrub
 from lib.config import now_utc_iso, zark_command
@@ -371,11 +371,28 @@ class ZFSQuery(Protocol):
         ...
 
 
-class ZFS:
+class ZFS:  # pylint: disable=too-many-public-methods
     """ZFS operations wrapper."""
 
     def __init__(self, log: Log):
         self.log = log
+        # Pools refused because a run left them imported and not healthy,
+        # with the state read: their FATAL points at the lines already said.
+        self.refused: dict[str, str] = {}
+
+    def import_fatal(
+        self,
+        name: str,
+        causes: list[str] | None = None,
+        solutions: list[str] | None = None,
+    ) -> NoReturn:
+        """The FATAL after :meth:`import_backup_pool` returned False. A pool
+        it refused as left imported and not healthy gets no generic advice:
+        an export or a reconnect is what its own lines warn against (M26 eli
+        revision 4, B3c)."""
+        if word := self.refused.get(name):
+            self.log.fatal(f"{name} is left imported and {word}: what to do is said above")
+        self.log.fatal(f"Cannot import pool {name}", causes=causes, solutions=solutions)
 
     # ── Pool operations ──────────────────────────────────────────────────
 
@@ -574,6 +591,7 @@ class ZFS:
         if word != pool_state.MISSING and word not in pool_state.HEALTHY:
             for line in pool_state.left_imported_lines(name, f"it is already imported and {word}"):
                 self.log.error(line)
+            self.refused[name] = word
             return False
         if not self.pool_exists(name):
             return None
