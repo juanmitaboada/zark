@@ -32,9 +32,11 @@ everything 2.3.1 writes.
   pool is imported (its `/dev/disk/by-id` partition and its kstat state
   file, every 2 s, with no `zpool` command). When the drive goes away it
   says so (terminal, zark.log, a desktop notification) with the two ways
-  out: plug it back in and run `sudo zpool clear <pool>` in another
-  terminal, or reboot with it unplugged. `progress.json` gains the
-  optional `drive_gone` object, shown by `zark monitor`. The run takes no
+  out: first, reboot with it unplugged; or plug it back in and run
+  `sudo zpool clear <pool>` in another terminal, with the warning that
+  on OpenZFS 2.4 the clear can crash the module (known limitations,
+  below). `progress.json` gains the optional `drive_gone` object, shown
+  by `zark monitor`. The run takes no
   point and asks nothing once the drive is gone, starts no further
   transfer, and at its end waits for the drive: once the drive is back,
   the pool ONLINE or DEGRADED for 10 s and a `zpool sync -f` has returned 0, the
@@ -90,6 +92,15 @@ everything 2.3.1 writes.
 - A read-only pool is exported without the probe or the device checks (its
   export does not wait for a transaction group); one already suspended is
   left imported.
+- On OpenZFS 2.4, a `zpool clear` of a pool whose drive went away with
+  writes in flight can crash the ZFS module (`VERIFY0(spa_do_crypt_abd(...))
+  failed (13)`, `PANIC at zio.c:...:zio_encrypt()`; OpenZFS #18394): writes
+  to the pool then hang, and the reboot itself may need a power-off. Seen
+  on hardware on 2.4.4 (a raw receive of a new encrypted dataset in
+  flight) and reported on 2.4.1; a module panic after a resume was also
+  seen in virtual machines on 2.4.1 and 2.4.4. zark's messages offer the
+  reboot with the drive unplugged first and the clear second, with this
+  warning; zark never runs the clear itself.
 - A pool resumed by `zpool clear` after its drive lost power may have lost
   writes the drive had acknowledged: zark marks that run NOT VERIFIED and
   names `zark fullcheck`.

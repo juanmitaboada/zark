@@ -17,10 +17,12 @@ The backup drive's watch while ``zark backup`` has its pool imported (A1E-7).
 On eli, backup2 unplugged during a backup left zark waiting for ever, with
 nothing said. A pool without redundancy suspends at the first write that
 fails (``failmode=wait``, the default, kept: M26-2 2a), and every call that
-needs it then waits until the drive is back and someone runs ``zpool clear``.
-zark cannot end that wait, and it does not run the clear itself (M26-4 4b):
-a pool resumed after its drive lost power may have lost writes the drive
-had acknowledged (M26R-1). What it does is say so at once, in the terminal,
+needs it then waits until the drive is back and someone runs ``zpool clear``,
+or until a reboot. zark cannot end that wait, and it does not run the clear
+itself (M26-4 4b): a pool resumed after its drive lost power may have lost
+writes the drive had acknowledged (M26R-1), and on OpenZFS 2.4 the clear can
+crash the module (``pool_state.CLEAR_RISK``), so the reboot with the drive
+unplugged is offered first. What it does is say so at once, in the terminal,
 zark.log, a desktop notification and ``progress.json``'s ``drive_gone``, and
 latch the run, which then never ends COMPLETED.
 
@@ -37,7 +39,7 @@ state. The latch (never cleared, M26R-24, M26R-29):
     handles an event must not cost a healthy backup. A link or a state
     file the watch never saw is not watched.
 
-Every later entry into ``SUSPENDED`` repeats the clear instruction
+Every later entry into ``SUSPENDED`` repeats the two ways out
 (M26R-21); every exit from it is recorded as a resume, whoever caused it
 (zed included, M26R-13). While the drive is away, ``zpool status -p`` is
 read through the bounded runner, one child at a time, so the counters the
@@ -267,8 +269,8 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             self._announce(latch)
         elif latch is not None and entered:
             self.log.warn(
-                f"{self.pool} is suspended now ({local_time(now)}). "
-                + f"Plug the drive in if it is not, then: sudo zpool clear {self.pool}"
+                f"{self.pool} is suspended now ({local_time(now)}). Reboot with its drive "
+                + f"unplugged, or plug it in and run: sudo zpool clear {self.pool} (the risk above)"
             )
         if latch is not None and left:
             with self._lock:
@@ -306,18 +308,20 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         lines = [
             f"{self.pool}'s drive went away at {local_time(latch.lost_at)} ({self.pool} {how}).",
             "zark cannot end or resume this run itself. Either:",
-            f"  - plug the drive back in, then in another terminal: sudo zpool clear {self.pool}",
+            "  - reboot with the drive unplugged (the safer way): nothing imports it at "
+            + "boot, and its next import starts from the last state it saved;",
+            "  - or plug the drive back in, then in another terminal: "
+            + f"sudo zpool clear {self.pool}",
+            f"    {pool_state.CLEAR_RISK}",
             "    Writes the drive had accepted before it lost power may be lost: this run "
             + "will not be marked complete, and after it ends run: "
             + f"{zark_command()} fullcheck",
-            "  - or reboot with the drive unplugged: nothing imports it at boot, and its "
-            + "next import starts from the last state it saved.",
         ]
         for line in lines:
             self.log.error(line)
         self._notify(
             f"{self.pool}: drive went away",
-            f"Plug it back in, then: sudo zpool clear {self.pool}",
+            "Reboot with it unplugged; or plug it back in and see the terminal",
         )
 
     def _reopen_hint(self, now: float, state: str, link: bool) -> None:
@@ -328,7 +332,10 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             self._unopened_since = now
         if not self._hinted_reopen and now - self._unopened_since >= REOPEN_HINT_S:
             self._hinted_reopen = True
-            self.log.warn(f"{self.pool} has not reopened its drive: sudo zpool clear {self.pool}")
+            self.log.warn(
+                f"{self.pool} has not reopened its drive: reboot with it unplugged, or "
+                + f"sudo zpool clear {self.pool} (the risk above)"
+            )
 
     def _read_evidence(self, now: float) -> None:
         """``zpool status -p`` while the drive is away, one child at a time
@@ -383,8 +390,9 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             "suspended": suspended,
             "back": back,
             "resumed_at": _iso(resumed) if resumed is not None else None,
-            "hint": f"{self.pool}'s drive went away. Plug it back in, then: "
-            + f"sudo zpool clear {self.pool}",
+            "hint": f"{self.pool}'s drive went away. Reboot with it unplugged (safer), or plug "
+            + f"it back in and run: sudo zpool clear {self.pool} (can crash OpenZFS 2.4: "
+            + "see zark.log)",
         }
 
     def _publish(self) -> None:

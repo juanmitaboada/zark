@@ -1420,7 +1420,10 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
                 and "--drive" not in text
             )
             assert "reboot with the drive unplugged" in text
-            assert len(b.notes) == 1
+            # The reboot first, the clear second with its risk (M26 eli B1d, #18394).
+            assert text.index("reboot with the drive unplugged") < text.index("sudo zpool clear")
+            assert pool_state.CLEAR_RISK in text and "#18394" in pool_state.CLEAR_RISK
+            assert len(b.notes) == 1 and "Reboot with it unplugged" in b.notes[0]
 
     def test_a_suspension_latches_at_once_and_is_never_cleared(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1519,6 +1522,8 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
             doc = b.watch.document()
         assert doc is not None
         assert set(doc) == {"since", "pool", "suspended", "back", "resumed_at", "hint"}
+        hint = doc["hint"]
+        assert hint.index("Reboot with it unplugged") < hint.index("sudo zpool clear backup")
         assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", doc["since"])
 
     def test_the_thread_starts_ticks_and_stops_within_its_limit(self):
@@ -1693,6 +1698,14 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
                 assert not ZFS(make_log()).import_backup_pool("backup", "/dev/x-part1")
             assert not mock.calls, mock.calls
             assert "sudo zpool clear backup" in out.getvalue()
+
+    def test_a_pool_left_imported_offers_the_reboot_first(self):
+        lines = pool_state.left_imported_lines("backup", "its drive went away")
+        text = "\n".join(lines)
+        assert lines[0] == "backup is left imported: its drive went away. Either:"
+        assert text.index("reboot with its drive unplugged") < text.index("sudo zpool clear backup")
+        assert text.index("sudo zpool clear backup") < text.index("clean")
+        assert lines[-1].strip() == pool_state.CLEAR_RISK
 
     def test_an_import_keeps_the_mode_and_the_paths(self):
         mock = MockShell()
@@ -1889,6 +1902,7 @@ class TestWaitForDrive:  # pylint: disable=missing-function-docstring
             got, out = self._wait(watch, k, steps)
             assert got and watch.probed_n == 2, out
             assert "sudo zpool clear backup" in out and "the run goes on" in out
+            assert out.index("reboot with the drive unplugged") < out.index("sudo zpool clear")
 
     def test_no_probe_while_suspended_or_gone(self):
         with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:

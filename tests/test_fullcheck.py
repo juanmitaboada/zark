@@ -1040,6 +1040,9 @@ class TestScrubPart:  # pylint: disable=missing-function-docstring
         got, cleanup, cr, mock, _ = self._part(zfs, {}, scanning(), suspended_at=1)
         assert got is False and cr.check.result == "not_finished"
         assert "suspended" in cr.check.message and "zpool clear" in cr.check.message
+        msg = cr.check.message
+        assert msg.index("reboot with the drive unplugged") < msg.index("zpool clear")
+        assert "#18394" in msg
         assert mock.was_not_called("zpool scrub -p")
         assert not zfs.pool_export.called
         assert not cleanup._pools and not cleanup._actions  # pylint: disable=protected-access

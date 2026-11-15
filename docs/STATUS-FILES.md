@@ -224,8 +224,10 @@ shows `percent` when it is set.
 partition's link missing, or the pool not usable). A pool without
 redundancy then suspends at its first failed write, and every call that
 needs it waits until the drive is plugged back in and `zpool clear` is run,
-or until a reboot; zark does not run the clear itself. The run can no
-longer end `completed`.
+or until a reboot; zark does not run the clear itself, and its `hint`
+offers the reboot with the drive unplugged first (on OpenZFS 2.4 the clear
+can crash the module: OpenZFS #18394). The run can no longer end
+`completed`.
 
 | Field | Type | Meaning |
 |---|---|---|

@@ -275,13 +275,25 @@ def probe(pool: str, deadline_s: float = PROBE_DEADLINE_S) -> Bounded:
     return run_bounded(["zpool", "sync", "-f", pool], deadline_s)
 
 
+# Why every message offers the reboot first and the clear second: on eli
+# (2.4.4) the module panicked in zio_encrypt 3.5 s after the user's clear
+# resumed a raw receive, as OpenZFS #18394 reports on 2.4.1 (M26 eli, B1d).
+CLEAR_RISK = (
+    "On OpenZFS 2.4 a clear of a pool whose drive went away with writes in flight "
+    + "can crash the ZFS module (OpenZFS #18394): writes to the pool then hang, and "
+    + "the reboot itself may need a power-off."
+)
+
+
 def left_imported_lines(pool: str, why: str) -> list[str]:
     """What the user does with a pool zark leaves imported (plan 4.8)."""
     return [
-        f"{pool} is left imported: {why}.",
-        f"Plug its drive back in; if `zpool status {pool}` says it is suspended:",
-        f"  sudo zpool clear {pool}",
-        "then, to close its keystore and export it:",
-        f"  {zark_command()} clean",
-        "Or reboot with the drive unplugged: nothing imports it at boot.",
+        f"{pool} is left imported: {why}. Either:",
+        "  - reboot with its drive unplugged: nothing imports it at boot, and its next "
+        + "import starts from the last state it saved;",
+        f"  - or plug its drive back in; if `zpool status {pool}` says it is suspended:",
+        f"      sudo zpool clear {pool}",
+        "    then, to close its keystore and export it:",
+        f"      {zark_command()} clean",
+        f"    {CLEAR_RISK}",
     ]

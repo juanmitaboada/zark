@@ -448,9 +448,10 @@ def suspended(cr: CheckRun, cleanup: Cleanup, log: Log) -> None:
     pool = cr.pool
     cleanup.untrack_pool(pool)
     message = (
-        f"{pool} is suspended (the drive went away while it was imported): plug it in "
-        + f"again, then `sudo zpool clear {pool}` and `sudo zpool export {pool}`; the "
-        + f"scrub resumes at the next `{zark_command()} fullcheck`"
+        f"{pool} is suspended (the drive went away while it was imported): reboot with "
+        + f"the drive unplugged, or plug it in again, then `sudo zpool clear {pool}` "
+        + "(on OpenZFS 2.4 it can crash the module: OpenZFS #18394) and `sudo zpool export "
+        + f"{pool}`; the scrub resumes at the next `{zark_command()} fullcheck`"
     )
     log.error(message)
     cr.check.scrub = scrub_record("not_run")

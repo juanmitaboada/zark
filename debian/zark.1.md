@@ -129,15 +129,20 @@ end-to-end sequences.
     */proc/spl/kstat/zfs/*\<pool\>*/state*, every 2 seconds, without
     running **zpool**. When the drive goes away it says so in the
     terminal, in zark.log and in a desktop notification, names the two
-    ways out (plug the drive back in and run **zpool clear** *pool* in
-    another terminal, or reboot with it unplugged) and starts no further
-    transfer; **progress.json** gains **drive_gone**. At the end of such a
+    ways out (first, reboot with the drive unplugged: nothing imports it
+    at boot, and its next import starts from the last state it saved;
+    or plug the drive back in and run **zpool clear** *pool* in another
+    terminal) and starts no further transfer; **progress.json** gains
+    **drive_gone**. On OpenZFS 2.4 a clear of a pool whose drive went
+    away with writes in flight can crash the ZFS module (OpenZFS
+    #18394): writes to the pool then hang, and the reboot itself may need
+    a power-off. At the end of such a
     run it waits for the drive: once the drive is back, the pool ONLINE or
     DEGRADED for 10 s and a **zpool sync -f** has returned 0, the run's last steps
     run once and it ends **BACKUP NOT VERIFIED** (writes the drive had
     accepted before it lost power may be lost; run **fullcheck**). Ctrl+C
-    in the wait ends the run and leaves the pool imported: **zpool clear**
-    if it is suspended, then **clean**. **backup** never unloads the keys
+    in the wait ends the run and leaves the pool imported: reboot with the
+    drive unplugged, or **zpool clear** if it is suspended, then **clean**. **backup** never unloads the keys
     of, nor exports, a read-write pool that is gone, not ONLINE or
     DEGRADED, or not probed since its drive went away: OpenZFS waits
     holding a lock that only a reboot releases. Any command refuses a

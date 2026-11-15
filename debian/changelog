@@ -7,7 +7,9 @@ zark (2.3.1~rc1-1) UNRELEASED; urgency=medium
     stops a run. A passphrase the locale cannot encode is named as such.
   * backup opens the drive's keystore read-only and watches the drive
     while its pool is imported: when it goes away the run says how to
-    resume it (zpool clear) or leave it (reboot), starts no transfer,
+    leave it (reboot with the drive unplugged, offered first) or resume
+    it (zpool clear, which can crash the OpenZFS 2.4 module: OpenZFS
+    #18394), starts no transfer,
     waits for the drive at its end and is never marked complete;
     progress.json gains drive_gone. No command unloads the keys of or
     exports a read-write backup pool that is gone, unhealthy or not
