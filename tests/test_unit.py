@@ -54,7 +54,7 @@ import termios
 import time
 import urllib.parse
 import zlib
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import (
     AbstractContextManager,
     ExitStack,
@@ -62,6 +62,7 @@ from contextlib import (
     nullcontext,
     redirect_stderr,
     redirect_stdout,
+    suppress,
 )
 from dataclasses import asdict as dc_asdict, dataclass, replace as dc_replace
 from datetime import UTC, datetime, timedelta
@@ -187,6 +188,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     engine,
     forensics,
     grub_guard,
+    guard_sh,
     pool_record,
     pool_state,
     reclaim,
@@ -10375,6 +10377,25 @@ class TestSetupInstallsBothGuards:  # pylint: disable=missing-function-docstring
             assert path.stat().st_mtime == 1
 
 
+def _hermetic_guard(
+    text: str, td: str, states: Mapping[str, str] | None = None, devices: Sequence[str] = ("sdz",)
+) -> str:
+    """A guard script reading a kstat and a block directory of the test's own
+    (lib/guard_sh.py): the machine's pools and devices are never seen."""
+    kstat = Path(td, "kstat")
+    block = Path(td, "block")
+    for pool, word in (states or {}).items():
+        Path(kstat, pool).mkdir(parents=True)
+        Path(kstat, pool, "state").write_text(f"{word}\n", encoding="ascii")
+    kstat.mkdir(exist_ok=True)
+    block.mkdir()
+    for dev in devices:
+        Path(block, dev).touch()
+    return text.replace(guard_sh.KSTAT_LINE, f"zark_kstat={kstat}").replace(
+        guard_sh.BLOCK_LINE, f"zark_block={block}"
+    )
+
+
 class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstring
     """H18 / D3 (M4a-3): an imported backup pool blocks boot-critical updates too.
 
@@ -10408,7 +10429,9 @@ class TestGuardsSeeImportedBackups:  # pylint: disable=missing-function-docstrin
     def _script(td: str, text: str, stub: str) -> str:
         path = Path(td, "script")
         path.write_text(
-            text.replace("PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"),
+            _hermetic_guard(text, td).replace(
+                "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"
+            ),
             encoding="utf-8",
         )
         return str(path)
@@ -10590,6 +10613,7 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
         env_add: dict[str, str] | None = None,
         args: Sequence[str] = (),
         imported: str = "",
+        states: Mapping[str, str] | None = None,
     ) -> tuple[int, str, str]:
         importable = self._PLUGGED if state == "plugged" else ""
         imported = imported or (self._IMPORTED if state == "imported" else self._SYSTEM)
@@ -10610,7 +10634,7 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
                 Path(stub, name).chmod(0o755)
             script = Path(td, "script")
             script.write_text(
-                text.replace(
+                _hermetic_guard(text, td, states).replace(
                     "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"
                 ),
                 encoding="utf-8",
@@ -10873,6 +10897,175 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
             assert apt_guard.remove(td, make_log()) == [str(prerm)] and prerm.exists()
 
 
+class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
+    """M26, eli B1d of revision 2: with backup2 suspended, the login reminder's
+    bare ``zpool import`` read backup2's zvols and hung in state D at every ssh
+    login. Every installed guard now reads the kstat first and starts no
+    ``zpool`` or ``zfs`` while a pool is not ONLINE or DEGRADED, scans named
+    disks and partitions only, and waits a few seconds at most for a call.
+
+    ``zpool`` and ``zfs`` are stubs that record their calls; ``hang`` makes
+    ``zpool`` sleep (a stand-in for state D, which no test can make)."""
+
+    _DEB = "/var/cache/apt/archives/linux-image-7.3.0-9-generic_7.3.0-9.9_amd64.deb\n"
+    _SUSPENDED: ClassVar[dict[str, str]] = {"rpool": "ONLINE", "backup2": "SUSPENDED"}
+
+    def _run(  # pylint: disable=too-many-arguments,too-many-locals
+        self,
+        text: str,
+        *,
+        states: Mapping[str, str] | None = None,
+        hang: bool = False,
+        devices: Sequence[str] = ("sdz",),
+        env_add: Mapping[str, str] | None = None,
+        source: bool = False,
+    ) -> tuple[int, str, str, float]:
+        with tempfile.TemporaryDirectory() as td:
+            stub = Path(td, "stub")
+            stub.mkdir()
+            Path(stub, "zpool").write_text(
+                "#!/bin/sh\n"
+                f'echo "zpool $*" >> {td}/calls\n'
+                + (f"echo $$ >> {td}/pids\nexec sleep 30\n" if hang else "")
+                + 'case "$1" in\n'
+                "  import) printf '   pool: backup2\\n' ;;\n"
+                "  list) printf 'rpool\\t-\\nbpool\\t-\\n' ;;\n"
+                "esac\n",
+                encoding="ascii",
+            )
+            Path(stub, "zfs").write_text(
+                f'#!/bin/sh\necho "zfs $*" >> {td}/calls\nprintf -- "-\\n"\n', encoding="ascii"
+            )
+            for name in ("zpool", "zfs"):
+                Path(stub, name).chmod(0o755)
+            script = Path(td, "script")
+            script.write_text(
+                _hermetic_guard(text, td, states, devices).replace(
+                    "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={stub}:/usr/bin:/bin"
+                ),
+                encoding="utf-8",
+            )
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("ZARK_INTERNAL", "ZPOOL_IMPORT_PATH")
+            }
+            env["PATH"] = f"{stub}:/usr/bin:/bin"
+            env.update(env_add or {})
+            cmd = (
+                [
+                    "dash",
+                    "-c",
+                    'set -e; self=grub-mkconfig; . "$1"; echo "child=${ZPOOL_IMPORT_PATH-unset}"',
+                    "sh",
+                    str(script),
+                ]
+                if source
+                else ["sh", str(script)]
+            )
+            began = time.monotonic()
+            try:
+                # The pipes must close when the script ends: a call left behind
+                # that kept them open would hold the login (pam_motd reads to EOF).
+                proc = subprocess.run(
+                    cmd,
+                    input=self._DEB,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    check=False,
+                    timeout=25,
+                )
+            finally:
+                pids = Path(td, "pids")
+                for pid in pids.read_text(encoding="ascii").split() if pids.exists() else ():
+                    with suppress(ProcessLookupError):
+                        os.kill(int(pid), signal.SIGKILL)
+            took = time.monotonic() - began
+            calls = (
+                Path(td, "calls").read_text(encoding="utf-8") if Path(td, "calls").exists() else ""
+            )
+        return proc.returncode, proc.stdout + proc.stderr, calls, took
+
+    def test_the_reminder_names_a_suspended_pool_and_starts_no_zpool(self):
+        rc, out, calls, _ = self._run(apt_guard.MOTD_SCRIPT, states=self._SUSPENDED)
+        assert rc == 0, out
+        assert "pool(s) not ONLINE: backup2" in out and "reboot with the drive unplugged" in out, (
+            out
+        )
+        assert calls == "", calls
+
+    def test_the_reminder_never_waits_on_a_zpool_that_does_not_return(self):
+        rc, out, calls, took = self._run(apt_guard.MOTD_SCRIPT, hang=True)
+        assert rc == 0, out
+        assert "backup pools not checked: a pool did not" in out and "answer within 3 s" in out, out
+        assert calls.startswith("zpool import"), calls
+        assert took < 6, took
+
+    def test_the_hook_refuses_with_a_suspended_pool_and_starts_no_zpool(self):
+        rc, out, calls, _ = self._run(apt_guard.HOOK_SCRIPT, states=self._SUSPENDED)
+        assert rc == 1, out
+        assert "pool backup2 is not ONLINE" in out and "linux-image-7.3.0-9-generic" in out, out
+        assert calls == "", calls
+
+    def test_the_hook_refuses_when_a_zpool_does_not_return(self):
+        rc, out, _, took = self._run(apt_guard.HOOK_SCRIPT, hang=True)
+        assert rc == 1, out
+        assert "could not be read within 10 s" in out, out
+        assert took < 14, took
+
+    def test_the_prerm_refuses_with_a_suspended_pool_and_starts_no_zpool(self):
+        rc, out, calls, _ = self._run(apt_guard.PRERM_SCRIPT, states=self._SUSPENDED)
+        assert rc == 1 and "backup pool backup2 is imported" in out, out
+        assert calls == "", calls
+
+    def test_the_grub_guard_stops_with_a_suspended_pool_and_starts_no_zpool(self):
+        rc, out, calls, _ = self._run(grub_guard.GUARD_SCRIPT, states=self._SUSPENDED)
+        assert rc == 1 and "ZFS pool(s) not ONLINE: backup2" in out, out
+        assert calls == "", calls
+
+    def test_the_scan_file_scans_nothing_with_a_suspended_pool(self):
+        rc, out, calls, _ = self._run(grub_guard.CFG_TEXT, states=self._SUSPENDED, source=True)
+        assert rc == 0, out
+        assert f"child={grub_guard.NO_IMPORT_PATH}" in out, out
+        assert "zark: pool(s) not ONLINE: backup2: no device is scanned" in out, out
+        assert calls == "", calls
+
+    def test_the_scan_file_leaves_nothing_of_its_own_in_the_shell(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td, "cfg")
+            cfg.write_text(_hermetic_guard(grub_guard.CFG_TEXT, td), encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "dash",
+                    "-c",
+                    'self=grub-mkconfig; . "$1"; set | grep -c "^zark_" || :',
+                    "sh",
+                    str(cfg),
+                ],
+                capture_output=True,
+                text=True,
+                env={"PATH": "/usr/bin:/bin"},
+                check=False,
+            )
+        assert proc.stdout.strip() == "0", proc.stdout + proc.stderr
+
+    def test_the_scan_names_disks_and_partitions_only(self):
+        devices = ("sda", "sda1", "nvme0n1p2", "zd0", "zd16", "dm-0", "md127", "loop3", "sr0")
+        _, out, calls, _ = self._run(apt_guard.MOTD_SCRIPT, devices=devices)
+        scan = calls.splitlines()[0].split()
+        assert scan[:2] == ["zpool", "import"], calls
+        assert sorted(scan[2:][1::2]) == ["/dev/nvme0n1p2", "/dev/sda", "/dev/sda1"], calls
+        assert set(scan[2:][0::2]) == {"-d"}, calls
+        assert "backup2" in out, out
+
+    def test_a_set_import_path_is_kept(self):
+        _, _, calls, _ = self._run(
+            grub_guard.GUARD_SCRIPT, env_add={"ZPOOL_IMPORT_PATH": grub_guard.NO_IMPORT_PATH}
+        )
+        assert calls.splitlines()[0] == "zpool import", calls
+
+
 class TestGrubScanFile:  # pylint: disable=missing-function-docstring
     """M18 option C (M18-5 5b, M18-8 8a, M18R-3, M18R-4): the file
     grub-mkconfig sources keeps importable pools out of 10_linux_zfs's scan.
@@ -10913,6 +11106,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
         fail: bool = False,
         status: int = 0,
         text: str = grub_guard.CFG_TEXT,
+        states: Mapping[str, str] | None = None,
     ) -> tuple[int, str, str, str]:
         """Source the file under ``set -e`` the way grub-mkconfig does, then
         run a child that prints what it inherited. Returns the status, the
@@ -10920,7 +11114,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
         with tempfile.TemporaryDirectory() as td:
             stub = self._stub(td, importable, fail=fail, status=status)
             cfg = Path(td, "zark-backup-guard.cfg")
-            cfg.write_text(text, encoding="utf-8")
+            cfg.write_text(_hermetic_guard(text, td, states), encoding="utf-8")
             env = {k: v for k, v in os.environ.items() if k != "ZPOOL_IMPORT_PATH"}
             env["PATH"] = f"{stub}:/usr/bin:/bin"
             proc = subprocess.run(
@@ -10980,7 +11174,7 @@ class TestGrubScanFile:  # pylint: disable=missing-function-docstring
         rc, out, err, calls = self._source(self._pools("backup2"), fail=True)
         assert rc == 0, err
         assert out == f"after\nchild={grub_guard.NO_IMPORT_PATH}\n", out
-        assert calls == "import\n" and err == "", (calls, err)
+        assert calls == "import -d /dev/sdz\n" and err == "", (calls, err)
 
     def test_status_0_listing_nothing_exports(self):
         rc, out, err, _ = self._source("", status=0)

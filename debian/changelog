@@ -14,6 +14,11 @@ zark (2.3.1~rc1-1) UNRELEASED; urgency=medium
     progress.json gains drive_gone. No command unloads the keys of or
     exports a read-write backup pool that is gone, unhealthy or not
     probed with zpool sync -f; it is left imported for zark clean.
+  * The login reminder, the APT hook, the kernel prerm guard and the
+    update-grub guard no longer hang on a pool whose drive went away:
+    the pools' states are read from the kstat first, no zpool or zfs
+    command starts while a pool is not healthy, only disks and partitions
+    are scanned, and no command is waited for more than 10 s.
   * Strict listings fail on stderr: no dataset is called diverged after
     the drive went away.
   * One measure of data errors (zpool status -p) at step 3, before the

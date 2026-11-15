@@ -15,6 +15,20 @@ everything 2.3.1 writes.
 
 #### Fixed
 
+- **An ssh login, `apt` or `update-grub` no longer hangs on a pool whose
+  drive went away** (M26, eli): the login reminder
+  (`/etc/update-motd.d/99-zark-external-pool`), the APT hook, the kernel
+  prerm guard and the update-grub guard ran a bare `zpool import`, which
+  reads every block device; with a pool suspended it read that pool's
+  zvols and never returned, and every ssh login waited on it. The fault is
+  in 2.3.0 too. They now read the pools' states from
+  `/proc/spl/kstat/zfs` first and start no `zpool` or `zfs` command while a
+  pool is not ONLINE or DEGRADED; they scan disks and partitions only (no
+  zvol, device-mapper, md or loop device); and they wait at most 3 s (the
+  reminder) or 10 s (the others) for a command, leaving one that does not
+  end behind. The reminder then names the pool or says it could not check;
+  the APT hook, the prerm guard and the update-grub guard refuse. Run
+  `sudo zark setup` after upgrading to install them.
 - **A forensic capture no longer kills a backup** (A1E-10, M26-1 1a):
   command output that is not valid UTF-8 (a pool's history can hold such
   bytes) is read with U+FFFD in place of each bad byte instead of raising

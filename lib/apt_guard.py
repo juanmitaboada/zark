@@ -58,6 +58,7 @@ zark's own recovery flows import the backup pool on purpose; they export
 
 from pathlib import Path
 
+from lib.guard_sh import POOL_READ_SH
 from lib.log import Log
 
 HOOK_RELATIVE_PATH = "usr/local/lib/zark/apt-zfs-backup-guard"
@@ -203,16 +204,34 @@ done
 # Nothing boot-critical in this transaction: allow it, no zpool scan needed.
 [ -n "$installs$removals" ] || exit 0
 
+# Globs again from here: the pool read lists directories.
+set +f
+__POOL_READ_SH__
+# A pool that is not healthy (its drive went away) is imported: both
+# installs and removals are refused, and nothing is scanned. A read that
+# does not end in 10 s refuses too: apt stops instead of waiting for ever.
+if [ -n "$zark_unhealthy" ]; then
+    echo "zark: Refusing boot-critical package operation(s):$installs$removals:" >&2
+    echo "  pool$zark_unhealthy is not ONLINE (its drive went away?). Reboot with the" >&2
+    echo "  drive unplugged, then run apt again." >&2
+    echo "  (Installed by zark. Bypass once with ZARK_INTERNAL=1, or remove" >&2
+    echo "  __APT_CONF_ABS__ to disable.)" >&2
+    exit 1
+fi
+if ! zark_scan 10 || ! zark_held 10; then
+    echo "zark: Refusing boot-critical package operation(s):$installs$removals:" >&2
+    echo "  the backup pools could not be read within 10 s (a pool may not be" >&2
+    echo "  answering). Run apt again later, or reboot first." >&2
+    echo "  (Installed by zark. Bypass once with ZARK_INTERNAL=1, or remove" >&2
+    echo "  __APT_CONF_ABS__ to disable.)" >&2
+    exit 1
+fi
+
 # External pools: available for import (plugged in), and imported as a
 # backup (under an altroot, or zark's metadata on its root).
 ALLOWED_POOLS="rpool bpool"
-available="$(zpool import 2>/dev/null | awk '/pool:/{print $2}' | sort -u)"
-imported="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altroot; do
-    case " $ALLOWED_POOLS " in *" $name "*) continue ;; esac
-    if [ "$altroot" != "-" ]; then echo "$name"; continue; fi
-    fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
-    if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
-done || true)"
+available="$zark_avail"
+imported="$zark_imp"
 plugged=""
 held=""
 for pool in $available $imported; do
@@ -246,7 +265,8 @@ exit 1
 """
 
 HOOK_SCRIPT = (
-    _HOOK_TEMPLATE.replace("__SENSITIVE_CASE__", _SENSITIVE_CASE)
+    _HOOK_TEMPLATE.replace("__POOL_READ_SH__", POOL_READ_SH.rstrip("\n"))
+    .replace("__SENSITIVE_CASE__", _SENSITIVE_CASE)
     .replace("__APT_CONF_ABS__", _APT_CONF_ABS)
     .replace("__HOOK_ABS__", _HOOK_ABS)
 )
@@ -281,13 +301,15 @@ export PATH
 
 [ "${ZARK_INTERNAL:-}" = "1" ] && exit 0
 
-ALLOWED_POOLS="rpool bpool"
-held="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altroot; do
-    case " $ALLOWED_POOLS " in *" $name "*) continue ;; esac
-    if [ "$altroot" != "-" ]; then echo "$name"; continue; fi
-    fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
-    if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
-done || true)"
+__POOL_READ_SH__
+# A pool not healthy counts as imported, unread; a list that does not come
+# in 10 s refuses: the kernel stays as it was.
+if ! zark_held 10; then
+    echo "zark: not removing kernel ${1:-}: the backup pools could not be read within 10 s." >&2
+    echo '  Reboot, then run: sudo apt -f install' >&2
+    exit 1
+fi
+held="$zark_imp"
 [ -n "$held" ] || exit 0
 
 pools=""
@@ -296,7 +318,7 @@ echo "zark: not removing kernel ${1:-}: backup pool$pools is imported." >&2
 echo '  When the backup, mount or full check ends (or after `sudo zark umount`),' >&2
 echo '  run: sudo apt -f install' >&2
 exit 1
-"""
+""".replace("__POOL_READ_SH__", POOL_READ_SH.rstrip("\n"))
 
 # ── MOTD reminder (login-time, secondary defence) ────────────────────────
 MOTD_SCRIPT = """\
@@ -310,13 +332,26 @@ PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH
 export PATH
 
 ALLOWED_POOLS="rpool bpool"
-available="$(zpool import 2>/dev/null | awk '/pool:/{print $2}' | sort -u)"
-imported="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altroot; do
-    case " $ALLOWED_POOLS " in *" $name "*) continue ;; esac
-    if [ "$altroot" != "-" ]; then echo "$name"; continue; fi
-    fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
-    if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
-done || true)"
+__POOL_READ_SH__
+# A login never waits on a pool (eli, M26 B1d: a bare `zpool import` hung
+# every ssh login while backup2 was suspended). A pool that is not healthy
+# is named and nothing is scanned; a read that has not ended in 3 s is
+# left behind and said.
+if [ -n "$zark_unhealthy" ]; then
+    printf '\\n\\033[1;33mWARNING (zark):\\033[0m pool(s) not ONLINE:%s\\n' "$zark_unhealthy"
+    printf '  A drive went away? zpool and zfs commands that touch the pool wait\\n'
+    printf '  until a reboot with the drive unplugged (or the drive back and a\\n'
+    printf '  `sudo zpool clear`, which can crash OpenZFS 2.4: man zark). Kernel,\\n'
+    printf '  GRUB, shim and ZFS installs and update-grub are refused until then.\\n\\n'
+    exit 0
+fi
+if ! zark_scan 3 || ! zark_held 3; then
+    printf '\\n\\033[1;33mWARNING (zark):\\033[0m backup pools not checked: a pool did not\\n'
+    printf '  answer within 3 s.\\n\\n'
+    exit 0
+fi
+available="$zark_avail"
+imported="$zark_imp"
 # What the guards refuse depends on the state (M18): an install of a
 # boot-critical package while a pool is plugged in or imported; a kernel's
 # removal and update-grub only while one is imported (M20-7 7a).
@@ -341,7 +376,7 @@ else
     printf '  Installs and upgrades of kernel, GRUB, shim and ZFS packages are refused\\n'
     printf '  while they are plugged in; unplug them before upgrading.\\n\\n'
 fi
-"""
+""".replace("__POOL_READ_SH__", POOL_READ_SH.rstrip("\n"))
 
 
 def _write(path: Path, content: str, *, overwrite: bool) -> bool:

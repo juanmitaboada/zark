@@ -39,6 +39,7 @@ kernel entry, so the previous grub.cfg stays (M18E-4).
 from pathlib import Path
 
 from lib.grub_cfg import LINUX_LINE_ERE, OWN_SCRIPTS
+from lib.guard_sh import POOL_READ_SH, UNSET_SH
 from lib.log import Log
 
 GUARD_RELATIVE_PATH = "etc/grub.d/09_zfs_backup_guard"
@@ -57,18 +58,31 @@ set -e
 # Pools that should be importable - only rpool and bpool
 ALLOWED_POOLS="rpool bpool"
 
-# List pools available for import (exported or on connected drives)
-available="$(zpool import 2>/dev/null | awk '/pool:/{print $2}' | sort -u)"
+__POOL_READ_SH__
+# A pool that is not healthy (its drive went away) is external and imported:
+# update-grub stops, and nothing is scanned. A read that does not end in 10 s
+# stops it too, instead of waiting for ever.
+if [ -n "$zark_unhealthy" ]; then
+    echo "ERROR: ZFS pool(s) not ONLINE:$zark_unhealthy" >&2
+    echo "" >&2
+    echo "  update-grub cannot run while a pool's drive is gone: reboot with the" >&2
+    echo "  drive unplugged, then run: sudo update-grub" >&2
+    echo "" >&2
+    exit 1
+fi
+if ! zark_scan 10 || ! zark_held 10; then
+    echo "ERROR: the ZFS pools could not be read within 10 s (a pool may not be" >&2
+    echo "  answering). update-grub stops; reboot, then run: sudo update-grub" >&2
+    echo "" >&2
+    exit 1
+fi
 
+# Pools available for import (exported or on connected drives); and, since
 # 10_linux_zfs also takes, from every imported pool, the filesystems whose
-# mountpoint is the pool's altroot (or / without one) as root datasets: an
+# mountpoint is the pool's altroot (or / without one) as root datasets, an
 # imported backup (an altroot, or zark's metadata on its root) is external too.
-imported="$(zpool list -H -o name,altroot 2>/dev/null | while read -r name altroot; do
-    case " $ALLOWED_POOLS " in *" $name "*) continue ;; esac
-    if [ "$altroot" != "-" ]; then echo "$name"; continue; fi
-    fmt="$(zfs get -H -o value org.zark:format "$name" 2>/dev/null || true)"
-    if [ -n "$fmt" ] && [ "$fmt" != "-" ]; then echo "$name"; fi
-done || true)"
+available="$zark_avail"
+imported="$zark_imp"
 
 extra=""
 for pool in $available $imported; do
@@ -99,7 +113,7 @@ if [ -n "$extra" ]; then
     echo "" >&2
     exit 1
 fi
-"""
+""".replace("__POOL_READ_SH__", POOL_READ_SH.rstrip("\n"))
 
 CHECK_RELATIVE_PATH = "etc/grub.d/99_zark_cfg_check"
 
@@ -174,7 +188,8 @@ NO_IMPORT_PATH = "/nonexistent/zark-no-import"
 # config_item(). Hence no exit, nothing on stdout, every status handled, and
 # `:` last so the `.` itself returns 0 (a false last test would end
 # grub-mkconfig). The zark_ prefix keeps clear of grub-mkconfig's variables.
-CFG_TEXT = """\
+CFG_TEXT = (
+    """\
 # zark-backup-guard.cfg - Keep external ZFS pools out of update-grub's scan.
 #
 # 10_linux_zfs imports every pool it can find and mounts their root
@@ -189,11 +204,20 @@ CFG_TEXT = """\
 #
 # Installed by zark.  Safe to remove if you don't use zark.
 if [ "${self:-}" = "grub-mkconfig" ]; then
+__POOL_READ_SH__
     # The listing decides, whatever the status (M18R-19): a status-1 listing
-    # that names a foreign rpool still keeps it in the menu.
-    zark_pools="$(zpool import 2>/dev/null)" || :
-    zark_pools="$(printf '%s\\n' "$zark_pools" |
-        awk '$1 == "pool:" {print $2}' 2>/dev/null | sort -u 2>/dev/null)" || zark_pools=""
+    # that names a foreign rpool still keeps it in the menu. A pool that is
+    # not healthy, or a scan that does not end in 10 s, leaves the listing
+    # empty: nothing is scanned after this file, and 09_zfs_backup_guard
+    # stops update-grub.
+    zark_pools=""
+    if zark_scan 10; then
+        zark_pools="$zark_avail"
+    elif [ -n "$zark_unhealthy" ]; then
+        echo "zark: pool(s) not ONLINE:$zark_unhealthy: no device is scanned" >&2
+    else
+        echo "zark: the importable pools could not be read within 10 s" >&2
+    fi
     zark_hidden=""
     zark_system=false
     for zark_p in $zark_pools; do
@@ -210,9 +234,13 @@ if [ "${self:-}" = "grub-mkconfig" ]; then
         fi
     fi
     unset zark_p zark_pools zark_hidden zark_system
+__UNSET_SH__
 fi
 :
 """.replace("__NO_IMPORT_PATH__", NO_IMPORT_PATH)
+    .replace("__POOL_READ_SH__", POOL_READ_SH.rstrip("\n"))
+    .replace("__UNSET_SH__", UNSET_SH.rstrip("\n"))
+)
 
 
 def _path(target_root: str, rel: str) -> Path:

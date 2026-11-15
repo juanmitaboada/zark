@@ -1700,6 +1700,15 @@ login-time reminder (*/etc/update-motd.d/99-zark-external-pool*) warns when
 a backup pool is imported, naming it, and names any other one that is only
 plugged in; with none imported, it names the ones plugged in.
 
+None of these scripts waits on a pool: each reads the pools' states from
+*/proc/spl/kstat/zfs* first and starts no **zpool** or **zfs** command
+while a pool is not ONLINE or DEGRADED (a drive that went away); it scans
+disks and partitions only, never a zvol or a device-mapper device; and it
+waits at most 3 s (the reminder) or 10 s (the others) for a command. The
+reminder then names the pool, or says it could not check; the hook, the
+prerm script and the update-grub guard refuse. **setup** installs this
+version's copies: run it after upgrading **zark**.
+
 **zark** does not import a backup pool while **apt**, **dpkg** or
 **unattended-upgrades** runs. Before every import of a backup pool on the
 installed system (**backup**, **mount**, **prune**, **purge**, **selftest**
