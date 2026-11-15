@@ -33,6 +33,7 @@ possible future addition).
 
 import os
 import re
+import shlex
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -905,7 +906,11 @@ def generate_report(  # pylint: disable=too-many-locals
         return re.sub(r"[0-9A-Fa-f]{8,}", "<redacted>", text)
 
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    zver = run("./zark --version 2>/dev/null || zark --version 2>/dev/null").output
+    # This zark's own script by its path: children start in "/" (lib.sh.CHILD_CWD).
+    script = Path(__file__).resolve().parent.parent / "zark"
+    zver = run(
+        f"{shlex.quote(str(script))} --version 2>/dev/null || zark --version 2>/dev/null"
+    ).output
     ubuntu = run("lsb_release -d 2>/dev/null").output
     zfsver = run("zfs version 2>/dev/null").output
     kernel = run("uname -a").output

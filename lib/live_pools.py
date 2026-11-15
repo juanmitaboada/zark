@@ -115,6 +115,7 @@ def run_command(argv: Sequence[str], timeout: int) -> tuple[int, str, str]:
             check=False,
             stdin=subprocess.DEVNULL,
             env=env,
+            cwd="/",  # never the user's directory: see lib.sh.CHILD_CWD
         )
     except FileNotFoundError:
         return 127, "", f"{argv[0]}: command not found"

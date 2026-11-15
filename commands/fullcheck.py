@@ -50,6 +50,7 @@ from lib import (
     dpkg_lock,
     drive_marks,
     exclusions,
+    pool_state,
     progress,
     scrub,
     sh,
@@ -448,8 +449,9 @@ def suspended(cr: CheckRun, cleanup: Cleanup, log: Log) -> None:
     pool = cr.pool
     cleanup.untrack_pool(pool)
     message = (
-        f"{pool} is suspended (the drive went away while it was imported): reboot with "
-        + f"the drive unplugged, or plug it in again, then `sudo zpool clear {pool}` "
+        f"{pool} is suspended (the drive went away while it was imported): unplug the "
+        + f"drive and reboot at once with `{pool_state.reboot_command(pool)}` (a plain "
+        + f"reboot can hang), or plug it in again, then `sudo zpool clear {pool}` "
         + "(on OpenZFS 2.4 it can crash the module: OpenZFS #18394) and `sudo zpool export "
         + f"{pool}`; the scrub resumes at the next `{zark_command()} fullcheck`"
     )

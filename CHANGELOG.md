@@ -46,10 +46,14 @@ everything 2.3.1 writes.
   pool is imported (its `/dev/disk/by-id` partition and its kstat state
   file, every 2 s, with no `zpool` command). When the drive goes away it
   says so (terminal, zark.log, a desktop notification) with the two ways
-  out: first, reboot with it unplugged; or plug it back in and run
-  `sudo zpool clear <pool>` in another terminal, with the warning that
-  on OpenZFS 2.4 the clear can crash the module (known limitations,
-  below). `progress.json` gains the optional `drive_gone` object, shown
+  out: first, unplug it and reboot at once with the command zark prints
+  for the system (its healthy pools synced by name, an ext4 `/boot`
+  synced, then `sudo systemctl reboot --force --force`, which stops no
+  service and unmounts nothing: a plain reboot can hang, known
+  limitations below); or plug it back in and run `sudo zpool clear
+  <pool>` in another terminal, with the warning that on OpenZFS 2.4 the
+  clear can crash the module. Every child zark starts begins in `/`, so
+  one stuck on a suspended pool keeps no other file system busy. `progress.json` gains the optional `drive_gone` object, shown
   by `zark monitor`. The run takes no
   point and asks nothing once the drive is gone, starts no further
   transfer, and at its end waits for the drive: once the drive is back,
@@ -113,8 +117,16 @@ everything 2.3.1 writes.
   on hardware on 2.4.4 (a raw receive of a new encrypted dataset in
   flight) and reported on 2.4.1; a module panic after a resume was also
   seen in virtual machines on 2.4.1 and 2.4.4. zark's messages offer the
-  reboot with the drive unplugged first and the clear second, with this
-  warning; zark never runs the clear itself.
+  forced reboot with the drive unplugged first and the clear second, with
+  this warning; zark never runs the clear itself.
+- With a backup pool suspended, a plain reboot can hang: on hardware the
+  orderly shutdown did not end in 10 minutes. It waits on processes in
+  state D that no signal ends (a `zfs receive` cut by the unplug), and
+  `blk-availability.service`'s `blkdeactivate` blocks on the keystore's
+  dm-crypt mapping, which zark leaves open over the suspended pool's zvol
+  (closing it would read the gone drive). zark offers instead the command
+  it prints: the system's healthy pools synced by name, an ext4 `/boot`
+  synced, then `systemctl reboot --force --force`.
 - A pool resumed by `zpool clear` after its drive lost power may have lost
   writes the drive had acknowledged: zark marks that run NOT VERIFIED and
   names `zark fullcheck`.

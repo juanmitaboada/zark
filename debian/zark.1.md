@@ -129,9 +129,14 @@ end-to-end sequences.
     */proc/spl/kstat/zfs/*\<pool\>*/state*, every 2 seconds, without
     running **zpool**. When the drive goes away it says so in the
     terminal, in zark.log and in a desktop notification, names the two
-    ways out (first, reboot with the drive unplugged: nothing imports it
-    at boot, and its next import starts from the last state it saved;
-    or plug the drive back in and run **zpool clear** *pool* in another
+    ways out (first, unplug the drive and reboot at once with the command
+    it prints for this system: **zpool sync** of the system's healthy
+    pools by name, **sync -f /boot** on an ext4 */boot*, then
+    **systemctl reboot --force --force**, which stops no service and
+    unmounts nothing, since with a pool suspended the orderly shutdown
+    can hang on processes it cannot end; nothing imports the drive at
+    boot, and its next import starts from the last state it saved; or
+    plug the drive back in and run **zpool clear** *pool* in another
     terminal) and starts no further transfer; **progress.json** gains
     **drive_gone**. On OpenZFS 2.4 a clear of a pool whose drive went
     away with writes in flight can crash the ZFS module (OpenZFS
@@ -141,8 +146,10 @@ end-to-end sequences.
     DEGRADED for 10 s and a **zpool sync -f** has returned 0, the run's last steps
     run once and it ends **BACKUP NOT VERIFIED** (writes the drive had
     accepted before it lost power may be lost; run **fullcheck**). Ctrl+C
-    in the wait ends the run and leaves the pool imported: reboot with the
-    drive unplugged, or **zpool clear** if it is suspended, then **clean**. **backup** never unloads the keys
+    in the wait ends the run and leaves the pool imported: the same forced
+    reboot with the drive unplugged, or **zpool clear** if it is suspended,
+    then **clean**. Every child **zark** starts begins in */*, so one stuck
+    on a suspended pool keeps no other file system busy. **backup** never unloads the keys
     of, nor exports, a read-write pool that is gone, not ONLINE or
     DEGRADED, or not probed since its drive went away: OpenZFS waits
     holding a lock that only a reboot releases. Any command refuses a

@@ -1041,7 +1041,7 @@ class TestScrubPart:  # pylint: disable=missing-function-docstring
         assert got is False and cr.check.result == "not_finished"
         assert "suspended" in cr.check.message and "zpool clear" in cr.check.message
         msg = cr.check.message
-        assert msg.index("reboot with the drive unplugged") < msg.index("zpool clear")
+        assert msg.index("systemctl reboot --force --force") < msg.index("zpool clear")
         assert "#18394" in msg
         assert mock.was_not_called("zpool scrub -p")
         assert not zfs.pool_export.called

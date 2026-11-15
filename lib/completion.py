@@ -94,6 +94,7 @@ def _zfs(argv: list[str]) -> list[str]:
             timeout=ZFS_TIMEOUT_S,
             stdin=subprocess.DEVNULL,
             check=False,
+            cwd="/",  # never the user's directory: see lib.sh.CHILD_CWD
         )
     except (OSError, subprocess.TimeoutExpired):
         return []

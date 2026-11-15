@@ -1187,10 +1187,11 @@ def _wait_for_drive(  # pylint: disable=too-many-arguments
     M26R-29). In backup's own flow, so a signal ends it: the pool is then
     left imported, said once, and the signal goes on."""
     log.warn(
-        f"Waiting for {pool}'s drive. The safer way out is a reboot with the drive "
-        + "unplugged. Or plug it back in and, if `zpool status "
-        + f"{pool}` says suspended, run in another terminal: sudo zpool clear {pool} "
-        + "(the risk above). Ctrl+C ends the run and leaves the pool imported."
+        f"Waiting for {pool}'s drive. The safer way out: unplug it, then reboot at once "
+        + f"with: {pool_state.reboot_command(pool)} (a plain reboot can hang). Or plug "
+        + f"it back in and, if `zpool status {pool}` says suspended, run in another "
+        + f"terminal: sudo zpool clear {pool} (the risk above). Ctrl+C ends the run "
+        + "and leaves the pool imported."
     )
     missing_since: float | None = None
     healthy_since: float | None = None

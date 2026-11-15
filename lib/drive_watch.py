@@ -21,10 +21,12 @@ needs it then waits until the drive is back and someone runs ``zpool clear``,
 or until a reboot. zark cannot end that wait, and it does not run the clear
 itself (M26-4 4b): a pool resumed after its drive lost power may have lost
 writes the drive had acknowledged (M26R-1), and on OpenZFS 2.4 the clear can
-crash the module (``pool_state.CLEAR_RISK``), so the reboot with the drive
-unplugged is offered first. What it does is say so at once, in the terminal,
-zark.log, a desktop notification and ``progress.json``'s ``drive_gone``, and
-latch the run, which then never ends COMPLETED.
+crash the module (``pool_state.CLEAR_RISK``), so a reboot with the drive
+unplugged is offered first: one that does not wait for the orderly shutdown
+(``pool_state.reboot_command``), which can hang on processes in state D.
+What it does is say so at once, in the terminal, zark.log, a desktop
+notification and ``progress.json``'s ``drive_gone``, and latch the run,
+which then never ends COMPLETED.
 
 A daemon thread, started by backup after its import (M26-3 3b) and stopped
 before Cleanup and the read-back's import, reads every :data:`TICK_S`
@@ -269,8 +271,9 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             self._announce(latch)
         elif latch is not None and entered:
             self.log.warn(
-                f"{self.pool} is suspended now ({local_time(now)}). Reboot with its drive "
-                + f"unplugged, or plug it in and run: sudo zpool clear {self.pool} (the risk above)"
+                f"{self.pool} is suspended now ({local_time(now)}). Unplug its drive and "
+                + f"reboot as above ({pool_state.reboot_command(self.pool)}), or plug it in "
+                + f"and run: sudo zpool clear {self.pool} (the risk above)"
             )
         if latch is not None and left:
             with self._lock:
@@ -308,8 +311,8 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         lines = [
             f"{self.pool}'s drive went away at {local_time(latch.lost_at)} ({self.pool} {how}).",
             "zark cannot end or resume this run itself. Either:",
-            "  - reboot with the drive unplugged (the safer way): nothing imports it at "
-            + "boot, and its next import starts from the last state it saved;",
+            "  - the safer way: unplug the drive if it is not, then reboot at once with:",
+            *pool_state.reboot_lines(self.pool, "      "),
             "  - or plug the drive back in, then in another terminal: "
             + f"sudo zpool clear {self.pool}",
             f"    {pool_state.CLEAR_RISK}",
@@ -321,7 +324,7 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             self.log.error(line)
         self._notify(
             f"{self.pool}: drive went away",
-            "Reboot with it unplugged; or plug it back in and see the terminal",
+            "Unplug it and reboot as the terminal says; or plug it back in (the terminal says how)",
         )
 
     def _reopen_hint(self, now: float, state: str, link: bool) -> None:
@@ -333,7 +336,7 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         if not self._hinted_reopen and now - self._unopened_since >= REOPEN_HINT_S:
             self._hinted_reopen = True
             self.log.warn(
-                f"{self.pool} has not reopened its drive: reboot with it unplugged, or "
+                f"{self.pool} has not reopened its drive: unplug it and reboot as above, or "
                 + f"sudo zpool clear {self.pool} (the risk above)"
             )
 
@@ -390,9 +393,10 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             "suspended": suspended,
             "back": back,
             "resumed_at": _iso(resumed) if resumed is not None else None,
-            "hint": f"{self.pool}'s drive went away. Reboot with it unplugged (safer), or plug "
+            "hint": f"{self.pool}'s drive went away. Safer: unplug it, then: "
+            + f"{pool_state.reboot_command(self.pool)} (a plain reboot can hang). Or plug "
             + f"it back in and run: sudo zpool clear {self.pool} (can crash OpenZFS 2.4: "
-            + "see zark.log)",
+            + "man zark)",
         }
 
     def _publish(self) -> None:

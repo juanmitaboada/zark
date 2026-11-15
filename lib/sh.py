@@ -30,6 +30,12 @@ from typing import IO, Protocol
 from lib import signals
 from lib.log import Log
 
+# Every child zark starts begins in "/": one stuck in state D on a suspended
+# pool keeps its working directory busy for ever, and on eli the shutdown
+# could not unmount /home, where the run had been started (M26 eli, revision
+# 3's B1d). lib.pool_state's runner uses it too.
+CHILD_CWD = "/"
+
 
 @dataclass
 class RunResult:
@@ -149,6 +155,9 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
             # pool's history, A1E-10) is read with U+FFFD, never fatal.
             errors="replace",
             process_group=0,
+            # A child stuck in state D keeps its working directory busy: "/",
+            # never the user's (M26 eli, revision 3's B1d; lib.pool_state).
+            cwd=CHILD_CWD,
         )
     except FileNotFoundError as e:
         return RunResult(
@@ -327,6 +336,7 @@ def run_pipe(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         process_group=0,
+        cwd=CHILD_CWD,
     ) as p1:  # nosec B602 - see the rationale above run()
         assert p1.stdout is not None  # guaranteed by stdout=PIPE above
         with subprocess.Popen(
@@ -336,6 +346,7 @@ def run_pipe(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             process_group=0,
+            cwd=CHILD_CWD,
         ) as p2:
             left = _Drain()
             try:

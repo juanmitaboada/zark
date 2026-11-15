@@ -708,6 +708,8 @@ def _guarded_start(argv: list[str]) -> pool_state.Child:
 
 _POOL_STATE_GUARD = (
     patch.object(pool_state, "KSTAT_DIR", Path(_TEST_LOG_DIR, "no-zfs-module")).start(),
+    # The reboot command reads the host's mounts for an ext4 /boot: not here.
+    patch.object(pool_state, "MOUNTS", Path(_TEST_LOG_DIR, "no-mounts")).start(),
     patch.object(pool_state, "start", _guarded_start).start(),
 )
 
@@ -1421,11 +1423,13 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
                 and "zark fullcheck" in text
                 and "--drive" not in text
             )
-            assert "reboot with the drive unplugged" in text
-            # The reboot first, the clear second with its risk (M26 eli B1d, #18394).
-            assert text.index("reboot with the drive unplugged") < text.index("sudo zpool clear")
+            # The forced reboot first with why, the clear second with its risk
+            # (M26 eli B1d of revisions 1 and 3, #18394).
+            reboot = "sudo systemctl reboot --force --force"
+            assert text.index(reboot) < text.index("sudo zpool clear")
+            assert pool_state.REBOOT_WHY in text
             assert pool_state.CLEAR_RISK in text and "#18394" in pool_state.CLEAR_RISK
-            assert len(b.notes) == 1 and "Reboot with it unplugged" in b.notes[0]
+            assert len(b.notes) == 1 and "Unplug it and reboot" in b.notes[0]
 
     def test_a_suspension_latches_at_once_and_is_never_cleared(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1525,7 +1529,10 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
         assert doc is not None
         assert set(doc) == {"since", "pool", "suspended", "back", "resumed_at", "hint"}
         hint = doc["hint"]
-        assert hint.index("Reboot with it unplugged") < hint.index("sudo zpool clear backup")
+        assert hint.index("systemctl reboot --force --force") < hint.index(
+            "sudo zpool clear backup"
+        )
+        assert "a plain reboot can hang" in hint and "zark.log" not in hint
         assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", doc["since"])
 
     def test_the_thread_starts_ticks_and_stops_within_its_limit(self):
@@ -1705,9 +1712,62 @@ class TestExportRules:  # pylint: disable=missing-function-docstring
         lines = pool_state.left_imported_lines("backup", "its drive went away")
         text = "\n".join(lines)
         assert lines[0] == "backup is left imported: its drive went away. Either:"
-        assert text.index("reboot with its drive unplugged") < text.index("sudo zpool clear backup")
+        assert text.index("systemctl reboot --force --force") < text.index(
+            "sudo zpool clear backup"
+        )
+        assert pool_state.REBOOT_WHY in text
         assert text.index("sudo zpool clear backup") < text.index("clean")
         assert lines[-1].strip() == pool_state.CLEAR_RISK
+
+    @staticmethod
+    def _reboot(td: str, states: dict[str, str], mounts: str, pool: str = "backup2") -> str:
+        kstat = Path(td, "kstat")
+        kstat.mkdir()
+        Path(kstat, "arcstats").write_text("x\n", encoding="ascii")  # not a pool
+        for name, word in states.items():
+            Path(kstat, name).mkdir()
+            Path(kstat, name, "state").write_text(f"{word}\n", encoding="ascii")
+        Path(kstat, "nostate").mkdir()  # a directory without a state file
+        mtab = Path(td, "mounts")
+        mtab.write_text(mounts, encoding="ascii")
+        return pool_state.reboot_command(pool, kstat, mtab)
+
+    def test_the_reboot_syncs_the_healthy_pools_by_name_and_never_the_lost_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            got = self._reboot(
+                td,
+                {
+                    "rpool": "ONLINE",
+                    "bpool": "ONLINE",
+                    "tank": "DEGRADED",
+                    "backup2": "ONLINE",
+                    "black": "SUSPENDED",
+                    "old": "FAULTED",
+                },
+                "rpool/ROOT/x / zfs rw 0 0\n",
+            )
+        # backup2 is the pool whose drive went away, even while it still reads
+        # ONLINE (the latch before the first failed write); never a bare sync.
+        assert got == "sudo zpool sync bpool rpool tank && sudo systemctl reboot --force --force"
+
+    def test_the_reboot_syncs_an_ext4_boot(self):
+        with tempfile.TemporaryDirectory() as td:
+            got = self._reboot(
+                td,
+                {"rpool": "ONLINE"},
+                "/dev/nvme0n1p2 /boot ext4 rw 0 0\n/dev/x /boot/efi vfat rw 0 0\n",
+            )
+        assert got == (
+            "sudo zpool sync rpool && sudo sync -f /boot && sudo systemctl reboot --force --force"
+        )
+
+    def test_the_reboot_with_nothing_to_sync_is_the_reboot_alone(self):
+        with tempfile.TemporaryDirectory() as td:
+            got = self._reboot(td, {"backup2": "SUSPENDED"}, "")
+            assert pool_state.reboot_command("backup2", Path(td, "none"), Path(td, "none")) == (
+                "sudo systemctl reboot --force --force"
+            )
+        assert got == "sudo systemctl reboot --force --force"
 
     def test_an_import_keeps_the_mode_and_the_paths(self):
         mock = MockShell()
@@ -1904,7 +1964,7 @@ class TestWaitForDrive:  # pylint: disable=missing-function-docstring
             got, out = self._wait(watch, k, steps)
             assert got and watch.probed_n == 2, out
             assert "sudo zpool clear backup" in out and "the run goes on" in out
-            assert out.index("reboot with the drive unplugged") < out.index("sudo zpool clear")
+            assert out.index("systemctl reboot --force --force") < out.index("sudo zpool clear")
 
     def test_no_probe_while_suspended_or_gone(self):
         with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
@@ -10895,6 +10955,44 @@ class TestAptHookVersion3:  # pylint: disable=missing-function-docstring
             apt_guard.install(target_root=td, log=make_log())
             prerm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             assert apt_guard.remove(td, make_log()) == [str(prerm)] and prerm.exists()
+
+
+class TestChildrenStartInRoot:  # pylint: disable=missing-function-docstring
+    """M26, eli B1d of revision 3: zark's zfs receive, stuck in state D on the
+    suspended pool, kept /home (where the run was started) busy, and the
+    shutdown retried its unmount without end. Every child zark starts begins
+    in "/" (lib.sh.CHILD_CWD)."""
+
+    def _from(self, call: Callable[[], str]) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            here = os.getcwd()
+            os.chdir(td)
+            try:
+                return call().strip()
+            finally:
+                os.chdir(here)
+
+    def test_a_command_starts_in_root(self):
+        assert self._from(lambda: _sh.run(["pwd"]).stdout) == "/"
+        assert self._from(lambda: _sh.run("pwd; true").stdout) == "/"  # through a shell
+
+    def test_both_sides_of_a_transfer_start_in_root(self):
+        assert self._from(lambda: _sh.run_pipe("pwd", "cat; pwd").stdout) == "/\n/"
+
+    def test_the_bounded_runner_starts_in_root(self):
+        assert self._from(lambda: pool_state.run_bounded(["pwd"], 10).stdout) == "/"
+
+    def test_monitors_listings_and_the_completion_start_in_root(self):
+        seen: list[object] = []
+
+        def fake_run(*_a: object, **kw: object) -> subprocess.CompletedProcess[str]:
+            seen.append(kw.get("cwd"))
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(subprocess, "run", fake_run):
+            _ = livep.run_command(list(livep._ZPOOL), 5)  # pylint: disable=protected-access
+            _ = completion_mod._zfs(["zfs", "list", "-H"])  # pylint: disable=protected-access
+        assert seen == ["/", "/"], seen
 
 
 class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring

@@ -340,9 +340,10 @@ __POOL_READ_SH__
 if [ -n "$zark_unhealthy" ]; then
     printf '\\n\\033[1;33mWARNING (zark):\\033[0m pool(s) not ONLINE:%s\\n' "$zark_unhealthy"
     printf '  A drive went away? zpool and zfs commands that touch the pool wait\\n'
-    printf '  until a reboot with the drive unplugged (or the drive back and a\\n'
-    printf '  `sudo zpool clear`, which can crash OpenZFS 2.4: man zark). Kernel,\\n'
-    printf '  GRUB, shim and ZFS installs and update-grub are refused until then.\\n\\n'
+    printf '  until a reboot with the drive unplugged (a plain reboot can hang: zark\\n'
+    printf '  and man zark give the forced one), or the drive back and a\\n'
+    printf '  `sudo zpool clear` (it can crash OpenZFS 2.4). Kernel, GRUB, shim and\\n'
+    printf '  ZFS installs and update-grub are refused until then.\\n\\n'
     exit 0
 fi
 if ! zark_scan 3 || ! zark_held 3; then

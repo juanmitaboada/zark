@@ -43,8 +43,10 @@ from pathlib import Path
 from typing import IO
 
 from lib.config import zark_command
+from lib.sh import CHILD_CWD
 
 KSTAT_DIR = Path("/proc/spl/kstat/zfs")
+MOUNTS = Path("/proc/self/mounts")
 HEALTHY = frozenset({"ONLINE", "DEGRADED"})
 # States that say at once that the drive is not usable (spa_state_to_name).
 LOST = frozenset({"SUSPENDED", "REMOVED", "UNAVAIL", "FAULTED", "OFFLINE"})
@@ -111,7 +113,13 @@ def start(argv: list[str]) -> Child:
     err = tempfile.TemporaryFile()  # pylint: disable=consider-using-with
     env = {**os.environ, "LC_ALL": "C"}
     proc = subprocess.Popen(  # pylint: disable=consider-using-with
-        argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env, start_new_session=True
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=out,
+        stderr=err,
+        env=env,
+        start_new_session=True,
+        cwd=CHILD_CWD,
     )
     return Child(" ".join(argv), proc, out, err)
 
@@ -285,12 +293,69 @@ CLEAR_RISK = (
 )
 
 
+# Why the reboot zark offers is not a plain one: on eli the orderly shutdown
+# with backup2 suspended did not end in 10 minutes (zark's zfs receive in
+# state D, blkdeactivate's dmsetup on the keystore's mapping; M26 eli,
+# revision 3's B1d).
+REBOOT_WHY = (
+    "A plain reboot is not offered: with a pool suspended the shutdown can hang "
+    + "on processes it cannot end."
+)
+
+
+def _ext_boot(mounts: Path) -> bool:
+    """Whether /boot is an ext2/3/4 file system of its own (zark-boot's layout)."""
+    try:
+        lines = mounts.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    return any(
+        len(f) > 2 and f[1] == "/boot" and f[2] in ("ext2", "ext3", "ext4")
+        for f in (ln.split() for ln in lines)
+    )
+
+
+def reboot_command(pool: str, kstat_dir: Path | None = None, mounts: Path | None = None) -> str:
+    """The reboot zark offers first for ``pool``, whose drive went away.
+
+    The system's own pools are synced by name, only those the kstat reads
+    ONLINE or DEGRADED (``zpool sync`` with names opens and syncs those pools
+    alone; with none it would reach the suspended one too); an ext4 /boot is
+    synced with ``sync -f``; then ``systemctl reboot --force --force``, which
+    stops no service and unmounts nothing (systemd's ``halt_now``: sync(2),
+    then reboot(2)). All reads here are files, never a ``zpool`` call."""
+    kstat_dir = _kstat(kstat_dir)
+    try:
+        names = sorted(
+            d.name
+            for d in kstat_dir.iterdir()
+            if d.name != pool and d.is_dir() and state(d.name, kstat_dir) in HEALTHY
+        )
+    except OSError:
+        names = []
+    steps = [f"sudo zpool sync {' '.join(names)}"] if names else []
+    if _ext_boot(mounts if mounts is not None else MOUNTS):
+        steps.append("sudo sync -f /boot")
+    steps.append("sudo systemctl reboot --force --force")
+    return " && ".join(steps)
+
+
+def reboot_lines(pool: str, indent: str = "    ") -> list[str]:
+    """The first way out, as every message gives it: the drive unplugged, the
+    command for this system, and why not a plain reboot."""
+    return [
+        f"{indent}{reboot_command(pool)}",
+        f"{indent}{REBOOT_WHY} Nothing imports the drive at boot, and its next import "
+        + "starts from the last state it saved.",
+    ]
+
+
 def left_imported_lines(pool: str, why: str) -> list[str]:
     """What the user does with a pool zark leaves imported (plan 4.8)."""
     return [
         f"{pool} is left imported: {why}. Either:",
-        "  - reboot with its drive unplugged: nothing imports it at boot, and its next "
-        + "import starts from the last state it saved;",
+        "  - unplug its drive if it is not, then reboot at once with:",
+        *reboot_lines(pool, "      "),
         f"  - or plug its drive back in; if `zpool status {pool}` says it is suspended:",
         f"      sudo zpool clear {pool}",
         "    then, to close its keystore and export it:",
