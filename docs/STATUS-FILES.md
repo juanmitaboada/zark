@@ -505,7 +505,9 @@ pool has.
 | `interrupted` | a signal during or after the transfers, before the result was known; the drive went away during the run (written when zark saw it go, with the time in `ended_at` and `message`; the run's own end replaces it if the run gets there); or an orphan `progress.json` found by the next command | partial receives kept for the next run |
 
 A run that ends before a drive is chosen records nothing: `last_run` belongs
-to a drive. Only `incomplete`, `not_verified` and `interrupted` call for
+to a drive. Nor does a backup refused at its import because the drive's pool
+is left imported by a run whose drive went away: that run's `interrupted`
+stays until a later run records its own. Only `incomplete`, `not_verified` and `interrupted` call for
 attention; `aborted` changed nothing.
 
 `last_check` (M19):

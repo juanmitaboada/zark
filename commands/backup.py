@@ -1287,6 +1287,9 @@ class _RunRecord:  # pylint: disable=too-many-instance-attributes
         self.done = False
         self.point_record: tuple[str, str] | None = None  # written_by, min_recover (M13F-4)
         self.gone = ""  # why the run cannot finish, once its drive went away (E16E-1)
+        # A run refused because its pool is left imported records nothing:
+        # the run that left it keeps its own record (E16E-1, 5a).
+        self.silent = False
 
     def measure(self, pool: str) -> None:
         """Read the drive's space now (it is imported) and show it."""
@@ -1350,7 +1353,7 @@ class _RunRecord:  # pylint: disable=too-many-instance-attributes
 
     def finish(self) -> None:
         """The end of a run with no result: what it left the drive with."""
-        if self.done:
+        if self.done or self.silent:
             return
         if self.gone:
             # The pool is left imported and the drive was not seen back:
@@ -1465,6 +1468,9 @@ def run(
 
     device = backup_device(drive)
     if not zfs.import_backup_pool(pool_name, device, guid=pool_guid):
+        # Left imported by a run whose drive went away: that run's record
+        # (interrupted, item 20) stays; a retry adds nothing to it (5a).
+        record.silent = pool_name in zfs.refused
         zfs.import_fatal(
             pool_name,
             causes=[

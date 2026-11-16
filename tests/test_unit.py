@@ -1572,6 +1572,64 @@ class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
             rec.result("not_verified")
             assert unless()  # the run has its own word now: not written
 
+    @staticmethod
+    def _refused_retry(left: bool) -> list[Any]:
+        """A backup refused at step 2: as left imported (``left``) or for
+        another reason; the updates its end hands to progress."""
+        ends: list[Callable[[], None]] = []
+        ups: list[Any] = []
+
+        def refuse(self: Any, name: str, *_a: Any, **_k: Any) -> bool:
+            if left:
+                self.refused[name] = "SUSPENDED"
+            return False
+
+        _, rc = TestBackupCommand()._run(  # pylint: disable=protected-access
+            _fresh_fake(),
+            patch.object(ZFS, "import_backup_pool", new=refuse),
+            patch.object(progress_mod, "on_end", side_effect=ends.append),
+        )
+        assert rc == 1 and len(ends) == 1, (rc, ends)
+        with (
+            patch.object(progress_mod, "record", side_effect=lambda _g, u, s=ups: s.append(u)),
+            patch.object(progress_mod, "started_at", return_value="2026-11-17T10:00:00Z"),
+            patch.object(progress_mod, "error", return_value="refused"),
+        ):
+            ends[0]()  # what progress.end does at the run's end
+        return ups
+
+    def test_a_retry_refused_as_left_imported_records_nothing(self):
+        # 5a: the latch's interrupted stays for every reader until a later
+        # run records its own.
+        assert not self._refused_retry(left=True)
+        ups = self._refused_retry(left=False)  # any other refusal: as before
+        assert len(ups) == 1 and ups[0].last_run.result == "aborted", ups
+
+    def test_the_latchs_record_survives_a_refused_retry_in_status_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _ = self._doc(root)
+            ok, _, _ = self._record(root, "111")
+            assert ok
+            # The refused retry's end: status.json written with no update of its own.
+            cfg = tsf._config(("blue", "222"), ("black", "111"))  # pylint: disable=protected-access
+            with (
+                redirect_stdout(StringIO()),
+                patch.object(status_file_lib.sh, "is_live_usb", return_value=False),
+            ):
+                assert status_file_lib.write(
+                    tsf._status(),  # pylint: disable=protected-access
+                    cfg,
+                    "backup",
+                    Log(os.devnull),
+                    updates={},
+                    path=root / "status.json",
+                    lock_path=root / "status.lock",
+                )
+            doc: dict[str, Any] = json.loads((root / "status.json").read_text("utf-8"))
+        black = next(d for d in doc["drives"] if d["guid"] == "111")
+        assert black["last_run"] == self._gone().to_json(), black["last_run"]
+
     def test_the_runs_own_end_replaces_it(self):
         for end, result in (("completed", "completed"), ("finish", "interrupted")):
             written: list[status_file_lib.LastRun] = []

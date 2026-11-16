@@ -78,7 +78,9 @@ monitor` say `zark's guards are out of date: run sudo zark setup`.
   zark offers, `zark status`, `zark monitor` and the desktop show it.
   Before, the run was recorded only at its end, which the reboot never
   reached, so the drive showed its run before. When the run gets to its
-  end, its own result replaces it.
+  end, its own result replaces it. A backup tried again before the reboot,
+  refused because the pool is left imported, records nothing, so the
+  `interrupted` stays.
 - **The open question is shown again** below the lines a backup prints
   when its drive goes away, with its options and the line the answer is
   typed on.
