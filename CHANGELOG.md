@@ -5,7 +5,11 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.3.1] - 2026-11-16
+
+A backup drive that goes away during a backup: what zark does then, and
+what it no longer does. Nothing on a drive or in `/etc/zark` changes;
+zark 2.3.0 reads everything 2.3.1 writes.
 
 ### For zark 2.3.0 users
 
@@ -16,17 +20,12 @@ after upgrading. Until then 2.3.0's login reminder stays, and it hangs an
 ssh login while a backup pool is suspended (below). `zark backup` (at its
 step 1) and `zark monitor` say `zark's guards are out of date: run sudo zark
 setup` while an older zark's guards are installed; neither changes them.
+Details in [docs/UPGRADING.md](docs/UPGRADING.md).
 
-### M26 - a drive that goes away during a backup (2.3.1-rc2)
-
-Fixes of what the GNOME app's first run on eli found (A1E-4, A1E-7 to
-A1E-10). Nothing on a drive or in `/etc/zark` changes; zark 2.3.0 reads
-everything 2.3.1 writes.
-
-#### Fixed
+### Fixed
 
 - **An ssh login, `apt` or `update-grub` no longer hangs on a pool whose
-  drive went away** (M26, eli): the login reminder
+  drive went away**: the login reminder
   (`/etc/update-motd.d/99-zark-external-pool`) ran a bare `zpool import`,
   which reads every block device; with a pool suspended it read that
   pool's zvols and never returned, and every ssh login waited on it. The
@@ -47,7 +46,7 @@ everything 2.3.1 writes.
   zark's or not, rpool and bpool included, refuses kernel, GRUB, shim and
   ZFS installs and kernel removals and stops `update-grub` until it is
   healthy or gone. Run `sudo zark setup` after upgrading to install them.
-- **A forensic capture no longer kills a backup** (A1E-10, M26-1 1a):
+- **A forensic capture no longer kills a backup**:
   command output that is not valid UTF-8 (a pool's history can hold such
   bytes) is read with U+FFFD in place of each bad byte instead of raising
   in the middle of a run. A capture never stops a run: a section that
@@ -57,9 +56,8 @@ everything 2.3.1 writes.
   cannot encode`), not as a wrong passphrase, and is not counted as an
   attempt. A value zark read with an undecodable byte and writes back to a
   drive (`org.zark:canmount`, `org.zark:mountpoint`, the exclusion and
-  pool records) is a warning naming the dataset and property (M26R-15).
-- **A backup whose drive goes away no longer hangs** (A1E-7, M26-3 3b,
-  M26-4 4b, M26-5 5a, M26-6 6a, M26-10 10a, M26R-28 28a): `backup`
+  pool records) is a warning naming the dataset and property.
+- **A backup whose drive goes away no longer hangs**: `backup`
   opens the drive's keystore read-only and watches the drive while its
   pool is imported (its `/dev/disk/by-id` partition and its kstat state
   file, every 2 s, with no `zpool` command). When the drive goes away it
@@ -91,15 +89,14 @@ everything 2.3.1 writes.
   refuses a pool left imported that is not ONLINE or DEGRADED before it
   runs `zpool`. `zark clean` probes a read-write pool (`zpool sync -f`)
   before it exports it, after reading its state again 10 s later.
-- **Datasets are no longer called diverged after the drive went away**
-  (A1E-8, M26-7 7a): a strict listing fails on anything written to
+- **Datasets are no longer called diverged after the drive went away**:
+  a strict listing fails on anything written to
   stderr, not only on its exit status (`zfs list -r` exits 0 after a
   child it could not read), and the drive's root datasets are read with
   one strict listing. A run whose drive went away reports every dataset
   it did not reach as `not attempted (the drive went away)`; the next
   backup plans it again.
-- **The read-back no longer says ONLINE over data errors** (A1E-9, M26-8
-  8a revised): one measure, `zpool status -p` (read with no key loaded),
+- **The read-back no longer says ONLINE over data errors**: one measure, `zpool status -p` (read with no key loaded),
   gives the error counters and the count of data errors at step 3, before
   the export and at the read-back. Step 3 asks about a count above zero
   even when the list waits for the keys. New errors during the run, or a
@@ -107,17 +104,15 @@ everything 2.3.1 writes.
   counts; errors accepted at step 3 with nothing new keep the outcome,
   with a warning. `prepare` and `registry verify` call any count or
   counter not verified; `fullcheck`'s read-back line shows the count.
-- **`zark monitor` no longer says "connected" after an eject** (A1E-4,
-  M26-9 9a): a drive is connected when `/dev/disk/by-id/<drive_id>-part1`
+- **`zark monitor` no longer says "connected" after an eject**: a drive is connected when `/dev/disk/by-id/<drive_id>-part1`
   exists; the disk's own link stays after the desktop ejects the drive.
   `docs/STATUS-FILES.md` and both schemas say so.
-
 - **An interrupted transfer to a drive that went away no longer spins
-  at full CPU** (R5-1, eli): on Ctrl+C or another stop signal zark ended
+  at full CPU**: on Ctrl+C or another stop signal zark ended
   the transfer's `zfs send` and `zfs receive` with SIGINT, then SIGKILL.
   In the ioctl of a suspended pool neither can end, and on OpenZFS 2.4 a
   signal left pending makes the receive loop without sleeping until the
-  reboot (65 to 100 % CPU on eli). While the pool it writes or reads
+  reboot (65 to 100 % CPU on the test machine). While the pool it writes or reads
   reads SUSPENDED, zark now sends nothing to the side of the transfer on
   that pool (the `zfs receive` in backup and prepare, the `zfs send` in
   recover) and stops the other side as before. It says, for example,
@@ -128,8 +123,7 @@ everything 2.3.1 writes.
   pipe). A pool that was resumed, or reads ONLINE or DEGRADED, is
   stopped as before. This covers backup's transfers, recover's and the
   keystore prepare sends to a new drive.
-- **A resumed transfer is estimated whole from the start** (A112E-2, the
-  GNOME app on eli): a dataset whose partial receive is resumed reaches
+- **A resumed transfer is estimated whole from the start**: a dataset whose partial receive is resumed reaches
   the backup point in two streams, the resume and then the incremental
   from the snapshot it brings. The second was estimated only in the next
   round, so `progress.json`'s `bytes_total` grew after the first and a
@@ -140,14 +134,14 @@ everything 2.3.1 writes.
   removals or the question about old monthly points one run earlier, or
   stop a backup that would have run out of space in its second round.
 - **`zark prepare` no longer counts excluded datasets in its size to
-  transfer** (P3, eli): its line was `zfs list -o used rpool`, which
+  transfer**: its line was `zfs list -o used rpool`, which
   holds every dataset, so an excluded 115G image made "~124G to transfer"
   for a 9G send. The excluded subtrees' space is now left out, and the
   line says how many. A `zfs send -nvP` estimate or this `zfs list` that
   fails or does not answer within its bound (120 s, 60 s) leaves its part
-  unknown, says so, and never stops a run.
+  unknown and says so: the run goes on.
 
-#### Known limitations
+### Known limitations
 
 - A pool whose drive never returns stays imported and suspended until a
   reboot: OpenZFS cannot export a suspended pool on any series. zark
@@ -184,16 +178,18 @@ everything 2.3.1 writes.
   dm-crypt mapping, which zark leaves open over the suspended pool's zvol
   (closing it would read the gone drive). zark offers instead the command
   it prints: the system's healthy pools synced by name, an ext4 `/boot`
-  synced, then `systemctl reboot --force --force`.
+  synced, then `systemctl reboot --force --force`. That reboot closes
+  nothing and stops no service: open work is lost unless saved first, and
+  an apt or dpkg run in progress is cut (zark says when one is running).
 - A pool resumed by `zpool clear` after its drive lost power may have lost
   writes the drive had acknowledged: zark marks that run NOT VERIFIED and
   names `zark fullcheck`.
 - The drive-loss path is validated on hardware on Ubuntu 26.10 (OpenZFS
   2.4.4) only; this release has no test bench for the other series. There
-  eli showed: the forced reboot ending at once after a drive lost during a
-  transfer and after Ctrl+C, the next backup taking the cut run up (a
-  receive resumed or sent again), and `zpool clear` with nothing in flight
-  resuming the pool. A clear with a transfer in flight is the one that
+  the test machine showed: the forced reboot ending at once after a drive
+  lost during a transfer and after Ctrl+C, the next backup taking the cut
+  run up (a receive resumed or sent again), and `zpool clear` with nothing
+  in flight resuming the pool. A clear with a transfer in flight is the one that
   crashed the module (#18394, above).
 
 ## [2.3.0] - 2026-11-11

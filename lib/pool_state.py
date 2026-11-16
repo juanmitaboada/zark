@@ -385,6 +385,8 @@ def _apt_running() -> str:
         held = dpkg_lock.holders(skip_frontend=dpkg_lock.is_held())
     except OSError:
         return ""
+    # A lock file that could not be read is not apt running (M26R-55).
+    held = [h for h in held if not h.error]
     return dpkg_lock.describe(held) if held else ""
 
 

@@ -1,6 +1,14 @@
 # Upgrading zark
 
-What changes when a system and its drives move from zark 2.2 to 2.3, from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+What changes when a system and its drives move from zark 2.3.0 to 2.3.1, from zark 2.2 to 2.3, from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+
+## Upgrading from zark 2.3.0
+
+Nothing on a drive or in `/etc/zark` changes, and 2.3.0 reads everything 2.3.1 writes. zark 2.3.1 rewrites the guards it installs (the login reminder, the APT hook, the kernel prerm guard, the update-grub guard and its scan file) so that none of them waits on a pool whose drive went away. The package upgrade leaves the installed guards as they are: run `sudo zark setup` once per system after it. Until then 2.3.0's login reminder stays, and it hangs an ssh login while a backup pool is suspended; `zark backup` (at its step 1) and `zark monitor` say `zark's guards are out of date: run sudo zark setup`.
+
+**What behaves differently.** The guards scan only the disks and partitions udev records as ZFS members (`ID_FS_TYPE=zfs_member`): a pool on LUKS, md or a loop device, or a drive udev does not record as a ZFS member, does not count as plugged in. Any pool that is not ONLINE or DEGRADED, zark's or not, refuses kernel, GRUB, shim and ZFS installs and kernel removals and stops `update-grub` until it is healthy or gone. When a drive goes away during a backup, zark offers first a forced reboot with the drive unplugged, whose command it prints, and second `sudo zpool clear <pool>`, which can crash the OpenZFS 2.4 module (see the [CHANGELOG](../CHANGELOG.md)'s known limitations).
+
+**The way back.** 2.3.0 reads everything 2.3.1 writes. Its `setup` rewrites the guards as 2.3.0's.
 
 ## Upgrading from zark 2.2
 

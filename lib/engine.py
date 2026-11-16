@@ -356,8 +356,8 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
 
     def stream_size(self, args: str) -> int:
         """One stream's bytes (``zfs send -nvP <args>``), asked once; 0 when
-        unknown. The dry run is bounded: one that fails or does not answer
-        leaves its part unknown, says so, and never holds the run (A112E-2)."""
+        unknown. The dry run is bounded at ESTIMATE_TIMEOUT_S (120 s): one that
+        fails or does not answer leaves its part unknown and says so (A112E-2)."""
         if args not in self._estimates:
             r = sh.run(f"zfs send -nvP {args}", timeout=ESTIMATE_TIMEOUT_S)
             size = 0

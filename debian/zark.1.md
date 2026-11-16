@@ -1721,7 +1721,8 @@ records as ZFS members (*/run/udev/data*, **ID_FS_TYPE=zfs_member**), so
 no device is opened to decide and a disk that sleeps is not woken (with
 no such records, every disk and partition), never a zvol, a
 device-mapper, md or loop device: a pool on LUKS, md or a loop device does
-not count as plugged in; and it waits at most 3 s (the reminder) or 10 s
+not count as plugged in, nor does a drive whose partition **udev** does not
+record as a ZFS member; and it waits at most 3 s (the reminder) or 10 s
 (the others) for a command, leaving one that does not end behind with
 none of its descriptors. The reminder then names the pool, or says why it
 could not check; the hook, the prerm script and the update-grub guard

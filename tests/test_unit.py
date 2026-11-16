@@ -1901,6 +1901,20 @@ class TestExportRules:  # pylint: disable=missing-function-docstring,too-many-pu
             assert pool_state._apt_running() == ""  # pylint: disable=protected-access
         assert seen == [True, False]
 
+    def test_a_lock_that_cannot_be_read_is_not_apt_running(self):
+        # M26R-55: an unreadable lock file counts as held for the import's
+        # refusal, but it is not apt running.
+        unreadable = dpkg_lock.Holder("/var/lib/dpkg/lock", error="Permission denied")
+        apt = dpkg_lock.Holder("/var/lib/dpkg/lock", 4242, "apt-get")
+        for held, want in (([unreadable], ""), ([unreadable, apt], "apt-get")):
+            with (
+                patch.object(dpkg_lock, "holders", return_value=held),
+                patch.object(dpkg_lock, "is_held", return_value=False),
+            ):
+                got = pool_state._apt_running()  # pylint: disable=protected-access
+            assert (want in got) if want else got == "", (held, got)
+            assert "Permission denied" not in got, got
+
     def test_the_reboot_command_is_never_wrapped_in_a_box(self):
         # M26 eli revision 4, B6b: in a box the command wrapped and its first
         # line was a plain `systemctl reboot`. umount says the lines above
@@ -16994,6 +17008,43 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
             _ = self._run_in(td, "YES", extra=extra, everything_succeeds=True)
         assert seen["mount"] == [(_BE, True)], seen
         assert seen["gaps"] == [monthly], seen
+
+    def test_step_12s_refused_pool_gets_its_own_fatal(self):
+        """M26R-55: the reimport at step 12 refused as left imported and not
+        healthy ends in that pool's own FATAL, not a reconnect."""
+        imports: list[bool] = []
+
+        def import_pool(zfs: ZFS, name: str, *_a: object, **kw: object) -> bool:
+            imports.append(bool(kw.get("readonly")))
+            if len(imports) == 1:
+                return True
+            zfs.refused[name] = "SUSPENDED"
+            return False
+
+        real_exists = Path.exists
+
+        def exists(self: Path) -> bool:  # the target disk's partitions
+            return str(self).startswith("/dev/sda") or real_exists(self)
+
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            extra: list[AbstractContextManager[object]] = [
+                patch.object(recover_mod, "RECOVER_MNT", os.path.join(td, "mnt")),
+                patch.object(Path, "exists", exists),
+                patch.object(recover_mod, "restore_rpool_rows", return_value=[]),
+                patch.object(recover_mod, "_restore_encryption_root", return_value=[]),
+                patch.object(recover_mod, "_export_verified"),
+                patch.object(recover_mod, "_refuse_imported_system_pools"),
+                patch.object(recover_mod, "_stable_vdev", return_value="/dev/x"),
+                patch.object(recover_mod, "drop_prepare_snapshot"),
+                patch.object(recover_mod, "_install_missing_tools"),
+                patch.object(ZFS, "import_backup_pool", import_pool),
+                redirect_stdout(out),
+            ]
+            _ = self._run_in(td, "YES", extra=extra, everything_succeeds=True)
+        assert len(imports) == 2, imports  # the first import, then step 12's
+        assert "is left imported and SUSPENDED: what to do is said above" in out.getvalue()
+        assert "Reconnect the backup drive" not in out.getvalue(), out.getvalue()[-2000:]
 
     def _banner_after_a_run(self, td: str, installed: bool) -> str:
         """A whole run whose plan recreates an excluded top with two datasets

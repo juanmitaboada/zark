@@ -1299,8 +1299,10 @@ def run(
     # Neither bpool nor the keystore dataset is encrypted: no key is loaded.
     log.step(12, TOTAL_STEPS, "Reimporting backup pool for bpool + keystore restore...")
     if not zfs.import_backup_pool(pool_name, device, readonly=True, guid=drive.guid):
-        log.fatal(
-            f"Cannot reimport {pool_name} to restore bpool and the keystore",
+        # A pool refused as left imported and not healthy gets its own FATAL
+        # (M26R-55): the reconnect below is what its lines warn against.
+        zfs.import_fatal(
+            pool_name,
             causes=["Without the keystore the recovered system cannot unlock rpool"],
             solutions=["Reconnect the backup drive and run recover again"],
         )

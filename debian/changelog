@@ -1,7 +1,7 @@
-zark (2.3.1~rc2-1) UNRELEASED; urgency=medium
+zark (2.3.1-1) stable; urgency=medium
 
-  * Milestone M26 of zark 2.3.1 (a drive that goes away during a backup).
-    Not for release: nothing is published until the final 2.3.1.
+  * zark 2.3.1: a backup drive that goes away during a backup. Nothing on
+    a drive or in /etc/zark changes; 2.3.0 reads everything 2.3.1 writes.
   * A forensic capture no longer kills a backup: command output that is
     not UTF-8 is read with replacement characters, and a capture never
     stops a run. A passphrase the locale cannot encode is named as such.
@@ -38,8 +38,11 @@ zark (2.3.1~rc2-1) UNRELEASED; urgency=medium
   * One measure of data errors (zpool status -p) at step 3, before the
     export and at the read-back: new errors are not verified.
   * zark monitor: a drive is connected when its -part1 link exists.
+  * Run sudo zark setup once after the upgrade: the package leaves the
+    installed guards as they are, and 2.3.0's login reminder hangs an ssh
+    login while a backup pool is suspended.
 
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Fri, 13 Nov 2026 00:19:53 +0100
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 16 Nov 2026 20:45:00 +0100
 
 zark (2.3.0-1) stable; urgency=medium
 

@@ -194,7 +194,7 @@ with no terminal reads nothing, so neither `waiting_for_input` nor
 
 | Field | Type | Meaning |
 |---|---|---|
-| `datasets_total` | integer | dataset transfers planned so far in this run: one per dataset per round; a dataset resumed in one round and finished in the next counts twice, both planned with the resume (2.3.1). It grows later only when a round plans a send not planned before (a failed resume sent again) |
+| `datasets_total` | integer | dataset transfers planned so far in this run: one per dataset per round; a dataset resumed in one round and finished in the next counts twice, both planned with the resume (2.3.1). It grows later only when a round plans a send not planned before (a failed resume sent again); after a failed resume the totals can stay above what is sent |
 | `datasets_done` | integer | of those, how many ended (sent or failed) |
 | `datasets_failed` | integer | of `datasets_done`, how many failed |
 | `dataset` | string or null | the dataset being sent now; null between two |
