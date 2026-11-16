@@ -1535,7 +1535,8 @@ roll its backup points back).
 :   If set, overrides the configuration directory search and forces
     **zark** to read **known_drives.json** from this path. Useful for
     integration tests and for keeping multiple registries (for example,
-    one per laptop) on a single recovery pendrive.
+    one per laptop) on a single recovery pendrive. A relative path is
+    taken from the directory **zark** was started in.
 
 **DEBEMAIL**, **DEBFULLNAME**
 :   Used only by the packaging targets in the project's **Makefile**

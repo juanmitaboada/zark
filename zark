@@ -84,8 +84,9 @@ def print_help():
 def _checked_args(name: str, args: list[str]) -> list[str]:
     """Before anything runs, root or not: the command's own usage for
     ``--help`` (M14P.3, D4 19b), exit 2 for an option the command does not
-    declare (M14P.3), and its path arguments made absolute before zark
-    leaves the caller's directory for / (M26R-50, D1)."""
+    declare (M14P.3), and its path arguments (and a relative
+    ``ZARK_CONFIG_DIR``) made absolute before zark leaves the caller's
+    directory for / (M26R-50, D1)."""
     _, cmd = _invocation_hint()
     if cli_spec.asks_help(name, args):
         print(cli_spec.usage(name, cmd), end="")
@@ -96,6 +97,11 @@ def _checked_args(name: str, args: list[str]) -> list[str]:
         print(f"  Run: {cmd} {name} --help", file=sys.stderr)
         sys.exit(cli_spec.EX_USAGE)
     out = cli_spec.absolute(name, args)
+    # A relative ZARK_CONFIG_DIR names a directory under the caller's, as a
+    # path argument does: made absolute before zark leaves it (M27R-4).
+    conf = os.environ.get("ZARK_CONFIG_DIR")
+    if conf and not os.path.isabs(conf):
+        os.environ["ZARK_CONFIG_DIR"] = os.path.abspath(conf)
     # A read zark itself makes that never returns (a drive gone in the middle
     # of fullcheck's restore check) pins zark's own directory, which a reboot
     # must unmount: zark runs from / (M26R-50). Children start there too

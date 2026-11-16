@@ -32013,9 +32013,12 @@ class TestCliSpec:  # pylint: disable=missing-function-docstring
         assert kinds <= set(cli_spec_mod.KINDS), kinds
 
 
-def _entry_child(code: str, argv: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
+def _entry_child(
+    code: str, argv: list[str], cwd: str, *extra: str
+) -> subprocess.CompletedProcess[str]:
     """``code`` run in a child after zark's entry point is loaded as ``m``
-    (not run), then ``m.main()`` with ``argv``; the suite's Log redirected."""
+    (not run), then ``m.main()`` with ``argv``; the suite's Log redirected.
+    ``extra`` follow the child's own two arguments (``sys.argv[3:]``)."""
     prelude = (
         "import importlib.machinery, importlib.util, os, sys\n"
         "from unittest.mock import patch\n"
@@ -32036,6 +32039,7 @@ def _entry_child(code: str, argv: list[str], cwd: str) -> subprocess.CompletedPr
             prelude + code + call,
             str(_REPO_ROOT / "zark"),
             os.path.join(cwd, "zark.log"),
+            *extra,
         ],
         capture_output=True,
         text=True,
@@ -32181,6 +32185,19 @@ class TestCommandLine:  # pylint: disable=missing-function-docstring
             r = _entry_child(code, ["monitor", "--root", "rel/dir", "--once"], td)
         assert r.returncode == 0, r
         assert r.stdout.strip() == f"/ ['--root', '{td}/rel/dir', '--once']", r.stdout
+
+    def test_a_relative_config_dir_is_made_absolute_before_the_chdir(self):
+        # M27R-4: ZARK_CONFIG_DIR=etc meant /etc once zark was in /.
+        code = (
+            "os.environ['ZARK_CONFIG_DIR'] = sys.argv[3]\n"
+            "import commands.monitor as mon\n"
+            "mon.run = lambda a: (print(os.getcwd(), os.environ['ZARK_CONFIG_DIR']), 0)[1]\n"
+        )
+        for value in ("etc", "/abs/etc"):
+            with tempfile.TemporaryDirectory() as td:
+                r = _entry_child(code, ["monitor", "--once"], td, value)
+            want = f"{td}/etc" if value == "etc" else value
+            assert r.returncode == 0 and r.stdout.strip() == f"/ {want}", (value, r)
 
     def test_a_crash_reaches_zark_log_with_its_traceback(self):
         # M26 eli R1x: an exception nothing caught went to the terminal only.
