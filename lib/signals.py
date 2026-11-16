@@ -39,10 +39,10 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from types import FrameType
-from typing import TextIO, cast
+from typing import Literal, TextIO, cast
 
 from lib.log import Log
 
@@ -256,11 +256,23 @@ def stop_children(
     it may ignore it, and the cleanup must not run under a child that is
     still writing.
 
-    ``pool`` is the pool a transfer reads or writes: while it reads
-    SUSPENDED the children are left as they are (:func:`_leave`)."""
+    ``pool`` is the pool a transfer reads or writes, and which side of
+    :func:`lib.sh.run_pipe`'s pipe is on it: while it reads SUSPENDED that
+    side is left as it is (:func:`_leave`) and the other one is stopped
+    (M26R-57)."""
     if pool is not None and pool.suspended():
-        _leave(procs, pool.name)
+        on_pool = procs[_SIDES[pool.side]]
+        _stop([p for p in procs if p is not on_pool], sig, wait)
+        _leave(on_pool, pool.name)
         return
+    _stop(procs, sig, wait)
+
+
+def _stop(
+    procs: Sequence[subprocess.Popen[str] | subprocess.Popen[bytes]],
+    sig: int | None,
+    wait: float | None,
+) -> None:
     sig = child_signal() if sig is None else sig
     for p in procs:
         if p.poll() is None:
@@ -285,36 +297,44 @@ class Held:
 
     name: str
     suspended: Callable[[], bool]
+    # The side of run_pipe's pipe that reads or writes this pool: the
+    # receive into a backup or a new drive, the send out of a backup.
+    side: Literal["send", "receive"]
 
 
-def _leave(procs: list[subprocess.Popen[str]] | list[subprocess.Popen[bytes]], pool: str) -> None:
-    """Leave a transfer's ``zfs`` children with no signal (R5-1, eli V8x).
+# run_pipe's order: [the send's Popen, the receive's Popen].
+_SIDES: dict[str, int] = {"send": 0, "receive": 1}
 
-    In the ioctl of a suspended pool they cannot end, whatever they get; a
+
+def _leave(p: subprocess.Popen[str] | subprocess.Popen[bytes], pool: str) -> None:
+    """Leave the side of a transfer on a suspended pool with no signal
+    (R5-1, eli V8x).
+
+    In the ioctl of a suspended pool it cannot end, whatever it gets; a
     signal left pending makes OpenZFS 2.4.4's ``bqueue_enqueue_impl`` and
     ``bqueue_dequeue`` (module/zfs/bqueue.c:111-113, :162-163) loop on
     ``cv_wait_sig`` without sleeping: a receive spun at 65-100 % CPU until
-    the reboot. Asleep they cost nothing, and the reboot ends them. Only
-    the ``sh -c`` zark started is ended (SIGKILL to it alone, not to its
-    group), so the ``with`` around the Popen does not wait for ``zfs``.
+    the reboot. Asleep it costs nothing; the reboot ends it, and so does a
+    resume, since the other side is gone by then (a receive meets the end
+    of its stream, a send a closed pipe: M26R-57). Only the ``sh -c`` zark
+    started is ended (SIGKILL to it alone, not to its group), so the
+    ``with`` around the Popen does not wait for ``zfs``.
     """
-    names: list[str] = []
-    for p in procs:
-        if p.poll() is not None:
-            continue
-        if _comm(p.pid) in _SHELLS:
-            _kill(p.pid)
-            _ = p.wait()
-        else:
-            # The shell exec'd the command itself: nothing is sent, and the
-            # Popen is marked as reaped so that nothing waits for it.
-            p.returncode = -signal.SIGKILL
-        names.append(_running[0] if _running else "the transfer")
-    if names:
-        (_log[0] if _log else Log()).warn(
-            f"{names[0]} left running: they cannot end while {pool} is suspended,"
-            " and end at the reboot"
-        )
+    if p.poll() is not None:
+        return
+    if _comm(p.pid) in _SHELLS:
+        _kill(p.pid)
+        _ = p.wait()
+    else:
+        # The shell exec'd the command itself: nothing is sent. The value is
+        # a mark so that nothing waits for it, not the child's status
+        # (M26R-58): the child is still running.
+        p.returncode = -signal.SIGKILL
+    name = child_name(p.args) if isinstance(p.args, str) else "the transfer"
+    (_log[0] if _log else Log()).warn(
+        f"{name} left running: it cannot end while {pool} is suspended;"
+        " the reboot ends it, and so does a resume of the pool"
+    )
 
 
 _SHELLS = frozenset({"sh", "dash", "bash"})

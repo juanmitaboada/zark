@@ -325,9 +325,9 @@ def run_pipe(
     failure modes.
 
     ``pool`` is the pool the transfer reads or writes that a drive can take
-    away (the backup pool, :func:`lib.pool_state.hold`): while it reads
-    SUSPENDED an interrupt leaves the two ``zfs`` with no signal
-    (:func:`signals.stop_children`, R5-1).
+    away, and the side of the pipe on it (:func:`lib.pool_state.hold`):
+    while it reads SUSPENDED an interrupt leaves that side with no signal
+    and stops the other (:func:`signals.stop_children`, R5-1, M26R-57).
 
     ``meter`` hears when the left side starts and, once it ended, what it
     wrote in all, measured by the kernel outside the data path (M7-2): the

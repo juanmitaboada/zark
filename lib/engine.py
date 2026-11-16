@@ -657,7 +657,7 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
                 self._recv(p.rel, resume, clone_from),
                 log=self.log,
                 meter=self.observer.meter if self.observer else None,
-                pool=pool_state.hold(self.pool),
+                pool=pool_state.hold(self.pool, side="receive"),
             )
             if not r.ok:
                 err = pipe_message(r) or f"rc={r.returncode}"

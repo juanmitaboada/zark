@@ -699,7 +699,7 @@ def _receive(  # pylint: disable=too-many-arguments,too-many-positional-argument
     recv = f"zfs receive -u {' '.join(options)} {dst}".replace("  ", " ")
     log.info(f"  {dst} ← @{src.split('@', 1)[1]}")
     # The backup pool is the side a drive can take away (R5-1).
-    r = sh.run_pipe(send, recv, pool=pool_state.hold(src.split("/", 1)[0]))
+    r = sh.run_pipe(send, recv, pool=pool_state.hold(src.split("/", 1)[0], side="send"))
     if r.ok:
         return True
     if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
@@ -865,7 +865,7 @@ def _send_keystore(keystore_snap: str, pool_name: str) -> sh.RunResult:
     return sh.run_pipe(
         f"zfs send {keystore_snap}",
         "zfs receive -u -o encryption=off rpool/keystore",
-        pool=pool_state.hold(pool_name),
+        pool=pool_state.hold(pool_name, side="send"),
     )
 
 

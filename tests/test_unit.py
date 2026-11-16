@@ -68,7 +68,7 @@ from dataclasses import asdict as dc_asdict, dataclass, replace as dc_replace
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
-from typing import Any, ClassVar, NoReturn, cast
+from typing import IO, Any, ClassVar, Literal, NoReturn, cast
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -14282,13 +14282,14 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring,too-man
         assert self._prepare(fake, cfg_dir, out=out) == 0, out.getvalue()
         assert "zfs list -Hp -o name,used rpool rpool/var/lib/docker" in fake.calls, fake.calls
         assert "to transfer (1 subtree(s) excluded from backups not counted)" in out.getvalue()
-        # The keystore's send names the new drive's pool for an interrupt (R5-1).
+        # The keystore's send names the new drive's pool for an interrupt,
+        # and its receive as the side on it (R5-1, M26R-57).
         keystore = [
-            p
-            for p, c in zip(fake.pipe_pools, fake.pipe_cmds, strict=True)
+            (p, s)
+            for p, s, c in zip(fake.pipe_pools, fake.pipe_sides, fake.pipe_cmds, strict=True)
             if c.endswith("blue/keystore")
         ]
-        assert keystore == ["blue"], (fake.pipe_pools, fake.pipe_cmds)
+        assert keystore == [("blue", "receive")], (fake.pipe_pools, fake.pipe_cmds)
 
     def test_the_size_to_transfer_leaves_out_what_is_excluded(self):
         mock = MockShell()
@@ -19959,7 +19960,8 @@ class TestTransferLeftAsleep:  # pylint: disable=missing-function-docstring
     reads SUSPENDED is left with no signal; a pending one makes the receive
     spin in OpenZFS's bqueue (module/zfs/bqueue.c:111-113, 2.4.4)."""
 
-    LINE = "zfs send | zfs receive left running: they cannot end while bk is suspended"
+    LINE = "left running: it cannot end while bk is suspended; the reboot ends it"
+    ASLEEP = "0000000000000000 0000000000000000"  # SigPnd, ShdPnd: nothing pending
 
     @staticmethod
     @contextmanager
@@ -19979,10 +19981,19 @@ class TestTransferLeftAsleep:  # pylint: disable=missing-function-docstring
                 yield
 
     @staticmethod
-    def _child(argv: str | list[str]) -> tuple[subprocess.Popen[bytes], int]:
+    def _child(
+        argv: str | list[str], stdin: int | IO[bytes] | None = None
+    ) -> tuple[subprocess.Popen[bytes], int]:
         """A child as run_pipe starts one (its own group); the pid of the
         command (sh -c's child, or the child itself when exec'd)."""
-        p = subprocess.Popen(argv, shell=isinstance(argv, str), process_group=0, cwd="/")  # pylint: disable=consider-using-with
+        p = subprocess.Popen(  # pylint: disable=consider-using-with
+            argv,
+            shell=isinstance(argv, str),
+            process_group=0,
+            cwd="/",
+            stdin=stdin,
+            stdout=subprocess.PIPE if stdin is None else subprocess.DEVNULL,
+        )
         if not isinstance(argv, str):
             return p, p.pid
         children = Path(f"/proc/{p.pid}/task/{p.pid}/children")
@@ -19990,6 +20001,16 @@ class TestTransferLeftAsleep:  # pylint: disable=missing-function-docstring
         while not children.read_text(encoding="ascii").split() and time.monotonic() < deadline:
             time.sleep(0.02)
         return p, int(children.read_text(encoding="ascii").split()[0])
+
+    def _pipe(
+        self, left: str, right: str
+    ) -> tuple[subprocess.Popen[bytes], int, subprocess.Popen[bytes], int]:
+        """Two children joined by a pipe, as run_pipe starts a transfer."""
+        p1, c1 = self._child(left)
+        assert p1.stdout is not None
+        p2, c2 = self._child(right, stdin=p1.stdout)
+        p1.stdout.close()
+        return p1, c1, p2, c2
 
     @staticmethod
     def _signals_of(pid: int) -> str | None:
@@ -20005,60 +20026,100 @@ class TestTransferLeftAsleep:  # pylint: disable=missing-function-docstring
         )
 
     @staticmethod
-    def _stop(p: subprocess.Popen[bytes], out: StringIO) -> float:
-        _signals.running("zfs send | zfs receive")
+    def _stop(
+        procs: list[subprocess.Popen[bytes]], out: StringIO, side: Literal["send", "receive"]
+    ) -> float:
         t = time.monotonic()
-        try:
-            with redirect_stdout(out):
-                _signals.stop_children([p], wait=2, pool=pool_state.hold("bk"))
-        finally:
-            _signals.running(None)
+        with redirect_stdout(out):
+            _signals.stop_children(procs, wait=1, pool=pool_state.hold("bk", side=side))
         return time.monotonic() - t
 
-    def test_a_suspended_pools_transfer_is_left_with_no_signal(self):
-        p, cmd = self._child("sleep 30")
+    @staticmethod
+    def _end(*pids: int) -> None:
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def test_a_suspended_pools_receive_is_left_and_its_send_stopped(self):
+        # backup and prepare: the receive is on the suspended pool.
+        p1, send, p2, recv = self._pipe("sleep 31", "sleep 32")
         out = StringIO()
         try:
             with self._pool("SUSPENDED"):
-                took = self._stop(p, out)
-            # Only zark's sh -c is ended; the command gets nothing, so it
-            # stays asleep (no pending signal) and nothing waits for it.
-            assert p.returncode == -signal.SIGKILL, p.returncode
-            assert self._signals_of(cmd) == "0000000000000000 0000000000000000", self._signals_of(
-                cmd
+                took = self._stop([p1, p2], out, "receive")
+            # The send's group got the signal and is reaped; the receive's sh
+            # -c alone is ended, the receive behind it gets nothing and stays
+            # asleep, and nothing waits for it.
+            assert p1.returncode is not None and self._signals_of(send) is None, p1.returncode
+            assert p2.returncode == -signal.SIGKILL, p2.returncode
+            assert self._signals_of(recv) == self.ASLEEP, self._signals_of(recv)
+            # The send's stop takes its wait (1 s) at most where nothing reaps
+            # its orphans at once; nothing waits for the receive (30 s).
+            assert took < 4, took
+            assert "sleep " + self.LINE + ", and so does a resume of the pool" in out.getvalue(), (
+                out.getvalue()
             )
-            assert took < 1, took
-            assert self.LINE + ", and end at the reboot" in out.getvalue(), out.getvalue()
         finally:
-            os.kill(cmd, signal.SIGKILL)
+            self._end(send, recv)
+
+    def test_a_suspended_pools_send_is_left_and_its_receive_stopped(self):
+        # recover: the send reads the suspended pool.
+        p1, send, p2, recv = self._pipe("sleep 31", "sleep 32")
+        out = StringIO()
+        try:
+            with self._pool("SUSPENDED"):
+                _ = self._stop([p1, p2], out, "send")
+            assert p2.returncode is not None and self._signals_of(recv) is None, p2.returncode
+            assert p1.returncode == -signal.SIGKILL, p1.returncode
+            assert self._signals_of(send) == self.ASLEEP, self._signals_of(send)
+            assert out.getvalue().count(self.LINE) == 1, out.getvalue()
+        finally:
+            self._end(send, recv)
+
+    def test_the_receive_left_ends_by_itself_once_its_stream_ends(self):
+        # A resume lets the receive read on: with the send gone it meets the
+        # end of its stream and ends (here a reader that is not stuck).
+        p1, send, p2, recv = self._pipe("sleep 31", "cat > /dev/null")
+        try:
+            with self._pool("SUSPENDED"):
+                _ = self._stop([p1, p2], StringIO(), "receive")
+            deadline = time.monotonic() + 5
+            while self._signals_of(recv) is not None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert self._signals_of(recv) is None, "the receive did not end"
+        finally:
+            self._end(send, recv)
 
     def test_a_command_the_shell_exec_d_is_not_signalled_nor_waited_for(self):
         p, cmd = self._child(["sleep", "30"])
         out = StringIO()
         try:
             with self._pool("SUSPENDED"):
-                took = self._stop(p, out)
-            assert self._signals_of(cmd) == "0000000000000000 0000000000000000"
+                took = self._stop([p], out, "send")
+            assert self._signals_of(cmd) == self.ASLEEP, self._signals_of(cmd)
             assert p.returncode == -signal.SIGKILL and took < 1, (p.returncode, took)
-            assert self.LINE in out.getvalue(), out.getvalue()
+            assert "the transfer " + self.LINE in out.getvalue(), out.getvalue()
         finally:
             os.kill(cmd, signal.SIGKILL)
             _ = os.waitpid(cmd, 0)
 
     def test_a_resumed_or_unreadable_pools_transfer_is_stopped_as_before(self):
-        # After a clear the latch stays set but the pool reads ONLINE: the
-        # children can end, and are stopped; a state that cannot be read
-        # counts as not suspended.
+        # After a clear the latch stays set but the pool reads ONLINE: both
+        # sides can end, and are stopped; a state that cannot be read counts
+        # as not suspended.
         for state in ("ONLINE", "DEGRADED", None):
-            p, cmd = self._child("sleep 30")
+            p1, send, p2, recv = self._pipe("sleep 31", "sleep 32")
             out = StringIO()
             with self._pool(state):
-                _ = self._stop(p, out)
-            assert self._signals_of(cmd) is None, (state, self._signals_of(cmd))
+                _ = self._stop([p1, p2], out, "receive")
+            assert self._signals_of(send) is None, (state, self._signals_of(send))
+            assert self._signals_of(recv) is None, (state, self._signals_of(recv))
             assert "left running" not in out.getvalue(), (state, out.getvalue())
 
     def test_an_interrupted_pipe_hands_its_pool_to_the_stop(self):
-        held = pool_state.hold("bk")
+        held = pool_state.hold("bk", side="receive")
         got: list[object] = []
         real = _signals.stop_children
 
@@ -20086,12 +20147,14 @@ class TestTransferLeftAsleep:  # pylint: disable=missing-function-docstring
         fake = _fresh_fake()
         assert TestEngineTransferObserver()._run(fake, None).ok  # pylint: disable=protected-access
         assert fake.pipe_pools and set(fake.pipe_pools) == {"backup"}, fake.pipe_pools
+        assert set(fake.pipe_sides) == {"receive"}, fake.pipe_sides
         # recover: the backup pool it reads from, the datasets and the keystore.
         mock = MockShell()
         with patch_sh(mock), redirect_stdout(StringIO()):
             _ = recover_mod._receive("backup/rpool/x@p", "rpool/x", [], True, Log())  # pylint: disable=protected-access
             _ = recover_mod._send_keystore("backup/keystore@prepare_1", "backup")  # pylint: disable=protected-access
         assert mock.pipe_pools == ["backup", "backup"], mock.pipe_pools
+        assert mock.pipe_sides == ["send", "send"], mock.pipe_sides
 
 
 class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring

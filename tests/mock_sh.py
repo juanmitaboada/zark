@@ -98,6 +98,7 @@ class MockShell:
         self._calls: list[str] = []
         self.pipe_pools: list[str | None] = []
         self.pipe_cmds: list[str] = []  # each pipe, as pipe_pools
+        self.pipe_sides: list[str | None] = []  # the side on that pool (M26R-57)
         self._strict = strict  # if True, unregistered commands raise
 
     def on(self, pattern: str, regex: bool = False) -> MockResponse:
@@ -172,6 +173,7 @@ class MockShell:
         nothing (the commands never run). The pool each pipe names for an
         interrupt is kept (R5-1)."""
         self.pipe_pools.append(None if pool is None else pool.name)
+        self.pipe_sides.append(None if pool is None else pool.side)
         self.pipe_cmds.append(f"{cmd1} | {cmd2}")
         if meter is not None:
             meter.begin(0)

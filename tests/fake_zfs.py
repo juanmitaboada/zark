@@ -208,6 +208,7 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
         each pipe names for an interrupt is kept (R5-1)."""
         self._calls.append(f"{cmd1} | {cmd2}")
         self.pipe_pools.append(None if pool is None else pool.name)
+        self.pipe_sides.append(None if pool is None else pool.side)
         self.pipe_cmds.append(f"{cmd1} | {cmd2}")
         if meter is not None:
             meter.begin(0)

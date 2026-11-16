@@ -41,7 +41,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
+from typing import IO, Literal
 
 from lib import dpkg_lock, signals
 from lib.config import zark_command
@@ -75,11 +75,12 @@ def state(pool: str, kstat_dir: Path | None = None) -> str:
         return UNREADABLE
 
 
-def hold(pool: str) -> signals.Held:
+def hold(pool: str, *, side: Literal["send", "receive"]) -> signals.Held:
     """``pool`` for an interrupt of a transfer (:func:`signals.stop_children`):
     suspended when its kstat state reads SUSPENDED at that moment; a state
-    that cannot be read does not count (R5-1)."""
-    return signals.Held(pool, lambda: state(pool) == "SUSPENDED")
+    that cannot be read does not count (R5-1). ``side`` is the side of the
+    pipe on ``pool``: only that one is left (M26R-57)."""
+    return signals.Held(pool, lambda: state(pool) == "SUSPENDED", side)
 
 
 def imported(pool: str, kstat_dir: Path | None = None) -> bool:

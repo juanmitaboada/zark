@@ -118,10 +118,15 @@ everything 2.3.1 writes.
   In the ioctl of a suspended pool neither can end, and on OpenZFS 2.4 a
   signal left pending makes the receive loop without sleeping until the
   reboot (65 to 100 % CPU on eli). While the pool it writes or reads
-  reads SUSPENDED, zark now sends them nothing: it says they are left
-  running, they stay asleep, and the reboot ends them. A pool that was
-  resumed, or reads ONLINE or DEGRADED, is stopped as before. This covers
-  backup's transfers, recover's (the drive is the side read) and the
+  reads SUSPENDED, zark now sends nothing to the side of the transfer on
+  that pool (the `zfs receive` in backup and prepare, the `zfs send` in
+  recover) and stops the other side as before. It says, for example,
+  "zfs receive left running: it cannot end while backup2 is suspended;
+  the reboot ends it, and so does a resume of the pool": the side left
+  stays asleep, and after a resume it ends by itself (a receive at the
+  end of its stream, keeping its partial state, a send at the closed
+  pipe). A pool that was resumed, or reads ONLINE or DEGRADED, is
+  stopped as before. This covers backup's transfers, recover's and the
   keystore prepare sends to a new drive.
 - **A resumed transfer is estimated whole from the start** (A112E-2, the
   GNOME app on eli): a dataset whose partial receive is resumed reaches

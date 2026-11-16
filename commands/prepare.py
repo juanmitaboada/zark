@@ -570,7 +570,7 @@ def _send_keystore(new_pool: str, cleanup: Cleanup, log: Log) -> bool:
         f"zfs send {snap}",
         f"zfs receive -u {new_pool}/keystore",
         log=log,
-        pool=pool_state.hold(new_pool),
+        pool=pool_state.hold(new_pool, side="receive"),
     )
     drop()
     cleanup.untrack_action(drop)
