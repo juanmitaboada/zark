@@ -4000,6 +4000,12 @@ class TestAutoejectConfig:  # pylint: disable=missing-function-docstring
 # ═════════════════════════════════════════════════════════════════════════
 
 
+def _bind_ok(mock: MockShell) -> None:
+    """recover's chroot binds and efivarfs answer: they are checked (M27 item 16)."""
+    _ = mock.on(r"^mount --bind /(proc|sys|dev|dev/pts|run) ", regex=True).succeeds()
+    _ = mock.on_prefix("mount -t efivarfs").succeeds()
+
+
 class TestWorkDirectories:  # pylint: disable=missing-function-docstring
     """R4-8: the snapshot mount point (/run/zark/probe) and the restore
     check's directory (/run/zark/fullcheck) go after their last unmount."""
@@ -18358,6 +18364,50 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
                 mount_restored_system("x", True, make_log())
         assert "(1 kernel(s))" in buf.getvalue()
 
+    def test_a_failed_bind_or_efivarfs_stops_before_the_boot_chain(self):
+        # M27 item 16: as repair-boot's, each bind checked; efivarfs too
+        # (grub-install and shim write the boot entry through it).
+        names = ["proc", "sys", "dev", "dev/pts", "run", "efivarfs"]
+        for n, d in enumerate(names):
+            with tempfile.TemporaryDirectory() as td:
+                mock = MockShell()
+                mock.on_prefix("mkdir -p").succeeds()
+                if d == "efivarfs":
+                    mock.on_prefix("mount -t efivarfs").fails("mount: no such device")
+                else:
+                    mock.on(f"mount --bind /{d} {td}/{d}").fails(f"mount: /{d}: denied")
+                _ = mock.on_prefix("").succeeds()
+                cleanup = Cleanup(make_log())
+                out, code = StringIO(), 0
+                with (
+                    patch_sh(mock),
+                    patch.object(boot_chain, "RECOVER_MNT", td),
+                    patch.object(boot_chain.grub_guard, "install") as guard,
+                    patch.object(ZFS, "write_zpool_cache") as cache,
+                    patch("builtins.input", side_effect=EOFError),
+                    redirect_stdout(out),
+                ):
+                    try:
+                        _ = boot_chain.install_boot_chain(
+                            "/dev/sda", "x", ZFS(make_log()), cleanup, make_log()
+                        )
+                    except SystemExit as e:
+                        code = int(e.code or 0)
+                flat = " ".join(Log._STRIP_RE.sub("", unframed(out.getvalue())).split())  # pylint: disable=protected-access
+                assert code == 1, (d, flat)
+                if d == "efivarfs":
+                    assert "Could not mount efivarfs at" in flat, flat
+                else:
+                    assert f"Could not bind-mount /{d} (mount: /{d}: denied)" in flat, flat
+                assert "nothing of the boot chain" in flat and "recover again" in flat, flat
+                assert not [c for c in mock.calls if "grub-install" in c or "update-grub" in c]
+                assert not [c for c in mock.calls if "dpkg-reconfigure" in c]
+                cache.assert_not_called()
+                guard.assert_not_called()
+                tracked = cleanup._mounts  # pylint: disable=protected-access
+                binds = [f"{td}/{x}" for x in names[:5]]
+                assert tracked == binds[: min(n, 5)], (d, tracked)
+
     @staticmethod
     def _cryptsetup_initramfs(root: str) -> None:
         """cryptsetup-initramfs's script and hook in a fake initramfs-tools
@@ -18378,6 +18428,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
             )
             mock.on_prefix(f"chroot {td} env LC_ALL=C bash -c").succeeds()
             mock.on_prefix("find /dev/disk/by-id/").succeeds("")
+            _bind_ok(mock)
             with (
                 patch_sh(mock),
                 patch.object(boot_chain, "RECOVER_MNT", td),
@@ -18409,6 +18460,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
             )
             mock.on_prefix(f"chroot {td} env LC_ALL=C bash -c").succeeds()
             mock.on_prefix("find /dev/disk/by-id/ -lname '*/nvme0n1p1'").succeeds(by_id + "\n")
+            _bind_ok(mock)
             with (
                 patch_sh(mock),
                 patch.object(boot_chain, "RECOVER_MNT", td),

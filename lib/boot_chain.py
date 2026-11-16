@@ -29,6 +29,7 @@ from lib.cleanup import Cleanup
 from lib.config import zark_command
 from lib.identity import disks_under
 from lib.log import Log
+from lib.mount import RUNTIME_BINDS, bind_runtime
 from lib.zfs import ZFS, fix_grub_bpool_uuid
 
 # Additional bpool features for dracut systems (Ubuntu 26.04).
@@ -270,6 +271,43 @@ def restore_boot_copy(copy: str, log: Log) -> list[str]:
     return errors
 
 
+def _bind_chroot(cleanup: Cleanup, log: Log) -> None:
+    """The chroot's runtime file systems and efivarfs under RECOVER_MNT, each
+    checked, as repair-boot's: grub-install, shim's reconfigure and
+    update-grub must not run in a half-prepared tree, and grub-install and
+    shim write the firmware's boot entry through efivarfs. Fatal at the first
+    that fails, before anything of the boot chain is written; the cleanup
+    unmounts what was mounted (each tracked once it is)."""
+    restored = (
+        "the restored datasets are on the disk; nothing of the boot chain "
+        + "(grub-install, the signed GRUB and shim, update-grub) was written"
+    )
+    redo = f"Check the live session's mounts, then run {zark_command()} recover again"
+    failed = bind_runtime(RECOVER_MNT, cleanup)
+    if failed is not None:
+        log.fatal(
+            failed.describe(),
+            causes=[
+                f"recover needs {', '.join(f'/{d}' for d in RUNTIME_BINDS)} inside "
+                + f"{RECOVER_MNT} to install the boot chain; {restored}"
+            ],
+            solutions=[redo],
+        )
+    efivars = f"{RECOVER_MNT}/sys/firmware/efi/efivars"
+    _ = sh.run(f"mkdir -p {efivars}")
+    r = sh.run(f"mount -t efivarfs efivarfs {efivars}")
+    if not r.ok:
+        log.fatal(
+            f"Could not mount efivarfs at {efivars} ({r.stderr.strip() or 'no error text'})",
+            causes=[
+                "grub-install and shim's reconfigure write the firmware's boot entry "
+                + f"through it; {restored}"
+            ],
+            solutions=[redo],
+        )
+    cleanup.track_mount(efivars)
+
+
 def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches,too-many-locals,too-many-arguments,too-many-positional-arguments
     internal_disk: str,
     ubuntu_name: str,
@@ -291,15 +329,7 @@ def install_boot_chain(  # pylint: disable=too-many-statements,too-many-branches
     (M4c-7), a check of an ext4 ``/boot`` that failed (M12R-13).
     """
     errors: list[str] = []
-    # Bind mounts for chroot
-    for d in ("proc", "sys", "dev", "dev/pts", "run"):
-        _ = sh.run(f"mkdir -p {RECOVER_MNT}/{d}")
-        _ = sh.run(f"mount --bind /{d} {RECOVER_MNT}/{d}")
-        cleanup.track_mount(f"{RECOVER_MNT}/{d}")
-
-    _ = sh.run(f"mkdir -p {RECOVER_MNT}/sys/firmware/efi/efivars")
-    _ = sh.run(f"mount -t efivarfs efivarfs {RECOVER_MNT}/sys/firmware/efi/efivars")
-    cleanup.track_mount(f"{RECOVER_MNT}/sys/firmware/efi/efivars")
+    _bind_chroot(cleanup, log)
 
     # zpool.cache - required so grub and initrd can locate the pools
     cache_path = f"{RECOVER_MNT}/etc/zfs/zpool.cache"

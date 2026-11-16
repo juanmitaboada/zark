@@ -1682,6 +1682,9 @@ def _ext4_chain(esp_uuid: str) -> tuple[list[str], MockShell, MagicMock, str]:
         )
         mock.on_prefix(f"chroot {td} env LC_ALL=C bash -c").succeeds()
         mock.on_prefix("find /dev/disk/by-id/").succeeds("")
+        # recover's chroot binds and efivarfs are checked (M27 item 16).
+        _ = mock.on(r"^mount --bind /(proc|sys|dev|dev/pts|run) ", regex=True).succeeds()
+        _ = mock.on_prefix("mount -t efivarfs").succeeds()
         cache = MagicMock()
         with (
             patch_sh(mock),
