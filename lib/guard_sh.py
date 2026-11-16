@@ -68,7 +68,7 @@ POOL_READ_SH = (
 # first (a read that never waits); no zpool or zfs command at all while a
 # pool is not ONLINE or DEGRADED; the scan names disks and partitions only;
 # every call waited for a few seconds at most, then left behind (one at
-# most: no new call while an earlier one still runs).
+# most: while an earlier one still runs, it is waited for instead).
 __KSTAT_LINE__
 __BLOCK_LINE__
 __UDEV_LINE__
@@ -84,10 +84,10 @@ for zark_s in "$zark_kstat"/*/state; do
     case "${zark_n##*/}" in '$'*) continue ;; esac
     zark_w="$(cat "$zark_s" 2>/dev/null)" || zark_w="UNREADABLE"
     case "$zark_w" in
-        ONLINE|DEGRADED|SUSPENDED) ;;
-        *)
+        TRANSITIONING|UNREADABLE)
             # A pool being imported reads TRANSITIONING for a moment: read
-            # it again before calling it not healthy (M26R-45).
+            # it again before calling it not healthy (M26R-45). Only these:
+            # a state that lasts must not add a second to every run (M27R-6).
             sleep 1
             [ -e "$zark_s" ] || [ -L "$zark_s" ] || continue
             zark_w="$(cat "$zark_s" 2>/dev/null)" || zark_w="UNREADABLE"
@@ -119,29 +119,52 @@ zark_proc() {
 # run or has not ended after <seconds>: it is left running, never waited
 # for, and nothing of it reaches this script. The child keeps no descriptor
 # of the guard's above 2 (debconf's 3 under a maintainer script). A call
-# left behind is noted in $zark_callf, and while it still runs no other
-# call is started (M26R-43).
+# left behind is noted in $zark_callf; while it still runs no other call
+# is started (M26R-43): it is waited for instead, within the same
+# <seconds>, and its end lets this one start (M27R-1).
 zark_why=""
 zark_bounded() {
     zark_t=$1
     shift
     zark_out=""
+    zark_i=0
     if [ -O "$zark_callf" ] && read -r zark_cp zark_ck < "$zark_callf" 2>/dev/null; then
-        if zark_proc "$zark_cp" && [ "$zark_pst" != Z ] && [ "$zark_ptk" = "$zark_ck" ] \\
-            && { [ "$zark_pcm" = zpool ] || [ "$zark_pcm" = zfs ]; }; then
-            zark_why="an earlier $zark_pcm call has not ended (pid $zark_cp)"
-            return 1
-        fi
+        while zark_proc "$zark_cp" && [ "$zark_pst" != Z ] && [ "$zark_ptk" = "$zark_ck" ] \\
+            && { [ "$zark_pcm" = zpool ] || [ "$zark_pcm" = zfs ]; }; do
+            if [ "$zark_i" -ge $((zark_t * 10)) ]; then
+                zark_why="an earlier $zark_pcm call has not ended (pid $zark_cp)"
+                return 1
+            fi
+            sleep 0.1
+            zark_i=$((zark_i + 1))
+        done
         rm -f "$zark_callf"
     fi
     zark_d="$(mktemp -d 2>/dev/null)" || {
         zark_why="no temporary directory could be made (mktemp failed)"
         return 1
     }
+    if [ ! -r "/proc/$$/stat" ]; then
+        # No /proc (a chroot without it): the child cannot be followed by
+        # its pid, so 2.3.1's way, a file it makes when it ends (M27R-3).
+        ( "$@" > "$zark_d/out" 2>/dev/null || :; : > "$zark_d/done" ) \\
+            < /dev/null > /dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+        while [ ! -e "$zark_d/done" ]; do
+            if [ "$zark_i" -ge $((zark_t * 10)) ]; then
+                rm -rf "$zark_d"
+                zark_why="a pool did not answer within $zark_t s"
+                return 1
+            fi
+            sleep 0.1
+            zark_i=$((zark_i + 1))
+        done
+        zark_out="$(cat "$zark_d/out" 2>/dev/null)" || zark_out=""
+        rm -rf "$zark_d"
+        return 0
+    fi
     # The command itself is the background job, so $! is its own pid.
     "$@" > "$zark_d/out" 2>/dev/null < /dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
     zark_c=$!
-    zark_i=0
     while zark_proc "$zark_c" && [ "$zark_pst" != Z ]; do
         if [ "$zark_i" -ge $((zark_t * 10)) ]; then
             ( umask 077 && printf '%s %s\\n' "$zark_c" "$zark_ptk" > "$zark_callf.$$" \\

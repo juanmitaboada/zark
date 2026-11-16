@@ -5,7 +5,8 @@ zark (2.3.2~rc1-1) UNRELEASED; urgency=medium
     before anything runs; "zark <command> --help" prints that command's
     usage. zark runs from / once its path arguments are absolute. A crash
     is said through the log, its traceback in zark.log.
-  * The guards: one zpool or zfs call left behind at most; a transient
+  * The guards: one zpool or zfs call left behind at most, waited for by
+    the next guard within its own bound; a TRANSITIONING or unreadable
     pool state read a second time; the APT hook's scan waits up to 30 s;
     a guard file removed by hand is not "out of date". backup and
     registry verify say when udev does not record a drive as a ZFS member.

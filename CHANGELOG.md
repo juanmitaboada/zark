@@ -49,14 +49,17 @@ monitor` say `zark's guards are out of date: run sudo zark setup`.
 
 - **One guard command left behind at most**: a `zpool` or `zfs` command a
   guard leaves running is noted in `/run/zark-guard-call` with its start
-  time, and while it still runs no guard starts another; each answers as
-  for a command that did not end (the reminder says it could not check,
-  the others refuse). Before, every ssh login, `apt` run and `update-grub`
-  started one more.
+  time, and while it still runs no guard starts another: each waits for it
+  within its own bound (3 s for the login reminder, 30 s for the APT hook's
+  scan, 10 s for the rest), then starts its own; if it has not ended by
+  then, the guard answers as for a command that did not end (the reminder
+  says it could not check, the others refuse). Before, every ssh login,
+  `apt` run and `update-grub` started one more. Without `/proc` (a chroot
+  without it) a command is still waited for within its bound.
 - **A pool being imported is not taken for one whose drive went away**: a
-  state other than ONLINE, DEGRADED or SUSPENDED (TRANSITIONING while a
-  pool is imported) is read a second time after a second before the guards
-  call the pool not healthy and refuse or warn.
+  TRANSITIONING state (a pool being imported) or a state that cannot be
+  read is read a second time after a second before the guards call the
+  pool not healthy and refuse or warn. Any other state counts at once.
 - **A guard removed on purpose is not "out of date"**: only a guard file
   that is there, can be read and is not this zark's is. Removing the APT
   hook's configuration, as its own message says to disable it, no longer

@@ -12090,9 +12090,10 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
 
 class TestGuardsOneCall:  # pylint: disable=missing-function-docstring,protected-access
     """M26R-43: a call a guard left behind is noted with its pid and start
-    time, and while it still runs as zpool or zfs no guard starts another.
-    M26R-45: a state other than ONLINE, DEGRADED or SUSPENDED is read again
-    after a second before the pool counts as not healthy."""
+    time, and while it still runs as zpool or zfs no guard starts another;
+    M27R-1: a guard waits for it within its own bound, then starts its own.
+    M26R-45, M27R-6: a TRANSITIONING or unreadable state is read again after
+    a second before the pool counts as not healthy; no other state is."""
 
     @staticmethod
     def _stub(td: str) -> None:
@@ -12101,6 +12102,7 @@ class TestGuardsOneCall:  # pylint: disable=missing-function-docstring,protected
             "#!/bin/sh\n"
             f'echo "zpool $*" >> {td}/calls\n'
             f"echo $$ >> {td}/pids\n"
+            f'[ ! -e {td}/slow ] || [ "$1" != import ] || sleep 6\n'
             f'while [ -e {td}/hang ] || [ "$1" = decoy ]; do sleep 1; done\n',
             encoding="ascii",
         )
@@ -12141,10 +12143,12 @@ class TestGuardsOneCall:  # pylint: disable=missing-function-docstring,protected
                 note = Path(td, "guard-call").read_text(encoding="ascii").split()
                 assert note == [str(pid), self._ticks(pid)], note
                 assert Path(td, "guard-call").stat().st_mode & 0o077 == 0
+                # The next waits for it, up to its own 3 s, and starts none.
                 began = time.monotonic()
                 _, out = self._run(td, script)
+                took = time.monotonic() - began
                 assert f"an earlier zpool call has not ended (pid {pid})" in out, out
-                assert time.monotonic() - began < 2
+                assert 2.8 < took < 6, took
                 assert self._imports(td) == 1, self._calls(td)
                 # Once it has ended, the note goes and the next call starts.
                 Path(td, "hang").unlink()
@@ -12156,6 +12160,109 @@ class TestGuardsOneCall:  # pylint: disable=missing-function-docstring,protected
                 assert rc == 0 and "not checked" not in out, out
                 assert self._imports(td) == 2, self._calls(td)
                 assert not Path(td, "guard-call").exists()
+            finally:
+                TestGuardsNeverWait._kill(td)
+
+    def _both(self, td: str) -> tuple[str, str]:
+        """The login reminder and the APT hook, side by side in ``td``."""
+        motd = Path(TestGuardsNeverWait._script(apt_guard.MOTD_SCRIPT, td, prepare=self._stub))
+        hook = Path(td, "hook")
+        # Rendered in a directory of its own, then pointed at the reminder's
+        # (its kstat, devices and note): the same machine for both.
+        with tempfile.TemporaryDirectory() as other:
+            text = _hermetic_guard(apt_guard.HOOK_SCRIPT, other, None, ("sdz",), None, True)
+        hook.write_text(
+            text.replace(other, td).replace(
+                "PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH", f"PATH={td}/stub:/usr/bin:/bin"
+            ),
+            encoding="utf-8",
+        )
+        return str(motd), str(hook)
+
+    @staticmethod
+    def _apt(td: str, hook: str) -> tuple[int, str, float]:
+        began = time.monotonic()
+        proc = subprocess.run(
+            ["sh", hook],
+            input=TestGuardsNeverWait._DEB,
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{td}/stub:/usr/bin:/bin"},
+            check=False,
+            timeout=40,
+        )
+        return proc.returncode, proc.stdout + proc.stderr, time.monotonic() - began
+
+    def test_a_guard_waits_for_an_earlier_call_then_makes_its_own(self):
+        # M27R-1: a scan that takes 6 s (a member disk that wakes). The login
+        # reminder gives up at 3 s and leaves it; the hook right after waits
+        # for it, then scans itself, within its 30 s, and lets the kernel in.
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "slow").touch()
+            motd, hook = self._both(td)
+            try:
+                _, out = self._run(td, motd)
+                assert "did not answer within 3 s" in out, out
+                assert Path(td, "guard-call").exists()
+                rc, out, took = self._apt(td, hook)
+                assert rc == 0 and "could not be read" not in out, out
+                assert 6 < took < 15, took  # about 3 s for the earlier, 6 s its own
+                assert self._imports(td) == 2, self._calls(td)
+                assert not Path(td, "guard-call").exists()
+            finally:
+                TestGuardsNeverWait._kill(td)
+
+    def test_an_earlier_call_that_never_ends_is_waited_for_up_to_each_bound(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "hang").touch()
+            motd, hook = self._both(td)
+            # The hook's own 30 s made 5 here, so the test does not wait it out.
+            text = Path(hook).read_text(encoding="utf-8")
+            Path(hook).write_text(
+                text.replace("zark_scan 30 ||", "zark_scan 5 ||"), encoding="utf-8"
+            )
+            try:
+                _ = self._run(td, motd)
+                pid = int(Path(td, "pids").read_text(encoding="ascii").split()[0])
+                rc, out, took = self._apt(td, hook)
+                assert rc == 1 and f"an earlier zpool call has not ended (pid {pid})" in out, out
+                assert 4.8 < took < 9, took
+                assert self._imports(td) == 1, self._calls(td)
+            finally:
+                TestGuardsNeverWait._kill(td)
+
+    def test_without_proc_a_call_is_still_bounded(self):
+        # M27R-3: no /proc (a chroot without it): 2.3.1's done-file wait.
+        if os.geteuid() != 0 or not shutil.which("unshare"):
+            raise SkipTest("needs root and unshare to hide /proc")
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "hang").touch()
+            script = TestGuardsNeverWait._script(apt_guard.MOTD_SCRIPT, td, prepare=self._stub)
+            began = time.monotonic()
+            try:
+                proc = subprocess.run(
+                    ["unshare", "-m", "sh", "-c", f"umount -l /proc && exec sh {script}"],
+                    capture_output=True,
+                    text=True,
+                    env={"PATH": f"{td}/stub:/usr/bin:/bin:/usr/sbin:/sbin"},
+                    check=False,
+                    timeout=25,
+                )
+                took = time.monotonic() - began
+                out = proc.stdout + proc.stderr
+                assert proc.returncode == 0 and "did not answer within 3 s" in out, out
+                assert took < 6, took
+                assert not Path(td, "guard-call").exists()  # no pid to note
+                Path(td, "hang").unlink()
+                proc = subprocess.run(
+                    ["unshare", "-m", "sh", "-c", f"umount -l /proc && exec sh {script}"],
+                    capture_output=True,
+                    text=True,
+                    env={"PATH": f"{td}/stub:/usr/bin:/bin:/usr/sbin:/sbin"},
+                    check=False,
+                    timeout=25,
+                )
+                assert proc.returncode == 0 and "not checked" not in proc.stdout, proc.stdout
             finally:
                 TestGuardsNeverWait._kill(td)
 
@@ -12250,8 +12357,15 @@ class TestGuardsOneCall:  # pylint: disable=missing-function-docstring,protected
         assert rc == 1 and "pool odd is not ONLINE" in out, out
 
     def test_an_entry_gone_by_the_second_look_is_skipped(self):
-        rc, out, _ = self._hook("UNAVAIL", "gone")
+        rc, out, _ = self._hook("TRANSITIONING", "gone")
         assert rc == 0 and "not ONLINE" not in out, out
+
+    def test_a_state_that_lasts_is_not_read_again(self):
+        # M27R-6: a FAULTED or UNAVAIL data pool adds no second to every run.
+        for word in ("UNAVAIL", "FAULTED", "REMOVED"):
+            rc, out, looked = self._hook(word, "online")
+            assert rc == 1 and "pool odd is not ONLINE" in out, (word, out)
+            assert "sleep 1" not in looked.splitlines(), (word, looked)
 
     def test_a_suspended_pool_is_not_read_again(self):
         rc, out, looked = self._hook("SUSPENDED", "online")

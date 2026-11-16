@@ -1742,9 +1742,10 @@ hook's scan: a ZFS member disk that sleeps can take more than 10 s to
 answer) or 10 s (the rest) for a command, leaving one that does not end
 behind with none of its descriptors. One left behind is noted in
 */run/zark-guard-call*, and while it still runs no guard starts another:
-each answers as for a command that did not end. A state other than
-ONLINE, DEGRADED or SUSPENDED (a pool being imported) is read again after
-a second. The reminder then names the pool, or says why it
+each waits for it within its own bound, then starts its own, and answers
+as for a command that did not end if it has not ended by then. A
+TRANSITIONING state (a pool being imported), or one that cannot be read,
+is read again after a second. The reminder then names the pool, or says why it
 could not check; the hook, the prerm script and the update-grub guard
 refuse. **setup** installs this version's copies: run it after upgrading
 **zark**; until then **backup** and **monitor** say *zark's guards are out
