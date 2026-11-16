@@ -123,7 +123,23 @@ to `<zark_root>/zark.log` next to the script (which survives reboot, since the p
 - `zark setup` installs a login message and an hourly check: they warn when a pool is 80 % full or more (with a desktop notification from 90 %) and say how many days have passed since each drive's last backup.
 - zark writes what it is doing and how the backups stand to two JSON files that any program can read without root: [docs/STATUS-FILES.md](docs/STATUS-FILES.md).
 
-## On the desktop: GNOME Shell extension
+## On the desktop
+
+### GNOME app
+
+<p align="center">
+  <img alt="The zark for GNOME app's overview: how full the system pools are, the backup drives with their last backup, and the notices" src="docs/images/screenshots/gnome-app-overview.png" width="560">
+</p>
+
+[zark for GNOME](https://github.com/juanmitaboada/zark-gnome-app) shows how your backups stand in a window: how full the system pools are, each backup drive with its last backup, its space and its backup points, the datasets left out of backups, and a running backup's progress. It also runs zark's operations (back up, reclaim space, prepare, check, erase or register a drive, exclusions, retention): each one is a zark command run through `pkexec`, with the administrator's password, in a terminal inside the window where zark asks its questions as usual.
+
+It needs Ubuntu 24.04 LTS, 26.04 LTS or 26.10 with GNOME, and zark 2.3.0 or later:
+
+```bash
+sudo apt install zark-gnome-app   # from the same PPA; brings zark along
+```
+
+### GNOME Shell extension
 
 <p align="center">
   <img alt="The zark extension's menu in the GNOME top bar while a backup runs: the step, the dataset, a progress bar, the pools and the backup drives" src="docs/images/screenshots/gnome-menu-backup.png" width="320">
@@ -131,7 +147,7 @@ to `<zark_root>/zark.log` next to the script (which survives reboot, since the p
 
 [zark backup status](https://github.com/juanmitaboada/zark-gnome-extension) shows the same from the GNOME top bar: the last backup to each drive, a running backup's progress, when zark waits for an answer in its terminal, and how full the pools are. It notifies an overdue backup and a backup drive plugged in. It is read-only: it never starts or changes anything.
 
-It needs Ubuntu 26.04 LTS (GNOME Shell 50) and zark 2.1.0 or later:
+It needs Ubuntu 26.04 LTS (GNOME Shell 50) or 26.10 (GNOME Shell 51), and zark 2.1.0 or later (2.2.0 or later on 26.10):
 
 ```bash
 sudo apt install gnome-shell-extension-zark   # from the same PPA; brings zark along
