@@ -97,11 +97,13 @@ monitor` say `zark's guards are out of date: run sudo zark setup`.
   and update-grub run in a half-prepared tree; the restored datasets stay
   on the disk.
 - **`recover` refuses a live session not started in UEFI mode at its
-  start**: when `/sys/firmware/efi/efivars` is not there (a live USB
-  started in legacy BIOS or CSM mode, or with the firmware's runtime
-  services off), recover stops before it reads a drive or asks for a
-  disk, says that nothing was changed, and asks for the session to be
-  started again in UEFI mode. The boot chain it installs cannot be
+  start**: when efivarfs is not mounted at `/sys/firmware/efi/efivars`,
+  as a session started in UEFI mode mounts it at boot (a live USB started
+  in legacy BIOS or CSM mode, or with the firmware's runtime services
+  off, where the directory can be there with nothing mounted), recover
+  stops before it reads a drive or asks for a disk, says that nothing was
+  changed, and asks for the session to be started again in UEFI mode, or
+  for efivarfs to be mounted. The boot chain it installs cannot be
   written without it, and the efivarfs mount above would otherwise stop
   recover after the whole restore.
 - **A crash reaches `zark.log`**: an exception nothing caught is said

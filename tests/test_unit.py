@@ -593,6 +593,11 @@ _UDEV_DATA = patch("lib.identity.UDEV_DATA", os.path.join(_TEST_LOG_DIR, "no-ude
 # Nor whether it was booted in UEFI mode (M27R-2): recover's start finds
 # the firmware's variables; a test that needs them gone points it elsewhere.
 _EFIVARS = patch("lib.recover_checks.EFIVARS", _TEST_LOG_DIR).start()
+# and efivarfs mounted there (M27R-7), in a mount table of the suite's own.
+Path(_TEST_LOG_DIR, "mounts").write_text(
+    f"efivarfs {_TEST_LOG_DIR} efivarfs rw,nosuid,nodev,noexec,relatime 0 0\n", encoding="ascii"
+)
+_MOUNTS = patch("lib.recover_checks.MOUNTS", os.path.join(_TEST_LOG_DIR, "mounts")).start()
 # Nor its machine-id whether a drive is this system's (M4a-7): the drives
 # _fresh_fake prepares name this one as their owner, as prepare does.
 TEST_MACHINE_ID = "7e57000000000000000000000000beef"
@@ -17887,6 +17892,40 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
         ]
         assert not touched, touched
 
+    def test_efivars_not_mounted_is_refused_before_anything(self):
+        # M27R-7: the directory is there with runtime services off; a UEFI
+        # session mounts efivarfs at boot, so recover asks for the mount.
+        out = StringIO()
+        calls: dict[str, list[tuple[object, ...]]] = {}
+        with tempfile.TemporaryDirectory() as td:
+            efivars = os.path.join(td, "efivars")
+            os.mkdir(efivars)
+            mounts = os.path.join(td, "mounts")
+            Path(mounts).write_text(
+                "sysfs /sys sysfs rw 0 0\n" + f"tmpfs {efivars}x tmpfs rw 0 0\n", encoding="ascii"
+            )
+            mock = self._run_in(
+                td,
+                "YES",
+                calls=calls,
+                everything_succeeds=True,
+                extra=(
+                    patch("lib.recover_checks.EFIVARS", efivars),
+                    patch("lib.recover_checks.MOUNTS", mounts),
+                    redirect_stdout(out),
+                ),
+            )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert "This live session was not started in UEFI mode (efivarfs is not mounted" in text
+        assert "efi=noruntime" in text, text[-1500:]
+        assert "sudo mount -t efivarfs efivarfs" in text, text[-1500:]
+        assert "Nothing was changed: no disk was touched" in text, text[-1500:]
+        assert not calls, calls  # no point chosen, no plan built
+        touched = [
+            c for c in mock.calls if c.startswith(("zpool", "zfs", "sgdisk", "wipefs", "mkfs"))
+        ]
+        assert not touched, touched
+
     def test_a_bpool_left_at_its_monthly_is_mounted_and_its_kernels_checked(self):
         """M4dR-6 (P8): ``run`` mounts bpool explicitly whenever the restore
         put something there, a bpool left at its monthly included, and names
@@ -19190,6 +19229,52 @@ class TestKeyStatusRead:  # pylint: disable=missing-function-docstring,too-few-p
                 assert "I/O error" in str(e)
             else:
                 raise AssertionError("expected KeyStatusError")
+
+
+class TestRefuseNoUefi:  # pylint: disable=missing-function-docstring
+    """M27R-7: recover's start needs efivarfs mounted at EFIVARS, read from
+    the mount table, not only the directory."""
+
+    @staticmethod
+    def _refused(table: str | None) -> str:
+        """recover's check against a mount table; its FATAL text, "" when it passed."""
+        from lib import recover_checks  # pylint: disable=import-outside-toplevel
+
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            efivars = os.path.join(td, "ef i")  # a space: \040 in the table
+            os.mkdir(efivars)
+            mounts = os.path.join(td, "mounts")
+            if table is not None:
+                table = table.replace("@", efivars.replace(" ", "\\040"))
+                Path(mounts).write_text(table, encoding="utf-8")
+            with (
+                patch("lib.recover_checks.EFIVARS", efivars),
+                patch("lib.recover_checks.MOUNTS", mounts),
+                patch("builtins.input", return_value=""),
+                redirect_stdout(out),
+            ):
+                try:
+                    recover_checks.refuse_no_uefi(make_log())
+                except SystemExit:
+                    return Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        return ""
+
+    def test_mounted_passes(self):
+        line = "efivarfs @ efivarfs rw,nosuid,nodev,noexec,relatime 0 0\n"
+        assert self._refused("proc /proc proc rw 0 0\n" + line) == ""
+
+    def test_another_filesystem_there_is_refused(self):
+        text = self._refused("tmpfs @ tmpfs rw 0 0\n")
+        assert "efivarfs is not mounted at" in text, text
+
+    def test_efivarfs_elsewhere_is_refused(self):
+        text = self._refused("efivarfs /mnt/x efivarfs rw 0 0\n")
+        assert "efivarfs is not mounted at" in text, text
+
+    def test_an_unreadable_table_is_refused(self):
+        text = self._refused(None)
+        assert "efivarfs is not mounted at" in text, text
 
 
 class TestKeysForEncryptionRoots:  # pylint: disable=missing-function-docstring

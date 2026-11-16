@@ -20,6 +20,7 @@ session not started in UEFI mode (M27R-2), checked at recover's start.
 """
 
 import os
+import re
 from typing import NoReturn
 
 from lib import pool_record
@@ -30,26 +31,59 @@ from lib.log import Log
 # Where the kernel shows the firmware's variables in a session booted in
 # UEFI mode with its runtime services on (the suite points it elsewhere).
 EFIVARS = "/sys/firmware/efi/efivars"
+# This process's mount table, where efivarfs is looked for at EFIVARS.
+MOUNTS = "/proc/self/mounts"
+
+
+def _efivarfs_mounted() -> bool:
+    """Whether MOUNTS has an efivarfs line at EFIVARS; an unreadable table
+    is not mounted (recover cannot tell, and step 15 would fail)."""
+    try:
+        with open(MOUNTS, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        fields = line.split()
+        # The kernel writes a space in a path as \040 (fs/proc_namespace.c).
+        if len(fields) >= 3 and fields[2] == "efivarfs":
+            where = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[1])
+            if where == EFIVARS:
+                return True
+    return False
 
 
 def refuse_no_uefi(log: Log) -> None:
     """FATAL when this session was not started in UEFI mode (M27R-2): the
     boot chain recover installs (grub-install, shim's reconfigure) writes
     the firmware's boot entry through efivarfs, and its mount is fatal at
-    step 15, after the restore. Checked first, when nothing has changed."""
-    if os.path.isdir(EFIVARS):
+    step 15, after the restore. Checked first, when nothing has changed:
+    efivarfs mounted at EFIVARS, as a UEFI session mounts it at boot
+    (M27R-7); the directory alone is there with runtime services off."""
+    if _efivarfs_mounted():
         return
+    present = os.path.isdir(EFIVARS)
+    causes = [
+        "The live USB was started in legacy BIOS or CSM mode",
+        "The firmware's runtime services are off (noefi or efi=noruntime)",
+    ]
+    solutions = [
+        "Nothing was changed: no disk was touched",
+        "Start the live session again in UEFI mode (the USB's UEFI entry in the "
+        + f"firmware's boot menu), then run {zark_command()} recover",
+    ]
+    if present:
+        causes.append("The live session did not mount efivarfs there")
+        solutions.append(
+            f"If it was started in UEFI mode: sudo mount -t efivarfs efivarfs {EFIVARS}, "
+            + f"then run {zark_command()} recover"
+        )
     log.fatal(
-        f"This live session was not started in UEFI mode ({EFIVARS} is missing)",
-        causes=[
-            "The live USB was started in legacy BIOS or CSM mode",
-            "The firmware's runtime services are off (noefi or efi=noruntime)",
-        ],
-        solutions=[
-            "Nothing was changed: no disk was touched",
-            "Start the live session again in UEFI mode (the USB's UEFI entry in the "
-            + f"firmware's boot menu), then run {zark_command()} recover",
-        ],
+        "This live session was not started in UEFI mode ("
+        + (f"efivarfs is not mounted at {EFIVARS}" if present else f"{EFIVARS} is missing")
+        + ")",
+        causes=causes,
+        solutions=solutions,
     )
 
 
