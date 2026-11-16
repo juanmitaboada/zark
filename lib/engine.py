@@ -174,6 +174,12 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
     # `zfs send -nvP` sizes by their exact arguments (M7-8 8a): a round's
     # planning asks again only for a send whose plan changed.
     _estimates: dict[str, int] = field(default_factory=dict)
+    # A resume token's dry run names the snapshot its partial receive brings
+    # (``toname``), by the token's arguments (A112E-2).
+    _resume_to: dict[str, str] = field(default_factory=dict)
+    # The second stream of each RESUME, told with it in its round (A112E-2):
+    # the next round does not tell it again.
+    told_tails: dict[str, str] = field(default_factory=dict)
 
     def drive_lost(self) -> str:
         """The watch's sentence, "" when the drive was never seen gone."""
@@ -313,7 +319,13 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
         return f"{rel}@{later[0].name}" if later else f"{rel}@{self.point}"
 
     def estimate(self, p: DatasetPlan, full: bool = False) -> int:
-        """Bytes a transfer would send (``zfs send -nvP``); 0 when unknown."""
+        """Bytes a transfer would send (``zfs send -nvP``); 0 when unknown.
+        A RESUME counts the stream that follows it too (:meth:`estimate_parts`)."""
+        return sum(self.stream_size(args) for args in self.estimate_parts(p, full))
+
+    def estimate_parts(self, p: DatasetPlan, full: bool = False) -> list[str]:
+        """The ``zfs send`` arguments a transfer's estimate is made of: its
+        own streams, and for a RESUME the next round's stream to the point."""
         args_list = self._send_args(p, full)
         if p.state is State.NEW and p.clone_from and not full:
             # M3 decision 7a: `-nvP -I <origin> <clone>@<point>` reports the
@@ -324,18 +336,46 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
             # which estimates from the origin (cmd/zfs/zfs_main.c:5026-5063).
             # The send itself stays `-I` (_send_args).
             args_list = [f"{self._raw(p.rel)}-i {_q(p.base)} {_q(f'{p.rel}@{self.point}')}"]
-        total = 0
-        for args in args_list:
-            if args not in self._estimates:
-                r = sh.run(f"zfs send -nvP {args}")
-                size = 0
-                for line in (r.stdout + "\n" + r.stderr).splitlines():
-                    fields = line.split("\t")
-                    if len(fields) == 2 and fields[0] == "size" and fields[1].isdigit():
-                        size += int(fields[1])
-                self._estimates[args] = size
-            total += self._estimates[args]
-        return total
+        if not full and (tail := self.resume_tail(p)):
+            args_list = [*args_list, tail]
+        return args_list
+
+    def resume_tail(self, p: DatasetPlan) -> str:
+        """A RESUME's next stream: from the snapshot its partial receive
+        brings to the point, as the next round sends it once the resume
+        lands (A112E-2). "" when the partial brings the point itself, or
+        when its token's dry run named no snapshot of this dataset."""
+        if p.state is not State.RESUME:
+            return ""
+        token = self._send_args(p)[0]
+        _ = self.stream_size(token)
+        to, pt = self._resume_to.get(token, ""), f"{p.rel}@{self.point}"
+        if not to.startswith(f"{p.rel}@") or to == pt:
+            return ""
+        return f"{self._raw(p.rel)}-I {_q(to)} {_q(pt)}"
+
+    def stream_size(self, args: str) -> int:
+        """One stream's bytes (``zfs send -nvP <args>``), asked once; 0 when
+        unknown. The dry run is bounded: one that fails or does not answer
+        leaves its part unknown, says so, and never holds the run (A112E-2)."""
+        if args not in self._estimates:
+            r = sh.run(f"zfs send -nvP {args}", timeout=ESTIMATE_TIMEOUT_S)
+            size = 0
+            for line in (r.stdout + "\n" + r.stderr).splitlines():
+                fields = line.split("\t")
+                if len(fields) == 2 and fields[0] == "size" and fields[1].isdigit():
+                    size += int(fields[1])
+                elif line.startswith(TONAME):
+                    self._resume_to[args] = line.removeprefix(TONAME).strip()
+            if not r.ok:
+                why = (
+                    f"no answer within {ESTIMATE_TIMEOUT_S} s"
+                    if r.returncode == sh.TIMED_OUT
+                    else last_message(r.stderr) or f"rc={r.returncode}"
+                )
+                self.log.info(f"  size unknown for zfs send {args}: {why}")
+            self._estimates[args] = size
+        return self._estimates[args]
 
     # ── decisions (each one asked to the user by the caller) ─────────────
 
@@ -974,6 +1014,12 @@ class Result:  # pylint: disable=too-many-instance-attributes
 Decide = Callable[[list[DatasetPlan], "Run"], bool]
 
 MAX_ROUNDS = 3
+# A `zfs send -nvP` that has not answered in this time leaves its part of an
+# estimate unknown (A112E-2): an estimate never holds a run.
+ESTIMATE_TIMEOUT_S = 120
+# How libnvpair prints a resume token's snapshot in a verbose dry run
+# (lib/libzfs/libzfs_sendrecv.c:1838-1842; libnvpair.c: "\t%s = %s").
+TONAME = "\ttoname = "
 
 
 def replicate(run: Run, decide: Decide) -> Result:
@@ -1074,7 +1120,19 @@ def _announce(run: Run, todo: list[DatasetPlan], obs: TransferObserver) -> None:
     if run.observer is None:
         return
     for p in todo:
-        obs.planned(run.estimate(p))
+        parts = run.estimate_parts(p)
+        if parts == [run.told_tails.get(p.rel)]:
+            # Told with its resume in an earlier round: the total stays whole.
+            del run.told_tails[p.rel]
+            continue
+        if p.state is State.RESUME and len(parts) > 1:
+            # Two transfers, the resume and the next round's to the point,
+            # both told now so the total does not grow later (A112E-2).
+            run.told_tails[p.rel] = parts[-1]
+            obs.planned(sum(run.stream_size(a) for a in parts[:-1]))
+            obs.planned(run.stream_size(parts[-1]))
+            continue
+        obs.planned(sum(run.stream_size(a) for a in parts))
 
 
 def _rounds(run: Run, res: Result, obs: TransferObserver) -> None:

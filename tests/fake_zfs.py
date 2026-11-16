@@ -423,7 +423,8 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
     # ── zfs list ─────────────────────────────────────────────────────────
 
     def _list(self, args: list[str]) -> RunResult:  # pylint: disable=too-many-branches
-        types, fields, root, recursive = ["filesystem", "volume"], ["name"], "", False
+        types, fields, recursive = ["filesystem", "volume"], ["name"], False
+        roots: list[str] = []  # zfs list takes several datasets, listed in order
         depth = -1  # -d N: N levels below the root
         i = 0
         while i < len(args):
@@ -439,11 +440,13 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             elif a.startswith("-"):
                 i += 1
             else:
-                root, i = a, i + 1
-        if root not in self.ds:
-            return _err(f"cannot open '{root}': dataset does not exist")
+                roots, i = [*roots, a], i + 1
+        for root in roots or [""]:
+            if root not in self.ds:
+                return _err(f"cannot open '{root}': dataset does not exist")
         names = [
             n
+            for root in roots
             for n in sorted(self.ds)
             if n == root
             or (
@@ -842,13 +845,24 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
             err = self._resume_check(args[args.index("-t") + 1])
             if err:
                 return _err(err)
+        head = ""
+        if "-nvP" in args and "-t" in args:
+            # libzfs prints the token's nvlist first in a verbose dry run, on
+            # stdout (lib/libzfs/libzfs_sendrecv.c:1829-1842, libnvpair's
+            # "\t<name> = <value>" lines).
+            _, src_ds, snapname, _frm, toguid = (args[args.index("-t") + 1].split("|") + [""])[:5]
+            head = (
+                "resume token contents:\nnvlist version: 0\n\tobject = 0x1\n\toffset = 0x0\n"
+                f"\tbytes = 0x0\n\ttoguid = 0x{int(toguid or 0):x}\n"
+                f"\ttoname = {src_ds}@{snapname}\n"
+            )
         if "-nvP" in args:
             incremental = any(a in args for a in ("-i", "-I", "-t"))
             if "-I" in args and args[args.index("-I") + 1].split("@")[0] != args[-1].split("@")[0]:
                 # OpenZFS 2.4.1 estimates a clone sent with -I from its origin
                 # as a full stream (libzfs_sendrecv.c:1237-1255).
                 incremental = False
-            return _ok(f"size\t{4096 if incremental else 10**9}\n")
+            return _ok(f"{head}size\t{4096 if incremental else 10**9}\n")
         return _err("fake: send outside a pipe")
 
     def _receive_abort(self, args: list[str]) -> RunResult:

@@ -194,12 +194,12 @@ with no terminal reads nothing, so neither `waiting_for_input` nor
 
 | Field | Type | Meaning |
 |---|---|---|
-| `datasets_total` | integer | dataset transfers planned so far in this run: one per dataset per round; a dataset resumed in one round and finished in the next counts twice. It may grow while the run goes on |
+| `datasets_total` | integer | dataset transfers planned so far in this run: one per dataset per round; a dataset resumed in one round and finished in the next counts twice, both planned with the resume (2.3.1). It grows later only when a round plans a send not planned before (a failed resume sent again) |
 | `datasets_done` | integer | of those, how many ended (sent or failed) |
 | `datasets_failed` | integer | of `datasets_done`, how many failed |
 | `dataset` | string or null | the dataset being sent now; null between two |
 | `dataset_state` | string or null, open enumeration | its plan state: `new`, `incremental`, `resume`, `via bookmark`. Generic case: "sending" |
-| `bytes_total` | integer or null | sum of the stream sizes `zfs send -nvP` estimated for every send planned so far; null when no send has an estimate. It may grow with `datasets_total` |
+| `bytes_total` | integer or null | sum of the stream sizes `zfs send -nvP` estimated for every send planned so far, a resumed dataset's stream to the point included from the resume's round (2.3.1); null when no send has an estimate. It grows only with `datasets_total` |
 | `bytes_total_partial` | boolean | true when at least one planned send has no estimate, so `bytes_total` is a floor |
 | `bytes_done` | integer or null | stream bytes sent so far in this run, every send included |
 | `rate_bytes_per_s` | integer or null | `bytes_done`'s rate over the last 30 s; null until two measurements exist |

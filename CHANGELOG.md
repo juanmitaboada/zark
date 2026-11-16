@@ -112,6 +112,25 @@ everything 2.3.1 writes.
   exists; the disk's own link stays after the desktop ejects the drive.
   `docs/STATUS-FILES.md` and both schemas say so.
 
+- **A resumed transfer is estimated whole from the start** (A112E-2, the
+  GNOME app on eli): a dataset whose partial receive is resumed reaches
+  the backup point in two streams, the resume and then the incremental
+  from the snapshot it brings. The second was estimated only in the next
+  round, so `progress.json`'s `bytes_total` grew after the first and a
+  bar's percentage fell back or held. Both are now estimated and planned
+  when the resume is (the snapshot is read from the token's own dry run),
+  and the plan's "Estimated transfer" counts both, so its space check
+  does too: with a drive near its margin that can bring the retention's
+  removals or the question about old monthly points one run earlier, or
+  stop a backup that would have run out of space in its second round.
+- **`zark prepare` no longer counts excluded datasets in its size to
+  transfer** (P3, eli): its line was `zfs list -o used rpool`, which
+  holds every dataset, so an excluded 115G image made "~124G to transfer"
+  for a 9G send. The excluded subtrees' space is now left out, and the
+  line says how many. A `zfs send -nvP` estimate or this `zfs list` that
+  fails or does not answer within its bound (120 s, 60 s) leaves its part
+  unknown, says so, and never stops a run.
+
 #### Known limitations
 
 - A pool whose drive never returns stays imported and suspended until a

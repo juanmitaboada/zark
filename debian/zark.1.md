@@ -264,7 +264,8 @@ end-to-end sequences.
     destroy takes on the drive is listed, archived lineages and datasets
     kept as only on the drive included.
 
-    **Space.** The estimated transfer, the full sends above included, is
+    **Space.** The estimated transfer, the full sends above included (and,
+    for a resumed dataset, the stream to the point that follows it), is
     checked against the drive's available space before any choice is
     applied. When the drive would end with less free space than its margin
     (10 % of its size by default), what its retention removes anyway goes

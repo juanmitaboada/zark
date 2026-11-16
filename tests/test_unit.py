@@ -14272,6 +14272,43 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring,too-man
         assert "Excluded: 1 dataset subtree(s), by zark exclude:" in banner, banner
         assert "  rpool/var/lib/docker (" in banner and ", backups)" in banner, banner
 
+    def test_prepare_counts_nothing_of_an_excluded_subtree(self):
+        """P3 (eli, 2026-11-16): prepare's line counted an excluded 115G image."""
+        fake = _fresh_fake(())
+        fake.ds["rpool/var/lib/docker"].props["org.zark:replicate"] = "no"
+        cfg_dir = Path(tempfile.mkdtemp())
+        registry_write_atomic(cfg_dir / "known_drives.json", {})
+        out = StringIO()
+        assert self._prepare(fake, cfg_dir, out=out) == 0, out.getvalue()
+        assert "zfs list -Hp -o name,used rpool rpool/var/lib/docker" in fake.calls, fake.calls
+        assert "to transfer (1 subtree(s) excluded from backups not counted)" in out.getvalue()
+
+    def test_the_size_to_transfer_leaves_out_what_is_excluded(self):
+        mock = MockShell()
+        mock.on("zfs list -Hp -o name,used rpool rpool/img").succeeds(
+            f"rpool\t{133 * 2**30}\nrpool/img\t{124 * 2**30}\n"
+        )
+        with patch_sh(mock):
+            line = prepare_mod.to_transfer(frozenset({"rpool/img", "bpool/x"}))
+        assert line == "~9.0G to transfer (1 subtree(s) excluded from backups not counted)", line
+        mock = MockShell()
+        mock.on("zfs list -Hp -o name,used rpool").fails("cannot open 'rpool': no such pool")
+        with patch_sh(mock):
+            line = prepare_mod.to_transfer(frozenset())
+        assert line == "Size to transfer unknown: zfs list: cannot open 'rpool': no such pool", line
+
+    def test_the_size_to_transfer_is_bounded(self):
+        seen: list[int | None] = []
+
+        def fake_run(cmd: object, timeout: int | None = None, **_k: object) -> _sh.RunResult:
+            seen.append(timeout)
+            return _sh.RunResult(_sh.TIMED_OUT, "", "Command timed out after 60s", str(cmd))
+
+        with patch.object(_sh, "run", fake_run):
+            line = prepare_mod.to_transfer(frozenset())
+        assert seen == [prepare_mod.LIST_TIMEOUT_S], seen
+        assert line == "Size to transfer unknown: zfs list: Command timed out after 60s", line
+
     def test_prepare_records_origins_pools_on_its_point(self):
         """M6-5: the first point carries how origin's pools are."""
         fake = _fresh_fake(())
@@ -25807,6 +25844,83 @@ class TestEngineTransferObserver:  # pylint: disable=missing-function-docstring
             calls = len([c for c in fake.calls if "-nvP" in c])
             assert [eng.estimate(p) for p in plans] == first
             assert len([c for c in fake.calls if "-nvP" in c]) == calls
+
+    def _cut(self) -> FakeZfs:
+        """A drive whose home holds a partial receive: P2's run was cut at
+        the hourly before it, so its token names the hourly, not a point."""
+        fake = _fresh_fake()
+        assert self._run(fake, None, P1).ok
+        _tick(fake, "2026-10-07_12:00:00_hourly")
+        fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 0)
+        assert not self._run(fake, None, P2).ok
+        return fake
+
+    def test_a_resume_is_told_whole_before_the_first_send(self):
+        # A112E-2: the resume and the stream after it (the next round's) are
+        # told in round 1; round 2 tells nothing, so the total never grows.
+        heard = _Heard()
+        assert self._run(self._cut(), heard, P3).ok
+        kinds = [k for k, _ in heard.events]
+        planned = [v for k, v in heard.events if k == "planned"]
+        assert "planned" not in kinds[kinds.index("sending") :], kinds
+        assert len(planned) == kinds.count("sending") == kinds.count("ended"), kinds
+        home = [
+            v
+            for k, v in heard.events
+            if k == "sending" and str(v).startswith("rpool/USERDATA/home ")
+        ]
+        assert home == ["rpool/USERDATA/home resume", "rpool/USERDATA/home incremental"], home
+
+    def test_a_resumes_estimate_counts_the_stream_after_it(self):
+        # backup's "Estimated transfer" and its space check (Juanmi's 1a).
+        fake = self._cut()
+        with patch_sh(fake), redirect_stdout(StringIO()):
+            eng = engine.Run("backup", "111", Log(), P3, sleep=lambda _s: None)
+            assert eng.take_point()
+            p = next(q for q in eng.survey() if q.rel == "rpool/USERDATA/home")
+            assert p.state is repl.State.RESUME
+            parts = eng.estimate_parts(p)
+            assert eng.estimate(p) == 2 * 4096, parts
+        hourly = shlex.quote("rpool/USERDATA/home@autosnap_2026-10-07_12:00:00_hourly")
+        assert parts[1] == f"-w -I {hourly} {shlex.quote(f'rpool/USERDATA/home@{P3}')}", parts
+
+    def test_a_resume_with_no_named_snapshot_has_no_tail(self):
+        # The point itself, another dataset, or a token's dry run that failed.
+        rel = "rpool/USERDATA/home"
+        with redirect_stdout(StringIO()):
+            # Its pools given: Run's default reads the host's (zpool list).
+            eng = engine.Run("backup", "111", Log(), P1, pools=["rpool"], sleep=lambda _s: None)
+        eng.dest = {rel: repl.Dest(rel, token="tok")}
+        p = repl.DatasetPlan(rel, repl.State.RESUME)
+        eng._estimates["-t tok"] = 4096  # pylint: disable=protected-access
+        for named in (f"{rel}@{P1}", f"rpool/var@{P2}", ""):
+            eng._resume_to = {"-t tok": named} if named else {}  # pylint: disable=protected-access
+            assert eng.resume_tail(p) == "" and eng.estimate_parts(p) == ["-t tok"], named
+        eng._resume_to = {"-t tok": f"{rel}@{P2}"}  # pylint: disable=protected-access
+        assert eng.estimate_parts(p)[1].endswith(
+            f"-I {shlex.quote(f'{rel}@{P2}')} {shlex.quote(f'{rel}@{P1}')}"
+        )
+
+    def test_an_estimate_that_fails_or_does_not_answer_is_unknown_and_said(self):
+        seen: list[int | None] = []
+
+        def fake_run(cmd: str, timeout: int | None = None, **_k: object) -> _sh.RunResult:
+            if "-nvP" not in cmd:
+                return _sh.RunResult(0, "", "", cmd)
+            seen.append(timeout)
+            if "-t " in cmd:
+                return _sh.RunResult(1, "", "cannot resume send: 'x' no longer exists", cmd)
+            return _sh.RunResult(_sh.TIMED_OUT, "", "Command timed out after 120s", cmd)
+
+        out = StringIO()
+        with patch.object(_sh, "run", fake_run), redirect_stdout(out):
+            eng = engine.Run("backup", "111", Log(), P1, sleep=lambda _s: None)
+            assert eng.stream_size("-w rpool/x@a") == 0
+            assert eng.stream_size("-t tok") == 0
+        assert seen == [engine.ESTIMATE_TIMEOUT_S] * 2, seen
+        text = out.getvalue()
+        assert "size unknown for zfs send -w rpool/x@a: no answer within 120 s" in text, text
+        assert "size unknown for zfs send -t tok: cannot resume send: 'x' no longer exists" in text
 
     def test_a_backup_shows_the_transfer_then_null(self):
         shown: list[dict[str, Any] | None] = []

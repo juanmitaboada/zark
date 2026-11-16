@@ -25,6 +25,10 @@ zark (2.3.1~rc2-1) UNRELEASED; urgency=medium
   * The forced reboot's steps are joined with ';', its lines say what it
     skips and what to do when a step does not return, and it is never
     printed inside a box.
+  * A resumed transfer is estimated whole from its first round (the
+    stream to the point after the resume included), so progress.json's
+    bytes_total does not grow and the space check counts it; prepare's
+    size to transfer leaves excluded datasets out.
   * Strict listings fail on stderr: no dataset is called diverged after
     the drive went away.
   * One measure of data errors (zpool status -p) at step 3, before the

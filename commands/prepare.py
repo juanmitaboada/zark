@@ -214,10 +214,9 @@ def run(
         4,
         f"Sending a backup point of {' and '.join(pool_record.pools_for(layout))} → {new_pool}...",
     )
-    rpool_used = sh.run("zfs list -H -o used rpool").output
-    log.info(f"~{rpool_used} to transfer")
     new_guid = zfs.pool_guid(new_pool)
     declared, excluded_mark = exclusions.for_run(survey.source_pools(), log)
+    log.info(to_transfer(declared.no_backup))
     eng = engine.Run(
         new_pool,
         new_guid,
@@ -574,3 +573,24 @@ def _send_keystore(new_pool: str, cleanup: Cleanup, log: Log) -> bool:
         return False
     log.ok(f"Keystore sent to {new_pool}/keystore")
     return True
+
+
+# zfs list answers from the pool's own records; it is bounded anyway, as an
+# estimate must never hold a run (A112E-2's rule).
+LIST_TIMEOUT_S = 60
+
+
+def to_transfer(left_out: frozenset[str]) -> str:
+    """The line that says what the first send carries, roughly: rpool's
+    space less that of the subtrees left out of backups, which are not sent
+    (P3: on eli an excluded 115G image was counted). Unknown, and said so,
+    when zfs list fails or does not answer."""
+    tops = sorted(t for t in left_out if t.startswith("rpool/"))
+    r = sh.run(["zfs", "list", "-Hp", "-o", "name,used", "rpool", *tops], timeout=LIST_TIMEOUT_S)
+    used = dict(ln.split("\t", 1) for ln in r.stdout.splitlines() if ln.count("\t") == 1)
+    if not r.ok or not all(used.get(n, "").isdigit() for n in ["rpool", *tops]):
+        why = r.stderr.strip().splitlines()[-1:] or [f"rc={r.returncode}"]
+        return f"Size to transfer unknown: zfs list: {why[0]}"
+    total = int(used["rpool"]) - sum(int(used[t]) for t in tops)
+    excluded = f" ({len(tops)} subtree(s) excluded from backups not counted)" if tops else ""
+    return f"~{sh.humanize_bytes(max(total, 0))} to transfer{excluded}"

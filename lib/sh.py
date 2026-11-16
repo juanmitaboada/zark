@@ -69,6 +69,8 @@ class RunResult:
 # What run() returns, without starting the child, when ``input`` cannot be
 # encoded in the locale's encoding: 126, as a shell says it of a command it
 # cannot execute.
+# What run() returns for a command it ended at its timeout (timeout(1)'s status).
+TIMED_OUT = 124
 INPUT_NOT_ENCODABLE = 126
 INPUT_NOT_ENCODABLE_TEXT = "the input holds a character this locale"
 
@@ -183,7 +185,7 @@ def run(  # pylint: disable=too-many-branches,too-many-locals
             signals.stop_children([proc], signal.SIGKILL)
             _ = proc.communicate()
             return RunResult(
-                returncode=124,
+                returncode=TIMED_OUT,
                 stdout="",
                 stderr=f"Command timed out after {timeout}s",
                 command=cmd_str,
