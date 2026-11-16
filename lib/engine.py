@@ -51,7 +51,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from lib import sh
+from lib import pool_state, sh
 from lib.anchors import POINT_FOR, anchor_point, point_owners, release_point
 from lib.boot_layout import Layout
 from lib.cleanup import Cleanup
@@ -657,6 +657,7 @@ class Run:  # pylint: disable=too-many-instance-attributes,too-many-public-metho
                 self._recv(p.rel, resume, clone_from),
                 log=self.log,
                 meter=self.observer.meter if self.observer else None,
+                pool=pool_state.hold(self.pool),
             )
             if not r.ok:
                 err = pipe_message(r) or f"rc={r.returncode}"

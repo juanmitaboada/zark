@@ -302,7 +302,11 @@ class _Drain:
 
 
 def run_pipe(
-    cmd1: str, cmd2: str, log: Log | None = None, meter: PipeMeter | None = None
+    cmd1: str,
+    cmd2: str,
+    log: Log | None = None,
+    meter: PipeMeter | None = None,
+    pool: signals.Held | None = None,
 ) -> RunResult:
     """Run cmd1 | cmd2 pipeline.
 
@@ -319,6 +323,11 @@ def run_pipe(
     right side already produces a non-zero p2.returncode, so ENOSPC was
     detected correctly even before this change. The fix is for the other
     failure modes.
+
+    ``pool`` is the pool the transfer reads or writes that a drive can take
+    away (the backup pool, :func:`lib.pool_state.hold`): while it reads
+    SUSPENDED an interrupt leaves the two ``zfs`` with no signal
+    (:func:`signals.stop_children`, R5-1).
 
     ``meter`` hears when the left side starts and, once it ended, what it
     wrote in all, measured by the kernel outside the data path (M7-2): the
@@ -365,7 +374,8 @@ def run_pipe(
                     meter.end(_written_at_exit(p1.pid))
                 _ = p1.wait()
             except BaseException:
-                signals.stop_children([p1, p2])
+                # Left with no signal while ``pool`` is suspended (R5-1).
+                signals.stop_children([p1, p2], pool=pool)
                 left.join(timeout=5)
                 raise
             finally:

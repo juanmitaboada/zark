@@ -112,6 +112,17 @@ everything 2.3.1 writes.
   exists; the disk's own link stays after the desktop ejects the drive.
   `docs/STATUS-FILES.md` and both schemas say so.
 
+- **An interrupted transfer to a drive that went away no longer spins
+  at full CPU** (R5-1, eli): on Ctrl+C or another stop signal zark ended
+  the transfer's `zfs send` and `zfs receive` with SIGINT, then SIGKILL.
+  In the ioctl of a suspended pool neither can end, and on OpenZFS 2.4 a
+  signal left pending makes the receive loop without sleeping until the
+  reboot (65 to 100 % CPU on eli). While the pool it writes or reads
+  reads SUSPENDED, zark now sends them nothing: it says they are left
+  running, they stay asleep, and the reboot ends them. A pool that was
+  resumed, or reads ONLINE or DEGRADED, is stopped as before. This covers
+  backup's transfers, recover's (the drive is the side read) and the
+  keystore prepare sends to a new drive.
 - **A resumed transfer is estimated whole from the start** (A112E-2, the
   GNOME app on eli): a dataset whose partial receive is resumed reaches
   the backup point in two streams, the resume and then the incremental

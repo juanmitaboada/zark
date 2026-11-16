@@ -65,6 +65,7 @@ from lib import (
     exclusions,
     platform_facts,
     pool_record,
+    pool_state,
     replication,
     sh,
     survey,
@@ -697,7 +698,8 @@ def _receive(  # pylint: disable=too-many-arguments,too-many-positional-argument
     send = "zfs send " + ("-w " if raw else "") + (f"-i {base} " if base else "") + src
     recv = f"zfs receive -u {' '.join(options)} {dst}".replace("  ", " ")
     log.info(f"  {dst} ← @{src.split('@', 1)[1]}")
-    r = sh.run_pipe(send, recv)
+    # The backup pool is the side a drive can take away (R5-1).
+    r = sh.run_pipe(send, recv, pool=pool_state.hold(src.split("/", 1)[0]))
     if r.ok:
         return True
     if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):
@@ -854,6 +856,17 @@ def anchor_bpool(row: RestoreRow, pool: str, disk_guid: str, log: Log) -> str:
         return ""
     log.warn(f"  {row.rel}: could not anchor {row.snap.name}: {r.stderr.strip()}")
     return _not_anchored(row.rel, pool)
+
+
+def _send_keystore(keystore_snap: str, pool_name: str) -> sh.RunResult:
+    """The keystore zvol's stream into the new rpool. The backup pool is
+    named for an interrupt: while it is suspended the two ``zfs`` are left
+    with no signal (R5-1)."""
+    return sh.run_pipe(
+        f"zfs send {keystore_snap}",
+        "zfs receive -u -o encryption=off rpool/keystore",
+        pool=pool_state.hold(pool_name),
+    )
 
 
 def drop_prepare_snapshot(keystore_snap: str, log: Log) -> None:
@@ -1310,10 +1323,7 @@ def run(
     # fix the backup before retrying. See _abort_missing_keystore() for
     # the full rationale and the rejected fallback options.
     log.info("Restoring keystore zvol...")
-    r = sh.run_pipe(
-        f"zfs send {plan.keystore_snap}",
-        "zfs receive -u -o encryption=off rpool/keystore",
-    )
+    r = _send_keystore(plan.keystore_snap, pool_name)
     if not r.ok:
         log.error(f"Keystore restore failed: {r.stderr.strip()}")
         if sh.is_enospc(r.stderr) or sh.is_enospc(r.stdout):

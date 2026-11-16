@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
-from lib import dpkg_lock
+from lib import dpkg_lock, signals
 from lib.config import zark_command
 from lib.sh import CHILD_CWD
 
@@ -73,6 +73,13 @@ def state(pool: str, kstat_dir: Path | None = None) -> str:
         return MISSING
     except (OSError, UnicodeDecodeError):
         return UNREADABLE
+
+
+def hold(pool: str) -> signals.Held:
+    """``pool`` for an interrupt of a transfer (:func:`signals.stop_children`):
+    suspended when its kstat state reads SUSPENDED at that moment; a state
+    that cannot be read does not count (R5-1)."""
+    return signals.Held(pool, lambda: state(pool) == "SUSPENDED")
 
 
 def imported(pool: str, kstat_dir: Path | None = None) -> bool:

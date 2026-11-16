@@ -25,6 +25,8 @@ zark (2.3.1~rc2-1) UNRELEASED; urgency=medium
   * The forced reboot's steps are joined with ';', its lines say what it
     skips and what to do when a step does not return, and it is never
     printed inside a box.
+  * An interrupted transfer to a suspended pool is left with no signal:
+    a pending one made the receive spin at full CPU until the reboot.
   * A resumed transfer is estimated whole from its first round (the
     stream to the point after the resume included), so progress.json's
     bytes_total does not grow and the space check counts it; prepare's

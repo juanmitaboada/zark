@@ -96,6 +96,8 @@ class MockShell:
     def __init__(self, strict: bool = False):
         self._responses: list[MockResponse] = []
         self._calls: list[str] = []
+        self.pipe_pools: list[str | None] = []
+        self.pipe_cmds: list[str] = []  # each pipe, as pipe_pools
         self._strict = strict  # if True, unregistered commands raise
 
     def on(self, pattern: str, regex: bool = False) -> MockResponse:
@@ -163,9 +165,14 @@ class MockShell:
             raise RuntimeError(f"Command failed: {cmd_str}")
         return r
 
-    def mock_run_pipe(self, cmd1, cmd2, _log=None, meter=None) -> RunResult:
+    def mock_run_pipe(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, cmd1, cmd2, _log=None, meter=None, pool=None
+    ) -> RunResult:
         """Drop-in replacement for sh.run_pipe(); a meter hears one send of
-        nothing (the commands never run)."""
+        nothing (the commands never run). The pool each pipe names for an
+        interrupt is kept (R5-1)."""
+        self.pipe_pools.append(None if pool is None else pool.name)
+        self.pipe_cmds.append(f"{cmd1} | {cmd2}")
         if meter is not None:
             meter.begin(0)
             meter.end(0)

@@ -35,6 +35,7 @@ from lib import (
     exclusions,
     pending,
     pool_record,
+    pool_state,
     registry,
     sh,
     status_file,
@@ -565,7 +566,12 @@ def _send_keystore(new_pool: str, cleanup: Cleanup, log: Log) -> bool:
         _ = sh.run(f"zfs destroy {snap}", log=log)
 
     cleanup.track_action(drop)
-    r = sh.run_pipe(f"zfs send {snap}", f"zfs receive -u {new_pool}/keystore", log=log)
+    r = sh.run_pipe(
+        f"zfs send {snap}",
+        f"zfs receive -u {new_pool}/keystore",
+        log=log,
+        pool=pool_state.hold(new_pool),
+    )
     drop()
     cleanup.untrack_action(drop)
     if not r.ok:

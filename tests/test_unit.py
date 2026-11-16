@@ -14282,6 +14282,13 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring,too-man
         assert self._prepare(fake, cfg_dir, out=out) == 0, out.getvalue()
         assert "zfs list -Hp -o name,used rpool rpool/var/lib/docker" in fake.calls, fake.calls
         assert "to transfer (1 subtree(s) excluded from backups not counted)" in out.getvalue()
+        # The keystore's send names the new drive's pool for an interrupt (R5-1).
+        keystore = [
+            p
+            for p, c in zip(fake.pipe_pools, fake.pipe_cmds, strict=True)
+            if c.endswith("blue/keystore")
+        ]
+        assert keystore == ["blue"], (fake.pipe_pools, fake.pipe_cmds)
 
     def test_the_size_to_transfer_leaves_out_what_is_excluded(self):
         mock = MockShell()
@@ -16689,7 +16696,7 @@ class TestRecoverMonthlyBase:  # pylint: disable=missing-function-docstring
         pipes: list[str] = []
         mock = MockShell()
 
-        def pipe(cmd1: str, _cmd2: str, _log: object = None) -> RunResult:
+        def pipe(cmd1: str, _cmd2: str, _log: object = None, **_kw: object) -> RunResult:
             pipes.append(cmd1)
             return RunResult(0, "", "", cmd1)
 
@@ -19947,6 +19954,146 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         assert order == ["guard", "install", "prune"], order
 
 
+class TestTransferLeftAsleep:  # pylint: disable=missing-function-docstring
+    """R5-1 (eli, revision 5, V8x): on an interrupt, a transfer whose pool
+    reads SUSPENDED is left with no signal; a pending one makes the receive
+    spin in OpenZFS's bqueue (module/zfs/bqueue.c:111-113, 2.4.4)."""
+
+    LINE = "zfs send | zfs receive left running: they cannot end while bk is suspended"
+
+    @staticmethod
+    @contextmanager
+    def _pool(state: str | None) -> Iterator[None]:
+        """A kstat directory where pool ``bk`` reads ``state``; None: its
+        state file is a directory (unreadable)."""
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "bk").mkdir()
+            if state is None:
+                (Path(td) / "bk" / "state").mkdir()
+            else:
+                (Path(td) / "bk" / "state").write_text(f"{state}\n", encoding="ascii")
+            with (
+                patch.object(pool_state, "KSTAT_DIR", Path(td)),
+                patch.object(_signals, "_log", []),
+            ):
+                yield
+
+    @staticmethod
+    def _child(argv: str | list[str]) -> tuple[subprocess.Popen[bytes], int]:
+        """A child as run_pipe starts one (its own group); the pid of the
+        command (sh -c's child, or the child itself when exec'd)."""
+        p = subprocess.Popen(argv, shell=isinstance(argv, str), process_group=0, cwd="/")  # pylint: disable=consider-using-with
+        if not isinstance(argv, str):
+            return p, p.pid
+        children = Path(f"/proc/{p.pid}/task/{p.pid}/children")
+        deadline = time.monotonic() + 5
+        while not children.read_text(encoding="ascii").split() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return p, int(children.read_text(encoding="ascii").split()[0])
+
+    @staticmethod
+    def _signals_of(pid: int) -> str | None:
+        """None when ``pid`` is gone; else its pending signals, both masks."""
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+        except FileNotFoundError:
+            return None
+        if "\nState:\tZ" in status:
+            return None
+        return " ".join(
+            ln.split()[1] for ln in status.splitlines() if ln.startswith(("SigPnd", "ShdPnd"))
+        )
+
+    @staticmethod
+    def _stop(p: subprocess.Popen[bytes], out: StringIO) -> float:
+        _signals.running("zfs send | zfs receive")
+        t = time.monotonic()
+        try:
+            with redirect_stdout(out):
+                _signals.stop_children([p], wait=2, pool=pool_state.hold("bk"))
+        finally:
+            _signals.running(None)
+        return time.monotonic() - t
+
+    def test_a_suspended_pools_transfer_is_left_with_no_signal(self):
+        p, cmd = self._child("sleep 30")
+        out = StringIO()
+        try:
+            with self._pool("SUSPENDED"):
+                took = self._stop(p, out)
+            # Only zark's sh -c is ended; the command gets nothing, so it
+            # stays asleep (no pending signal) and nothing waits for it.
+            assert p.returncode == -signal.SIGKILL, p.returncode
+            assert self._signals_of(cmd) == "0000000000000000 0000000000000000", self._signals_of(
+                cmd
+            )
+            assert took < 1, took
+            assert self.LINE + ", and end at the reboot" in out.getvalue(), out.getvalue()
+        finally:
+            os.kill(cmd, signal.SIGKILL)
+
+    def test_a_command_the_shell_exec_d_is_not_signalled_nor_waited_for(self):
+        p, cmd = self._child(["sleep", "30"])
+        out = StringIO()
+        try:
+            with self._pool("SUSPENDED"):
+                took = self._stop(p, out)
+            assert self._signals_of(cmd) == "0000000000000000 0000000000000000"
+            assert p.returncode == -signal.SIGKILL and took < 1, (p.returncode, took)
+            assert self.LINE in out.getvalue(), out.getvalue()
+        finally:
+            os.kill(cmd, signal.SIGKILL)
+            _ = os.waitpid(cmd, 0)
+
+    def test_a_resumed_or_unreadable_pools_transfer_is_stopped_as_before(self):
+        # After a clear the latch stays set but the pool reads ONLINE: the
+        # children can end, and are stopped; a state that cannot be read
+        # counts as not suspended.
+        for state in ("ONLINE", "DEGRADED", None):
+            p, cmd = self._child("sleep 30")
+            out = StringIO()
+            with self._pool(state):
+                _ = self._stop(p, out)
+            assert self._signals_of(cmd) is None, (state, self._signals_of(cmd))
+            assert "left running" not in out.getvalue(), (state, out.getvalue())
+
+    def test_an_interrupted_pipe_hands_its_pool_to_the_stop(self):
+        held = pool_state.hold("bk")
+        got: list[object] = []
+        real = _signals.stop_children
+
+        def record(
+            procs: Any, sig: int | None = None, wait: float | None = None, pool: Any = None
+        ) -> None:
+            del sig, wait  # the stop's own timing is not under test here
+            got.append(pool)
+            real(procs, signal.SIGKILL, 1)  # the test's own children end here
+
+        with (
+            patch.object(_signals, "stop_children", record),
+            patch.object(subprocess.Popen, "communicate", side_effect=KeyboardInterrupt),
+        ):
+            try:
+                _ = _sh.run_pipe("sleep 30", "sleep 30", pool=held)
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("the interrupt did not go on")
+        assert got == [held], got
+
+    def test_every_transfer_names_the_pool_a_drive_can_take_away(self):
+        # engine: the backup pool it receives into.
+        fake = _fresh_fake()
+        assert TestEngineTransferObserver()._run(fake, None).ok  # pylint: disable=protected-access
+        assert fake.pipe_pools and set(fake.pipe_pools) == {"backup"}, fake.pipe_pools
+        # recover: the backup pool it reads from, the datasets and the keystore.
+        mock = MockShell()
+        with patch_sh(mock), redirect_stdout(StringIO()):
+            _ = recover_mod._receive("backup/rpool/x@p", "rpool/x", [], True, Log())  # pylint: disable=protected-access
+            _ = recover_mod._send_keystore("backup/keystore@prepare_1", "backup")  # pylint: disable=protected-access
+        assert mock.pipe_pools == ["backup", "backup"], mock.pipe_pools
+
+
 class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
     """M4aF-6 (M4b-14): on a live session the installer's probe service is
     stopped, for this session only, before a command that imports pools."""
@@ -21763,7 +21910,9 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         real_pipe = fake.mock_run_pipe
         failed: list[str] = []
 
-        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
+        def pipe(  # pylint: disable=unused-argument
+            cmd1: str, cmd2: str, log: object = None, meter: object = None, pool: object = None
+        ) -> RunResult:
             if " -t " in cmd1 and not failed:
                 failed.append(cmd1)
                 return RunResult(1, "", "cannot receive resume stream: I/O error\n", "")
@@ -22439,7 +22588,9 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)  # the hourly lands
         real_pipe = fake.mock_run_pipe
 
-        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
+        def pipe(  # pylint: disable=unused-argument
+            cmd1: str, cmd2: str, log: object = None, meter: object = None, pool: object = None
+        ) -> RunResult:
             r = real_pipe(cmd1, cmd2, log, meter)
             if "rpool/USERDATA/home" in cmd1 and not r.ok:
                 raise KeyboardInterrupt  # the Ctrl-C that cut that receive
@@ -22477,7 +22628,9 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         fake.inject["backup/rpool/USERDATA/home"] = ("interrupt", 1)
         real_pipe, real_run = fake.mock_run_pipe, fake.mock_run
 
-        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
+        def pipe(  # pylint: disable=unused-argument
+            cmd1: str, cmd2: str, log: object = None, meter: object = None, pool: object = None
+        ) -> RunResult:
             r = real_pipe(cmd1, cmd2, log, meter)
             if "rpool/USERDATA/home" in cmd1 and not r.ok:
                 raise KeyboardInterrupt
@@ -23755,7 +23908,9 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "backup", "111", P1).ok
         real_pipe = fake.mock_run_pipe
 
-        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
+        def pipe(  # pylint: disable=unused-argument
+            cmd1: str, cmd2: str, log: object = None, meter: object = None, pool: object = None
+        ) -> RunResult:
             if "rpool/var" in cmd2 and "rpool/var/" not in cmd2:
                 return RunResult(1, "", modified, "")
             return real_pipe(cmd1, cmd2, log, meter)
@@ -23775,7 +23930,9 @@ class TestBackupDecide:  # pylint: disable=too-many-public-methods
         assert _engine_run(fake, "backup", "111", P1).ok
         real_pipe = fake.mock_run_pipe
 
-        def pipe(cmd1: str, cmd2: str, log: object = None, meter: object = None) -> RunResult:
+        def pipe(  # pylint: disable=unused-argument
+            cmd1: str, cmd2: str, log: object = None, meter: object = None, pool: object = None
+        ) -> RunResult:
             if "rpool/var" in cmd2 and "rpool/var/" not in cmd2:
                 return RunResult(1, "", send + recv, "", stderr_left=send, stderr_right=recv)
             return real_pipe(cmd1, cmd2, log, meter)
@@ -31573,7 +31730,9 @@ class _PoisonShell(MockShell):
         out = "" if str(cmd).startswith(self.ACCESSORS) else self.text
         return RunResult(self.returncode, out, self.text, str(cmd))
 
-    def mock_run_pipe(self, cmd1, cmd2, _log=None, meter=None) -> RunResult:
+    def mock_run_pipe(  # pylint: disable=too-many-arguments,too-many-positional-arguments,unused-argument
+        self, cmd1, cmd2, _log=None, meter=None, pool=None
+    ) -> RunResult:
         del meter
         return self.mock_run(f"{cmd1} | {cmd2}")
 

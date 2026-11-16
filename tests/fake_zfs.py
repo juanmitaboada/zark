@@ -200,10 +200,15 @@ class FakeZfs(MockShell):  # pylint: disable=too-many-public-methods,too-many-in
     # Stream bytes a fake send writes, as the kernel would count them for a meter.
     SEND_BYTES = 4096
 
-    def mock_run_pipe(self, cmd1, cmd2, log=None, meter=None) -> RunResult:  # pylint: disable=unused-argument
+    def mock_run_pipe(  # pylint: disable=unused-argument,too-many-arguments,too-many-positional-arguments
+        self, cmd1, cmd2, log=None, meter=None, pool=None
+    ) -> RunResult:
         """Interpret ``zfs send ... | zfs receive ...``; a meter hears a send
-        of :data:`SEND_BYTES`, or of nothing when the send fails."""
+        of :data:`SEND_BYTES`, or of nothing when the send fails. The pool
+        each pipe names for an interrupt is kept (R5-1)."""
         self._calls.append(f"{cmd1} | {cmd2}")
+        self.pipe_pools.append(None if pool is None else pool.name)
+        self.pipe_cmds.append(f"{cmd1} | {cmd2}")
         if meter is not None:
             meter.begin(0)
         r = self._pipe(shlex.split(cmd1)[2:], shlex.split(cmd2)[2:])

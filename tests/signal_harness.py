@@ -153,8 +153,9 @@ def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,too-man
             procs: list[subprocess.Popen[str]] | list[subprocess.Popen[bytes]],
             sig: int | None = None,
             wait: float | None = None,
+            pool: signals.Held | None = None,
         ) -> None:
-            real_stop(procs, sig, **({} if wait is None else {"wait": wait}))
+            real_stop(procs, sig, wait, pool)
             result["child_status"] = procs[0].returncode
             write()
 

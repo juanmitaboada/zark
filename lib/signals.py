@@ -40,6 +40,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from types import FrameType
 from typing import TextIO, cast
 
@@ -243,6 +244,7 @@ def stop_children(
     procs: list[subprocess.Popen[str]] | list[subprocess.Popen[bytes]],
     sig: int | None = None,
     wait: float | None = None,
+    pool: "Held | None" = None,
 ) -> None:
     """Stop each child's process group with ``sig`` (default
     :func:`child_signal`), wait up to ``wait`` seconds (default
@@ -252,7 +254,13 @@ def stop_children(
     The wait covers the whole group, not only the child zark started
     (M4bF-10 10a): ``sh -c`` dies with the signal while the command behind
     it may ignore it, and the cleanup must not run under a child that is
-    still writing."""
+    still writing.
+
+    ``pool`` is the pool a transfer reads or writes: while it reads
+    SUSPENDED the children are left as they are (:func:`_leave`)."""
+    if pool is not None and pool.suspended():
+        _leave(procs, pool.name)
+        return
     sig = child_signal() if sig is None else sig
     for p in procs:
         if p.poll() is None:
@@ -267,6 +275,64 @@ def stop_children(
         if not _group_gone(p.pid, deadline):
             _killpg(p.pid, signal.SIGKILL)
             _ = _group_gone(p.pid, time.monotonic() + 1.0)
+
+
+@dataclass(frozen=True)
+class Held:
+    """A pool a transfer reads or writes, and whether it reads SUSPENDED
+    now (:func:`lib.pool_state.hold` makes one: lib.pool_state imports
+    lib.sh, which imports this module)."""
+
+    name: str
+    suspended: Callable[[], bool]
+
+
+def _leave(procs: list[subprocess.Popen[str]] | list[subprocess.Popen[bytes]], pool: str) -> None:
+    """Leave a transfer's ``zfs`` children with no signal (R5-1, eli V8x).
+
+    In the ioctl of a suspended pool they cannot end, whatever they get; a
+    signal left pending makes OpenZFS 2.4.4's ``bqueue_enqueue_impl`` and
+    ``bqueue_dequeue`` (module/zfs/bqueue.c:111-113, :162-163) loop on
+    ``cv_wait_sig`` without sleeping: a receive spun at 65-100 % CPU until
+    the reboot. Asleep they cost nothing, and the reboot ends them. Only
+    the ``sh -c`` zark started is ended (SIGKILL to it alone, not to its
+    group), so the ``with`` around the Popen does not wait for ``zfs``.
+    """
+    names: list[str] = []
+    for p in procs:
+        if p.poll() is not None:
+            continue
+        if _comm(p.pid) in _SHELLS:
+            _kill(p.pid)
+            _ = p.wait()
+        else:
+            # The shell exec'd the command itself: nothing is sent, and the
+            # Popen is marked as reaped so that nothing waits for it.
+            p.returncode = -signal.SIGKILL
+        names.append(_running[0] if _running else "the transfer")
+    if names:
+        (_log[0] if _log else Log()).warn(
+            f"{names[0]} left running: they cannot end while {pool} is suspended,"
+            " and end at the reboot"
+        )
+
+
+_SHELLS = frozenset({"sh", "dash", "bash"})
+
+
+def _comm(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/comm", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _kill(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _group_gone(pgid: int, deadline: float) -> bool:
