@@ -19,7 +19,7 @@ the fixtures and zark's writer of both files (M7-15).
 finds them; run that file, not this one.
 """
 
-# pylint: disable=protected-access
+# pylint: disable=protected-access,too-many-lines
 # Rationale: these tests drive the writer's private state and helpers (the
 # lock's descriptor, a command's notification step), as test_unit.py does
 # line by line; basedpyright's reportPrivateUsage is off for the same reason.
@@ -1289,21 +1289,16 @@ class TestByteMeter:  # pylint: disable=missing-function-docstring
         assert counts and max(counts) == 1_000_000, counts[-3:]
         assert meter.bytes_done() == 1_000_000
 
-    def test_sums_rate_and_null(self):
+    def test_sums_and_null(self):
         meter = progress.ByteMeter(proc=Path("/nonexistent"))
         assert meter.bytes_done() == 0 and meter.rate() is None
         meter.end(1000)
         meter.sample(now=100.0)
         meter.end(3000)
         meter.sample(now=110.0)
-        assert meter.bytes_done() == 4000 and meter.rate() == 300
+        # Ends between samples: no stream was seen sending, no rate yet.
+        assert meter.bytes_done() == 4000 and meter.rate() is None
         m2 = progress.ByteMeter(proc=Path("/nonexistent"))
-        m2.sample(now=0.0)
-        m2.end(500)
-        m2.sample(now=10.0)
-        m2.sample(now=50.0)  # the 0.0 and 10.0 samples fall out of the 30 s window
-        m2.sample(now=55.0)
-        assert m2.bytes_done() == 500 and m2.rate() == 0
         m2.begin(4242)
         m2.sample(now=56.0)  # the group cannot be read: not measured from here on
         assert m2.bytes_done() is None and m2.rate() is None
@@ -1313,16 +1308,73 @@ class TestByteMeter:  # pylint: disable=missing-function-docstring
         m3.end(None)
         assert m3.bytes_done() is None
 
+    def test_the_rate_counts_streaming_seconds_only(self):
+        # A112E-4: 20 s before the first byte, then 100 MB/s: never a few MB/s.
+        meter = progress.ByteMeter()
+        meter.begin(77)
+        reads = [0] * 11 + [100_000_000 * n for n in range(1, 16)]
+        rates: list[int | None] = []
+        with patch.object(progress, "group_wchar", side_effect=reads):
+            for n in range(len(reads)):
+                meter.sample(now=2.0 * n)
+                rates.append(meter.rate())
+        # Null until 10 s of streaming, then the stream's own pace.
+        assert rates[:16] == [None] * 16, rates
+        assert set(rates[16:]) == {50_000_000}, rates  # 100 MB every 2 s
+
+    def test_the_seconds_between_sends_do_not_count(self):
+        # Many small sends with a few seconds of start and close each, then a
+        # large one: its pace, not the gaps', as soon as it has 10 s behind it.
+        meter = progress.ByteMeter()
+        t = 0.0
+        with patch.object(progress, "group_wchar") as wchar:
+            for _ in range(10):
+                meter.begin(1)
+                wchar.return_value = 0
+                meter.sample(now=t)
+                t += 3.0
+                meter.end(1_000)
+                meter.sample(now=t)
+            meter.begin(2)
+            for n in range(1, 8):
+                wchar.return_value = 50_000_000 * n
+                t += 2.0
+                meter.sample(now=t)
+        assert meter.rate() == 25_000_000, meter.rate()
+
+    def test_the_gap_between_two_streams_does_not_count(self):
+        # A stream, 20 s of nothing between transfers, another stream: the
+        # window spans both, and the gap is left out of its time.
+        meter = progress.ByteMeter()
+        t = 0.0
+        with patch.object(progress, "group_wchar") as wchar:
+            meter.begin(1)
+            for n in range(1, 5):
+                wchar.return_value = 50_000_000 * n
+                meter.sample(now=t)
+                t += 2.0
+            meter.end(200_000_000)
+            for _ in range(10):
+                meter.sample(now=t)
+                t += 2.0
+            meter.begin(2)
+            for n in range(1, 5):
+                wchar.return_value = 50_000_000 * n
+                meter.sample(now=t)
+                t += 2.0
+        assert meter.rate() == 25_000_000, meter.rate()
+
     def test_a_group_read_never_goes_backwards(self):
         meter = progress.ByteMeter()
         meter.begin(77)
-        with patch.object(progress, "group_wchar", side_effect=[500, 200, 900]):
+        with patch.object(progress, "group_wchar", side_effect=[500, 200, 900, 1100]):
             meter.sample(now=1.0)
             assert meter.bytes_done() == 500
             meter.sample(now=2.0)
             assert meter.bytes_done() == 500
             meter.sample(now=3.0)
-        assert meter.bytes_done() == 900 and meter.rate() == 200
+            meter.sample(now=12.0)
+        assert meter.bytes_done() == 1100 and meter.rate() == 54, meter.rate()
 
     def test_group_wchar_sums_the_groups_members(self):
         with tempfile.TemporaryDirectory() as td:

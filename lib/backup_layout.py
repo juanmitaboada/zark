@@ -104,6 +104,13 @@ def zark_props(pool: str) -> dict[str, tuple[str, str]]:
     }
 
 
+def remove_empty_dir(path: str) -> None:
+    """A work directory goes once nothing is mounted on it and it is empty;
+    otherwise ``rmdir`` refuses and it stays (R4-8: /run/zark/probe was left
+    after every run). Through the runner, as its ``mkdir``."""
+    _ = run(f"rmdir {path}")
+
+
 def root_is_empty(source: str, probe_dir: str, *, zfsutil: bool) -> bool | None:
     """True when the root directory of ``source`` has no entries; None if unreadable.
 
@@ -118,4 +125,5 @@ def root_is_empty(source: str, probe_dir: str, *, zfsutil: bool) -> bool | None:
         r = run(f"find {probe_dir} -mindepth 1 -maxdepth 1 -print -quit")
         return r.ok and not r.output
     finally:
-        _ = run(f"umount {probe_dir}")
+        if run(f"umount {probe_dir}").ok:
+            remove_empty_dir(probe_dir)

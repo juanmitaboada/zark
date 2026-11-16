@@ -88,7 +88,7 @@ EXACT_RE: dict[str, re.Pattern[str]] = {
 # say anything, so only this shape is shown.
 RE_ISO = re.compile(
     r'Ubuntu \d\d\.\d\d(?:\.\d+)?(?: LTS)? "[A-Za-z ]{1,40}" - '
-    + r"(?:Release|Daily|Beta|Alpha) amd64 \(\d{8}(?:\.\d+)?\)"
+    + r"(?:Release|Official|Daily|Beta|Alpha) amd64 \(\d{8}(?:\.\d+)?\)"
 )
 WHERES = ("installed", "live")
 LEVELS = (1, 2)

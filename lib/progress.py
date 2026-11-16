@@ -60,7 +60,13 @@ PROGRESS_PATH = statusdirs.RUN_DIR / "progress.json"
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 HEARTBEAT_S = 2.0  # the contract's limit is 5 s
 MIN_GAP_S = 1.0  # never more than one write a second
-RATE_WINDOW_S = 30.0  # rate_bytes_per_s is bytes_done's rate over this window
+# rate_bytes_per_s is bytes_done's rate over the last RATE_WINDOW_S seconds in
+# which a send was streaming (from its first byte), null until RATE_MIN_S of
+# them: the seconds a transfer spends starting, closing or before its first
+# byte made the rate a small fraction of the real one after a resume and
+# among small datasets, and the time left read hours (A112E-4).
+RATE_WINDOW_S = 30.0
+RATE_MIN_S = 10.0
 
 
 def start_ticks(pid: int, proc: Path = Path("/proc")) -> int:
@@ -92,7 +98,7 @@ def group_wchar(pgid: int, proc: Path = Path("/proc")) -> int:
     return total
 
 
-class ByteMeter:
+class ByteMeter:  # pylint: disable=too-many-instance-attributes
     """``bytes_done`` and ``rate_bytes_per_s`` (M7-2 2a): the kernel's count
     of what each ``zfs send`` wrote, sampled live from its process group and
     read exactly when it ends (:func:`lib.sh.run_pipe`). One read that fails
@@ -105,7 +111,12 @@ class ByteMeter:
         self._live = 0  # the running one, as last sampled
         self._pgid: int | None = None
         self._broken = False
+        # (streaming seconds, bytes sent in them) at each streaming sample.
         self._samples: deque[tuple[float, int]] = deque()
+        self._streamed = 0.0
+        self._counted = 0
+        self._last: tuple[float, int] | None = None  # the previous sample's time and total
+        self._was_streaming = False
 
     def begin(self, pgid: int) -> None:
         """A send started in process group ``pgid``."""
@@ -133,9 +144,17 @@ class ByteMeter:
             if self._broken:
                 return
             t = time.monotonic() if now is None else now
-            self._samples.append((t, self._done + self._live))
-            while self._samples and t - self._samples[0][0] > RATE_WINDOW_S:
-                _ = self._samples.popleft()
+            total = self._done + self._live
+            streaming = self._pgid is not None and self._live > 0
+            if streaming and self._was_streaming and self._last is not None:
+                # Only a stretch streaming at both ends counts, time and bytes.
+                self._streamed += t - self._last[0]
+                self._counted += total - self._last[1]
+            if streaming:
+                self._samples.append((self._streamed, self._counted))
+                while self._samples and self._streamed - self._samples[0][0] > RATE_WINDOW_S:
+                    _ = self._samples.popleft()
+            self._last, self._was_streaming = (t, total), streaming
 
     def bytes_done(self) -> int | None:
         """Stream bytes sent so far in this run, None when not measured."""
@@ -143,12 +162,13 @@ class ByteMeter:
             return None if self._broken else self._done + self._live
 
     def rate(self) -> int | None:
-        """``bytes_done``'s rate over the last 30 s; None until two samples."""
+        """``bytes_done``'s rate over the last 30 s in which a send was
+        streaming; None until :data:`RATE_MIN_S` of them (A112E-4)."""
         with self._lock:
             if self._broken or len(self._samples) < 2:
                 return None
             (t0, b0), (t1, b1) = self._samples[0], self._samples[-1]
-            return int((b1 - b0) / (t1 - t0)) if t1 > t0 else None
+            return int((b1 - b0) / (t1 - t0)) if t1 - t0 >= RATE_MIN_S else None
 
 
 class TransferProgress:

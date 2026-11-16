@@ -70,7 +70,7 @@ OTHER = "other"
 _VERSION_TAIL = r"[0-9A-Za-z.+~:-]+"
 ISO_SHAPE = re.compile(
     r'Ubuntu \d\d\.\d\d(?:\.\d+)?(?: LTS)? "[A-Za-z ]{1,40}" - '
-    + r"(?:Release|Daily|Beta|Alpha) amd64 \(\d{8}(?:\.\d+)?\)"
+    + r"(?:Release|Official|Daily|Beta|Alpha) amd64 \(\d{8}(?:\.\d+)?\)"
 )
 EXACT_SHAPES: dict[str, re.Pattern[str]] = {
     "ubuntu": re.compile(r"\d\d\.\d\d(?:\.\d+)?(?: LTS)? \([A-Za-z ]{1,40}\)"),

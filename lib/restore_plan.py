@@ -23,6 +23,7 @@ from pathlib import Path
 from lib import drive_marks, sh, survey
 from lib.backup_layout import (
     list_datasets as _list_datasets,
+    remove_empty_dir,
     root_is_empty,
     zark_props as _zark_props,
 )
@@ -162,7 +163,8 @@ def _mount_snapshot(full_snap: str) -> bool:
 
 
 def _umount_probe() -> None:
-    _ = sh.run(f"umount {PROBE_MNT}")
+    if sh.run(f"umount {PROBE_MNT}").ok:
+        remove_empty_dir(PROBE_MNT)
 
 
 def _probe_be(full_snap: str, log: Log) -> tuple[str, str, str]:

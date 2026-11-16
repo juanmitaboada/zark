@@ -137,6 +137,7 @@ import lib.status_reader as sreader  # pylint: disable=wrong-import-position # n
 import lib.transfer_eta as teta  # pylint: disable=wrong-import-position # noqa: E402
 import lib.zfs as zfs_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.zfs_features as zfeat  # pylint: disable=wrong-import-position # noqa: E402
+import tests.test_fullcheck as tfc  # pylint: disable=wrong-import-position # noqa: E402
 import tests.test_status_files as tsf  # pylint: disable=wrong-import-position # noqa: E402
 from commands.backup import (  # pylint: disable=wrong-import-position # noqa: E402
     _check_target_space,
@@ -3997,6 +3998,54 @@ class TestAutoejectConfig:  # pylint: disable=missing-function-docstring
 # ═════════════════════════════════════════════════════════════════════════
 #  lib/drives.py
 # ═════════════════════════════════════════════════════════════════════════
+
+
+class TestWorkDirectories:  # pylint: disable=missing-function-docstring
+    """R4-8: the snapshot mount point (/run/zark/probe) and the restore
+    check's directory (/run/zark/fullcheck) go after their last unmount."""
+
+    def test_the_probe_directory_goes_after_its_unmount(self):
+        for umount_ok in (True, False):
+            mock = MockShell()
+            mock.on_prefix("mkdir -p").succeeds()
+            mock.on_prefix("mount -t zfs").succeeds()
+            mock.on_prefix("find /run/zark/probe").succeeds("")
+            mock.on_prefix("rmdir").succeeds()
+            if umount_ok:
+                mock.on_prefix("umount").succeeds()
+            else:
+                mock.on_prefix("umount").fails("target is busy")
+            with patch_sh(mock):
+                assert backup_layout.root_is_empty("p/ds@s", "/run/zark/probe", zfsutil=False)
+            assert mock.was_called("rmdir /run/zark/probe") is umount_ok, mock.calls
+
+    def test_the_plans_probe_directory_goes_too(self):
+        mock = MockShell()
+        mock.on_prefix("umount").succeeds()
+        mock.on_prefix("rmdir").succeeds()
+        with patch_sh(mock):
+            restore_plan._umount_probe()  # pylint: disable=protected-access
+        assert mock.was_called(f"rmdir {restore_plan.PROBE_MNT}"), mock.calls
+
+    def test_the_restore_checks_directory_goes_after_its_datasets(self):
+        mock = MockShell()
+        mock.on_prefix("zfs get").succeeds("")
+        mock.on_prefix("rmdir").succeeds()
+        point = MagicMock()
+        point.label_utc.return_value = "2026-11-09 10:00:00 UTC"
+        cr, plan = tfc._cr(), tfc._plan(2)  # pylint: disable=protected-access
+        with (
+            patch_sh(mock),
+            patch.object(
+                tfc.fc_cmd, "read_snapshot", return_value=tfc.fullcheck.ReadResult(files=1)
+            ),
+            patch.object(tfc.fc_cmd, "point_name", return_value="zark_p"),
+            redirect_stdout(StringIO()),
+        ):
+            tfc.fc_cmd._read_point(  # pylint: disable=protected-access
+                cr, point, plan, Cleanup(make_log()), make_log()
+            )
+        assert mock.calls[-1] == "rmdir /run/zark/fullcheck", mock.calls
 
 
 class TestDrives:  # pylint: disable=missing-function-docstring
@@ -30851,6 +30900,17 @@ class TestMonitorView:  # pylint: disable=missing-function-docstring
         assert "connected, in use" in text
         assert "written by zark" not in text  # same version as the writer
 
+    def test_a_drive_gone_reads_as_gone_while_the_run_says_so(self) -> None:
+        # The run's drive went away (drive_gone, back false): not "connected".
+        text = _frame_text("drive-gone")
+        assert "went away, in use" in text and "connected, in use" not in text, text
+        where = mview._where  # pylint: disable=protected-access
+        nowhere = Path("/nonexistent")
+        assert where({}, True, nowhere, {"back": False}) == "went away, in use"
+        assert where({}, True, nowhere, {"back": True}) == "connected, in use"
+        assert where({}, True, nowhere, None) == "connected, in use"
+        assert where({"drive_id": "x"}, False, nowhere, {"back": False}) == "not connected"
+
     def test_the_null_and_partial_rules(self) -> None:
         text = _frame_text("no-byte-counts")
         assert (
@@ -32896,6 +32956,19 @@ class TestCertificateShapes:  # pylint: disable=missing-function-docstring
         entries = certs.read_certificates(_REPO_ROOT / "certificates" / "selftest.json")
         assert len(entries) >= 28
         assert [certs.platform_shapes(e) for e in entries] == entries
+
+    def test_the_official_2610_image_keeps_its_line(self) -> None:
+        # M15R-7: the line of the official 26.10 image (read on carmen, 2026-11-17).
+        line = 'Ubuntu 26.10 "Stonking Stingray" - Official amd64 (20261013)'
+        rep = _report([], _facts(where="live", iso=line))
+        assert rep["certificate"]["iso"] == line
+        spec = importlib.util.spec_from_file_location("matrix", _REPO_ROOT / "pages/matrix.py")
+        assert spec is not None and spec.loader is not None
+        gen = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gen)
+        assert gen.RE_ISO.fullmatch(line)
+        for other in (line.replace("Official", "Unofficial"), line.replace("Official", "Final")):
+            assert _report([], _facts(where="live", iso=other))["certificate"]["iso"] == certs.OTHER
 
     def test_the_shapes_are_the_pages(self) -> None:
         # pages/matrix.py publishes by the same patterns; neither changes alone.

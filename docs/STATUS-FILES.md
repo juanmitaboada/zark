@@ -202,7 +202,7 @@ with no terminal reads nothing, so neither `waiting_for_input` nor
 | `bytes_total` | integer or null | sum of the stream sizes `zfs send -nvP` estimated for every send planned so far, a resumed dataset's stream to the point included from the resume's round (2.3.1); null when no send has an estimate. It grows only with `datasets_total` |
 | `bytes_total_partial` | boolean | true when at least one planned send has no estimate, so `bytes_total` is a floor |
 | `bytes_done` | integer or null | stream bytes sent so far in this run, every send included |
-| `rate_bytes_per_s` | integer or null | `bytes_done`'s rate over the last 30 s; null until two measurements exist |
+| `rate_bytes_per_s` | integer or null | `bytes_done`'s rate over the last 30 s in which a send was streaming (from its first byte; the seconds between sends and before a send's first byte do not count); null until 10 s of them |
 
 `check` (`zark fullcheck`, M19):
 
@@ -320,6 +320,15 @@ rule 5 is skipped, as it says.
 On a default Ubuntu `/proc` hides nothing and every one of these reads
 works unprivileged. With `hidepid`, the reads of rules 4 and 5 may fail;
 the rules say what a reader does then.
+
+A reader in another pid namespace than zark (a Flatpak sandbox, a
+container) sees its own processes at `/proc/<pid>`, not zark's: rules 4
+and 5 do not hold for it, `hidepid` or not. Such a reader skips them and
+lets the heartbeat decide (rule 6).
+
+With `/proc` mounted `subset=pid`, `/proc/sys/kernel/random/boot_id`
+cannot be read: rule 3 is skipped, as the reference reader does; a file
+from an earlier boot is not met anyway, since `/run` is cleared at boot.
 
 A command that takes the lock knows any `progress.json` it finds is an
 orphan, since the lock admits one run. Before replacing it, if the orphan's

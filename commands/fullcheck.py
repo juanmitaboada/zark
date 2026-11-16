@@ -354,6 +354,9 @@ def _read_point(  # pylint: disable=too-many-locals
         read.error_paths += got.error_paths[: max(0, MAX_ERROR_PATHS - len(read.error_paths))]
         mark = f"{got.errors} error(s)" if got.errors else "ok"
         log.info(f"  {row.rel}: {got.files} file(s), {_gib(got.bytes)}, {mark}")
+    # The datasets' own directories are gone by now (R4-8); through the
+    # runner, as its mkdir.
+    _ = sh.run(f"rmdir {CHECK_MNT}")
     cr.check.restore = restore_record(len(rows), read, time.monotonic() - began)
     name = point_name(point)
     if read.errors:

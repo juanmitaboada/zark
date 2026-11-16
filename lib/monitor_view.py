@@ -605,7 +605,7 @@ def _drive_row(drive: Mapping[str, Any], width: int, where: str, now: datetime) 
     text = f"last backup {fmt_local(last, now)} ({fmt_days(age)})" if last else "no backup yet"
     row: Line = [
         (f"  {clean(drive.get('name', '?')):<{width}}  ", "bold"),
-        (f"{where:<19}", "dim" if where == "not connected" else "ok"),
+        (f"{where:<19}", "dim" if where in ("not connected", "went away, in use") else "ok"),
         (text, ""),
     ]
     run = drive.get("last_run")
@@ -675,8 +675,12 @@ def _fill_line(  # pylint: disable=too-many-arguments
     return line
 
 
-def _where(drive: Mapping[str, Any], in_use: bool, by_id: Any) -> str:
+def _where(drive: Mapping[str, Any], in_use: bool, by_id: Any, gone: object = None) -> str:
+    """Where the drive is; ``gone`` is the run's ``drive_gone``: while it says
+    the drive is not back, the run's drive reads as gone, not connected."""
     if in_use:
+        if isinstance(gone, dict) and gone.get("back") is not True:
+            return "went away, in use"
         return "connected, in use"
     return "connected" if sr.drive_connected(drive.get("drive_id"), by_id) else "not connected"
 
@@ -708,7 +712,8 @@ def _drive_lines(inp: Inputs, opt: ViewOptions) -> list[Line]:
     lines: list[Line] = [[("DRIVES", "head")]]
     for drive in drives:
         in_use = bool(using) and using.get("guid") == drive.get("guid")
-        lines.append(_drive_row(drive, width, _where(drive, in_use, inp.by_id), r.now))
+        gone = (pdoc or {}).get("drive_gone") if in_use else None
+        lines.append(_drive_row(drive, width, _where(drive, in_use, inp.by_id, gone), r.now))
         lines += _run_lines(drive, pad, r.now)
         lines += _check_line(drive, pad, r.now)
         space = using.get("space") if in_use else drive.get("space")
