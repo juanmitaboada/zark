@@ -210,7 +210,9 @@ set +f
 __POOL_READ_SH__
 # A pool that is not healthy (its drive went away) is imported: both
 # installs and removals are refused, and nothing is scanned. A read that
-# does not end in 10 s refuses too: apt stops instead of waiting for ever.
+# does not end in time refuses too: apt stops instead of waiting for ever.
+# The scan waits up to 30 s: a ZFS member disk that sleeps can take more
+# than 10 s to answer, and apt can wait where a login cannot (M26R-53).
 if [ -n "$zark_unhealthy" ]; then
     echo "zark: Refusing boot-critical package operation(s):$installs$removals:" >&2
     echo "  pool$zark_unhealthy is not ONLINE (its drive went away?). Reboot with the" >&2
@@ -220,7 +222,7 @@ if [ -n "$zark_unhealthy" ]; then
     echo "  __APT_CONF_ABS__ to disable.)" >&2
     exit 1
 fi
-if ! zark_scan 10 || ! zark_held 10; then
+if ! zark_scan 30 || ! zark_held 10; then
     echo "zark: Refusing boot-critical package operation(s):$installs$removals:" >&2
     echo "  the backup pools could not be read: $zark_why." >&2
     echo "  Run apt again later, or reboot first." >&2
@@ -559,24 +561,35 @@ STALE_LINE = "zark's guards are out of date: run sudo zark setup"
 GUARDS_ROOT = ""
 
 
-def guards_stale(target_root: str | None = None) -> bool:
-    """True when zark's guards are installed (any of their files is there)
-    and are not this zark's (:func:`is_current` and the grub guard's). A read,
-    never a write; with none installed it is False."""
+def guards_stale(target_root: str | None = None, unreadable: list[str] | None = None) -> bool:
+    """True when one of zark's guard files is there, can be read, and is not
+    this zark's (its text, or the execute bit a script needs). A file that is
+    missing was removed on purpose, as the hook's own message invites, and is
+    not stale; one that cannot be read is not either, and its path is added
+    to ``unreadable`` when given (M26R-52). A read, never a write."""
     target_root = GUARDS_ROOT if target_root is None else target_root
     root = target_root.rstrip("/")
     base = f"{root}/" if root else "/"
-    rels = (
-        HOOK_RELATIVE_PATH,
-        APT_CONF_RELATIVE_PATH,
-        PRERM_RELATIVE_PATH,
-        MOTD_RELATIVE_PATH,
-        grub_guard.GUARD_RELATIVE_PATH,
-        grub_guard.CHECK_RELATIVE_PATH,
-        grub_guard.CFG_RELATIVE_PATH,
+    files = (
+        (HOOK_RELATIVE_PATH, HOOK_SCRIPT, True),
+        (APT_CONF_RELATIVE_PATH, APT_CONF, True),
+        (PRERM_RELATIVE_PATH, PRERM_SCRIPT, True),
+        (MOTD_RELATIVE_PATH, MOTD_SCRIPT, True),
+        (grub_guard.GUARD_RELATIVE_PATH, grub_guard.GUARD_SCRIPT, True),
+        (grub_guard.CHECK_RELATIVE_PATH, grub_guard.CHECK_SCRIPT, True),
+        (grub_guard.CFG_RELATIVE_PATH, grub_guard.CFG_TEXT, False),
     )
-    try:
-        installed = any(Path(f"{base}{rel}").exists() for rel in rels)
-    except OSError:
-        return False
-    return installed and not (is_current(target_root) and grub_guard.is_current(target_root))
+    stale = False
+    for rel, content, executable in files:
+        path = Path(f"{base}{rel}")
+        try:
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            mode = path.stat().st_mode
+        except (OSError, UnicodeDecodeError):
+            if unreadable is not None:
+                unreadable.append(str(path))
+            continue
+        stale = stale or text != content or (executable and not mode & 0o111)
+    return stale

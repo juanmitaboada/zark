@@ -190,6 +190,7 @@ from lib import (  # pylint: disable=wrong-import-position # noqa: E402
     forensics,
     grub_guard,
     guard_sh,
+    identity,
     pool_record,
     pool_state,
     reclaim,
@@ -584,6 +585,9 @@ _ = patch.object(
 # Disk sizes come from sysfs; the machine running the tests must not decide
 # whether a mocked /dev/sdb has a medium. The empty directory reads as "unknown".
 _SYSFS_ROOT = patch("lib.identity.SYS_BLOCK", _TEST_LOG_DIR, create=True).start()
+# Nor its udev records what a drive's partition is (M26R-54): a directory
+# that does not exist reads as no records at all; tests point it at their own.
+_UDEV_DATA = patch("lib.identity.UDEV_DATA", os.path.join(_TEST_LOG_DIR, "no-udev")).start()
 # Nor its machine-id whether a drive is this system's (M4a-7): the drives
 # _fresh_fake prepares name this one as their owner, as prepare does.
 TEST_MACHINE_ID = "7e57000000000000000000000000beef"
@@ -723,7 +727,12 @@ _POOL_STATE_GUARD = (
 # (a CI runner records no ZFS member, carmen does). A shell started with a
 # guard's host lines in its command, in a file it runs or in one it sources
 # is recorded and refused; _hermetic_guard gives a test lines of its own.
-_HOST_GUARD_LINES = (guard_sh.KSTAT_LINE, guard_sh.BLOCK_LINE, guard_sh.UDEV_LINE)
+_HOST_GUARD_LINES = (
+    guard_sh.KSTAT_LINE,
+    guard_sh.BLOCK_LINE,
+    guard_sh.UDEV_LINE,
+    guard_sh.CALL_LINE,
+)
 _HOST_GUARD_RUNS: list[str] = []
 _SHELLS = frozenset({"sh", "bash", "dash"})
 _SOURCED = re.compile(r"""(?:^|[\s;&|(])(?:\.|source)\s+["']?([^"'\s;&|)]+)""")
@@ -2257,6 +2266,35 @@ class TestGuardsStale:  # pylint: disable=missing-function-docstring
             cfg.parent.mkdir(parents=True)
             cfg.write_text("# zark-backup-guard.cfg - an older one\n", encoding="utf-8")
             assert apt_guard.guards_stale(td)
+
+    def test_a_guard_removed_on_purpose_is_not_stale(self):
+        # M26R-52: the hook's own refusal says to remove its APT file to disable it.
+        with tempfile.TemporaryDirectory() as td:
+            with redirect_stdout(StringIO()):
+                apt_guard.install(target_root=td, log=make_log())
+                _ = grub_guard.install(target_root=td, log=make_log())
+            Path(td, apt_guard.APT_CONF_RELATIVE_PATH).unlink()
+            Path(td, grub_guard.CFG_RELATIVE_PATH).unlink()
+            assert not apt_guard.guards_stale(td)
+
+    def test_a_script_without_its_execute_bit_is_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            with redirect_stdout(StringIO()):
+                apt_guard.install(target_root=td, log=make_log())
+            Path(td, apt_guard.PRERM_RELATIVE_PATH).chmod(0o644)
+            assert apt_guard.guards_stale(td)
+
+    def test_an_unreadable_guard_is_not_stale_and_is_named(self):
+        with tempfile.TemporaryDirectory() as td:
+            with redirect_stdout(StringIO()):
+                apt_guard.install(target_root=td, log=make_log())
+            motd = Path(td, apt_guard.MOTD_RELATIVE_PATH)
+            motd.unlink()
+            motd.mkdir()  # read_text fails for root too
+            unreadable: list[str] = []
+            assert not apt_guard.guards_stale(td, unreadable)
+            assert unreadable == [str(motd)], unreadable
+            assert not apt_guard.guards_stale(td)
 
     def test_the_default_root_is_the_one_the_suite_points_elsewhere(self):
         with tempfile.TemporaryDirectory() as td:
@@ -10781,6 +10819,7 @@ def _hermetic_guard(
         text.replace(guard_sh.KSTAT_LINE, f"zark_kstat={kstat}")
         .replace(guard_sh.BLOCK_LINE, f"zark_block={block}")
         .replace(guard_sh.UDEV_LINE, f"zark_udev={records}")
+        .replace(guard_sh.CALL_LINE, f"zark_callf={td}/guard-call")
     )
 
 
@@ -11468,10 +11507,33 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
         assert calls == "", calls
 
     def test_the_hook_refuses_when_a_zpool_does_not_return(self):
-        rc, out, _, took = self._run(apt_guard.HOOK_SCRIPT, hang=True)
+        # The hook's own 30 s bound made 4 here, so the test does not wait it out.
+        hook = apt_guard.HOOK_SCRIPT.replace("zark_scan 30 ||", "zark_scan 4 ||")
+        rc, out, _, took = self._run(hook, hang=True)
         assert rc == 1, out
-        assert "could not be read: a pool did not answer within 10 s" in out, out
-        assert took < 14, took
+        assert "could not be read: a pool did not answer within 4 s" in out, out
+        assert took < 8, took
+
+    def test_only_the_hook_waits_30_s_for_its_scan(self):
+        # M26R-53: a ZFS member disk that sleeps can take more than 10 s to
+        # answer; apt can wait, a login cannot.
+        assert "if ! zark_scan 30 || ! zark_held 10; then" in apt_guard.HOOK_SCRIPT
+        assert "if ! zark_scan 3 || ! zark_held 3; then" in apt_guard.MOTD_SCRIPT
+        assert "zark_scan 10" in grub_guard.GUARD_SCRIPT and "zark_scan 10" in grub_guard.CFG_TEXT
+
+    def test_the_hook_lets_a_scan_through_that_answers_after_10_s(self):
+        def slow(td: str) -> None:
+            Path(td, "stub", "zpool").write_text(
+                f'#!/bin/sh\necho "zpool $*" >> {td}/calls\n'
+                + '[ "$1" != import ] || sleep 12\n'
+                + "case \"$1\" in list) printf 'rpool\\t-\\n' ;; esac\n",
+                encoding="ascii",
+            )
+
+        rc, out, calls, took = self._run(apt_guard.HOOK_SCRIPT, prepare=slow)
+        assert rc == 0, out
+        assert calls.startswith("zpool import"), calls
+        assert 11 < took < 20, took
 
     def test_the_prerm_refuses_with_a_suspended_pool_and_starts_no_zpool(self):
         rc, out, calls, _ = self._run(apt_guard.PRERM_SCRIPT, states=self._SUSPENDED)
@@ -11637,6 +11699,226 @@ class TestGuardsNeverWait:  # pylint: disable=missing-function-docstring
             apt_guard.MOTD_SCRIPT, devices=("sda", "sda1", "zd0"), members=(), udev=False
         )
         assert calls.splitlines()[0] == "zpool import -d /dev/sda -d /dev/sda1", calls
+
+
+class TestGuardsOneCall:  # pylint: disable=missing-function-docstring,protected-access
+    """M26R-43: a call a guard left behind is noted with its pid and start
+    time, and while it still runs as zpool or zfs no guard starts another.
+    M26R-45: a state other than ONLINE, DEGRADED or SUSPENDED is read again
+    after a second before the pool counts as not healthy."""
+
+    @staticmethod
+    def _stub(td: str) -> None:
+        # Hangs while $td/hang exists, without exec: its name stays zpool.
+        Path(td, "stub", "zpool").write_text(
+            "#!/bin/sh\n"
+            f'echo "zpool $*" >> {td}/calls\n'
+            f"echo $$ >> {td}/pids\n"
+            f'while [ -e {td}/hang ] || [ "$1" = decoy ]; do sleep 1; done\n',
+            encoding="ascii",
+        )
+
+    @staticmethod
+    def _run(td: str, script: str) -> tuple[int, str]:
+        proc = subprocess.run(
+            ["sh", script],
+            capture_output=True,
+            text=True,
+            env={"PATH": f"{td}/stub:/usr/bin:/bin"},
+            check=False,
+            timeout=25,
+        )
+        return proc.returncode, proc.stdout + proc.stderr
+
+    @staticmethod
+    def _calls(td: str) -> list[str]:
+        calls = Path(td, "calls")
+        return calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+
+    @classmethod
+    def _imports(cls, td: str) -> int:
+        return sum(c.startswith("zpool import") for c in cls._calls(td))
+
+    @staticmethod
+    def _ticks(pid: int) -> str:
+        return str(progress_mod.start_ticks(pid))
+
+    def test_a_call_left_behind_is_the_only_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "hang").touch()
+            script = TestGuardsNeverWait._script(apt_guard.MOTD_SCRIPT, td, prepare=self._stub)
+            try:
+                _, out = self._run(td, script)
+                assert "did not answer within 3 s" in out, out
+                pid = int(Path(td, "pids").read_text(encoding="ascii").split()[0])
+                note = Path(td, "guard-call").read_text(encoding="ascii").split()
+                assert note == [str(pid), self._ticks(pid)], note
+                assert Path(td, "guard-call").stat().st_mode & 0o077 == 0
+                began = time.monotonic()
+                _, out = self._run(td, script)
+                assert f"an earlier zpool call has not ended (pid {pid})" in out, out
+                assert time.monotonic() - began < 2
+                assert self._imports(td) == 1, self._calls(td)
+                # Once it has ended, the note goes and the next call starts.
+                Path(td, "hang").unlink()
+                TestGuardsNeverWait._kill(td)
+                deadline = time.monotonic() + 5
+                while Path(f"/proc/{pid}").exists() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                rc, out = self._run(td, script)
+                assert rc == 0 and "not checked" not in out, out
+                assert self._imports(td) == 2, self._calls(td)
+                assert not Path(td, "guard-call").exists()
+            finally:
+                TestGuardsNeverWait._kill(td)
+
+    def test_a_note_of_another_process_is_dropped(self):
+        # A live process that is not zpool or zfs, and a zpool pid with
+        # another start time (the pid reused): neither holds the guards.
+        with tempfile.TemporaryDirectory() as td:
+            script = TestGuardsNeverWait._script(apt_guard.MOTD_SCRIPT, td, prepare=self._stub)
+            other = subprocess.Popen(["sleep", "30"])  # pylint: disable=consider-using-with
+            # A process named zpool that is not the one noted (another start time).
+            decoy = subprocess.Popen([f"{td}/stub/zpool", "decoy"])  # pylint: disable=consider-using-with
+            try:
+                for note in (
+                    f"{other.pid} {self._ticks(other.pid)}\n",
+                    f"{decoy.pid} {int(self._ticks(decoy.pid)) - 1}\n",
+                ):
+                    Path(td, "guard-call").write_text(note, encoding="ascii")
+                    rc, out = self._run(td, script)
+                    assert rc == 0 and "not checked" not in out, (note, out)
+                    assert not Path(td, "guard-call").exists(), note
+                assert self._imports(td) == 2, self._calls(td)
+            finally:
+                for proc in (other, decoy):
+                    proc.kill()
+                    _ = proc.wait()
+
+    def test_a_note_of_another_user_is_not_read(self):
+        if os.geteuid() != 0:
+            raise SkipTest("needs root to give the note to another user")
+        with tempfile.TemporaryDirectory() as td:
+            Path(td, "hang").touch()
+            script = TestGuardsNeverWait._script(apt_guard.MOTD_SCRIPT, td, prepare=self._stub)
+            try:
+                _ = self._run(td, script)
+                os.chown(Path(td, "guard-call"), 65534, 65534)
+                _ = self._run(td, script)
+                assert self._imports(td) == 2, self._calls(td)
+            finally:
+                TestGuardsNeverWait._kill(td)
+
+    @staticmethod
+    def _second_look(change: str) -> Callable[[str], None]:
+        """A stand-in sleep that logs its calls and, at the second look's
+        ``sleep 1``, does ``change`` to the odd pool's state (``online``,
+        ``gone``, or nothing)."""
+
+        def make(td: str) -> None:
+            state = Path(td, "kstat", "odd", "state")
+            act = {
+                "online": f"echo ONLINE > {state}",
+                "gone": f"rm -rf {state.parent}",
+            }.get(change, ":")
+            Path(td, "stub", "sleep").write_text(
+                f'#!/bin/sh\necho "sleep $*" >> {td}/sleeps\n'
+                + f'[ "$1" != 1 ] || {act}\n'
+                + 'exec /bin/sleep "$@"\n',
+                encoding="ascii",
+            )
+            Path(td, "stub", "sleep").chmod(0o755)
+
+        return make
+
+    def _hook(self, word: str, change: str) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as td:
+            script = TestGuardsNeverWait._script(
+                apt_guard.HOOK_SCRIPT,
+                td,
+                states={"rpool": "ONLINE", "odd": word},
+                devices=(),
+                prepare=self._second_look(change),
+            )
+            proc = subprocess.run(
+                ["sh", script],
+                input=TestGuardsNeverWait._DEB,
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{td}/stub:/usr/bin:/bin"},
+                check=False,
+                timeout=25,
+            )
+            sleeps = Path(td, "sleeps")
+            looked = sleeps.read_text(encoding="utf-8") if sleeps.exists() else ""
+        return proc.returncode, proc.stdout + proc.stderr, looked
+
+    def test_a_pool_being_imported_is_read_again(self):
+        rc, out, looked = self._hook("TRANSITIONING", "online")
+        assert rc == 0 and "not ONLINE" not in out, out
+        assert "sleep 1" in looked.splitlines(), looked
+
+    def test_a_pool_that_stays_transitioning_is_not_healthy(self):
+        rc, out, _ = self._hook("TRANSITIONING", "")
+        assert rc == 1 and "pool odd is not ONLINE" in out, out
+
+    def test_an_entry_gone_by_the_second_look_is_skipped(self):
+        rc, out, _ = self._hook("UNAVAIL", "gone")
+        assert rc == 0 and "not ONLINE" not in out, out
+
+    def test_a_suspended_pool_is_not_read_again(self):
+        rc, out, looked = self._hook("SUSPENDED", "online")
+        assert rc == 1 and "pool odd is not ONLINE" in out, out
+        assert "sleep 1" not in looked.splitlines(), looked
+
+
+class TestUdevRecord:  # pylint: disable=missing-function-docstring
+    """M26R-54: a registered drive whose partition udev does not record as a
+    ZFS member is not seen by the guards; backup and registry verify say so."""
+
+    @staticmethod
+    def _fs(record: str | None, *, block: bool = True, records: bool = True) -> str | None:
+        with tempfile.TemporaryDirectory() as td:
+            data = Path(td, "data")
+            if records:
+                data.mkdir()
+                if record is not None:
+                    Path(data, "b8:17").write_text(record, encoding="ascii")
+            fake = MagicMock(st_mode=0o60660 if block else 0o100644, st_rdev=os.makedev(8, 17))
+            real = os.stat
+
+            def stat(path: Any, *a: Any, **k: Any) -> Any:
+                return fake if path == "/dev/disk/by-id/x-part1" else real(path, *a, **k)
+
+            with (
+                patch.object(identity, "UDEV_DATA", str(data)),
+                patch.object(identity.os, "stat", side_effect=stat),
+            ):
+                return identity.udev_fs_type("/dev/disk/by-id/x-part1")
+
+    def test_the_type_udev_records(self):
+        assert self._fs("S:x\nE:ID_FS_TYPE=zfs_member\nE:ID_FS_USAGE=filesystem\n") == (
+            "zfs_member"
+        )
+        assert self._fs("E:ID_FS_TYPE=ext4\n") == "ext4"
+        assert self._fs("S:x\n") == ""
+        assert self._fs(None) == ""
+        assert self._fs(None, records=False) is None
+        assert self._fs("E:ID_FS_TYPE=zfs_member\n", block=False) is None
+
+    def test_the_warning(self):
+        with patch.object(identity, "udev_fs_type", return_value="zfs_member"):
+            assert identity.udev_unseen("backup2", "/dev/x") == ""
+        with patch.object(identity, "udev_fs_type", return_value=None):
+            assert identity.udev_unseen("backup2", "/dev/x") == ""
+        for fs in ("", "ext4"):
+            with patch.object(identity, "udev_fs_type", return_value=fs):
+                got = identity.udev_unseen("backup2", "/dev/x")
+            assert got.startswith("udev does not record backup2's partition as a ZFS member")
+            assert "will not see it plugged in" in got
+
+    def test_the_suite_reads_no_host_record(self):
+        assert not Path(identity.UDEV_DATA).exists()
 
 
 class TestGrubScanFile:  # pylint: disable=missing-function-docstring
@@ -15861,6 +16143,16 @@ class TestRegistryVerify:  # pylint: disable=missing-function-docstring
     @staticmethod
     def _anchored(fake: FakeZfs) -> bool:
         return any(repl.anchor_disk(b) == "9" for b in fake.bookmarks("rpool/ROOT/be"))
+
+    def test_a_drive_udev_does_not_record_as_a_zfs_member_is_said(self):
+        # M26R-54: registered all the same; the guards will not see it.
+        for fs, said in (("", True), ("zfs_member", False)):
+            fake, d = self._fixture()
+            with patch.object(identity, "udev_fs_type", return_value=fs) as read:
+                rc, out, _, _ = self._run(fake, d, ["verify", "old"])
+            assert rc == 0 and "DRIVE REGISTERED" in out, out
+            assert ("udev does not record old's partition as a ZFS member" in out) is said, out
+            read.assert_called_once_with(self.DEV)
 
     def test_a_read_back_that_passes_registers_what_prepare_recorded(self):
         fake, d = self._fixture()
@@ -24320,6 +24612,45 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
             if stale:
                 assert text.index("Scanning for known backup drives") < text.index(
                     apt_guard.STALE_LINE
+                )
+
+    def test_step_1_logs_a_guard_it_could_not_read(self) -> None:
+        """M26R-52: not said on the terminal, one zark.log line."""
+
+        def stale(*, unreadable: list[str]) -> bool:
+            unreadable.append("/etc/update-motd.d/99-zark-external-pool")
+            return False
+
+        out = StringIO()
+        log_file = Path(Log.default_file())
+        before = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+        _, rc = self._run(
+            _fresh_fake(),
+            patch.object(apt_guard, "guards_stale", side_effect=stale),
+            redirect_stdout(out),
+        )
+        assert rc == 0, out.getvalue()
+        assert "could not be read" not in out.getvalue()
+        logged = log_file.read_text(encoding="utf-8")[len(before) :]
+        assert (
+            "zark's guard file /etc/update-motd.d/99-zark-external-pool could not be read" in logged
+        ), logged
+
+    def test_step_2_says_a_drive_udev_does_not_record_as_a_zfs_member(self) -> None:
+        """M26R-54: the guards will not see it; the run goes on."""
+        for fs, said in (("ext4", True), ("zfs_member", False), (None, False)):
+            out = StringIO()
+            _, rc = self._run(
+                _fresh_fake(),
+                patch.object(identity, "udev_fs_type", return_value=fs),
+                redirect_stdout(out),
+            )
+            text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+            assert rc == 0, text
+            assert ("udev does not record backup's partition" in text) is said, (fs, text)
+            if said:
+                assert (
+                    text.index("[2/8]") < text.index("udev does not record") < text.index("[3/8]")
                 )
 
     def test_an_ext4_run_refreshes_the_copy_before_the_point(self) -> None:

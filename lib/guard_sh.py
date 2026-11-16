@@ -36,19 +36,28 @@ So every guard reads pools through this block:
     ``/run/udev/data``: a chroot without /run) every disk and partition is
     named, as before. A ``ZPOOL_IMPORT_PATH`` already set (the GRUB scan
     file's) is kept as is;
+  * a state other than ONLINE, DEGRADED or SUSPENDED (a pool being imported
+    reads TRANSITIONING) is read a second time after a second before the
+    pool counts as not healthy (M26R-45);
   * every ``zpool`` and ``zfs`` call runs in the background and is waited for
     a few seconds at most: one that has not ended is left behind, its output
     discarded, and the guard decides without it (the reminder says it could
-    not check; the APT hook, the prerm and the GRUB guard refuse).
+    not check; the APT hook, the prerm and the GRUB guard refuse);
+  * one call left behind at most: its pid and start time go to a file under
+    ``/run``, and while that process still runs as ``zpool`` or ``zfs`` no
+    guard starts another call and each answers as for a call that did not
+    end (M26R-43). Only a file owned by the guard's own user is read, and
+    only root can write in ``/run``.
 
 The block is text inserted into each script, which stays standalone: the
-installed files never call zark. Its two path lines are what the tests point
+installed files never call zark. Its path lines are what the tests point
 elsewhere.
 """
 
 KSTAT_LINE = "zark_kstat=/proc/spl/kstat/zfs"
 BLOCK_LINE = "zark_block=/sys/class/block"
 UDEV_LINE = "zark_udev=/run/udev/data"
+CALL_LINE = "zark_callf=/run/zark-guard-call"
 
 # Not an f-string: the shell's ${...} and $((...)) would collide with it.
 POOL_READ_SH = (
@@ -58,10 +67,12 @@ POOL_READ_SH = (
 # included, and such a read never returns (state D). So: the kstat states
 # first (a read that never waits); no zpool or zfs command at all while a
 # pool is not ONLINE or DEGRADED; the scan names disks and partitions only;
-# every call waited for a few seconds at most, then left behind.
+# every call waited for a few seconds at most, then left behind (one at
+# most: no new call while an earlier one still runs).
 __KSTAT_LINE__
 __BLOCK_LINE__
 __UDEV_LINE__
+__CALL_LINE__
 zark_unhealthy=""
 for zark_s in "$zark_kstat"/*/state; do
     # The pattern itself when nothing matches; a state file that is there
@@ -73,30 +84,68 @@ for zark_s in "$zark_kstat"/*/state; do
     case "${zark_n##*/}" in '$'*) continue ;; esac
     zark_w="$(cat "$zark_s" 2>/dev/null)" || zark_w="UNREADABLE"
     case "$zark_w" in
+        ONLINE|DEGRADED|SUSPENDED) ;;
+        *)
+            # A pool being imported reads TRANSITIONING for a moment: read
+            # it again before calling it not healthy (M26R-45).
+            sleep 1
+            [ -e "$zark_s" ] || [ -L "$zark_s" ] || continue
+            zark_w="$(cat "$zark_s" 2>/dev/null)" || zark_w="UNREADABLE"
+            ;;
+    esac
+    case "$zark_w" in
         ONLINE|DEGRADED) ;;
         *) zark_unhealthy="$zark_unhealthy ${zark_n##*/}" ;;
     esac
 done
 
+# zark_proc <pid>: that process's state letter, start time (field 22 of its
+# stat, counted after the last ")") and name, in zark_pst, zark_ptk and
+# zark_pcm. Returns 1 when it is gone.
+zark_proc() {
+    zark_st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    zark_pcm="${zark_st#*(}"
+    zark_pcm="${zark_pcm%)*}"
+    zark_st="${zark_st##*) }"
+    # $zark_st is split on purpose: one field each.
+    set -- $zark_st
+    zark_pst=$1
+    zark_ptk=${20}
+    return 0
+}
+
 # zark_bounded <seconds> <command...>: the command's stdout in zark_out.
 # Returns 1, zark_out empty and the reason in zark_why, when it could not
 # run or has not ended after <seconds>: it is left running, never waited
 # for, and nothing of it reaches this script. The child keeps no descriptor
-# of the guard's above 2 (debconf's 3 under a maintainer script).
+# of the guard's above 2 (debconf's 3 under a maintainer script). A call
+# left behind is noted in $zark_callf, and while it still runs no other
+# call is started (M26R-43).
 zark_why=""
 zark_bounded() {
     zark_t=$1
     shift
     zark_out=""
+    if [ -O "$zark_callf" ] && read -r zark_cp zark_ck < "$zark_callf" 2>/dev/null; then
+        if zark_proc "$zark_cp" && [ "$zark_pst" != Z ] && [ "$zark_ptk" = "$zark_ck" ] \\
+            && { [ "$zark_pcm" = zpool ] || [ "$zark_pcm" = zfs ]; }; then
+            zark_why="an earlier $zark_pcm call has not ended (pid $zark_cp)"
+            return 1
+        fi
+        rm -f "$zark_callf"
+    fi
     zark_d="$(mktemp -d 2>/dev/null)" || {
         zark_why="no temporary directory could be made (mktemp failed)"
         return 1
     }
-    ( "$@" > "$zark_d/out" 2>/dev/null || :; : > "$zark_d/done" ) \
-        < /dev/null > /dev/null 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+    # The command itself is the background job, so $! is its own pid.
+    "$@" > "$zark_d/out" 2>/dev/null < /dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
+    zark_c=$!
     zark_i=0
-    while [ ! -e "$zark_d/done" ]; do
+    while zark_proc "$zark_c" && [ "$zark_pst" != Z ]; do
         if [ "$zark_i" -ge $((zark_t * 10)) ]; then
+            ( umask 077 && printf '%s %s\\n' "$zark_c" "$zark_ptk" > "$zark_callf.$$" \\
+                && mv -f "$zark_callf.$$" "$zark_callf" ) 2>/dev/null || :
             rm -rf "$zark_d"
             zark_why="a pool did not answer within $zark_t s"
             return 1
@@ -104,6 +153,7 @@ zark_bounded() {
         sleep 0.1
         zark_i=$((zark_i + 1))
     done
+    wait "$zark_c" 2>/dev/null || :
     zark_out="$(cat "$zark_d/out" 2>/dev/null)" || zark_out=""
     rm -rf "$zark_d"
     return 0
@@ -169,13 +219,15 @@ ZARK_LIST
 """.replace("__KSTAT_LINE__", KSTAT_LINE)
     .replace("__BLOCK_LINE__", BLOCK_LINE)
     .replace("__UDEV_LINE__", UDEV_LINE)
+    .replace("__CALL_LINE__", CALL_LINE)
 )
 
 # What a script sourced into another shell (the GRUB scan file) unsets after
 # the block, so nothing of it outlives the file.
 UNSET_SH = (
-    "unset zark_kstat zark_block zark_udev zark_unhealthy zark_s zark_w zark_n zark_t "
-    "zark_out zark_why zark_d zark_i zark_avail zark_devs zark_b zark_mm zark_imp zark_p "
-    "zark_list zark_name zark_alt\n"
-    "unset -f zark_bounded zark_scan zark_held\n"
+    "unset zark_kstat zark_block zark_udev zark_callf zark_unhealthy zark_s zark_w zark_n "
+    "zark_t zark_out zark_why zark_d zark_i zark_c zark_cp zark_ck zark_st zark_pst zark_ptk "
+    "zark_pcm zark_avail zark_devs zark_b zark_mm zark_imp zark_p zark_list zark_name "
+    "zark_alt\n"
+    "unset -f zark_proc zark_bounded zark_scan zark_held\n"
 )

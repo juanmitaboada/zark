@@ -31,6 +31,7 @@ filesystem (the live USB, the ESP, a LUKS container) or active swap.
 import os
 import re
 import shlex
+import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -40,6 +41,11 @@ from lib.sh import part, run
 
 BY_ID_DIR = "/dev/disk/by-id"
 SYS_BLOCK = "/sys/class/block"
+# udev's database of block devices: one file per device, b<major>:<minor>,
+# what zark's guards read to name the disks they scan (lib/guard_sh.py).
+# The suite points it at a directory of its own.
+UDEV_DATA = "/run/udev/data"
+ZFS_MEMBER = "zfs_member"
 
 # by-id prefixes in order of preference. wwn-/scsi-/nvme-eui. names come
 # last: USB-SATA bridges can report a bogus WWN shared across enclosures
@@ -426,3 +432,41 @@ def protected_disks(*, own_pool: str | None = None) -> dict[str, str]:
             for d in disks_under(dev):
                 reasons.setdefault(d, "holds active swap")
     return reasons
+
+
+def udev_fs_type(path: str) -> str | None:
+    """The file system type udev records for the block device at ``path``
+    (its ``E:ID_FS_TYPE=`` line): "" when the device has no record or the
+    record no type; None when it cannot be told: no udev records here at all
+    (a chroot without /run, where the guards scan every disk), or ``path`` is
+    not a block device. Opens no device: the major and minor come from stat."""
+    if not os.path.isdir(UDEV_DATA):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISBLK(st.st_mode):
+        return None
+    record = Path(UDEV_DATA, f"b{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}")
+    try:
+        text = record.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.startswith("E:ID_FS_TYPE="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
+def udev_unseen(name: str, path: str) -> str:
+    """The warning for a registered drive the guards cannot see plugged in:
+    udev does not record its partition as a ZFS member (M26R-54); "" when it
+    does, or when that cannot be told."""
+    fs = udev_fs_type(path)
+    if fs is None or fs == ZFS_MEMBER:
+        return ""
+    return (
+        f"udev does not record {name}'s partition as a ZFS member: zark's guards "
+        + "will not see it plugged in (man zark, the guards)"
+    )

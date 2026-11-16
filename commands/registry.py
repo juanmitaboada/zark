@@ -43,7 +43,7 @@ import os
 import shlex
 from pathlib import Path
 
-from lib import anchors, cli_spec, pending, registry, sh, status_file, survey
+from lib import anchors, cli_spec, identity, pending, registry, sh, status_file, survey
 from lib.cleanup import Cleanup, prompt_eject_or_attach
 from lib.config import Config, zark_command
 from lib.drives import (
@@ -371,6 +371,10 @@ def _verify(cfg: Config, log: Log, name: str) -> None:  # pylint: disable=too-ma
         cfg.save_drives()
         _ = pending.remove(cfg, name)
         status_file.refresh_or_warn(cfg, Log(os.devnull), "registry", warn=log)
+        # A drive udev does not record as a ZFS member is not seen by the guards.
+        unseen = identity.udev_unseen(name, held.device)
+        if unseen:
+            log.warn(unseen)
         log.banner_ok(
             "DRIVE REGISTERED",
             [

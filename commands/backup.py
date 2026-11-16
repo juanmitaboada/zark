@@ -49,6 +49,7 @@ from lib import (
     engine,
     exclusions,
     forensics,
+    identity,
     notify,
     pending,
     pool_record,
@@ -1350,8 +1351,11 @@ def run(
 
     # ── Find and select drive ────────────────────────────────────────────
     log.step(1, TOTAL_STEPS, "Scanning for known backup drives...")
-    if apt_guard.guards_stale():
+    unreadable: list[str] = []
+    if apt_guard.guards_stale(unreadable=unreadable):
         log.warn(apt_guard.STALE_LINE)
+    for path in unreadable:
+        log.file(f"zark's guard file {path} could not be read: not judged")
     drives = scan_connected_drives(cfg, log)
     known = [d for d in drives if d.known]
 
@@ -1424,6 +1428,10 @@ def run(
         )
 
     log.ok(f"Pool {pool_name} imported (GUID: {actual_guid} ✓)")
+    # A drive udev does not record as a ZFS member is not seen by the guards.
+    unseen = identity.udev_unseen(pool_name, device) if device else ""
+    if unseen:
+        log.warn(unseen)
     # Until the export: a drive that goes away is said at once (A1E-7, M26-3 3b).
     watch = drive_watch.start(pool_name, device or "", log, _notify)
     cleanup.track_action(watch.stop)
