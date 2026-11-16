@@ -129,14 +129,14 @@ _SIGNED_GRUB = Path("/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed")
     1,
     1,
     "the signed GRUB's modules: zfs recorded, needed on a bpool host only",
-    depends=("the signed boot chain of a bpool point (lib/boot_chain.py:273)",),
+    depends=("the signed boot chain of a bpool point (lib/boot_chain.py:311)",),
 )
 def boot_06(b: Bench) -> None:
     """Whether Ubuntu's signed GRUB carries the ``zfs`` modules (1.215+2.14-
     2ubuntu1 carries ``zfs``, ``zfscrypt`` and ``zfsinfo``): a bpool host
     boots through them; an ext4 ``/boot`` does not need them. The names are
     read as NUL-terminated strings in the image, logged as a record, and
-    their absence fails on a bpool host only (lib/boot_chain.py:273)."""
+    their absence fails on a bpool host only (lib/boot_chain.py:311)."""
     try:
         data = _SIGNED_GRUB.read_bytes()
     except OSError as e:
@@ -259,7 +259,7 @@ def boot_03(b: Bench) -> None:
     mode, an ACL and an xattr, copied with backup's rsync
     (lib/boot_layout.py:179) into a dataset made as ``zark-boot`` (child of
     an encrypted dataset, ``acltype=posixacl``, ``xattr=sa``, ``legacy``)
-    and back with recover's (lib/boot_chain.py:249): status 0 both ways,
+    and back with recover's (lib/boot_chain.py:250): status 0 both ways,
     every attribute equal, ``efi`` left out."""
     _need("mkfs.ext4", "rsync", "setfacl", "getfacl", "setfattr", "getfattr")
     c, _, copy = _copy_tree(b)

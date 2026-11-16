@@ -5,6 +5,106 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The last fixes of zark 2.3. Nothing on a drive or in `/etc/zark` changes;
+zark 2.3.1 reads everything 2.3.2 writes.
+
+### For zark 2.3.1 users
+
+The guards change again (below): run `sudo zark setup` once per system
+after upgrading. Until then `zark backup` (at its step 1) and `zark
+monitor` say `zark's guards are out of date: run sudo zark setup`.
+
+### Changed
+
+- **Every command refuses an option it does not declare**, before anything
+  runs: `zark <command>: unknown option <option>`, exit status 2. Until now
+  most commands ignored an option they did not know: `zark backup --drvie
+  black` backed up whichever drive was connected. A script that passes an
+  option zark never knew now stops. `zark <command> --help` (or `-h`)
+  prints that command's usage, built from the same declaration the parsers
+  read: its options and the kind of value each takes, its subcommands and
+  the default one, and exits 0 (`zark backup --help` used to run a
+  backup). `zark monitor` keeps its own usage. `simulate --ro`, accepted
+  for compatibility, is still accepted.
+- **zark runs from `/`**: once its path arguments (devices, files, `zark
+  monitor --root`) are made absolute, zark changes its own directory to
+  `/`, as every command it starts already did. A read zark itself makes
+  that never returns (a drive gone in the middle of `fullcheck`'s restore
+  check) no longer holds the directory it was started from, which the
+  reboot must unmount. `zark chroot`'s shell and `simulate`'s QEMU start in
+  `/`.
+- **The APT hook waits up to 30 s for its scan** of the pools available
+  for import: a ZFS member disk that sleeps can take more than 10 s to
+  answer, and a kernel install was refused then. The login reminder still
+  waits 3 s at most, the update-grub guard and its scan file 10 s.
+- **`rate_bytes_per_s` in `progress.json` counts only the seconds in which
+  a send was streaming**, from its first byte, and is null until 10 s of
+  them: the seconds a transfer spends starting and closing, among small
+  datasets or before a resume's first byte, made it a small fraction of
+  the real rate, and a reader's time left read hours after a resume.
+
+### Fixed
+
+- **One guard command left behind at most**: a `zpool` or `zfs` command a
+  guard leaves running is noted in `/run/zark-guard-call` with its start
+  time, and while it still runs no guard starts another; each answers as
+  for a command that did not end (the reminder says it could not check,
+  the others refuse). Before, every ssh login, `apt` run and `update-grub`
+  started one more.
+- **A pool being imported is not taken for one whose drive went away**: a
+  state other than ONLINE, DEGRADED or SUSPENDED (TRANSITIONING while a
+  pool is imported) is read a second time after a second before the guards
+  call the pool not healthy and refuse or warn.
+- **A guard removed on purpose is not "out of date"**: only a guard file
+  that is there, can be read and is not this zark's is. Removing the APT
+  hook's configuration, as its own message says to disable it, no longer
+  brings the line at every backup and in `zark monitor`.
+- **A drive the guards cannot see is said to its owner**: `backup` (at its
+  step 2) and `registry verify` warn when udev does not record a
+  registered drive's partition as a ZFS member: the guards then never see
+  it plugged in.
+- **The probe before a backup's export waits for the pool to settle** when
+  the drive changed again after the wait for it: ONLINE or DEGRADED with
+  its device there for 10 s, as the wait asks, or no probe and the pool
+  left imported after a minute.
+- **A backup whose drive went away is recorded as interrupted at once**:
+  the drive's last run in `status.json` says `interrupted`, with the time
+  the drive went away, as soon as zark sees it go; after the forced reboot
+  zark offers, `zark status`, `zark monitor` and the desktop show it.
+  Before, the run was recorded only at its end, which the reboot never
+  reached, so the drive showed its run before. When the run gets to its
+  end, its own result replaces it.
+- **The open question is shown again** below the lines a backup prints
+  when its drive goes away, with its options and the line the answer is
+  typed on.
+- **`Using drive: <name> (<model>, <size>)`** leaves out a field that is
+  empty, as with a drive gone and its pool still imported.
+- **`zark monitor` says the run's drive went away**: "went away, in use"
+  while the run's `drive_gone` says it is not back, not "connected, in
+  use".
+- **`recover` checks its chroot's binds and efivarfs**, as `repair-boot`
+  does: the first that fails stops recover with its name, before
+  grub-install, the signed GRUB and shim and update-grub run in a
+  half-prepared tree; the restored datasets stay on the disk.
+- **A crash reaches `zark.log`**: an exception nothing caught is said
+  through the log with its type, and its traceback goes to `zark.log`
+  (`--debug` still prints it). It went to the terminal only.
+- **`/run/zark/probe` and `/run/zark/fullcheck` are removed after use**
+  (`zark mount`, `recover`, `fullcheck`): they were left behind, empty.
+- **A certificate from the official Ubuntu 26.10 image names it**: its
+  `.disk/info` line says "Official", which the certificate's and the
+  matrix's pattern did not take, so it read "other".
+
+### Documentation
+
+- `docs/STATUS-FILES.md`: a reader in another pid namespace (a Flatpak
+  sandbox, a container) skips orphan rules 4 and 5; with `/proc` mounted
+  `subset=pid` rule 3 is skipped.
+- README: the hardware line no longer says every release was tested on
+  two series; each release's entry here says what was tested on which.
+
 ## [2.3.1] - 2026-11-16
 
 A backup drive that goes away during a backup: what zark does then, and

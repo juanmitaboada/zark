@@ -63,6 +63,9 @@ and never needs root.
 
 **-h**, **--help**, **help**
 :   Print a summary of available commands and exit. Does not require root.
+    After a *command* (**zark backup --help**), print that command's usage:
+    its options, the kind of value each takes, its subcommands and which is
+    the default, and exit; nothing runs. **monitor** prints its own.
 
 **-v**, **--version**
 :   Print the **zark** version and exit. Does not require root.
@@ -70,7 +73,16 @@ and never needs root.
 **--debug**
 :   When supplied as an argument to any *command*, a Python traceback is
     printed if the command aborts with an unhandled exception. Without
-    **--debug**, only the **\[FATAL\]** message is shown.
+    **--debug**, one line names the exception and the traceback goes to
+    *zark.log* only.
+
+Every *command* refuses an option it does not declare, before anything
+runs: the line names it and the exit status is 2 (until 2.3.1 most
+commands ignored it). Its path arguments (devices, files, **monitor
+--root**) are made absolute, then **zark** runs from */*, as every command
+it starts does: a read that never returns (a drive gone in the middle of
+**fullcheck**'s restore check) does not hold the directory it was started
+from.
 
 All other commands but **monitor** must be run as **root** (typically via **sudo**(8))
 because every action involves ZFS pool import/export, partition table
@@ -1549,9 +1561,10 @@ roll its backup points back).
     names the process.
 
 **2**
-:   A usage error: an unknown word or a missing value; nothing was done.
-    **exclude**, **selftest**, **setup** and **monitor** use it, and **backup
-    --drive** with no name.
+:   A usage error: an unknown option (every command), an unknown word or a
+    missing value; nothing was done. **exclude**, **selftest**, **setup**
+    and **monitor** also use it for their own words, and **backup --drive**
+    with no name.
 
 **130**, **143**, **129**, **141**
 :   The run was stopped by **Ctrl-C** (SIGINT), SIGTERM, SIGHUP (a closed
@@ -1723,13 +1736,20 @@ no device is opened to decide and a disk that sleeps is not woken (with
 no such records, every disk and partition), never a zvol, a
 device-mapper, md or loop device: a pool on LUKS, md or a loop device does
 not count as plugged in, nor does a drive whose partition **udev** does not
-record as a ZFS member; and it waits at most 3 s (the reminder) or 10 s
-(the others) for a command, leaving one that does not end behind with
-none of its descriptors. The reminder then names the pool, or says why it
+record as a ZFS member (**backup** and **registry verify** say so of a
+registered drive); and it waits at most 3 s (the reminder), 30 s (the APT
+hook's scan: a ZFS member disk that sleeps can take more than 10 s to
+answer) or 10 s (the rest) for a command, leaving one that does not end
+behind with none of its descriptors. One left behind is noted in
+*/run/zark-guard-call*, and while it still runs no guard starts another:
+each answers as for a command that did not end. A state other than
+ONLINE, DEGRADED or SUSPENDED (a pool being imported) is read again after
+a second. The reminder then names the pool, or says why it
 could not check; the hook, the prerm script and the update-grub guard
 refuse. **setup** installs this version's copies: run it after upgrading
 **zark**; until then **backup** and **monitor** say *zark's guards are out
-of date: run sudo zark setup*.
+of date: run sudo zark setup*. A guard file removed by hand is not out of
+date: it was taken away on purpose.
 
 **zark** does not import a backup pool while **apt**, **dpkg** or
 **unattended-upgrades** runs. Before every import of a backup pool on the
