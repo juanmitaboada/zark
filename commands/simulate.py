@@ -364,12 +364,13 @@ def _parse_args(args: list[str]) -> SimulateArgs:
                       (read-only is the default now, --ro is a no-op)
       --display WxH   QEMU virtio-vga resolution (default 2560x1440)
 
-    Unknown flags are ignored - defensive against future additions and
-    consistent with the rest of the codebase which never argparses
-    rigidly.
+    zark refuses an option the spec does not declare before this runs
+    (M14P.3), so ``--ro`` is declared and read here as the no-op it is.
     """
     parsed = SimulateArgs()
     parsed.rw = cli_spec.command("simulate").word("--rw") in args
+    # Read-only is the default: --ro asks for it, nothing to set.
+    _ = cli_spec.command("simulate").word("--ro") in args
     parsed.disk = next((a for a in args if a.startswith("/dev/")), None)
 
     # --display WxH (two-token form). We avoid argparse to stay

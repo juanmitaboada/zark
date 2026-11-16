@@ -22,6 +22,8 @@ Usage:    sudo ./zark <command> [options]
 
 import os
 import sys
+import traceback
+from typing import NoReturn
 
 from lib import cli_spec, dpkg_lock, invoker, live, lock, progress, signals
 from lib.config import VERSION, Config
@@ -79,6 +81,44 @@ def print_help():
     print()
 
 
+def _checked_args(name: str, args: list[str]) -> list[str]:
+    """Before anything runs, root or not: the command's own usage for
+    ``--help`` (M14P.3, D4 19b), exit 2 for an option the command does not
+    declare (M14P.3), and its path arguments made absolute before zark
+    leaves the caller's directory for / (M26R-50, D1)."""
+    _, cmd = _invocation_hint()
+    if cli_spec.asks_help(name, args):
+        print(cli_spec.usage(name, cmd), end="")
+        sys.exit(0)
+    bad = cli_spec.unknown_option(name, args)
+    if bad:
+        print(f"zark {name}: unknown option {bad}", file=sys.stderr)
+        print(f"  Run: {cmd} {name} --help", file=sys.stderr)
+        sys.exit(cli_spec.EX_USAGE)
+    out = cli_spec.absolute(name, args)
+    # A read zark itself makes that never returns (a drive gone in the middle
+    # of fullcheck's restore check) pins zark's own directory, which a reboot
+    # must unmount: zark runs from / (M26R-50). Children start there too
+    # (lib/sh.CHILD_CWD).
+    os.chdir("/")
+    return out
+
+
+def _crashed(e: Exception, cmd_args: list[str]) -> NoReturn:
+    """An unexpected exception: through the log as every other ending, the
+    traceback in zark.log only (a crash printed to the terminal alone left no
+    trace, M26 eli R1x); on the terminal too with ``--debug``. Exits 1."""
+    progress.note_error(str(e))  # a backup's last_run says why (M7-6 6a)
+    log = Log()
+    print()
+    log.error(f"zark stopped on an unexpected error: {type(e).__name__}: {e}")
+    log.file(traceback.format_exc().rstrip())
+    log.error(f"The details are in {log.log_file}: attach them to a bug report")
+    if cli_spec.DEBUG in cmd_args:
+        traceback.print_exc()
+    sys.exit(1)
+
+
 def main():  # pylint: disable=too-many-branches
     """
     Main entry point: parse command and dispatch to appropriate module
@@ -98,6 +138,10 @@ def main():  # pylint: disable=too-many-branches
     if args[0] in cli_spec.VERSION_WORDS:
         print(f"zark v{VERSION}")
         sys.exit(0)
+
+    name = args[0][2:] if args[0].startswith("--") else args[0]
+    if name in COMMANDS:
+        args = [args[0], *_checked_args(name, args[1:])]
 
     if args[0] in ("monitor", "--monitor"):
         # A reader of the status files: no root, no lock, no zark.log (M8-3).
@@ -168,13 +212,7 @@ def main():  # pylint: disable=too-many-branches
             Log().error("Interrupted by user.")
         sys.exit(130)
     except Exception as e:  # pylint: disable=broad-exception-caught
-        progress.note_error(str(e))  # a backup's last_run says why (M7-6 6a)
-        print(f"\n\033[0;31m[FATAL]\033[0m {e}")
-        if cli_spec.DEBUG in cmd_args:
-            import traceback  # pylint: disable=import-outside-toplevel
-
-            traceback.print_exc()
-        sys.exit(1)
+        _crashed(e, cmd_args)
 
 
 if __name__ == "__main__":

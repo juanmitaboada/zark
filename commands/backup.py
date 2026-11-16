@@ -195,7 +195,7 @@ class UsageError(ValueError):
 
 
 def _parse_args(args: list[str]) -> BackupArgs:
-    """Parse backup's command-line arguments (unknown flags are ignored)."""
+    """Parse backup's command-line arguments (zark refused unknown options before)."""
     spec = cli_spec.command("backup")
     parsed = BackupArgs()
     if spec.word("--no-snapshot") in args:

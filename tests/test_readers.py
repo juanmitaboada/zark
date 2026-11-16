@@ -528,7 +528,8 @@ class TestInvokingUser:  # pylint: disable=missing-function-docstring
 
         with ExitStack() as stack:
             for cm in (
-                patch.object(sys, "argv", ["zark", "prune", "--dry-run"]),
+                patch.object(sys, "argv", ["zark", "backup", "--drive", "alpha"]),
+                patch("os.chdir"),  # main() leaves for / (M26R-50): not the suite
                 patch("os.geteuid", return_value=0),
                 patch.dict(os.environ, {"SUDO_UID": "1000"}),
                 patch.object(Log, "file", lambda _s, m: order.append(f"file:{m}")),
@@ -541,7 +542,7 @@ class TestInvokingUser:  # pylint: disable=missing-function-docstring
             except SystemExit as e:
                 assert e.code == 75, e.code
         assert len(order) == 2 and order[1] == "guard", order
-        assert order[0].startswith("file:zark prune --dry-run run by uid 1000 ("), order
+        assert order[0].startswith("file:zark backup --drive alpha run by uid 1000 ("), order
         assert order[0].endswith(") via sudo"), order
         assert out.getvalue() == "", out.getvalue()
 

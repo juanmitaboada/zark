@@ -5325,6 +5325,7 @@ class TestLock:  # pylint: disable=missing-function-docstring,protected-access
         ran: list[str] = []
         with (
             patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.chdir"),  # main() leaves for / (M26R-50): not the suite
             patch("os.geteuid", return_value=0),
             patch("lib.progress.start"),
             patch("lib.signals.guard_output"),
@@ -7493,6 +7494,7 @@ class TestDpkgLock:  # pylint: disable=missing-function-docstring,used-before-as
         out = StringIO()
         with (
             patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.chdir"),  # main() leaves for / (M26R-50): not the suite
             patch("os.geteuid", return_value=0),
             patch("lib.progress.start"),
             patch("lib.progress.note_error") as noted,
@@ -20435,6 +20437,7 @@ class TestCommandSignals:  # pylint: disable=missing-function-docstring
         order: list[str] = []
         with (
             patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.chdir"),  # main() leaves for / (M26R-50): not the suite
             patch("os.geteuid", return_value=0),
             patch("lib.progress.start"),
             patch("lib.signals.guard_output", side_effect=lambda *_a: order.append("guard")),
@@ -20734,7 +20737,8 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
         loader.exec_module(entry)
         order: list[str] = []
         with (
-            patch.object(sys, "argv", ["zark", "prune", "--dry-run"]),
+            patch.object(sys, "argv", ["zark", "prune"]),
+            patch("os.chdir"),  # main() leaves for / (M26R-50): not the suite
             patch("os.geteuid", return_value=0),
             patch("lib.progress.start"),
             patch("lib.signals.guard_output"),
@@ -20748,7 +20752,7 @@ class TestLiveInstallerProbe:  # pylint: disable=missing-function-docstring
             patch.object(prune_mod, "run", side_effect=lambda _a: order.append("prune")),
         ):
             entry.main()
-        assert order == ["stop prune ['--dry-run']", "prune"], order
+        assert order == ["stop prune []", "prune"], order
 
 
 class TestMountOriginLayout:  # pylint: disable=missing-function-docstring
@@ -26476,6 +26480,7 @@ class TestEntryPointProgress:  # pylint: disable=missing-function-docstring
             started = stack.enter_context(patch("lib.progress.start"))
             cms: list[AbstractContextManager[object]] = [
                 patch.object(sys, "argv", argv),
+                patch("os.chdir"),  # main() leaves for / (M26R-50): not the suite
                 patch("os.geteuid", return_value=0),
                 patch("lib.signals.guard_output"),
                 patch.object(lock_mod, "guard"),
@@ -31571,6 +31576,200 @@ class TestCliSpec:  # pylint: disable=missing-function-docstring
         assert kinds <= set(cli_spec_mod.KINDS), kinds
 
 
+def _entry_child(code: str, argv: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
+    """``code`` run in a child after zark's entry point is loaded as ``m``
+    (not run), then ``m.main()`` with ``argv``; the suite's Log redirected."""
+    prelude = (
+        "import importlib.machinery, importlib.util, os, sys\n"
+        "from unittest.mock import patch\n"
+        "loader = importlib.machinery.SourceFileLoader('zark_entry', sys.argv[1])\n"
+        "spec = importlib.util.spec_from_file_location('zark_entry', sys.argv[1], loader=loader)\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        "loader.exec_module(m)\n"
+        "from lib.log import Log\n"
+        "LOGF = sys.argv[2]\n"
+        "patch.object(Log, 'default_file', classmethod(lambda c: LOGF)).start()\n"
+    )
+    call = f"sys.argv = {['zark', *argv]!r}\nm.main()\n"
+    return subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            prelude + code + call,
+            str(_REPO_ROOT / "zark"),
+            os.path.join(cwd, "zark.log"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+        check=False,
+    )
+
+
+class TestCommandLine:  # pylint: disable=missing-function-docstring
+    """M14P.3: every command refuses an option it does not declare, exit 2,
+    before anything runs; ``--help`` after a command prints its usage (D4
+    19b). M26R-50: path arguments made absolute, then zark runs from /."""
+
+    @staticmethod
+    def _specs() -> Iterator[tuple[str, list[str], Any]]:
+        """Every command and subcommand: its name, the words that select it,
+        its spec."""
+        for name, spec in cli_spec_mod.SPECS.items():
+            yield name, [], spec
+            for sub in spec.subcommands:
+                yield name, [sub.name], sub
+
+    def test_an_undeclared_option_is_named(self):
+        for name, sel, _spec in self._specs():
+            got = cli_spec_mod.unknown_option(name, [*sel, "--no-such-option"])
+            assert got == "--no-such-option", (name, sel, got)
+            assert cli_spec_mod.unknown_option(name, [*sel, "-q"]) == "-q", (name, sel)
+
+    def test_every_declared_option_passes_with_its_value(self):
+        for name, sel, spec in self._specs():
+            for opt in spec.options:
+                args = [*sel, opt.name, *(["x"] if opt.value else []), "--debug"]
+                assert cli_spec_mod.unknown_option(name, args) == "", (name, args)
+
+    def test_an_options_value_and_a_lone_dash_are_not_options(self):
+        assert cli_spec_mod.unknown_option("selftest", ["run", "--only", "-X"]) == ""
+        assert cli_spec_mod.unknown_option("backup", ["--drive", "--no-snapshot"]) == ""
+        assert cli_spec_mod.unknown_option("prepare", ["-"]) == ""
+        assert cli_spec_mod.unknown_option("backup", ["--debug", "--drvie", "b"]) == "--drvie"
+        # A subcommand's options are its own, the default one's when none is named.
+        assert cli_spec_mod.unknown_option("selftest", ["--stick", "/dev/sdz"]) == ""
+        assert cli_spec_mod.unknown_option("selftest", ["status", "--stick"]) == "--stick"
+
+    def test_each_command_refuses_before_anything_runs(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name in cli_spec_mod.SPECS:
+                r = subprocess.run(
+                    [sys.executable, "-B", str(_REPO_ROOT / "zark"), name, "--no-such-option"],
+                    capture_output=True,
+                    text=True,
+                    cwd=td,
+                    stdin=subprocess.DEVNULL,
+                    timeout=60,
+                    check=False,
+                )
+                assert r.returncode == 2, (name, r)
+                assert r.stdout == "", (name, r.stdout)
+                assert r.stderr.startswith(f"zark {name}: unknown option --no-such-option\n"), r
+            # The contract's example: a mistyped option no longer backs up.
+            r = subprocess.run(
+                [sys.executable, "-B", str(_REPO_ROOT / "zark"), "backup", "--drvie", "black"],
+                capture_output=True,
+                text=True,
+                cwd=td,
+                stdin=subprocess.DEVNULL,
+                timeout=60,
+                check=False,
+            )
+            assert (r.returncode, r.stderr.splitlines()[0]) == (
+                2,
+                "zark backup: unknown option --drvie",
+            ), r
+
+    def test_help_after_a_command_prints_its_usage_and_runs_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name, spec in cli_spec_mod.SPECS.items():
+                if name == "monitor":
+                    continue  # it declares -h and --help and prints its own
+                for word in ("--help", "-h"):
+                    r = subprocess.run(
+                        [sys.executable, "-B", str(_REPO_ROOT / "zark"), name, word],
+                        capture_output=True,
+                        text=True,
+                        cwd=td,
+                        stdin=subprocess.DEVNULL,
+                        timeout=60,
+                        check=False,
+                    )
+                    assert r.returncode == 0 and r.stderr == "", (name, word, r)
+                    assert r.stdout.startswith("Usage: ") and name in r.stdout.splitlines()[0]
+                    assert cli_spec_mod.DESCRIPTIONS[name] in r.stdout, r.stdout
+                    for w in spec.words():
+                        assert w in r.stdout, (name, w, r.stdout)
+            assert not Path(td, "zark.log").exists()
+
+    def test_the_usage_of_three_commands(self):
+        assert cli_spec_mod.usage("backup") == (
+            "Usage: zark backup [--no-snapshot] [--drive <drive>]\n\n"
+            "Run incremental backup to connected drive\n\nMore: man zark\n"
+        )
+        registry = cli_spec_mod.usage("registry", "./zark").splitlines()
+        assert registry[:3] == [
+            "Usage: ./zark registry <subcommand> ...",
+            "  ./zark registry list  (the default)",
+            "  ./zark registry forget <drive>",
+        ], registry
+        assert "  ./zark registry retention <drive> <window|max_age|margin>..." in registry
+        selftest = cli_spec_mod.usage("selftest").splitlines()
+        assert (
+            "  zark selftest run [--stick <device>] [--only <text>] [--debug]  (the default)"
+            in selftest
+        ), selftest
+        assert "  zark selftest certificate [--into <file>] <file>..." in selftest
+
+    def test_path_arguments_are_made_absolute(self):
+        here = os.getcwd()
+        ab = cli_spec_mod.absolute
+        assert ab("selftest", ["certificate", "--into", "o.json", "a.json", "/b.json"]) == [
+            "certificate",
+            "--into",
+            f"{here}/o.json",
+            f"{here}/a.json",
+            "/b.json",
+        ]
+        assert ab("selftest", ["report", "r.json"]) == ["report", f"{here}/r.json"]
+        assert ab("selftest", ["--stick", "sdz", "--only", "x"]) == [
+            "--stick",
+            f"{here}/sdz",
+            "--only",
+            "x",
+        ]
+        assert ab("monitor", ["--root", "fx", "--once"]) == ["--root", f"{here}/fx", "--once"]
+        assert ab("prepare", ["/dev/sdz"]) == ["/dev/sdz"]
+        assert ab("simulate", ["--display", "800x600", "--rw"]) == ["--display", "800x600", "--rw"]
+        assert ab("registry", ["forget", "black"]) == ["forget", "black"]
+
+    def test_zark_runs_from_root_with_its_arguments_made_absolute(self):
+        code = "import commands.monitor as mon\nmon.run = lambda a: (print(os.getcwd(), a), 0)[1]\n"
+        with tempfile.TemporaryDirectory() as td:
+            r = _entry_child(code, ["monitor", "--root", "rel/dir", "--once"], td)
+        assert r.returncode == 0, r
+        assert r.stdout.strip() == f"/ ['--root', '{td}/rel/dir', '--once']", r.stdout
+
+    def test_a_crash_reaches_zark_log_with_its_traceback(self):
+        # M26 eli R1x: an exception nothing caught went to the terminal only.
+        code = (
+            "import commands.explore as ex\n"
+            "def boom(_args): raise RuntimeError('boom')\n"
+            "ex.run = boom\n"
+            "for target in ('lib.lock.guard', 'lib.signals.install', 'lib.progress.start',\n"
+            "               'lib.live.stop_installer_probe'):\n"
+            "    patch(target).start()\n"
+            "patch('os.geteuid', return_value=0).start()\n"
+        )
+        for extra in ([], ["--debug"]):
+            with tempfile.TemporaryDirectory() as td:
+                r = _entry_child(code, ["explore", *extra], td)
+                logged = Path(td, "zark.log").read_text(encoding="utf-8")
+            assert r.returncode == 1, r
+            out = Log._STRIP_RE.sub("", r.stdout)  # pylint: disable=protected-access
+            assert "zark stopped on an unexpected error: RuntimeError: boom" in out, out
+            assert f"The details are in {td}/zark.log" in out, out
+            assert "zark stopped on an unexpected error: RuntimeError: boom" in logged, logged
+            assert "Traceback (most recent call last)" in logged, logged
+            assert "RuntimeError: boom" in logged and "in boom" in logged, logged
+            assert ("Traceback" in r.stderr) is bool(extra), r.stderr
+
+
 def _all_args(spec: Any) -> list[Any]:
     args = list(spec.args) + [o.value for o in spec.options if o.value]
     for sub in spec.subcommands:
@@ -33726,12 +33925,18 @@ def _run_one(name: str, method: Callable[[], object]) -> str:
     seen = StringIO()
     reads, writes = len(_TERMINAL_READS), len(_REAL_LOG_WRITES)
     starts, guard_runs = len(_HOST_TOOL_STARTS), len(_HOST_GUARD_RUNS)
+    here = os.getcwd()
     try:
         with redirect_stdout(seen), redirect_stderr(seen):
             try:
                 method()
             finally:
                 _stop_watches()
+        # zark's main() leaves for / (M26R-50): a test that runs it in this
+        # process and lets it would move every later test's directory.
+        if os.getcwd() != here:
+            os.chdir(here)
+            raise AssertionError("it left the suite's directory")
         if len(_HOST_TOOL_STARTS) > starts:
             raise AssertionError(f"it started a host tool: {', '.join(_HOST_TOOL_STARTS[starts:])}")
         if len(_HOST_GUARD_RUNS) > guard_runs:

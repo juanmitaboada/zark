@@ -26,6 +26,8 @@ Standard library only and no zark import, so the shell completion can read
 it without loading the rest of zark.
 """
 
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 
@@ -151,6 +153,8 @@ _WHAT = Arg("words", ("backups", "snapshots", "both"))
 HELP_WORDS = ("--help", "-h", "help")
 VERSION_WORDS = ("--version", "-v")
 DEBUG = "--debug"
+# The exit status of a command line zark refuses (sysexits' EX_USAGE).
+EX_USAGE = 2
 GLOBAL_OPTIONS = (Opt(DEBUG),)
 
 SPECS: dict[str, Spec] = {
@@ -223,7 +227,11 @@ SPECS: dict[str, Spec] = {
             default_sub="run",
         ),
         Spec("setup", options=(Opt("--remove"),)),
-        Spec("simulate", options=(Opt("--rw"), Opt("--display", Arg("text"))), args=(_DEVICE,)),
+        Spec(
+            "simulate",
+            options=(Opt("--rw"), Opt("--ro"), Opt("--display", Arg("text"))),
+            args=(_DEVICE,),
+        ),
         Spec("status", options=(Opt("--refresh"), Opt("--notify"))),
         Spec("umount", args=(_SYSTEM,)),
     )
@@ -233,3 +241,128 @@ SPECS: dict[str, Spec] = {
 def command(name: str) -> Spec:
     """The spec of command ``name``."""
     return SPECS[name]
+
+
+# ── what every command's arguments are checked against (M14P.3) ─────────
+
+# Kinds of value that name a path: made absolute before zark leaves the
+# caller's directory for / (M26R-50).
+PATH_KINDS = ("device", "file", "dir")
+
+
+@dataclass(frozen=True)
+class Word:
+    """One argument as the spec reads it: an option (``opt``), an option's
+    value or a positional argument (``arg``, None for a positional the spec
+    does not declare)."""
+
+    text: str
+    opt: Opt | None = None
+    arg: Arg | None = None
+
+
+def _selected(name: str, args: list[str]) -> tuple[Spec, list[str]]:
+    """The spec the arguments are read with: a subcommand named first, else
+    the default one; and the arguments after the subcommand's name."""
+    spec = SPECS[name]
+    if not spec.subcommands:
+        return spec, list(args)
+    if args and any(s.name == args[0] for s in spec.subcommands):
+        return spec.sub(args[0]), list(args[1:])
+    if spec.default_sub:
+        return spec.sub(spec.default_sub), list(args)
+    return spec, list(args)
+
+
+def _is_option(text: str) -> bool:
+    return text.startswith("-") and text != "-"
+
+
+def words(name: str, args: list[str]) -> Iterator[Word]:
+    """``args`` of command ``name`` as its spec reads them, the subcommand's
+    name left out: an option takes the next argument as its value whatever
+    it looks like; ``--debug`` is an option anywhere after the command."""
+    spec, rest = _selected(name, args)
+    options = {o.name: o for o in (*spec.options, *GLOBAL_OPTIONS)}
+    positional = 0
+    i = 0
+    while i < len(rest):
+        text = rest[i]
+        opt = options.get(text) if _is_option(text) else None
+        if opt is not None:
+            yield Word(text, opt=opt)
+            if opt.value is not None and i + 1 < len(rest):
+                i += 1
+                yield Word(rest[i], arg=opt.value)
+        elif _is_option(text):
+            yield Word(text)
+        else:
+            arg: Arg | None = None
+            if positional < len(spec.args):
+                arg = spec.args[positional]
+            elif spec.args and spec.args[-1].repeat:
+                arg = spec.args[-1]
+            positional += 1
+            yield Word(text, arg=arg)
+        i += 1
+
+
+def unknown_option(name: str, args: list[str]) -> str:
+    """The first option command ``name`` does not declare, "" when none: an
+    argument that starts with ``-`` (``-`` alone is a positional) and is not
+    an option's value."""
+    return next(
+        (
+            w.text
+            for w in words(name, args)
+            if w.opt is None and w.arg is None and _is_option(w.text)
+        ),
+        "",
+    )
+
+
+def asks_help(name: str, args: list[str]) -> bool:
+    """Whether ``args`` hold ``--help`` or ``-h`` as an option command
+    ``name`` does not declare itself (the monitor does): zark then prints
+    the command's usage and runs nothing."""
+    return any(w.text in HELP_WORDS and w.opt is None and w.arg is None for w in words(name, args))
+
+
+def absolute(name: str, args: list[str]) -> list[str]:
+    """``args`` with every value of a path kind made absolute (without
+    following links), so they mean the same once zark is in ``/``."""
+    out = list(args)
+    _, rest = _selected(name, args)
+    skip = len(args) - len(rest)  # the subcommand's name
+    for n, w in enumerate(words(name, args)):
+        if w.arg is not None and w.arg.kind in PATH_KINDS and not w.text.startswith("/"):
+            out[skip + n] = os.path.abspath(w.text)
+    return out
+
+
+def _value(arg: Arg) -> str:
+    shown = f"<{'|'.join(arg.words) if arg.words else arg.kind}>"
+    return f"{shown}..." if arg.repeat else shown
+
+
+def _synopsis(spec: Spec) -> str:
+    parts = [f"[{o.name}{' ' + _value(o.value) if o.value else ''}]" for o in spec.options]
+    parts += [_value(a) for a in spec.args]
+    return " ".join(parts)
+
+
+def usage(name: str, cmd: str = "zark") -> str:
+    """Command ``name``'s usage, from its spec: what ``zark <command>
+    --help`` prints (M14P.3)."""
+    spec = SPECS[name]
+    lines: list[str] = []
+    if spec.subcommands:
+        lines.append(f"Usage: {cmd} {name} <subcommand> ...")
+        for sub in spec.subcommands:
+            mark = "  (the default)" if sub.name == spec.default_sub else ""
+            line = f"  {cmd} {name} {sub.name} {_synopsis(sub)}".rstrip()
+            lines.append(line + mark)
+    else:
+        lines.append(f"Usage: {cmd} {name} {_synopsis(spec)}".rstrip())
+    lines += ["", DESCRIPTIONS[name], "", "More: man zark"]
+    return "\n".join(lines) + "\n"
