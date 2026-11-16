@@ -36,6 +36,7 @@ import json
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -345,15 +346,18 @@ def record_last_run(  # pylint: disable=too-many-arguments,too-many-return-state
     path: Path | None = None,
     lock_path: Path | None = None,
     wait: float = LOCK_WAIT_S,
+    unless: Callable[[], bool] | None = None,
 ) -> bool:
     """This drive's ``last_run`` in status.json now, and nothing else read
     again: a backup whose drive went away (E16E-1), which a forced reboot
     would otherwise end before :func:`refresh`. No pool, registry or origin
-    is read (a pool may be suspended); the rest of the document stays as the
-    last write left it, ``generated_at`` aside (when the file was written).
-    True when written; a write that cannot be made is a warning."""
-    if sh.is_live_usb():
-        return False
+    is read (a pool may be suspended), and no command is run: the caller
+    knows it is not a live session (backup refuses one at its start;
+    M27R-5). The rest of the document stays as the last write left it,
+    ``generated_at`` aside (when the file was written). ``unless``, asked
+    under the lock: nothing written when it answers True (the run has
+    recorded its own result meanwhile). True when written; a write that
+    cannot be made is a warning."""
     path = path or STATUS_PATH
     try:
         fd = _lock(lock_path or LOCK_PATH, wait)
@@ -364,6 +368,8 @@ def record_last_run(  # pylint: disable=too-many-arguments,too-many-return-state
         _warn(log, f"{lock_path or LOCK_PATH} still held after {wait:.0f} s; {NOT_NOW}")
         return False
     try:
+        if unless is not None and unless():
+            return False
         prev = read(path)
         version = prev.get("schema_version") if prev else None
         if prev is None or (isinstance(version, int) and version > SCHEMA_VERSION):

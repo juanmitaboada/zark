@@ -1437,14 +1437,18 @@ class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
             message="backup's drive went away at 11:05:00; the run did not finish",
         )
 
-    def _record(self, root: Path, guid: str, wait: float = 10.0) -> tuple[bool, str, MockShell]:
-        mock = MockShell()  # no answer: any zpool or zfs call is recorded and fails
+    def _record(
+        self,
+        root: Path,
+        guid: str,
+        wait: float = 10.0,
+        unless: Callable[[], bool] | None = None,
+    ) -> tuple[bool, str, MockShell]:
+        # No answer: any command (a zpool, a zfs, live-session probes) is
+        # recorded and fails; M27R-5: the write runs none.
+        mock = MockShell()
         out = StringIO()
-        with (
-            patch_sh(mock),
-            redirect_stdout(out),
-            patch.object(status_file_lib.sh, "is_live_usb", return_value=False),
-        ):
+        with patch_sh(mock), redirect_stdout(out):
             ok = status_file_lib.record_last_run(
                 guid,
                 self._gone(),
@@ -1452,6 +1456,7 @@ class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
                 path=root / "status.json",
                 lock_path=root / "status.lock",
                 wait=wait,
+                unless=unless,
             )
         return ok, Log._STRIP_RE.sub("", out.getvalue()), mock  # pylint: disable=protected-access
 
@@ -1488,6 +1493,17 @@ class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
             assert not ok and "still held" in said and status_file_lib.NOT_NOW in said, said
             assert (root / "status.json").read_text("utf-8") == text
 
+    def test_nothing_is_written_once_the_run_has_its_result(self):
+        # M27R-5: asked under the lock, so a write that waited on it does
+        # not land after the run's own.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _ = self._doc(root)
+            text = (root / "status.json").read_text("utf-8")
+            ok, said, mock = self._record(root, "111", unless=lambda: True)
+            assert not ok and not said and not mock.calls, (said, mock.calls)
+            assert (root / "status.json").read_text("utf-8") == text
+
     def test_no_previous_file_or_drive_writes_nothing(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -1519,7 +1535,9 @@ class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
         rec = backup_mod._RunRecord("111")  # pylint: disable=protected-access
         with (
             patch.object(
-                status_file_lib, "record_last_run", side_effect=lambda g, r, _l: written.append(r)
+                status_file_lib,
+                "record_last_run",
+                side_effect=lambda g, r, _l, **_k: written.append(r),
             ),
             patch.object(progress_mod, "started_at", return_value="2026-11-17T10:00:00Z"),
         ):
@@ -1534,6 +1552,25 @@ class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
         assert written[0].ended_at == drive_watch.iso(1_800_000_000.0)
         assert written[0].message == f"backup's drive went away at {when}; the run did not finish"
         assert not rec.done  # the run's own end still records its result
+
+    def test_the_early_write_yields_to_the_runs_result(self):
+        asked: list[Callable[[], bool] | None] = []
+        rec = backup_mod._RunRecord("111")  # pylint: disable=protected-access
+        with (
+            patch.object(
+                status_file_lib,
+                "record_last_run",
+                side_effect=lambda g, r, _l, unless=None: asked.append(unless),
+            ),
+            patch.object(progress_mod, "started_at", return_value="2026-11-17T10:00:00Z"),
+            patch.object(progress_mod, "record"),
+        ):
+            rec.drive_gone("backup", drive_watch.Latch(1_800_000_000.0, True), make_log())
+            assert len(asked) == 1
+            unless = asked[0]
+            assert unless is not None and not unless()
+            rec.result("not_verified")
+            assert unless()  # the run has its own word now: not written
 
     def test_the_runs_own_end_replaces_it(self):
         for end, result in (("completed", "completed"), ("finish", "interrupted")):
@@ -1581,7 +1618,9 @@ class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
         )
         assert rc == 0 and len(calls) == 1 and callable(calls[0].get("on_latch")), calls
         with patch.object(
-            status_file_lib, "record_last_run", side_effect=lambda g, r, _l: written.append((g, r))
+            status_file_lib,
+            "record_last_run",
+            side_effect=lambda g, r, _l, **_k: written.append((g, r)),
         ):
             calls[0]["on_latch"](drive_watch.Latch(1_800_000_000.0, True))
         assert written and written[0][0] == "111" and written[0][1].result == "interrupted"

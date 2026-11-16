@@ -1343,7 +1343,10 @@ class _RunRecord:  # pylint: disable=too-many-instance-attributes
             point,
             message=self.gone,
         )
-        _ = status_file.record_last_run(self.guid, run_, log)
+        # Under the lock, not written once the run has its own result: the
+        # lock can be busy for seconds, and the result's write is the run's
+        # own word (M27R-5). backup never runs from a live session.
+        _ = status_file.record_last_run(self.guid, run_, log, unless=lambda: self.done)
 
     def finish(self) -> None:
         """The end of a run with no result: what it left the drive with."""
