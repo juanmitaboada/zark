@@ -1,6 +1,14 @@
 # Upgrading zark
 
-What changes when a system and its drives move from zark 2.3.0 to 2.3.1, from zark 2.2 to 2.3, from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+What changes when a system and its drives move from zark 2.3.1 to 2.3.2, from zark 2.3.0 to 2.3.1, from zark 2.2 to 2.3, from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+
+## Upgrading from zark 2.3.1
+
+Nothing on a drive or in `/etc/zark` changes, and 2.3.1 reads everything 2.3.2 writes. zark 2.3.2 rewrites the guards it installs again (the login reminder, the APT hook, the kernel prerm guard, the update-grub guard and its scan file): a `zpool` or `zfs` command one of them leaves behind is waited for by the next instead of being joined by another, the APT hook waits up to 30 s for its scan, and a pool being imported is not taken for one whose drive went away. The package upgrade leaves the installed guards as they are: run `sudo zark setup` once per system after it. Until then `zark backup` (at its step 1) and `zark monitor` say `zark's guards are out of date: run sudo zark setup`.
+
+**What behaves differently.** Every command refuses an option it does not declare, before anything runs: `zark <command>: unknown option <option>`, exit status 2. 2.3.1 ignored it (`zark backup --drvie black` backed up whichever drive was connected), so a script that passes an option zark never knew now stops: check scripts and timers that call zark. `zark <command> --help` prints that command's usage and exits 0 (`zark backup --help` used to run a backup). zark runs from `/`: its path arguments and a relative `ZARK_CONFIG_DIR` are made absolute from the directory it was started in, then it changes to `/`, so `zark chroot`'s shell and `simulate`'s QEMU start in `/`. A backup whose drive goes away records its run as interrupted in `status.json` at once, so `zark status`, `zark monitor` and the desktop show it after the forced reboot. `recover` refuses at its start a live session in which efivarfs is not mounted at `/sys/firmware/efi/efivars` (not started in UEFI mode).
+
+**The way back.** 2.3.1 reads everything 2.3.2 writes. Its `setup` rewrites the guards as 2.3.1's.
 
 ## Upgrading from zark 2.3.0
 

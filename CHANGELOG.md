@@ -5,16 +5,20 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.3.2] - 2026-11-16
 
-The last fixes of zark 2.3. Nothing on a drive or in `/etc/zark` changes;
-zark 2.3.1 reads everything 2.3.2 writes.
+The last fixes of zark 2.3: the guards, the command line, a drive that
+goes away during a backup, and recover's boot chain. Nothing on a drive or
+in `/etc/zark` changes; zark 2.3.1 reads everything 2.3.2 writes.
 
 ### For zark 2.3.1 users
 
 The guards change again (below): run `sudo zark setup` once per system
 after upgrading. Until then `zark backup` (at its step 1) and `zark
-monitor` say `zark's guards are out of date: run sudo zark setup`.
+monitor` say `zark's guards are out of date: run sudo zark setup`. A
+script that passes a command an option it does not declare now stops
+with exit status 2, where 2.3.1 ran the command without it. Details in
+[docs/UPGRADING.md](docs/UPGRADING.md).
 
 ### Changed
 
@@ -29,7 +33,8 @@ monitor` say `zark's guards are out of date: run sudo zark setup`.
   backup). `zark monitor` keeps its own usage. `simulate --ro`, accepted
   for compatibility, is still accepted.
 - **zark runs from `/`**: once its path arguments (devices, files, `zark
-  monitor --root`) are made absolute, zark changes its own directory to
+  monitor --root`, a relative `ZARK_CONFIG_DIR`) are made absolute, zark
+  changes its own directory to
   `/`, as every command it starts already did. A read zark itself makes
   that never returns (a drive gone in the middle of `fullcheck`'s restore
   check) no longer holds the directory it was started from, which the
@@ -127,6 +132,29 @@ monitor` say `zark's guards are out of date: run sudo zark setup`.
   `subset=pid` rule 3 is skipped.
 - README: the hardware line no longer says every release was tested on
   two series; each release's entry here says what was tested on which.
+
+### Tested
+
+On the test machine (a Dell XPS 13 9333), on Ubuntu 26.10 with OpenZFS
+2.4.4 only: the upgrade from 2.3.1 and `setup`'s new guards; a refused
+option and a command's help; a guard file removed by hand; a backup and
+`fullcheck` (no work directory left in `/run/zark`); a drive pulled during
+a backup, with the open question shown again, `zark monitor`'s line, zark
+in `/`, the run recorded as interrupted at once and kept through a refused
+retry and the forced reboot; the next backup; and a recover from the
+official Ubuntu 26.10 live image (its UEFI check passing, the chroot's
+binds and efivarfs, the image named in its certificate) followed by
+`finish` and a boot with Secure Boot on. On that live efivarfs is mounted
+at `/sys/firmware/efi/efivars`, which recover's start now requires; that
+check and the keys' listing came after the run and are covered by the unit
+tests, as are the cases no run can make on purpose (a guard command that
+never returns, a pool caught while it is being imported, a crash, a
+failed bind, a sleeping disk behind a USB bridge). The udev warning was
+not shown there: the import makes udev read the partition again.
+
+### Known limitations
+
+Those of 2.3.1 (below) still hold.
 
 ## [2.3.1] - 2026-11-16
 

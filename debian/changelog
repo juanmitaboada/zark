@@ -1,26 +1,36 @@
-zark (2.3.2~rc1-1) UNRELEASED; urgency=medium
+zark (2.3.2-1) stable; urgency=medium
 
-  * zark 2.3.2: the last fixes of 2.3.
+  * zark 2.3.2: the last fixes of 2.3. Nothing on a drive or in /etc/zark
+    changes; 2.3.1 reads everything 2.3.2 writes.
   * Every command refuses an option it does not declare, exit status 2,
     before anything runs; "zark <command> --help" prints that command's
-    usage. zark runs from / once its path arguments are absolute. A crash
-    is said through the log, its traceback in zark.log.
+    usage. zark runs from / once its path arguments and a relative
+    ZARK_CONFIG_DIR are absolute. A crash is said through the log, its
+    traceback in zark.log.
   * The guards: one zpool or zfs call left behind at most, waited for by
     the next guard within its own bound; a TRANSITIONING or unreadable
     pool state read a second time; the APT hook's scan waits up to 30 s;
     a guard file removed by hand is not "out of date". backup and
     registry verify say when udev does not record a drive as a ZFS member.
+  * A backup whose drive goes away records its run in status.json as
+    interrupted at once, with the time the drive went away, so zark
+    status, zark monitor and the desktop show it after the forced reboot;
+    a retry refused because the pool is left imported records nothing.
   * backup settles a pool that changed after the wait before the probe
     before its export, shows an open question again below the drive
     watch's lines, and leaves no empty field in "Using drive".
   * recover checks its chroot's five binds (as repair-boot does) and the
     efivarfs mount, and refuses at its start, before anything is touched,
-    a live session without /sys/firmware/efi/efivars (not UEFI mode).
+    a live session without efivarfs mounted at /sys/firmware/efi/efivars
+    (not UEFI mode).
+  * Loading a drive's keys lists its datasets only, not every point.
   * Work directories under /run/zark removed after use; the transfer's
     rate counts streaming time only; zark monitor says a gone drive went
     away; the official 26.10 image's line is kept in a certificate.
+  * Run sudo zark setup once after the upgrade: the package leaves the
+    installed guards as they are.
 
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 16 Nov 2026 22:36:00 +0100
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Mon, 16 Nov 2026 22:57:00 +0100
 
 zark (2.3.1-1) stable; urgency=medium
 
