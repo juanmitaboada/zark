@@ -116,11 +116,14 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         clock: Callable[[], float] = time.time,
         runner: Callable[[list[str], float], pool_state.Bounded] = pool_state.run_bounded,
         prober: Callable[[str], pool_state.Bounded] = pool_state.probe,
+        on_latch: Callable[[Latch], None] | None = None,
     ) -> None:
         self.pool = pool
         self.device = device
         self.log = log
         self._notify = notify or (lambda _t, _b: None)
+        self._on_latch = on_latch
+        self.latch_thread: threading.Thread | None = None
         self._kstat_dir = kstat_dir
         self._clock = clock
         self._runner = runner
@@ -346,6 +349,13 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             f"{self.pool}: drive went away",
             "Unplug it and reboot as the terminal says; or plug it back in (the terminal says how)",
         )
+        if self._on_latch is not None:
+            # Its own thread: a write that waits (the status lock) never
+            # holds up the watch (E16E-1).
+            self.latch_thread = threading.Thread(
+                target=self._on_latch, args=(latch,), name="zark-drive-gone", daemon=True
+            )
+            self.latch_thread.start()
 
     def _reopen_hint(self, now: float, state: str, link: bool) -> None:
         if not (link and state in _NOT_REOPENED):
@@ -413,11 +423,11 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             resumed = self.resumed_at
             back = self.link
         return {
-            "since": _iso(latch.lost_at),
+            "since": iso(latch.lost_at),
             "pool": self.pool,
             "suspended": suspended,
             "back": back,
-            "resumed_at": _iso(resumed) if resumed is not None else None,
+            "resumed_at": iso(resumed) if resumed is not None else None,
             "hint": f"{self.pool}'s drive went away. Safer: unplug it, then: "
             + f"{pool_state.reboot_command(self.pool)} (a plain reboot can hang). Or plug "
             + f"it back in and run: sudo zpool clear {self.pool} (can crash OpenZFS 2.4: "
@@ -428,10 +438,18 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         progress.set_drive_gone(self.document())
 
 
-def _iso(t: float) -> str:
+def iso(t: float) -> str:
+    """``t`` as the status files' UTC timestamp."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def start(pool: str, device: str, log: Log, notify: Callable[[str, str], None]) -> DriveWatch:
-    """A started watch of ``pool``'s drive at ``device`` (backup's)."""
-    return DriveWatch(pool, device, log, notify=notify).start()
+def start(
+    pool: str,
+    device: str,
+    log: Log,
+    notify: Callable[[str, str], None],
+    on_latch: Callable[[Latch], None] | None = None,
+) -> DriveWatch:
+    """A started watch of ``pool``'s drive at ``device`` (backup's);
+    ``on_latch`` is called once, in a thread of its own, when it latches."""
+    return DriveWatch(pool, device, log, notify=notify, on_latch=on_latch).start()

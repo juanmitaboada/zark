@@ -1454,8 +1454,9 @@ roll its backup points back).
     frees, each from **zfs list** and dry runs of **zfs destroy -nvp**, never
     a destroy), and the lines the MOTD shows. Written at the end of
     every command that changes state, by a backup when its result is
-    known, and by **status** (by hand and from the timer); never from a
-    live session. Its format is in the same document as *progress.json*'s.
+    known and when its drive goes away (that drive's last run only, as
+    **interrupted**, so a reboot that ends the run does not lose it), and
+    by **status** (by hand and from the timer); never from a live session. Its format is in the same document as *progress.json*'s.
 
 */usr/share/doc/zark/STATUS-FILES.md.gz*, */usr/share/doc/zark/schema/*
 :   The status files' description for other programs, and their JSON

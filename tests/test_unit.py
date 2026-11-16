@@ -1403,6 +1403,188 @@ class TestStrictReads:  # pylint: disable=missing-function-docstring
             assert not any("backup/bpool" in c for c in mock.calls), mock.calls
 
 
+class TestDriveGoneRecorded:  # pylint: disable=missing-function-docstring
+    """E16E-1 (D12 12a): a backup whose drive went away has its drive's
+    last_run in status.json at once, interrupted, so a forced reboot does not
+    lose it; the run's own end still writes its own result."""
+
+    def _doc(self, root: Path) -> dict[str, Any]:
+        cfg = tsf._config(("blue", "222"), ("black", "111"))  # pylint: disable=protected-access
+        with (
+            redirect_stdout(StringIO()),
+            patch.object(status_file_lib.sh, "is_live_usb", return_value=False),
+        ):
+            assert status_file_lib.write(
+                tsf._status(),  # pylint: disable=protected-access
+                cfg,
+                "timer",
+                Log(os.devnull),
+                path=root / "status.json",
+                lock_path=root / "status.lock",
+            )
+        doc: dict[str, Any] = json.loads((root / "status.json").read_text("utf-8"))
+        return doc
+
+    @staticmethod
+    def _gone() -> status_file_lib.LastRun:
+        return status_file_lib.LastRun(
+            "interrupted",
+            "2026-11-17T10:00:00Z",
+            "2026-11-17T10:05:00Z",
+            message="backup's drive went away at 11:05:00; the run did not finish",
+        )
+
+    def _record(self, root: Path, guid: str, wait: float = 10.0) -> tuple[bool, str, MockShell]:
+        mock = MockShell()  # no answer: any zpool or zfs call is recorded and fails
+        out = StringIO()
+        with (
+            patch_sh(mock),
+            redirect_stdout(out),
+            patch.object(status_file_lib.sh, "is_live_usb", return_value=False),
+        ):
+            ok = status_file_lib.record_last_run(
+                guid,
+                self._gone(),
+                Log(os.devnull),
+                path=root / "status.json",
+                lock_path=root / "status.lock",
+                wait=wait,
+            )
+        return ok, Log._STRIP_RE.sub("", out.getvalue()), mock  # pylint: disable=protected-access
+
+    def test_only_that_drives_last_run_changes_and_no_pool_is_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            before = self._doc(root)
+            ok, said, mock = self._record(root, "111")
+            after: dict[str, Any] = json.loads((root / "status.json").read_text("utf-8"))
+        assert ok and not said and not mock.calls, (said, mock.calls)
+        assert not tsf.problems(after, "status"), tsf.problems(after, "status")
+        black = next(d for d in after["drives"] if d["guid"] == "111")
+        assert black["last_run"] == self._gone().to_json()
+        assert after["generated_by"] == "backup"
+        for doc in (before, after):
+            _ = doc.pop("generated_at")
+            _ = doc.pop("generated_by")
+            for d in doc["drives"]:
+                if d["guid"] == "111":
+                    d.pop("last_run")
+        assert after == before
+
+    def test_a_held_lock_writes_nothing_and_says_so(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _ = self._doc(root)
+            text = (root / "status.json").read_text("utf-8")
+            fd = os.open(root / "status.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                ok, said, _ = self._record(root, "111", wait=0.3)
+            finally:
+                os.close(fd)
+            assert not ok and "still held" in said and status_file_lib.NOT_NOW in said, said
+            assert (root / "status.json").read_text("utf-8") == text
+
+    def test_no_previous_file_or_drive_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ok, said, _ = self._record(root, "111")
+            assert (
+                not ok and not (root / "status.json").exists() and status_file_lib.NOT_NOW in said
+            )
+            _ = self._doc(root)
+            text = (root / "status.json").read_text("utf-8")
+            ok, said, _ = self._record(root, "999")
+            assert not ok and "not in the previous file" in said
+            assert (root / "status.json").read_text("utf-8") == text
+
+    def test_the_watch_calls_it_once_at_the_latch(self):
+        seen: list[drive_watch.Latch] = []
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.watch._on_latch = seen.append  # pylint: disable=protected-access
+            b.tick()
+            b.dev.unlink()
+            for _ in range(4):
+                b.tick()
+            thread = b.watch.latch_thread
+            assert thread is not None
+            thread.join(5)
+        assert seen == [b.watch.latched], seen
+
+    def _record_of_a_run(self, written: list[status_file_lib.LastRun]) -> Any:
+        rec = backup_mod._RunRecord("111")  # pylint: disable=protected-access
+        with (
+            patch.object(
+                status_file_lib, "record_last_run", side_effect=lambda g, r, _l: written.append(r)
+            ),
+            patch.object(progress_mod, "started_at", return_value="2026-11-17T10:00:00Z"),
+        ):
+            rec.drive_gone("backup", drive_watch.Latch(1_800_000_000.0, True), make_log())
+        return rec
+
+    def test_the_latch_records_interrupted_with_the_time_it_went(self):
+        written: list[status_file_lib.LastRun] = []
+        rec = self._record_of_a_run(written)
+        when = drive_watch.local_time(1_800_000_000.0)
+        assert len(written) == 1 and written[0].result == "interrupted", written
+        assert written[0].ended_at == drive_watch.iso(1_800_000_000.0)
+        assert written[0].message == f"backup's drive went away at {when}; the run did not finish"
+        assert not rec.done  # the run's own end still records its result
+
+    def test_the_runs_own_end_replaces_it(self):
+        for end, result in (("completed", "completed"), ("finish", "interrupted")):
+            written: list[status_file_lib.LastRun] = []
+            rec = self._record_of_a_run(written)
+            ups: list[tuple[str, Any]] = []
+            with (
+                patch.object(
+                    progress_mod, "record", side_effect=lambda g, u, s=ups: s.append((g, u))
+                ),
+                patch.object(progress_mod, "started_at", return_value="2026-11-17T10:00:00Z"),
+            ):
+                if end == "finish":
+                    rec.finish()  # no receive began: today's rule says "aborted"
+                else:
+                    rec.result("completed")
+            assert len(ups) == 1 and ups[0][0] == "111", ups
+            run_ = ups[0][1].last_run
+            assert run_.result == result, (end, run_)
+            if end == "finish":
+                assert run_.message == written[0].message
+
+    def test_finish_without_a_latch_keeps_todays_rule(self):
+        rec = backup_mod._RunRecord("111")  # pylint: disable=protected-access
+        ups: list[Any] = []
+        with (
+            patch.object(progress_mod, "record", side_effect=lambda _g, u: ups.append(u)),
+            patch.object(progress_mod, "started_at", return_value="2026-11-17T10:00:00Z"),
+        ):
+            rec.finish()
+        assert ups[0].last_run.result == "aborted"
+
+    def test_backup_hands_the_watch_its_record(self):
+        calls: list[dict[str, Any]] = []
+
+        def start(*_a: Any, **kw: Any) -> _FakeWatch:
+            calls.append(kw)
+            return _FakeWatch()
+
+        written: list[tuple[str, status_file_lib.LastRun]] = []
+        _, rc = TestBackupCommand()._run(  # pylint: disable=protected-access
+            _fresh_fake(),
+            patch.object(backup_mod.drive_watch, "start", side_effect=start),
+            redirect_stdout(StringIO()),
+        )
+        assert rc == 0 and len(calls) == 1 and callable(calls[0].get("on_latch")), calls
+        with patch.object(
+            status_file_lib, "record_last_run", side_effect=lambda g, r, _l: written.append((g, r))
+        ):
+            calls[0]["on_latch"](drive_watch.Latch(1_800_000_000.0, True))
+        assert written and written[0][0] == "111" and written[0][1].result == "interrupted"
+        assert written[0][1].message.startswith("backup's drive went away at ")
+
+
 class _WatchBench:  # pylint: disable=too-many-instance-attributes
     """A drive watch on a temporary by-id link and kstat file, a clock moved
     by hand and a runner that answers ``zpool status -p`` (or never)."""

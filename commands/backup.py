@@ -1269,7 +1269,7 @@ def _settled_before_probe(  # pylint: disable=too-many-arguments
 CONTENTS_BUDGET_S = 60.0
 
 
-class _RunRecord:
+class _RunRecord:  # pylint: disable=too-many-instance-attributes
     """This run's ``last_run`` for its drive in status.json (M7-6).
 
     The banners set the result when they print it; a run that ends without
@@ -1286,6 +1286,7 @@ class _RunRecord:
         self.contents: drive_contents.DriveContents | None = None
         self.done = False
         self.point_record: tuple[str, str] | None = None  # written_by, min_recover (M13F-4)
+        self.gone = ""  # why the run cannot finish, once its drive went away (E16E-1)
 
     def measure(self, pool: str) -> None:
         """Read the drive's space now (it is imported) and show it."""
@@ -1326,9 +1327,34 @@ class _RunRecord:
         )
         progress.record(self.guid, up)
 
+    def drive_gone(self, pool: str, latch: drive_watch.Latch, log: Log) -> None:
+        """The watch latched: this drive's ``last_run`` in status.json at once,
+        ``interrupted`` with the reason, so a forced reboot does not lose it
+        (E16E-1). The run's own end replaces it if the run gets there."""
+        self.gone = (
+            f"{pool}'s drive went away at {drive_watch.local_time(latch.lost_at)}; "
+            + "the run did not finish"
+        )
+        point = self.eng.point if self.eng is not None and self.point_taken else None
+        run_ = status_file.LastRun(
+            "interrupted",
+            progress.started_at(),
+            drive_watch.iso(latch.lost_at),
+            point,
+            message=self.gone,
+        )
+        _ = status_file.record_last_run(self.guid, run_, log)
+
     def finish(self) -> None:
         """The end of a run with no result: what it left the drive with."""
         if self.done:
+            return
+        if self.gone:
+            # The pool is left imported and the drive was not seen back:
+            # "aborted" (nothing changed) would not be true (E16E-1, D12).
+            if self.eng is None or not self.eng.started:
+                self.point_taken = False
+            self.result("interrupted", message=self.gone)
             return
         began = self.eng is not None and bool(self.eng.started)
         sig = signals.received()
@@ -1468,7 +1494,13 @@ def run(
     if unseen:
         log.warn(unseen)
     # Until the export: a drive that goes away is said at once (A1E-7, M26-3 3b).
-    watch = drive_watch.start(pool_name, device or "", log, _notify)
+    watch = drive_watch.start(
+        pool_name,
+        device or "",
+        log,
+        _notify,
+        on_latch=lambda latch: record.drive_gone(pool_name, latch, log),
+    )
     cleanup.track_action(watch.stop)
     # Rule 3 of the export: a latched run exports only after a probe (M26R-19).
     cleanup.guard_pool(pool_name, watch.why_not_export)

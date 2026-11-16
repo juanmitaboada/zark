@@ -30,7 +30,10 @@ zark itself, with no resident process.
   every event listed under "Write cadence", and from a heartbeat inside the
   same process while it lives. It removes the file when it ends.
 - `status.json` is written by every command that changes state, at its end,
-  whatever its result, and by `zark status` when it runs as root: hourly from
+  whatever its result; by a backup when its drive goes away, that drive's
+  `last_run` only (`interrupted`; nothing else is read again, so a pool that
+  hangs cannot hold it up, and a reboot that ends the run does not lose it);
+  and by `zark status` when it runs as root: hourly from
   `zark-status.timer` (`zark status --refresh --notify`, installed by
   `zark setup` or `zark alerts install`) and when run by hand.
 - Nothing is written from a live session (its `/var/lib` is thrown away at
@@ -499,7 +502,7 @@ pool has.
 | `incomplete` | `BACKUP INCOMPLETE`: read back, but some datasets did not reach the point | earlier points intact; the next backup resumes or retries |
 | `not_verified` | `BACKUP NOT VERIFIED`: the export or the read-back failed | not to be relied on until a backup completes |
 | `aborted` | stopped before the first byte was sent: a fatal error or a question declined before replicating, a failed survey, no space, or a signal before the first transfer | unchanged; the point was undone |
-| `interrupted` | a signal during or after the transfers, before the result was known; or an orphan `progress.json` found by the next command | partial receives kept for the next run |
+| `interrupted` | a signal during or after the transfers, before the result was known; the drive went away during the run (written when zark saw it go, with the time in `ended_at` and `message`; the run's own end replaces it if the run gets there); or an orphan `progress.json` found by the next command | partial receives kept for the next run |
 
 A run that ends before a drive is chosen records nothing: `last_run` belongs
 to a drive. Only `incomplete`, `not_verified` and `interrupted` call for

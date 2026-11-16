@@ -16,7 +16,8 @@
 (docs/STATUS-FILES.md, schema version 1; M7-4 4a, M7-13).
 
 Written by every command that changes state at its end, by a backup when
-its result is known, and by ``zark status`` (by hand and from the alerts
+its result is known and when its drive goes away (that drive's ``last_run``
+only, :func:`record_last_run`), and by ``zark status`` (by hand and from the alerts
 timer), never from a live session, whose ``/var/lib`` goes at shutdown.
 
 Every write is a read-merge-write under ``flock(LOCK_EX)`` on
@@ -56,6 +57,8 @@ LOCK_WAIT_S = 10.0
 # take the file as stale after it.
 STALE_AFTER_S = 3 * 3600
 RESULTS = ("completed", "incomplete", "not_verified", "aborted", "interrupted")
+# record_last_run's warnings end so: the run's own end still writes it.
+NOT_NOW = "the drive's last run is written at the run's end"
 
 
 @dataclass(frozen=True)
@@ -326,6 +329,60 @@ def write(  # pylint: disable=too-many-arguments,too-many-return-statements
         doc = build(st, cfg, generated_by, prev, updates)
         _ = statusdirs.ensure(path.parent)
         write_atomic(path, json.dumps(doc, indent=2) + "\n", durable=True)
+        return True
+    except (OSError, ValueError) as e:
+        _warn(log, f"could not write {path}: {e}")
+        return False
+    finally:
+        os.close(fd)
+
+
+def record_last_run(  # pylint: disable=too-many-arguments,too-many-return-statements
+    guid: str,
+    run: LastRun,
+    log: Log,
+    *,
+    path: Path | None = None,
+    lock_path: Path | None = None,
+    wait: float = LOCK_WAIT_S,
+) -> bool:
+    """This drive's ``last_run`` in status.json now, and nothing else read
+    again: a backup whose drive went away (E16E-1), which a forced reboot
+    would otherwise end before :func:`refresh`. No pool, registry or origin
+    is read (a pool may be suspended); the rest of the document stays as the
+    last write left it, ``generated_at`` aside (when the file was written).
+    True when written; a write that cannot be made is a warning."""
+    if sh.is_live_usb():
+        return False
+    path = path or STATUS_PATH
+    try:
+        fd = _lock(lock_path or LOCK_PATH, wait)
+    except OSError as e:
+        _warn(log, f"cannot take {lock_path or LOCK_PATH}: {e}; {NOT_NOW}")
+        return False
+    if fd is None:
+        _warn(log, f"{lock_path or LOCK_PATH} still held after {wait:.0f} s; {NOT_NOW}")
+        return False
+    try:
+        prev = read(path)
+        version = prev.get("schema_version") if prev else None
+        if prev is None or (isinstance(version, int) and version > SCHEMA_VERSION):
+            _warn(log, f"no previous file this zark can update; {NOT_NOW}")
+            return False
+        drives = prev.get("drives")
+        found = (
+            [d for d in drives if isinstance(d, dict) and d.get("guid") == guid]
+            if isinstance(drives, list)
+            else []
+        )
+        entry = found[0] if found else None
+        if entry is None:
+            _warn(log, f"the drive is not in the previous file; {NOT_NOW}")
+            return False
+        entry["last_run"] = run.to_json()
+        prev["generated_at"] = now_utc_iso()
+        prev["generated_by"] = "backup"
+        write_atomic(path, json.dumps(prev, indent=2) + "\n", durable=True)
         return True
     except (OSError, ValueError) as e:
         _warn(log, f"could not write {path}: {e}")
