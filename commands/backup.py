@@ -69,6 +69,7 @@ from lib.dependents import DestroyPlan, also, destroy_plan, rollback_blockers, t
 from lib.drives import (
     ConnectedDrive,
     backup_device,
+    describe,
     drive_staleness_days,
     no_anchor_lines,
     reconcile,
@@ -238,7 +239,7 @@ def _named_drive(name: str, cfg: Config, drives: list[ConnectedDrive], log: Log)
             causes=[f"Connected registered drives: {', '.join(connected) or 'none'}"],
             solutions=[f"Connect {name} and run again"],
         )
-    log.ok(f"Using drive: {match.name} ({match.model or match.drive_id}, {match.size})")
+    log.ok(f"Using drive: {describe(match)}")
     return match
 
 
@@ -1171,6 +1172,8 @@ def _new_damage(pool: str, m1: Damage, m2: Damage | None, m3: Damage | None) -> 
 WAIT_TICK_S = 1.0
 NOT_IMPORTED_S = 60.0
 WAIT_LOG_S = 600.0
+# The longest the last probe waits for a pool that changed after the wait (M26R-37).
+SETTLE_LIMIT_S = 60.0
 
 
 def _wait_for_drive(  # pylint: disable=too-many-arguments
@@ -1208,8 +1211,7 @@ def _wait_for_drive(  # pylint: disable=too-many-arguments
                     return False
             else:
                 missing_since = None
-            here = os.path.lexists(watch.device) if watch.device else True
-            if word in pool_state.HEALTHY and here:
+            if word in pool_state.HEALTHY and _link_here(watch):
                 healthy_since = clock() if healthy_since is None else healthy_since
             else:
                 healthy_since = None
@@ -1227,6 +1229,39 @@ def _wait_for_drive(  # pylint: disable=too-many-arguments
         # latched pool imported and says why (M26 eli r4, B5c).
         log.error("Interrupted while waiting for the drive: the rest of the run is skipped")
         raise
+
+
+def _link_here(watch: drive_watch.DriveWatch) -> bool:
+    """The drive's device link is there (no device known: taken as there)."""
+    return os.path.lexists(watch.device) if watch.device else True
+
+
+def _settled_before_probe(  # pylint: disable=too-many-arguments
+    watch: drive_watch.DriveWatch,
+    pool: str,
+    log: Log,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """True once the pool has read ONLINE or DEGRADED with its link there for
+    :data:`pool_state.SETTLE_S` without a break, as the wait asks; False after
+    :data:`SETTLE_LIMIT_S` without it: the last probe is then not started and
+    the pool stays imported (M26R-37)."""
+    log.dbg(f"{pool} changed after the wait: settling before the probe")
+    began = clock()
+    since: float | None = None
+    while True:
+        if pool_state.state(pool) in pool_state.HEALTHY and _link_here(watch):
+            since = clock() if since is None else since
+            if clock() - since >= pool_state.SETTLE_S:
+                return True
+        else:
+            since = None
+        if clock() - began >= SETTLE_LIMIT_S:
+            log.warn(f"{pool} did not settle within {int(SETTLE_LIMIT_S)} s: no probe")
+            return False
+        sleep(WAIT_TICK_S)
 
 
 # The dry runs at a backup's end (M9a-5): black's 230 take about 25 s on eli
@@ -1559,12 +1594,17 @@ def run(
     # A run whose drive went away waits for it before anything more is
     # written to the pool (M26-5 5a, M26R-12), and is never complete
     # (M26R-1): no completion mark, no retention, no last_backup_at.
-    if watch.latched is not None and not _wait_for_drive(watch, pool_name, log):
-        log.fatal(
-            f"{pool_name} is no longer imported: the run ends here",
-            causes=[watch.sentence()],
-            solutions=[f"Check the drive: {zark_command()} fullcheck"],
-        )
+    # The watch's changes when the wait passed: one after it settles the
+    # pool again before the last probe (M26R-37); 0 when it never waited.
+    waited_at = 0
+    if watch.latched is not None:
+        if not _wait_for_drive(watch, pool_name, log):
+            log.fatal(
+                f"{pool_name} is no longer imported: the run ends here",
+                causes=[watch.sentence()],
+                solutions=[f"Check the drive: {zark_command()} fullcheck"],
+            )
+        waited_at = watch.changes()
     complete = res.ok
     # What the point leaves out, on whatever of it reached the drive (M5b-7).
     _ = exclusions.record(
@@ -1603,7 +1643,9 @@ def run(
     # ── Export and read back ─────────────────────────────────────────────
     # A latched run's export needs a probe that returned 0, run here where
     # a signal is handled, never in Cleanup (M26R-19, M26R-27).
-    if watch.latched is not None:
+    if watch.latched is not None and (
+        watch.changes() == waited_at or _settled_before_probe(watch, pool_name, log)
+    ):
         _ = watch.probe()
     # The watch ends before the export and the read-back's import (M26-3 3b).
     watch.stop()

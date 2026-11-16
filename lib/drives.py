@@ -407,6 +407,14 @@ def reconcile(info: DriveInfo, ident: DiskIdentity, log: Log) -> bool:
     return True
 
 
+def describe(d: ConnectedDrive, gap: str = " ") -> str:
+    """``<name> (<model or drive id>, <size>)``, leaving out a field that is
+    empty: with its drive gone, an imported pool's device has neither model
+    nor size (R4-7); no parentheses when there is nothing to put in them."""
+    shown = [x for x in (d.model or d.drive_id, d.size) if x]
+    return f"{d.name}{gap}({', '.join(shown)})" if shown else d.name
+
+
 def select_drive(
     drives: list[ConnectedDrive],
     log: Log,
@@ -424,12 +432,12 @@ def select_drive(
 
     if len(candidates) == 1:
         d = candidates[0]
-        log.ok(f"Using drive: {d.name} ({d.model or d.drive_id}, {d.size})")
+        log.ok(f"Using drive: {describe(d)}")
         return d
 
     options = []
     for d in candidates:
-        label = f"{d.name}  ({d.model or d.drive_id}, {d.size}) [{d.state}]"
+        label = f"{describe(d, gap='  ')} [{d.state}]"
         options.append(label)
 
     idx = log.ask_choice("Multiple backup drives detected:", options)

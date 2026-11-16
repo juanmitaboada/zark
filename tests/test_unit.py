@@ -116,6 +116,7 @@ import lib.initrd as initrd_mod  # pylint: disable=wrong-import-position # noqa:
 import lib.live as live_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.live_pools as livep  # pylint: disable=wrong-import-position # noqa: E402
 import lib.lock as lock_mod  # pylint: disable=wrong-import-position # noqa: E402
+import lib.log as log_mod  # pylint: disable=wrong-import-position # noqa: E402
 import lib.monitor_view as mview  # pylint: disable=wrong-import-position # noqa: E402
 import lib.mount as lib_mount  # pylint: disable=wrong-import-position # noqa: E402
 import lib.notify as notify_mod  # pylint: disable=wrong-import-position # noqa: E402
@@ -1490,6 +1491,47 @@ class TestDriveWatch:  # pylint: disable=missing-function-docstring
             assert pool_state.CLEAR_RISK in text and "#18394" in pool_state.CLEAR_RISK
             assert len(b.notes) == 1 and "Unplug it and reboot" in b.notes[0]
 
+    def test_an_open_question_is_shown_again_below_the_lines(self):
+        # R4-4: the question and its prompt, below what the watch printed.
+        options = ["Ask again next time", "Keep it", "Destroy it"]
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            asked = log_mod._q("choice", default=0, options=options)  # pylint: disable=protected-access
+            with log_mod._Reading("rpool/q exists only on the backup", asked):  # pylint: disable=protected-access
+                log_mod._OPEN_READ["line"] = "    Select [1-3, default=1]: "  # pylint: disable=protected-access
+                with redirect_stdout(b.out):
+                    b.set_state("SUSPENDED")
+                    b.tick()
+            text = Log._STRIP_RE.sub("", b.out.getvalue())  # pylint: disable=protected-access
+            tail = text[text.index("drive went away") :]
+            assert tail.endswith(
+                "  rpool/q exists only on the backup\n"
+                "    1) Ask again next time ←\n"
+                "    2) Keep it\n"
+                "    3) Destroy it\n"
+                "    Select [1-3, default=1]: "
+            ), tail[-300:]
+            # Closed with its read: a later line shows nothing more.
+            before = b.out.getvalue()
+            with redirect_stdout(b.out):
+                b.set_state("ONLINE")
+                b.tick()
+            assert "Destroy it" not in b.out.getvalue()[len(before) :]
+
+    def test_no_open_question_nothing_more(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _WatchBench(td)
+            b.tick()
+            with redirect_stdout(b.out):
+                b.set_state("SUSPENDED")
+                b.tick()
+            assert not b.out.getvalue().rstrip(" ").endswith(": ")
+            quiet = StringIO()
+            with patch.object(Log, "reshow_open") as reshow, redirect_stdout(quiet):
+                b.tick()  # the same state: nothing new to say
+            reshow.assert_not_called()
+
     def test_a_suspension_latches_at_once_and_is_never_cleared(self):
         with tempfile.TemporaryDirectory() as td:
             b = _WatchBench(td)
@@ -2087,6 +2129,7 @@ class _FakeWatch:  # pylint: disable=missing-function-docstring,too-many-instanc
         self.on_probe: Callable[[], None] | None = None
         self.stopped = False
         self.evidence = drive_watch.Evidence()
+        self.changed = 0
 
     @property
     def latched(self) -> "drive_watch.Latch | None":
@@ -2107,6 +2150,9 @@ class _FakeWatch:  # pylint: disable=missing-function-docstring,too-many-instanc
 
     def why_not_export(self) -> str:
         return ""
+
+    def changes(self) -> int:
+        return self.changed
 
     def stop(self) -> None:
         self.stopped = True
@@ -2142,6 +2188,45 @@ class TestWaitForDrive:  # pylint: disable=missing-function-docstring
             )
         del k
         return got, out.getvalue()
+
+    @staticmethod
+    def _settle(watch: _FakeWatch, steps: list[Callable[[], None]]) -> tuple[bool, float, str]:
+        clock = {"t": 0.0}
+
+        def sleep(_s: float) -> None:
+            clock["t"] += 1.0
+            if steps:
+                steps.pop(0)()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            got = backup_mod._settled_before_probe(  # pylint: disable=protected-access
+                cast("drive_watch.DriveWatch", watch),
+                "backup",
+                make_log(),
+                sleep=sleep,
+                clock=lambda: clock["t"],
+            )
+        return got, clock["t"], out.getvalue()
+
+    def test_the_last_probe_waits_for_the_pool_to_settle(self):
+        # M26R-37: ONLINE with the link for SETTLE_S, a break restarts it.
+        with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="ONLINE") as k:
+            dev = Path(td) / "part1"
+            dev.touch()
+            watch = _FakeWatch(str(dev), latched=True)
+            got, at, _ = self._settle(watch, [])
+            assert got and at == pool_state.SETTLE_S, at
+            steps: list[Callable[[], None]] = [lambda: None] * 3 + [
+                lambda: k.set("backup", "SUSPENDED"),
+                lambda: k.set("backup", "ONLINE"),
+            ]
+            got, at, _ = self._settle(watch, steps)
+            assert got and at == 5 + pool_state.SETTLE_S, at
+            dev.unlink()
+            got, at, out = self._settle(watch, [])
+            assert not got and at == backup_mod.SETTLE_LIMIT_S, at
+            assert "did not settle within 60 s: no probe" in out, out
 
     def test_it_goes_on_only_with_the_drive_healthy_and_probed(self):
         with tempfile.TemporaryDirectory() as td, _Kstat(td, backup="SUSPENDED") as k:
@@ -2346,6 +2431,56 @@ class TestBackupLatched:  # pylint: disable=missing-function-docstring
                 redirect_stdout(out),
             )
         return rc, Log._STRIP_RE.sub("", out.getvalue()), (complete, retention)  # pylint: disable=protected-access
+
+    def test_the_last_probe_settles_only_after_a_change_since_the_wait(self):
+        # M26R-37: the wait settles the pool before its probe; the probe
+        # before the export does the same when the watch changed after it.
+        real, real_record = engine.execute, backup_mod.exclusions.record
+        for changed_after_wait, settles, probes in (
+            (False, None, 2),
+            (True, True, 2),
+            (True, False, 1),
+        ):
+            watch = _FakeWatch(latched=False)
+
+            def execute(*a: Any, w: _FakeWatch = watch, **kw: Any) -> engine.Result:
+                res = real(*a, **kw)
+                w.latch()  # after the transfers: the wait, then the last probe
+                return res
+
+            def record(
+                *a: Any, w: _FakeWatch = watch, bump: bool = changed_after_wait, **kw: Any
+            ) -> bool:
+                if bump:
+                    w.changed += 1  # the drive dropped again after the wait
+                return real_record(*a, **kw)
+
+            settled = MagicMock(return_value=bool(settles))
+            _ = self._run(
+                watch,
+                patch.object(engine, "execute", execute),
+                patch.object(backup_mod.exclusions, "record", record),
+                patch.object(backup_mod, "_settled_before_probe", settled),
+            )
+            assert watch.probed_n == probes, (changed_after_wait, settles, watch.probed_n)
+            assert settled.call_count == (1 if changed_after_wait else 0)
+
+    def test_a_latch_after_the_table_is_settled_before_the_probe(self):
+        # No wait ran (the latch came later): the latch itself is the change.
+        watch = _FakeWatch(latched=False)
+
+        def record(*_a: Any, **_kw: Any) -> bool:
+            watch.latch()
+            watch.changed = 1
+            return True
+
+        settled = MagicMock(return_value=True)
+        _ = self._run(
+            watch,
+            patch.object(backup_mod.exclusions, "record", record),
+            patch.object(backup_mod, "_settled_before_probe", settled),
+        )
+        assert settled.call_count == 1 and watch.probed_n == 1
 
     def test_a_drive_that_went_away_and_came_back_is_not_verified(self):
         watch = _FakeWatch(latched=False)
@@ -3866,6 +4001,19 @@ class TestAutoejectConfig:  # pylint: disable=missing-function-docstring
 
 class TestDrives:  # pylint: disable=missing-function-docstring
     """Tests for ConnectedDrive status labeling and registration JSON."""
+
+    def test_a_drive_is_described_without_empty_fields(self):
+        # R4-7: with its drive gone, an imported pool's device has no model or size.
+        def d(model: str, size: str, drive_id: str = "usb-X_1-0:0") -> ConnectedDrive:
+            return ConnectedDrive(
+                "backup2", "1", drive_id, "", True, False, False, "imported", model, size
+            )
+
+        assert drives_lib.describe(d("SanDisk", "114.6G")) == "backup2 (SanDisk, 114.6G)"
+        assert drives_lib.describe(d("", "114.6G")) == "backup2 (usb-X_1-0:0, 114.6G)"
+        assert drives_lib.describe(d("", "")) == "backup2 (usb-X_1-0:0)"
+        assert drives_lib.describe(d("", "", "")) == "backup2"
+        assert drives_lib.describe(d("SanDisk", ""), gap="  ") == "backup2  (SanDisk)"
 
     def test_connected_drive_status_known(self):
         d = ConnectedDrive(

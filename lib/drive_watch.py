@@ -150,6 +150,7 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         self._hinted_reopen = False
         self._evidence_child: pool_state.Child | None = None
         self.evidence = Evidence()
+        self._told = False
 
     # ── the thread ───────────────────────────────────────────────────────
 
@@ -232,6 +233,12 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             self.log.dbg(f"zpool sync -f {self.pool}: {got.stderr.strip() or got.rc}")
         return self.probed()
 
+    def changes(self) -> int:
+        """How many changes that void a probe the watch has seen (the latch,
+        each entry into SUSPENDED, each loss of the link after the latch)."""
+        with self._lock:
+            return self._changes
+
     def _probe_passed(self) -> None:
         with self._lock:
             self._probe_ok = self._probe_from == self._changes
@@ -272,19 +279,30 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         if latched_now and latch is not None:
             self._announce(latch)
         elif latch is not None and entered:
-            self.log.warn(
+            self._tell(
+                self.log.warn,
                 f"{self.pool} is suspended now ({local_time(now)}). Unplug its drive and "
                 + f"reboot as above ({pool_state.reboot_command(self.pool)}), or plug it in "
-                + f"and run: sudo zpool clear {self.pool} (the risk above)"
+                + f"and run: sudo zpool clear {self.pool} (the risk above)",
             )
         if latch is not None and left:
             with self._lock:
                 self.resumed_at = now
-            self.log.info(f"{self.pool} was resumed at {local_time(now)}")
+            self._tell(self.log.info, f"{self.pool} was resumed at {local_time(now)}")
         if latch is not None:
             self._reopen_hint(now, state, link)
             self._read_evidence(now)
             self._publish()
+        if self._told:
+            # A question the terminal waits on is shown again below (R4-4).
+            self._told = False
+            self.log.reshow_open()
+
+    def _tell(self, say: Callable[[str], None], msg: str) -> None:
+        """One terminal line of this look; :meth:`tick` then shows an open
+        question again below its lines."""
+        say(msg)
+        self._told = True
 
     def _check_latch(self, now: float, state: str, link: bool) -> bool:
         """Set the latch when this look says the drive is gone (lock held).
@@ -323,7 +341,7 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             + f"{zark_command()} fullcheck",
         ]
         for line in lines:
-            self.log.error(line)
+            self._tell(self.log.error, line)
         self._notify(
             f"{self.pool}: drive went away",
             "Unplug it and reboot as the terminal says; or plug it back in (the terminal says how)",
@@ -337,9 +355,10 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
             self._unopened_since = now
         if not self._hinted_reopen and now - self._unopened_since >= REOPEN_HINT_S:
             self._hinted_reopen = True
-            self.log.warn(
+            self._tell(
+                self.log.warn,
                 f"{self.pool} has not reopened its drive: unplug it and reboot as above, or "
-                + f"sudo zpool clear {self.pool} (the risk above)"
+                + f"sudo zpool clear {self.pool} (the risk above)",
             )
 
     def _read_evidence(self, now: float) -> None:
@@ -359,7 +378,9 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         got = self._runner(["zpool", "status", "-p", self.pool], EVIDENCE_DEADLINE_S)
         if got.rc is None:
             self._evidence_child = got.child
-            self.log.dbg(f"drive watch: zpool status -p {self.pool} has not returned yet")
+            self._tell(
+                self.log.dbg, f"drive watch: zpool status -p {self.pool} has not returned yet"
+            )
             self.evidence.at = now
             return
         self._keep_evidence(now, got.stdout)
@@ -372,9 +393,11 @@ class DriveWatch:  # pylint: disable=too-many-instance-attributes
         if same:
             return  # logged when it changes, not every 30 s (M26R-36)
         for line in damage.counters:
-            self.log.warn(f"  {self.pool} while its drive was away (READ WRITE CKSUM): {line}")
+            self._tell(
+                self.log.warn, f"  {self.pool} while its drive was away (READ WRITE CKSUM): {line}"
+            )
         if errors:
-            self.log.warn(f"  {self.pool} while its drive was away: {errors}")
+            self._tell(self.log.warn, f"  {self.pool} while its drive was away: {errors}")
 
     def document(self) -> dict[str, Any] | None:
         """``progress.json``'s ``drive_gone`` (M26-10 10a), None before the latch."""

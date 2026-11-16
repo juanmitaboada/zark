@@ -48,6 +48,9 @@ _ON_WAIT: list[Callable[[str | None, dict[str, Any] | None], None]] = []
 _ON_FATAL: list[Callable[[str], None]] = []
 # Whether take_terminal() has signalled this process's group (M20E-1).
 _TOOK_TERMINAL: list[bool] = [False]
+# The read the terminal waits on now, for Log.reshow_open (R4-4): its
+# question, its kind and options (_q), and the line its input shows.
+_OPEN_READ: dict[str, Any] = {}
 
 
 def watch(
@@ -148,10 +151,13 @@ class _Reading:
     ends it."""
 
     def __init__(self, prompt: str, asked: dict[str, Any]):
+        self._raw = prompt
         self._prompt = " ".join(_SGR.sub("", prompt).split())
         self._asked = asked
 
     def __enter__(self) -> None:
+        _OPEN_READ.clear()
+        _OPEN_READ.update(question=self._raw, asked=self._asked, line="")
         for hear in _ON_WAIT:
             hear(self._prompt, self._asked)
 
@@ -161,6 +167,7 @@ class _Reading:
         _exc: BaseException | None,
         _tb: TracebackType | None,
     ) -> None:
+        _OPEN_READ.clear()
         for hear in _ON_WAIT:
             hear(None, None)
 
@@ -170,6 +177,8 @@ def _read_line(prompt: str) -> str:
     terminal and stdout is not (``| tee``): the terminal echoes the typed
     newline to itself only, so the transcript would join the prompt and the
     next line (M5bP.6, M9b-12 12a). The screen shows one blank line there."""
+    if _OPEN_READ:
+        _OPEN_READ["line"] = prompt
     answer = input(prompt)
     if sys.stdin.isatty() and not sys.stdout.isatty():
         sys.stdout.write("\n")
@@ -267,7 +276,7 @@ def frame(  # pylint: disable=too-many-arguments,too-many-locals
     return lines
 
 
-class Log:
+class Log:  # pylint: disable=too-many-public-methods
     """Structured terminal + file logger. Always verbose."""
 
     # Colors
@@ -380,6 +389,34 @@ class Log:
     def raw(self, msg: str):
         """Raw output (e.g. command stdout)."""
         self._emit(msg)
+
+    def reshow_open(self) -> None:
+        """Show again the question the terminal waits on, below lines another
+        thread printed over it (the drive watch's, R4-4): the question, a
+        choice's options, and the line the answer is typed on. Nothing when
+        no read is open; nothing goes to zark.log (the question is there)."""
+        read = dict(_OPEN_READ)
+        if not read:
+            return
+        asked = read["asked"]
+        question = read["question"].strip()
+        line = read["line"]
+        rows = [""]
+        if question and question != line.strip():
+            rows.append(f"  {self.W}{question}{self.N}")
+        options = asked.get("options")
+        if asked.get("kind") == "choice" and options:
+            default = asked.get("default")
+            rows += [
+                f"    {self.W}{i + 1}){self.N} {opt}{' ←' if i == default else ''}"
+                for i, opt in enumerate(options)
+            ]
+        try:
+            print("\n".join(rows))
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        except OSError:
+            pass  # terminal closed (EIO): nothing to show it on
 
     def blank(self):
         """Blank line for spacing."""
@@ -727,6 +764,7 @@ class Log:
             # getpass restores the echo in its own finally, so an alarm's
             # exception leaves the terminal as it found it (Lib/getpass.py, unix_getpass).
             with _Reading(question, _q("passphrase", timeout_s=timeout)), _Deadline(timeout):
+                _OPEN_READ["line"] = "    Passphrase: "
                 return getpass.getpass("    Passphrase: ", stream=sys.stdout)
         except PromptTimeout:
             sys.stdout.write("\n")  # getpass's own newline comes only after a line

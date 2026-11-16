@@ -36,7 +36,7 @@ from pathlib import Path
 
 from lib import sh
 from lib.config import Config, zark_command
-from lib.drives import scan_connected_drives, validate_external_block_device
+from lib.drives import describe, scan_connected_drives, validate_external_block_device
 from lib.health import (
     PROFILE_FAST,
     PROFILE_MEDIUM,
@@ -124,7 +124,7 @@ def _select_device(args: list[str], log: Log) -> str:
             # partition, the bare-disk list below gives the whole disk (I10).
             seen.add(whole_disk(dev) or str(Path(dev).resolve()))
             devs.append(dev)
-            labels.append(f"{d.name}  ({d.model or d.drive_id}, {d.size})")
+            labels.append(describe(d, gap="  "))
 
     # Then any bare USB disks not already covered above.
     for dev, label in _usb_disks():
