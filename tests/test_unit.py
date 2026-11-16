@@ -19219,7 +19219,7 @@ class TestKeyStatusRead:  # pylint: disable=missing-function-docstring,too-few-p
 
     def test_strict_raises_lenient_is_empty(self):
         mock = MockShell()
-        mock.on("zfs get -H keystatus -r backup/rpool").fails("I/O error")
+        mock.on("zfs get -H -t filesystem,volume keystatus -r backup/rpool").fails("I/O error")
         with patch_sh(mock):
             zfs = ZFS(make_log())
             assert not zfs.datasets_needing_key("backup/rpool")
@@ -19229,6 +19229,35 @@ class TestKeyStatusRead:  # pylint: disable=missing-function-docstring,too-few-p
                 assert "I/O error" in str(e)
             else:
                 raise AssertionError("expected KeyStatusError")
+
+    def test_datasets_only_are_listed(self):
+        # Without -t it listed every snapshot and bookmark of the drive too,
+        # each "-": seconds on a drive with many points, and nothing to load.
+        mock = MockShell()
+        mock.on("zfs get -H -t filesystem,volume keystatus -r backup/rpool").succeeds(
+            "backup/rpool\tkeystatus\tunavailable\t-\n"
+            + "backup/rpool/ROOT\tkeystatus\tunavailable\t-\n"
+            + "backup/rpool/data\tkeystatus\tavailable\t-\n"
+            + "backup/rpool/plain\tkeystatus\t-\t-\n"
+        )
+        with patch_sh(mock):
+            zfs = ZFS(make_log())
+            want = ["backup/rpool", "backup/rpool/ROOT"]
+            assert zfs.datasets_needing_key("backup/rpool") == want
+            assert zfs.datasets_needing_key("backup/rpool", strict=True) == want
+        reads = [c for c in mock.calls if "keystatus" in c]
+        assert reads, mock.calls
+        assert all(" -t filesystem,volume " in c for c in reads), reads
+
+    def test_a_snapshot_line_is_still_skipped(self):
+        # The '@' filter stays as a guard for a zfs that lists one anyway.
+        mock = MockShell()
+        mock.on("zfs get -H -t filesystem,volume keystatus -r backup/rpool").succeeds(
+            "backup/rpool\tkeystatus\tunavailable\t-\n"
+            + "backup/rpool@zark_1\tkeystatus\tunavailable\t-\n"
+        )
+        with patch_sh(mock):
+            assert ZFS(make_log()).datasets_needing_key("backup/rpool") == ["backup/rpool"]
 
 
 class TestRefuseNoUefi:  # pylint: disable=missing-function-docstring
@@ -22945,7 +22974,8 @@ class TestEngine:  # pylint: disable=too-many-public-methods
         assert fake._resume_check(token) == ""  # pylint: disable=protected-access
 
     def test_fake_get_recursive_reads_the_options_as_options(self) -> None:
-        """M4d plan 15 (9): ``zfs get -H keystatus -r <root>`` lists the root
+        """M4d plan 15 (9): ``zfs get -H -t filesystem,volume keystatus -r
+        <root>`` lists the root
         and what is below it; ``-r`` was read as the property."""
         fake = self._fresh()
         fake.ds["rpool/USERDATA/home"].props["keystatus"] = "unavailable"
@@ -26197,7 +26227,7 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         `zfs get keystatus` fails and the real datasets_needing_key reads it,
         so the test fails if backup stops asking for a strict read (M4cR-2)."""
         fake = _fresh_fake()
-        fake.fail_cmds.add("zfs get -H keystatus -r backup/rpool")
+        fake.fail_cmds.add("zfs get -H -t filesystem,volume keystatus -r backup/rpool")
         out = StringIO()
         _, rc = self._run(
             fake,
@@ -26797,7 +26827,7 @@ class TestBackupLastRun:  # pylint: disable=missing-function-docstring
         assert rc == 1 and lr["result"] == "aborted" and lr["point"] is None, lr
         assert lr["message"] == "Aborted by user"
         fake = _fresh_fake()
-        fake.fail_cmds.add("zfs get -H keystatus -r backup/rpool")
+        fake.fail_cmds.add("zfs get -H -t filesystem,volume keystatus -r backup/rpool")
         rc, drive, _ = self._ending(
             fake, patch.object(ZFS, "datasets_needing_key", _REAL_DATASETS_NEEDING_KEY)
         )

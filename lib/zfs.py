@@ -1058,14 +1058,17 @@ class ZFS:  # pylint: disable=too-many-public-methods
         """
         Return datasets under `root` whose key is not yet loaded.
 
-        Reads `zfs get -H keystatus -r <root>` and selects every non-snapshot
-        dataset (no '@' in the name) with keystatus == 'unavailable'. Used by
-        every caller that needs to walk an encryption hierarchy and load keys.
+        Reads `zfs get -H -t filesystem,volume keystatus -r <root>` and
+        selects every dataset (no '@' in the name: kept as a guard) with
+        keystatus == 'unavailable'. Used by every caller that needs to walk an
+        encryption hierarchy and load keys.
         A failed read is no dataset; with ``strict`` it raises
         :class:`KeyStatusError` instead, since "nothing to load" would then
         skip the passphrase (M4c-19).
         """
-        r = run(f"zfs get -H keystatus -r {root}")
+        # Datasets only: without -t it lists every snapshot and bookmark too,
+        # all "-", slow on a drive holding many points.
+        r = run(f"zfs get -H -t filesystem,volume keystatus -r {root}")
         if not r.ok:
             if strict:
                 raise KeyStatusError(r.stderr.strip() or f"zfs get keystatus -r {root} failed")

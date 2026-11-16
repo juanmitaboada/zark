@@ -106,6 +106,11 @@ monitor` say `zark's guards are out of date: run sudo zark setup`.
   for efivarfs to be mounted. The boot chain it installs cannot be
   written without it, and the efivarfs mount above would otherwise stop
   recover after the whole restore.
+- **Loading a drive's keys no longer lists every point on it**: the
+  read of which datasets still need their key (`backup`'s step 5,
+  `fullcheck`'s restore check) lists datasets only. It listed every
+  snapshot and bookmark too, so the more points a drive held, the longer
+  `Loading encryption key...` took.
 - **A crash reaches `zark.log`**: an exception nothing caught is said
   through the log with its type, and its traceback goes to `zark.log`
   (`--debug` still prints it). It went to the terminal only.
