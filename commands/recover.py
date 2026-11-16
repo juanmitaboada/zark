@@ -86,7 +86,7 @@ from lib.identity import BY_ID_DIR, by_id_names, preferred_by_id, protected_disk
 from lib.initrd import installed_kernels, kernels_without_vmlinuz, regenerate_initrd
 from lib.keystore import SYSTEM_KEY_PATH, Keystore, open_keystore
 from lib.log import Log
-from lib.recover_checks import refuse_unreadable, refuse_unrecoverable
+from lib.recover_checks import refuse_no_uefi, refuse_unreadable, refuse_unrecoverable
 from lib.recover_ext4 import (
     EXT4_RECOVER_TOOLS,
     before_rpool_bytes,
@@ -1052,6 +1052,8 @@ def run(
         if confirm != "IUNDERSTAND":
             return
 
+    # Before anything is asked or touched: step 15 cannot finish without it.
+    refuse_no_uefi(log)
     _warn_old_live(log)
     _install_missing_tools(log)
 

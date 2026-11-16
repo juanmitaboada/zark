@@ -590,6 +590,9 @@ _SYSFS_ROOT = patch("lib.identity.SYS_BLOCK", _TEST_LOG_DIR, create=True).start(
 # Nor its udev records what a drive's partition is (M26R-54): a directory
 # that does not exist reads as no records at all; tests point it at their own.
 _UDEV_DATA = patch("lib.identity.UDEV_DATA", os.path.join(_TEST_LOG_DIR, "no-udev")).start()
+# Nor whether it was booted in UEFI mode (M27R-2): recover's start finds
+# the firmware's variables; a test that needs them gone points it elsewhere.
+_EFIVARS = patch("lib.recover_checks.EFIVARS", _TEST_LOG_DIR).start()
 # Nor its machine-id whether a drive is this system's (M4a-7): the drives
 # _fresh_fake prepares name this one as their owner, as prepare does.
 TEST_MACHINE_ID = "7e57000000000000000000000000beef"
@@ -17762,6 +17765,31 @@ class TestRecoverNoWipeBeforeYes:  # pylint: disable=missing-function-docstring
                 c.run()
         return mock
 
+    def test_a_session_not_in_uefi_mode_is_refused_before_anything(self):
+        # M27R-2: step 15 cannot install the boot chain without efivarfs;
+        # recover's start says so, before a drive is read or a disk asked for.
+        out = StringIO()
+        calls: dict[str, list[tuple[object, ...]]] = {}
+        with tempfile.TemporaryDirectory() as td:
+            mock = self._run_in(
+                td,
+                "YES",
+                calls=calls,
+                everything_succeeds=True,
+                extra=(
+                    patch("lib.recover_checks.EFIVARS", os.path.join(td, "no-efivars")),
+                    redirect_stdout(out),
+                ),
+            )
+        text = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        assert "This live session was not started in UEFI mode" in text, text[-1500:]
+        assert "Nothing was changed: no disk was touched" in text, text[-1500:]
+        assert not calls, calls  # no point chosen, no plan built
+        touched = [
+            c for c in mock.calls if c.startswith(("zpool", "zfs", "sgdisk", "wipefs", "mkfs"))
+        ]
+        assert not touched, touched
+
     def test_a_bpool_left_at_its_monthly_is_mounted_and_its_kernels_checked(self):
         """M4dR-6 (P8): ``run`` mounts bpool explicitly whenever the restore
         put something there, a bpool left at its monthly included, and names
@@ -18661,7 +18689,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
         assert "(1 kernel(s))" in buf.getvalue()
 
     def test_a_failed_bind_or_efivarfs_stops_before_the_boot_chain(self):
-        # M27 item 16: as repair-boot's, each bind checked; efivarfs too
+        # M27 item 16: each bind checked as repair-boot checks them; efivarfs too
         # (grub-install and shim write the boot entry through it).
         names = ["proc", "sys", "dev", "dev/pts", "run", "efivarfs"]
         for n, d in enumerate(names):
@@ -18693,6 +18721,7 @@ class TestRecoverBootChain:  # pylint: disable=missing-function-docstring
                 assert code == 1, (d, flat)
                 if d == "efivarfs":
                     assert "Could not mount efivarfs at" in flat, flat
+                    assert "not started in UEFI mode" in flat, flat  # M27R-2: its cause named
                 else:
                     assert f"Could not bind-mount /{d} (mount: /{d}: denied)" in flat, flat
                 assert "nothing of the boot chain" in flat and "recover again" in flat, flat

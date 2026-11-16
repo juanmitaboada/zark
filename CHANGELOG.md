@@ -87,10 +87,21 @@ monitor` say `zark's guards are out of date: run sudo zark setup`.
 - **`zark monitor` says the run's drive went away**: "went away, in use"
   while the run's `drive_gone` says it is not back, not "connected, in
   use".
-- **`recover` checks its chroot's binds and efivarfs**, as `repair-boot`
-  does: the first that fails stops recover with its name, before
-  grub-install, the signed GRUB and shim and update-grub run in a
-  half-prepared tree; the restored datasets stay on the disk.
+- **`recover` checks its chroot's binds and efivarfs**: the five binds
+  (`/proc`, `/sys`, `/dev`, `/dev/pts`, `/run`) as `repair-boot` checks
+  them, and the efivarfs mount, which grub-install and shim's reconfigure
+  write the firmware's boot entry through. The first that fails stops
+  recover with its name, before grub-install, the signed GRUB and shim
+  and update-grub run in a half-prepared tree; the restored datasets stay
+  on the disk.
+- **`recover` refuses a live session not started in UEFI mode at its
+  start**: when `/sys/firmware/efi/efivars` is not there (a live USB
+  started in legacy BIOS or CSM mode, or with the firmware's runtime
+  services off), recover stops before it reads a drive or asks for a
+  disk, says that nothing was changed, and asks for the session to be
+  started again in UEFI mode. The boot chain it installs cannot be
+  written without it, and the efivarfs mount above would otherwise stop
+  recover after the whole restore.
 - **A crash reaches `zark.log`**: an exception nothing caught is said
   through the log with its type, and its traceback goes to `zark.log`
   (`--debug` still prints it). It went to the terminal only.

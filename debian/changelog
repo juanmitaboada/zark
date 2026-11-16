@@ -13,7 +13,9 @@ zark (2.3.2~rc1-1) UNRELEASED; urgency=medium
   * backup settles a pool that changed after the wait before the probe
     before its export, shows an open question again below the drive
     watch's lines, and leaves no empty field in "Using drive".
-  * recover checks its chroot's binds and efivarfs, as repair-boot does.
+  * recover checks its chroot's five binds (as repair-boot does) and the
+    efivarfs mount, and refuses at its start, before anything is touched,
+    a live session without /sys/firmware/efi/efivars (not UEFI mode).
   * Work directories under /run/zark removed after use; the transfer's
     rate counts streaming time only; zark monitor says a gone drive went
     away; the official 26.10 image's line is kept in a certificate.

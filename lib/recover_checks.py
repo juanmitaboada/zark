@@ -15,15 +15,42 @@
 What recover refuses before anything is erased because of the point's
 record of origin's pools (M12-8, M13R-1, M13R-2): a point that needs a
 newer zark, one whose record cannot be read, one whose ``/boot`` is on
-ext4 without a readable record to lay the disk out from.
+ext4 without a readable record to lay the disk out from. And a live
+session not started in UEFI mode (M27R-2), checked at recover's start.
 """
 
+import os
 from typing import NoReturn
 
 from lib import pool_record
 from lib.boot_layout import Layout
-from lib.config import VERSION
+from lib.config import VERSION, zark_command
 from lib.log import Log
+
+# Where the kernel shows the firmware's variables in a session booted in
+# UEFI mode with its runtime services on (the suite points it elsewhere).
+EFIVARS = "/sys/firmware/efi/efivars"
+
+
+def refuse_no_uefi(log: Log) -> None:
+    """FATAL when this session was not started in UEFI mode (M27R-2): the
+    boot chain recover installs (grub-install, shim's reconfigure) writes
+    the firmware's boot entry through efivarfs, and its mount is fatal at
+    step 15, after the restore. Checked first, when nothing has changed."""
+    if os.path.isdir(EFIVARS):
+        return
+    log.fatal(
+        f"This live session was not started in UEFI mode ({EFIVARS} is missing)",
+        causes=[
+            "The live USB was started in legacy BIOS or CSM mode",
+            "The firmware's runtime services are off (noefi or efi=noruntime)",
+        ],
+        solutions=[
+            "Nothing was changed: no disk was touched",
+            "Start the live session again in UEFI mode (the USB's UEFI entry in the "
+            + f"firmware's boot menu), then run {zark_command()} recover",
+        ],
+    )
 
 
 def refuse_min_recover(min_recover: str, written_by: str, log: Log) -> None:

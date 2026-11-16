@@ -272,11 +272,12 @@ def restore_boot_copy(copy: str, log: Log) -> list[str]:
 
 
 def _bind_chroot(cleanup: Cleanup, log: Log) -> None:
-    """The chroot's runtime file systems and efivarfs under RECOVER_MNT, each
-    checked, as repair-boot's: grub-install, shim's reconfigure and
-    update-grub must not run in a half-prepared tree, and grub-install and
-    shim write the firmware's boot entry through efivarfs. Fatal at the first
-    that fails, before anything of the boot chain is written; the cleanup
+    """The chroot's runtime file systems under RECOVER_MNT, each checked as
+    repair-boot checks them, and efivarfs: grub-install, shim's reconfigure
+    and update-grub must not run in a half-prepared tree, and grub-install
+    and shim write the firmware's boot entry through efivarfs (recover's
+    start refused a session without it, M27R-2). Fatal at the first that
+    fails, before anything of the boot chain is written; the cleanup
     unmounts what was mounted (each tracked once it is)."""
     restored = (
         "the restored datasets are on the disk; nothing of the boot chain "
@@ -300,10 +301,15 @@ def _bind_chroot(cleanup: Cleanup, log: Log) -> None:
         log.fatal(
             f"Could not mount efivarfs at {efivars} ({r.stderr.strip() or 'no error text'})",
             causes=[
+                "The live session was not started in UEFI mode, or lost its firmware "
+                + "variables since recover's start",
                 "grub-install and shim's reconfigure write the firmware's boot entry "
-                + f"through it; {restored}"
+                + f"through it; {restored}",
             ],
-            solutions=[redo],
+            solutions=[
+                "Start the live session again in UEFI mode, then run "
+                + f"{zark_command()} recover again",
+            ],
         )
     cleanup.track_mount(efivars)
 

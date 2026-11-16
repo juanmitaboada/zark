@@ -726,7 +726,10 @@ end-to-end sequences.
     a backup drive. Must be run from an Ubuntu Live USB with the backup
     drive connected: Ubuntu 26.04 or newer, for a 24.04 or a 26.04
     system. On an older live **recover** warns and goes on; what that
-    live cannot do stops it before anything is erased.
+    live cannot do stops it before anything is erased. A live session not
+    started in UEFI mode (no */sys/firmware/efi/efivars*) is refused at
+    the start, before a drive is read: the boot chain is written through
+    the firmware's variables.
 
     The procedure scans for backup drives and, before importing anything,
     lists the chosen drive with **zpool import -d**: when it uses features
