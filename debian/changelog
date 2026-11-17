@@ -1,3 +1,18 @@
+zark (2.3.3~rc1-1) UNRELEASED; urgency=medium
+
+  * zark 2.3.3: a small fix release. Nothing on a drive or in /etc/zark
+    changes; 2.3.2 reads everything 2.3.3 writes.
+  * Every command refuses a positional argument it does not take, exit
+    status 2, before anything runs, as it refuses an unknown option.
+  * backup's and fullcheck's read-backs import only the pool that was
+    written (the drive's GUID); fullcheck records another pool there as
+    not finished.
+  * recover's restore table keeps its columns with long names.
+  * docs/HARDWARE.md: zoned block devices (SMR, ZNS) are not detected;
+    README and docs/USAGE.md give prepare its device.
+
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 17 Nov 2026 23:07:00 +0100
+
 zark (2.3.2-1) stable; urgency=medium
 
   * zark 2.3.2: the last fixes of 2.3. Nothing on a drive or in /etc/zark

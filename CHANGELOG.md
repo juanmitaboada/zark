@@ -5,6 +5,50 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A small fix release after 2.3.2. Nothing on a drive or in `/etc/zark`
+changes; zark 2.3.2 reads everything 2.3.3 writes.
+
+### Changed
+
+- **Every command refuses a positional argument it does not take**, before
+  anything runs: `zark <command>: unexpected argument <arg>`, exit status
+  2, as 2.3.2 refuses an unknown option. Until now most commands ignored
+  it: `zark backup foo` ran a backup. Each command's arguments are counted
+  from the same declaration as its options; a value of a fixed word is
+  still checked by the command itself. `alerts`, `fullcheck` and
+  `registry` with a word too many now stop here with exit status 2, where
+  they stopped later with exit status 1.
+
+### Fixed
+
+- **backup's and fullcheck's read-backs import only the pool that was
+  written.** They now pass the drive's GUID, as `prepare` and `registry
+  verify` do: another pool of the same name at the drive's device is not
+  read back as the drive. backup then says BACKUP NOT VERIFIED, naming the
+  other pool's GUID; fullcheck records the check as not finished, not as
+  damage of the drive. Their import already checked the GUID; this closes
+  the read-back too. The line for another pool no longer says "nothing was
+  registered", which is true only of `prepare` and `registry verify`.
+- **recover's restore table keeps its columns** when a dataset name or a
+  snapshot label is longer than 44 characters: both name columns are as
+  wide as their longest cell, and a table of shorter names prints as
+  before.
+- **The quick start gives `prepare` its device.** README and
+  `docs/USAGE.md` showed `sudo zark prepare` with no device, which stops
+  with "No device specified"; they now show `/dev/disk/by-id/<disk>`, how
+  to find it, and that `prepare` refuses a disk that is not empty.
+
+### Known limitations
+
+Those of 2.3.2 still hold, and:
+
+- zark does not detect zoned block devices (host-managed or host-aware SMR
+  disks, ZNS SSDs) as backup drives or recover targets. OpenZFS cannot use
+  a host-managed disk today; a drive-managed SMR disk works, but receives
+  and resilvers slowly ([docs/HARDWARE.md](docs/HARDWARE.md)).
+
 ## [2.3.2] - 2026-11-16
 
 The last fixes of zark 2.3: the guards, the command line, a drive that
