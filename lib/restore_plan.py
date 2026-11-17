@@ -461,6 +461,10 @@ def _plan_bases(pool: str, rows: list[RestoreRow], snaps: list[Snap], log: Log) 
         )
 
 
+# The restore table's name columns are never narrower than this (M27E.4).
+PLAN_COLUMN = 44
+
+
 def _fmt_delta(seconds: int) -> str:
     """Signed offset from the point, e.g. ``-36m30s``, ``-5h02m``, from 48 h
     on in days (``-38d23h59m``, M3P.10), or ``0``."""
@@ -488,12 +492,21 @@ def _snapshot_label(name: str, drives: dict[str, str]) -> str:
 
 def show_plan(plan: RestorePlan, log: Log, drives: dict[str, str] | None = None) -> None:
     """The restore table (hallazgo 3): what each dataset will be restored from.
-    ``drives`` maps a pool GUID to its registry name."""
+    ``drives`` maps a pool GUID to its registry name. The two name columns
+    are as wide as their longest cell, at least :data:`PLAN_COLUMN` (M27E.4)."""
     drives = drives or {}
+    keystore = plan.keystore_snap.split("@")[-1]
+    labels = {
+        r.rel: _snapshot_label(r.snap.name, drives)
+        for r in plan.rows
+        if r.restored and not r.empty and r.snap is not None
+    }
+    dw = max(PLAN_COLUMN, len("rpool (pool root)"), *(len(r.rel) for r in plan.rows))
+    sw = max(PLAN_COLUMN, len(keystore), *(len(label) for label in labels.values()))
     log.info(f"Restore point: {plan.point.label_utc()} ({plan.point.family.rstrip('_')})")
-    log.raw(f"  {'DATASET':44} {'SNAPSHOT':44} {'Δ POINT':>9} {'SIZE':>7}  MOUNT")
+    log.raw(f"  {'DATASET':{dw}} {'SNAPSHOT':{sw}} {'Δ POINT':>9} {'SIZE':>7}  MOUNT")
     log.raw(
-        f"  {'rpool (pool root)':44} {'(created)':44} {'':>9} {'':>7}  "
+        f"  {'rpool (pool root)':{dw}} {'(created)':{sw}} {'':>9} {'':>7}  "
         + f"off {plan.rpool_mountpoint} [{plan.rpool_mountpoint_source}]",
     )
     for r in plan.rows:
@@ -501,22 +514,21 @@ def show_plan(plan: RestorePlan, log: Log, drives: dict[str, str] | None = None)
             assert r.props is not None
             below = f"; {r.below} dataset(s) below it not created" if r.below else ""
             log.raw(
-                f"  {r.rel:44} excluded from backups at this point: recreated empty  "
+                f"  {r.rel:{dw}} excluded from backups at this point: recreated empty  "
                 + f"{r.props.canmount} {r.effective}{below}"
             )
             continue
         if not r.restored:
-            log.raw(f"  {log.Y}{r.rel:44} NOT RESTORED - {r.note}{log.N}")
+            log.raw(f"  {log.Y}{r.rel:{dw}} NOT RESTORED - {r.note}{log.N}")
             continue
         assert r.snap is not None and r.props is not None
         delta = _fmt_delta(r.snap.creation - plan.point.label)
         size = sh.humanize_bytes(r.referenced) if r.referenced >= 0 else "?"
         mark = log.Y if r.props.source == "inferred" else ""
         origin = " (from archive)" if r.snap.source else ""
-        label = _snapshot_label(r.snap.name, drives)
         log.raw(
-            f"  {r.rel:44} {label:44} {delta:>9} {size:>7}  "
+            f"  {r.rel:{dw}} {labels[r.rel]:{sw}} {delta:>9} {size:>7}  "
             + f"{mark}{r.props.canmount} {r.effective} [{r.props.source}]{log.N if mark else ''}"
             + origin,
         )
-    log.raw(f"  {'keystore':44} {plan.keystore_snap.split('@')[-1]:44} (newest, independent)")
+    log.raw(f"  {'keystore':{dw}} {keystore:{sw}} (newest, independent)")

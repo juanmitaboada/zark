@@ -17385,6 +17385,63 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert "excluded from backups at this point: recreated empty" in out.getvalue()
         assert "1 dataset(s) below it not created" in out.getvalue()
 
+    @staticmethod
+    def _table(plan: RestorePlan, drives: dict[str, str] | None = None) -> list[str]:
+        out = StringIO()
+        with redirect_stdout(out):
+            restore_plan.show_plan(plan, Log(), drives)
+        plain = Log._STRIP_RE.sub("", out.getvalue())  # pylint: disable=protected-access
+        return [ln for ln in plain.splitlines() if ln.startswith("  ")]
+
+    def test_the_table_keeps_its_columns_with_long_names(self):
+        """M27E.4: a dataset name and a snapshot label longer than 44 widen
+        their columns; every row keeps the next column at one offset."""
+        plan = _run_plan(cache=True)
+        restored = [r for r in plan.rows if r.restored and r.snap is not None]
+        long_ds, anchored = restored[0], restored[1]
+        long_ds.rel = "rpool/USERDATA/home_bf193q/" + "a-dataset-name-well-past-44-chars" * 2
+        assert anchored.snap is not None
+        anchored.snap = dc_replace(
+            anchored.snap, name="zark_8963688414852777737_2026-11-17_17:36:39Z"
+        )
+        lines = self._table(plan, {"8963688414852777737": "a-drive-with-a-long-name"})
+        label = "zark_2026-11-17_17:36:39Z (bpool anchor of drive a-drive-with-a-long-name)"
+        assert len(long_ds.rel) > 44 and len(label) > 44
+        snap_col = 2 + len(long_ds.rel) + 1
+        delta_col = snap_col + len(label) + 1
+        header = lines[0]
+        assert header.index("SNAPSHOT") == snap_col, header
+        assert header.index("Δ POINT") + len("Δ POINT") == delta_col + 9, header
+        rows = [ln for ln in lines if any(f" {r.rel} " in f"{ln} " for r in restored)]
+        assert len(rows) == len(restored), lines
+        for ln in rows:
+            assert ln[snap_col - 1] == " " and ln[snap_col] != " ", ln
+            assert ln[delta_col - 1] == " ", ln
+        assert any(label in ln for ln in rows), lines
+        keystore = next(ln for ln in lines if ln.lstrip().startswith("keystore"))
+        assert keystore[snap_col] != " " and keystore[snap_col - 1] == " ", keystore
+
+    def test_a_long_name_that_is_not_restored_widens_the_table_too(self):
+        """M27E.4: a dataset created empty (excluded) or not restored has its
+        name in the DATASET column as well."""
+        mark = excl.PointMark(tops={"rpool/var/lib/docker": excl.BOTH})
+        plan = _run_plan(cache=True, excluded=mark)
+        for n, r in enumerate(plan.rows):
+            r.rel = f"rpool/d{n}"
+        empty = next(r for r in plan.rows if r.empty)
+        empty.rel = "rpool/" + "an-excluded-dataset-name-well-past-44" * 2
+        lines = self._table(plan)
+        assert lines[0].index("SNAPSHOT") == 2 + len(empty.rel) + 1, lines[0]
+
+    def test_short_names_print_the_table_as_before(self):
+        """M27E.4 (D3 3b): names within 44 keep the columns at 44."""
+        plan = _run_plan(cache=True)
+        for n, r in enumerate(plan.rows):
+            r.rel = f"rpool/d{n}"
+        lines = self._table(plan)
+        assert lines[0].index("SNAPSHOT") == 2 + 44 + 1, lines[0]
+        assert lines[0].index("Δ POINT") == 2 + 44 + 1 + 44 + 1 + 9 - len("Δ POINT"), lines[0]
+
     def test_a_snapshot_exclusion_is_set_again_on_what_is_restored(self):
         """M5b-13: a raw send carries no user property, so the point's
         snapshot-only exclusion is set again after the receive; a top the
