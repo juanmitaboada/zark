@@ -762,8 +762,11 @@ def _parts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     if do_scrub and scrub_part(cr, zfs, device, cleanup, log):
         log.step(3, TOTAL_STEPS, f"Reading {cr.pool} back after the scrub...")
         progress.set_check(check_doc("readback"))
-        rb = zfs.verify_exported_pool_readback(cr.pool, device, cleanup, skip_note=SKIP_NOTE)
-        if rb.skipped:
+        rb = zfs.verify_exported_pool_readback(
+            cr.pool, device, cleanup, skip_note=SKIP_NOTE, guid=cr.guid
+        )
+        if rb.skipped or rb.foreign:
+            # Not done (apt ran) or another pool at the device: not finished, never damage.
             cr.lines += rb.describe(again=False)
             cr.record("not_finished", rb.summary(cr.pool), log)
         elif not rb.ok:

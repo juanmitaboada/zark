@@ -466,7 +466,7 @@ class TestFullcheckFlow:  # pylint: disable=missing-function-docstring
         order: list[str] = []
         drive = MagicMock(name="drive")
         drive.name, drive.guid = POOL, GUID
-        rb = MagicMock(skipped="", ok=True)
+        rb = MagicMock(skipped="", foreign="", ok=True)
 
         def scrub_part(*_a: Any, **_k: Any) -> bool:
             order.append("scrub")
@@ -514,11 +514,16 @@ class TestRunRecords:  # pylint: disable=missing-function-docstring
     """What `run` records when a part ends early: apt or dpkg at an import (M19R-12),
     a skipped read-back (M19R-14)."""
 
-    def _run(self, busy_at: str = "", skipped: str = "") -> tuple[list[dict[str, Any]], int, bool]:
+    guids: list[Any] = []  # the GUID each read-back of the last run was given
+
+    def _run(  # pylint: disable=too-many-locals
+        self, busy_at: str = "", skipped: str = "", foreign: str = "", ok: bool = True
+    ) -> tuple[list[dict[str, Any]], int, bool]:
         drive = MagicMock(name="drive")
         drive.name, drive.guid = POOL, GUID
         saved: list[dict[str, Any]] = []
         tracked: list[Any] = []
+        self.guids = []
 
         def restore_step(cr: Any, *_a: Any, **_k: Any) -> None:
             if busy_at == "restore":
@@ -536,9 +541,14 @@ class TestRunRecords:  # pylint: disable=missing-function-docstring
         def readback(*_a: Any, **_k: Any) -> Any:
             if busy_at == "readback":
                 raise dpkg_lock.DpkgBusy([])
-            rb = MagicMock(skipped=skipped, ok=not skipped)
+            self.guids.append(_k.get("guid"))
+            rb = MagicMock(skipped=skipped, foreign=foreign, ok=ok and not skipped and not foreign)
             rb.describe.return_value = ["The read-back of backup2 was not done"]
-            rb.summary.return_value = "the read-back of backup2 was skipped by the operator"
+            rb.summary.return_value = (
+                f"backup2 is another pool (GUID {foreign})"
+                if foreign
+                else "the read-back of backup2 was skipped by the operator"
+            )
             return rb
 
         def save(_guid: str, check: Any, _log: Any) -> bool:
@@ -590,6 +600,21 @@ class TestRunRecords:  # pylint: disable=missing-function-docstring
         saved, _, busy = self._run(busy_at="readback")
         assert busy and len(saved) == 1
         assert saved[0]["result"] == "not_finished" and saved[0]["scrub"] is not None
+
+    def test_the_read_back_is_given_the_drives_guid(self) -> None:
+        """The read-back imports only the pool that was checked (M20R-1)."""
+        _ = self._run()
+        assert self.guids == [GUID]
+
+    def test_another_pool_at_the_device_is_not_finished_not_damage(self) -> None:
+        saved, code, busy = self._run(foreign="999")
+        assert not busy and code == 1 and len(saved) == 1
+        assert saved[0]["result"] == "not_finished", saved[0]
+        assert saved[0]["message"] == "backup2 is another pool (GUID 999)"
+
+    def test_a_failed_read_back_is_still_damage(self) -> None:
+        saved, code, _ = self._run(ok=False)
+        assert code == 1 and saved[0]["result"] == "damage", saved[0]
 
     def test_a_skipped_read_back_is_not_finished(self) -> None:
         saved, code, busy = self._run(skipped="operator")

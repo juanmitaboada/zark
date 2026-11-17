@@ -1739,7 +1739,10 @@ def run(
         _notify("❌ Backup NOT verified", f"{pool_name} could not be exported")
         record.result("not_verified", message=f"{pool_name} could not be exported")
         raise SystemExit(1)
-    rb = zfs.verify_exported_pool_readback(pool_name, device=device, cleanup=cleanup)
+    # The drive's GUID: another pool of the same name at the device is not read back as this one.
+    rb = zfs.verify_exported_pool_readback(
+        pool_name, device=device, cleanup=cleanup, guid=pool_guid
+    )
     if not rb.ok:
         # Skipped or timed out while apt ran: the same outcome, words that do
         # not call the drive faulty (M18-13 13a, M18R-14).

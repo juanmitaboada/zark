@@ -15609,6 +15609,7 @@ class TestPrepareIdentity:  # pylint: disable=missing-function-docstring,too-man
         assert self._prepare(fake, cfg_dir, readback=rb, out=out) == 1
         text = " ".join(unframed(out.getvalue()).split())
         assert "DRIVE NOT VERIFIED" in text and "another pool named blue (GUID 222)" in text
+        assert "The drive has NOT been registered." in text, text
         assert json.loads((cfg_dir / "known_drives.json").read_text()) == {}
         assert not (cfg_dir / "pending_drives.json").exists()
         assert not [b for b in fake.bookmarks("rpool/ROOT/be") if repl.anchor_disk(b) == "777"]
@@ -26192,6 +26193,41 @@ class TestBackupCommand:  # pylint: disable=too-many-public-methods
         text = " ".join(out.getvalue().split())
         assert rc == 1 and "BACKUP NOT VERIFIED" in text
         assert f"backup already records {point} as its last backup point" in text
+        assert not cfg.known_drives["backup"].last_backup_at
+
+    def test_the_read_back_gets_the_drives_guid(self) -> None:
+        """The read-back imports only the pool that was written (M20R-1): the
+        registry's GUID is passed to it."""
+        fake = _fresh_fake()
+        seen: list[dict[str, Any]] = []
+        good = Readback(imported=True, health="ONLINE", reexported=True, damage=Damage(count=0))
+
+        def readback(*_a: Any, **k: Any) -> Readback:
+            seen.append(k)
+            return good
+
+        cfg, rc = self._run(
+            fake,
+            patch.object(ZFS, "verify_exported_pool_readback", side_effect=readback),
+            redirect_stdout(StringIO()),
+        )
+        assert rc == 0 and seen and seen[0]["guid"] == cfg.known_drives["backup"].guid, seen
+
+    def test_another_pool_at_the_read_back_is_not_verified(self) -> None:
+        """A pool of the same name with another GUID at the device: NOT
+        VERIFIED, the GUID named, the registry's last backup not written."""
+        fake = _fresh_fake()
+        out = StringIO()
+        other = Readback(imported=True, reexported=True, foreign="222", pool="backup")
+        cfg, rc = self._run(
+            fake,
+            patch.object(ZFS, "verify_exported_pool_readback", return_value=other),
+            redirect_stdout(out),
+        )
+        text = " ".join(unframed(out.getvalue()).split())
+        assert rc == 1 and "BACKUP NOT VERIFIED" in text, text
+        assert "another pool named backup (GUID 222), not the one expected." in text, text
+        assert "nothing was registered" not in text
         assert not cfg.known_drives["backup"].last_backup_at
 
     def test_the_already_records_paragraph_is_wrapped_as_one(self) -> None:

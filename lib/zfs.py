@@ -291,7 +291,7 @@ class Readback:  # pylint: disable=too-many-instance-attributes
         if self.foreign:
             return [
                 f"The disk holds another pool named {self.pool} (GUID {self.foreign}), "
-                + "not the one expected: nothing was registered.",
+                + "not the one expected.",
                 *(
                     []
                     if self.reexported
