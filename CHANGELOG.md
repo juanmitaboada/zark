@@ -39,6 +39,13 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
   `docs/USAGE.md` showed `sudo zark prepare` with no device, which stops
   with "No device specified"; they now show `/dev/disk/by-id/<disk>`, how
   to find it, and that `prepare` refuses a disk that is not empty.
+- **The docs no longer have the release tarball run from the USB stick.**
+  On a FAT stick mounted by the desktop the extracted files have no
+  execute bit, so `sudo ./zark` fails there. README, the manual page and
+  the docs now say to keep the tarball on the stick and extract it in the
+  live session into `/tmp` (`tar xzf <the stick's folder>/zark_*.tar.gz -C
+  /tmp`, `cd /tmp/zark`, `sudo ./zark recover`), and that zark's log is
+  then `/tmp/zark/zark.log`, in memory: copy it to the stick to keep it.
 
 ### Known limitations
 

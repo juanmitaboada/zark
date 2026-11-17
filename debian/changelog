@@ -9,7 +9,9 @@ zark (2.3.3~rc1-1) UNRELEASED; urgency=medium
     not finished.
   * recover's restore table keeps its columns with long names.
   * docs/HARDWARE.md: zoned block devices (SMR, ZNS) are not detected;
-    README and docs/USAGE.md give prepare its device.
+    README and docs/USAGE.md give prepare its device; the docs have the
+    release tarball extracted from the stick into /tmp in a live session,
+    not run from the stick.
 
  -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 17 Nov 2026 23:07:00 +0100
 

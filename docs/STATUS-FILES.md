@@ -76,7 +76,7 @@ zark itself, with no resident process.
   not interpret the file: it keeps its last good state, if any, and says it
   needs an update.
 - A writer never writes over a `status.json` whose `schema_version` is higher
-  than its own (a newer zark wrote it, and an older one, run from a stick,
+  than its own (a newer zark wrote it, and an older one, run from a portable tree,
   would drop what it does not know). It logs a warning and leaves the file
   alone. `progress.json` is always replaced: it belongs to the running
   command.
@@ -98,7 +98,7 @@ zark itself, with no resident process.
 
 - `/run/zark` is created at boot by the package's `tmpfiles.d` entry, 0755
   root root, so a reader can watch it before zark first runs. A zark run
-  from a stick or a checkout creates it when missing.
+  from a portable tree or a checkout creates it when missing.
 - `/var/lib/zark` is 0755 root root; the writer creates it when missing. It
   also holds `selftest/`, 0700, which readers do not need.
 - Whoever creates either directory gives it 0755 explicitly, whatever the
@@ -753,7 +753,7 @@ from both files. First match wins:
 
 - Stale: `generated_at` more than `thresholds.stale_after_s` seconds before
   the reader's clock. A stale file is still shown, labelled with its date:
-  the timer is not installed, or the zark it runs is gone (a stick).
+  the timer is not installed, or the zark it runs is gone (a portable tree).
 - Unreadable: a `status.json` that exists but does not parse, is not an
   object or has another `kind`. An absent one is state 6, not unreadable.
 - An orphan `progress.json` stays until the next zark command or a reboot;
@@ -791,7 +791,7 @@ What any program may rely on, and how to read the files safely.
   dataset's `type`). Every other change increments `schema_version`.
 - An optional field may be absent from any file: a reader works without it.
   A writer drops the optional fields it does not know when it rewrites an
-  entry (an older zark run from a stick, say), so a field present once may
+  entry (an older zark run from a portable tree, say), so a field present once may
   be gone from the next file.
 - `last_run.result`, the indicator state's seven values and their rules,
   and zark's exit statuses (`zark(1)`, EXIT STATUS) are an interface; they

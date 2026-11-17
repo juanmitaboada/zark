@@ -37,7 +37,7 @@ That is everything a backup needs, but not a backup by itself: snapshots live on
 - **Encrypted end to end**: backups are raw `zfs send` streams, so the drive holds ciphertext and the keys never travel in the clear.
 - **A history on every drive**: each backup adds a restore point. After each complete backup the drive keeps every snapshot of its window (the last 30 days by default) and, before that, the newest point of each month, with no limit in time; the window is set per drive, and when space runs short zark lists the oldest monthly points and removes them only if you say yes ([retention](docs/RETENTION.md#retention-on-the-drive)). Each drive is anchored by its own ZFS bookmarks, so drives can rotate and stay unplugged for months.
 - **Checked, not assumed**: every backup is read back from the drive before zark says it is safe to unplug, and `zark selftest` checks that this machine's ZFS, kernel and tools behave the way zark relies on.
-- **Portable**: the same zark runs installed from a package or from a tarball on a USB stick, which is how it runs from a live session.
+- **Portable**: the same zark runs installed from a package or from its release tarball, which a live session extracts from a USB stick into memory.
 
 ## Quick start
 
@@ -59,7 +59,7 @@ sudo zark backup     # one new restore point, incremental, verified
 sudo zark status     # how full the pools are and how old each drive's last backup is
 ```
 
-When the disk dies: boot an Ubuntu live USB with the drive connected, and from zark's portable tarball:
+When the disk dies: boot an Ubuntu live USB with the drive connected, extract zark's portable tarball into `/tmp` ([below](#portable-tarball-required-for-live-usb-recovery)), and from `/tmp/zark`:
 
 ```bash
 sudo ./zark recover  # rebuild the system on the new disk
@@ -106,14 +106,17 @@ Built from the same source and with the same layout as the PPA's packages, but v
 For disaster recovery from a live USB - when there is no installed system to `apt install` into - head to the [**Releases page**](https://github.com/juanmitaboada/zark/releases/latest) and
 download the `zark_X.Y.Z.tar.gz` asset attached to the latest release. Then:
 
+Keep it on a USB stick as it is. In the live session, extract it into `/tmp`, which is in memory there, and run zark from it:
+
 ```bash
-tar xzf zark_*.tar.gz
-cd zark
-sudo ./zark explore
+tar xzf <the stick's folder>/zark_*.tar.gz -C /tmp
+cd /tmp/zark
+sudo ./zark recover
 ```
 
-The tarball runs from any directory (USB pendrive, `/opt`, `~/bin`) without installation. When zark detects it is running on a live USB session, it logs
-to `<zark_root>/zark.log` next to the script (which survives reboot, since the pendrive does) instead of `/var/log/`.
+Do not extract it on the stick: on a FAT stick, as most are, the desktop mounts it with no execute bit for its files, and `./zark` does not run there. The stick's folder is `/run/media/<user>/<label>` on Ubuntu 26.10 and `/media/<user>/<label>` on earlier releases; Tab completion finds it.
+
+On an installed system the tarball runs from any directory (`/opt`, `~/bin`) without installation. In a live session zark writes its log to `zark.log` next to the script instead of `/var/log/`: `/tmp/zark/zark.log` here, in memory and gone at the next boot. To keep it, copy it to the stick before rebooting: `sudo cp /tmp/zark/zark.log <the stick's folder>/`.
 
 > **Why three?** The `.deb` package (PPA or direct) cannot help during recovery because the live USB does not have zark installed and you cannot `apt install`
 > in a casper environment. The portable tarball is the only path for the recover command. The PPA is the most ergonomic for routine backups (apt updates handle versioning), and the standalone `.deb` covers air-gapped or offline deployments where the PPA channel is impractical.

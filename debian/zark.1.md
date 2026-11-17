@@ -49,8 +49,9 @@ the original installation. No custom artefacts are introduced and the
 recovered system continues to receive normal **apt**(8) upgrades.
 
 **zark** can be installed system-wide (the Debian package places it at
-*/usr/share/zark/* with a */usr/bin/zark* symlink) or run in place from a USB
-pendrive. Both invocation styles use exactly the same code; the only
+*/usr/share/zark/* with a */usr/bin/zark* symlink) or run in place from its
+release tarball (in a live session, extracted from a USB stick into */tmp*:
+see **Bare-metal recovery**). Both invocation styles use exactly the same code; the only
 difference is the default location of the configuration file and log.
 
 **bash** completes **zark**'s commands, their options and arguments (whole
@@ -1317,9 +1318,16 @@ After this, plugging in the drive and running **zark backup** is enough.
 
 ## Bare-metal recovery
 
-Boot the affected machine from an Ubuntu Live USB containing **zark** (or
-download/extract the **zark** tarball after booting the live USB), then:
+Boot the affected machine from an Ubuntu Live USB, with **zark**'s release
+tarball on a USB stick (or downloaded after booting). Extract it into
+*/tmp*, which is in memory in the live session, and run it from there. Do
+not extract it on the stick: on a FAT stick, as most are, its files lose
+the execute bit. The stick's
+folder is */run/media/<user>/<label>* on Ubuntu 26.10 and
+*/media/<user>/<label>* on earlier releases; Tab completion finds it:
 
+    tar xzf <the stick's folder>/zark_*.tar.gz -C /tmp
+    cd /tmp/zark
     sudo ./zark recover
 
 After the recovery completes and **zark** has exported both pools, reboot
@@ -1422,7 +1430,7 @@ roll its backup points back).
 */etc/zark/known_drives.json*
 :   Registry of known backup drives, used by every command that needs
     to identify a connected drive. When **zark** is run from a portable
-    location (USB pendrive, **git** checkout, extracted tarball), the
+    location (an extracted tarball, a **git** checkout), the
     registry is looked up next to the entry-point script first and falls
     back to */etc/zark/known_drives.json* only if no local copy exists.
     A documented example is shipped at
@@ -1502,9 +1510,10 @@ roll its backup points back).
     **zark** (next to *lib/* in a portable copy).
 
 */var/log/zark.log*
-:   Log file for system installs. Portable installs write
-    *zark.log* alongside the entry-point script instead, so the log
-    follows the pendrive.
+:   Log file. In a live session **zark** writes *zark.log* alongside the
+    entry-point script instead: */tmp/zark/zark.log* when the tarball was
+    extracted into */tmp*, in memory and gone at the next boot (copy it to
+    the stick to keep it).
 
 */mnt/zark/*
 :   Alternate-root mountpoint base used by **mount** and (transiently) by
@@ -1624,7 +1633,7 @@ installer does on a fresh install.
 and exporting pools repeatedly on a live USB is known to corrupt the
 overlay filesystem (*/bin/sh* and similar essentials disappear), so
 **zark** keeps such cycles to the minimum required by the recovery
-sequence and writes its log to the pendrive, not to */var/log/*, while in
+sequence and writes its log next to its script (see **FILES**), not to */var/log/*, while in
 this mode. Before a command that imports pools, **zark** stops the
 installer's **ubuntu-desktop-bootstrap.subiquity-server** for the session
 (**snap stop**, nothing changes for the next boot): it probes the disks on
