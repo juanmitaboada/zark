@@ -16,8 +16,10 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
   anything runs: `zark <command>: unexpected argument <arg>`, exit status
   2, as 2.3.2 refuses an unknown option. Until now most commands ignored
   it: `zark backup foo` ran a backup. Each command's arguments are counted
-  from the same declaration as its options; a value of a fixed word is
-  still checked by the command itself. `alerts`, `fullcheck` and
+  from the same declaration as its options. What a declared word says is
+  left to each command: `fullcheck`, `exclude` and `selftest warnings`
+  refuse an unknown one; `mount`, `umount` and `simulate` still ignore
+  one (below). `alerts`, `fullcheck` and
   `registry` with a word too many now stop here with exit status 2, where
   they stopped later with exit status 1.
 - **The package recommends `attr`.** The self-test's BOOT-03 check needs
@@ -27,7 +29,7 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
 
 ### Fixed
 
-- **backup's and fullcheck's read-backs import only the pool that was
+- **backup's and fullcheck's read-backs accept only the pool that was
   written.** They now pass the drive's GUID, as `prepare` and `registry
   verify` do: another pool of the same name at the drive's device is not
   read back as the drive. backup then says BACKUP NOT VERIFIED, naming the
@@ -64,10 +66,16 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
 
 Those of 2.3.2 still hold, and:
 
-- zark does not detect zoned block devices (host-managed or host-aware SMR
-  disks, ZNS SSDs) as backup drives or recover targets. OpenZFS cannot use
-  a host-managed disk today; a drive-managed SMR disk works, but receives
-  and resilvers slowly ([docs/HARDWARE.md](docs/HARDWARE.md)).
+- `mount`, `umount` and `simulate` ignore a word they do not know where
+  they take one: `sudo zark mount lcoal` mounts a backup drive, as `sudo
+  zark mount` does, not the installed system; `simulate` ignores an
+  argument that is not a `/dev/` path. Only the number of arguments is
+  checked for them.
+- zark does not check whether a backup drive or a recover target is a
+  zoned block device (a host-managed or host-aware SMR disk, a ZNS SSD).
+  OpenZFS cannot use a host-managed disk or a ZNS SSD today; a
+  drive-managed SMR disk works, but receives and resilvers slowly
+  ([docs/HARDWARE.md](docs/HARDWARE.md)).
 
 ## [2.3.2] - 2026-11-16
 

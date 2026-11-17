@@ -516,7 +516,7 @@ attention; `aborted` changed nothing.
 |---|---|---|
 | `started_at` | timestamp | |
 | `ended_at` | timestamp | |
-| `result` | closed enumeration | `clean`: every part asked for passed; `damage`: a part found something wrong, a repair by the scrub included; `not_finished`: interrupted, the read-back skipped, the drive gone; `failed`: a part could not run (the import, the passphrase, a key) |
+| `result` | closed enumeration | `clean`: every part asked for passed; `damage`: a part found something wrong, a repair by the scrub included; `not_finished`: interrupted, the read-back skipped or met another pool at the device (or could not read its GUID), the drive gone; `failed`: a part could not run (the import, the passphrase, a key) |
 | `point` | string or null | the point the restore check read; null when it did not run |
 | `scrub` | object or null | null when the scrub did not run: `state` (`finished`, `paused`, `not_run`), `examined_bytes`, `repaired_bytes`, `errors`, `permanent_errors`, `seconds` (each integer or null) |
 | `restore` | object or null | null when the restore check did not run: `datasets`, `files`, `bytes`, `errors` (integers), `error_paths` (up to 20 strings, for people), `seconds` (integer or null) |

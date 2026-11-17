@@ -185,7 +185,7 @@ can be catalogued in future versions.
 
 ## Zoned disks (SMR, ZNS)
 
-zark does not detect zoned block devices (host-managed or host-aware SMR
-disks, ZNS SSDs) as backup drives or recover targets. OpenZFS cannot use a
-host-managed disk today; a drive-managed SMR disk works, but receives and
-resilvers slowly.
+zark does not check whether a backup drive or a recover target is a zoned
+block device (a host-managed or host-aware SMR disk, a ZNS SSD). OpenZFS
+cannot use a host-managed disk or a ZNS SSD today; a drive-managed SMR disk
+works, but receives and resilvers slowly.

@@ -90,7 +90,7 @@ What to do:
 
 **Can I use multiple backup drives?**
 
-Yes. Run `sudo zark prepare` once for each drive; it registers the drive in `known_drives.json` by its pool GUID. zark detects whichever registered drive is connected, and each drive keeps its own anchors and retention ([Drive rotation and retention](RETENTION.md)).
+Yes. Run `sudo zark prepare /dev/disk/by-id/<disk>` once for each drive; it registers the drive in `known_drives.json` by its pool GUID. zark detects whichever registered drive is connected, and each drive keeps its own anchors and retention ([Drive rotation and retention](RETENTION.md)).
 
 **What if recovery drops to an emergency shell?**
 
