@@ -78,7 +78,9 @@ and never needs root.
 
 Every *command* refuses an option it does not declare, before anything
 runs: the line names it and the exit status is 2 (until 2.3.1 most
-commands ignored it). Its path arguments (devices, files, **monitor
+commands ignored it). A positional argument past those the command
+takes is refused the same way (until 2.3.2 most commands ignored it:
+**zark backup foo** ran a backup). Its path arguments (devices, files, **monitor
 --root**) are made absolute, then **zark** runs from */*, as every command
 it starts does: a read that never returns (a drive gone in the middle of
 **fullcheck**'s restore check) does not hold the directory it was started
@@ -1565,8 +1567,9 @@ roll its backup points back).
     names the process.
 
 **2**
-:   A usage error: an unknown option (every command), an unknown word or a
-    missing value; nothing was done. **exclude**, **selftest**, **setup**
+:   A usage error: an unknown option or an argument past those the command
+    takes (every command), an unknown word or a missing value; nothing was
+    done. **exclude**, **selftest**, **setup**
     and **monitor** also use it for their own words, and **backup --drive**
     with no name.
 

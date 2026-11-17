@@ -84,7 +84,8 @@ def print_help():
 def _checked_args(name: str, args: list[str]) -> list[str]:
     """Before anything runs, root or not: the command's own usage for
     ``--help`` (M14P.3, D4 19b), exit 2 for an option the command does not
-    declare (M14P.3), and its path arguments (and a relative
+    declare (M14P.3) or a positional argument past those it declares
+    (M27P.1), and its path arguments (and a relative
     ``ZARK_CONFIG_DIR``) made absolute before zark leaves the caller's
     directory for / (M26R-50, D1)."""
     _, cmd = _invocation_hint()
@@ -94,6 +95,11 @@ def _checked_args(name: str, args: list[str]) -> list[str]:
     bad = cli_spec.unknown_option(name, args)
     if bad:
         print(f"zark {name}: unknown option {bad}", file=sys.stderr)
+        print(f"  Run: {cmd} {name} --help", file=sys.stderr)
+        sys.exit(cli_spec.EX_USAGE)
+    extra = cli_spec.unexpected_argument(name, args)
+    if extra:
+        print(f"zark {name}: unexpected argument {extra}", file=sys.stderr)
         print(f"  Run: {cmd} {name} --help", file=sys.stderr)
         sys.exit(cli_spec.EX_USAGE)
     out = cli_spec.absolute(name, args)

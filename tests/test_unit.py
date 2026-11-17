@@ -32421,6 +32421,82 @@ class TestCommandLine:  # pylint: disable=missing-function-docstring
                 "zark backup: unknown option --drvie",
             ), r
 
+    def test_a_positional_past_those_declared_is_named(self):
+        """M27P.1: each spec's declared positionals pass; one more is named,
+        unless the last one repeats."""
+        for name, sel, spec in self._specs():
+            filled = [*sel, *(f"v{n}" for n in range(len(spec.args)))]
+            assert cli_spec_mod.unexpected_argument(name, filled) == "", (name, filled)
+            got = cli_spec_mod.unexpected_argument(name, [*filled, "extra"])
+            repeats = bool(spec.args) and spec.args[-1].repeat
+            assert got == ("" if repeats else "extra"), (name, sel, got)
+            if repeats:
+                more = [*filled, "a", "b", "c"]
+                assert cli_spec_mod.unexpected_argument(name, more) == "", (name, more)
+
+    def test_option_values_and_options_are_not_positionals(self):
+        un = cli_spec_mod.unexpected_argument
+        assert un("backup", ["--drive", "black", "--no-snapshot", "--debug"]) == ""
+        assert un("monitor", ["--interval", "60", "--root", "r", "--once", "--state"]) == ""
+        assert un("selftest", ["certificate", "--into", "o.json", "a.json", "b.json"]) == ""
+        assert un("selftest", ["--stick", "/dev/sdz", "--only", "POOL-01"]) == ""
+        assert un("status", ["--refresh", "--notify"]) == ""
+        assert un("registry", ["retention", "black", "window=30", "max_age=off"]) == ""
+        assert un("exclude", ["add", "rpool/x", "both"]) == ""
+        # A lone dash is a positional; a word that is no subcommand is the
+        # default subcommand's positional, or the command's own (alerts).
+        assert un("backup", ["-"]) == "-"
+        assert un("alerts", ["foo"]) == "foo"
+        assert un("registry", ["foo"]) == "foo"
+        assert un("registry", ["forget", "a", "b"]) == "b"
+        assert un("fullcheck", ["scrub", "restore"]) == "restore"
+        assert un("mount", ["local", "x"]) == "x"
+
+    def test_each_command_refuses_an_extra_argument_before_anything_runs(self):
+        with tempfile.TemporaryDirectory() as td:
+            for name, spec in cli_spec_mod.SPECS.items():
+                sel = [spec.default_sub] if spec.default_sub else []
+                own = spec.sub(spec.default_sub) if spec.default_sub else spec
+                args = [*sel, *(f"v{n}" for n in range(len(own.args))), "extra-word"]
+                r = subprocess.run(
+                    [sys.executable, "-B", str(_REPO_ROOT / "zark"), name, *args],
+                    capture_output=True,
+                    text=True,
+                    cwd=td,
+                    stdin=subprocess.DEVNULL,
+                    timeout=60,
+                    check=False,
+                )
+                assert r.returncode == 2, (name, args, r)
+                assert r.stdout == "", (name, r.stdout)
+                assert r.stderr.splitlines() == [
+                    f"zark {name}: unexpected argument extra-word",
+                    f"  Run: ./zark {name} --help",
+                ], r
+            # The map's example: a stray word no longer backs up; an unknown
+            # option is named first; help still wins.
+            for args, code, first in (
+                (["backup", "foo"], 2, "zark backup: unexpected argument foo"),
+                (["backup", "foo", "--bogus"], 2, "zark backup: unknown option --bogus"),
+                (["backup", "foo", "--help"], 0, ""),
+                (["backup", "help"], 0, ""),
+            ):
+                r = subprocess.run(
+                    [sys.executable, "-B", str(_REPO_ROOT / "zark"), *args],
+                    capture_output=True,
+                    text=True,
+                    cwd=td,
+                    stdin=subprocess.DEVNULL,
+                    timeout=60,
+                    check=False,
+                )
+                assert r.returncode == code, (args, r)
+                if first:
+                    assert r.stderr.splitlines()[0] == first, (args, r)
+                else:
+                    assert r.stdout.startswith("Usage: ./zark backup "), (args, r)
+            assert not Path(td, "zark.log").exists()
+
     def test_help_after_a_command_prints_its_usage_and_runs_nothing(self):
         with tempfile.TemporaryDirectory() as td:
             for name, spec in cli_spec_mod.SPECS.items():

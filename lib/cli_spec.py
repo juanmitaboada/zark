@@ -321,6 +321,20 @@ def unknown_option(name: str, args: list[str]) -> str:
     )
 
 
+def unexpected_argument(name: str, args: list[str]) -> str:
+    """The first positional argument past those the selected spec of
+    command ``name`` declares (a repeating last one takes any number), ""
+    when none: zark refuses it as it refuses an unknown option (M27P.1)."""
+    return next(
+        (
+            w.text
+            for w in words(name, args)
+            if w.opt is None and w.arg is None and not _is_option(w.text)
+        ),
+        "",
+    )
+
+
 def asks_help(name: str, args: list[str]) -> bool:
     """Whether ``args`` hold ``--help`` or ``-h`` as an option command
     ``name`` does not declare itself (the monitor does): zark then prints
