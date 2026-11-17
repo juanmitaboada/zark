@@ -182,3 +182,10 @@ is strong evidence the enclosure should not be used for backups. When a risk
 or failure is found, `zark health` writes a diagnostic report to `/tmp` with
 the bridge's USB VID:PID and instructions for filing an issue so the bridge
 can be catalogued in future versions.
+
+## Zoned disks (SMR, ZNS)
+
+zark does not detect zoned block devices (host-managed or host-aware SMR
+disks, ZNS SSDs) as backup drives or recover targets. OpenZFS cannot use a
+host-managed disk today; a drive-managed SMR disk works, but receives and
+resilvers slowly.
