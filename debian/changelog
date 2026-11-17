@@ -8,6 +8,9 @@ zark (2.3.3~rc1-1) UNRELEASED; urgency=medium
     written (the drive's GUID); fullcheck records another pool there as
     not finished.
   * recover's restore table keeps its columns with long names.
+  * fullcheck keeps the scrub's damage when its read-back is not done; a
+    GUID that cannot be read at the read-back is said as such.
+  * Recommends attr (setfattr, getfattr) for the self-test's BOOT-03.
   * docs/HARDWARE.md: zoned block devices (SMR, ZNS) are not detected;
     README and docs/USAGE.md give prepare its device; the docs have the
     release tarball extracted from the stick into /tmp in a live session,

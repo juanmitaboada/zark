@@ -517,7 +517,12 @@ class TestRunRecords:  # pylint: disable=missing-function-docstring
     guids: list[Any] = []  # the GUID each read-back of the last run was given
 
     def _run(  # pylint: disable=too-many-locals
-        self, busy_at: str = "", skipped: str = "", foreign: str = "", ok: bool = True
+        self,
+        busy_at: str = "",
+        skipped: str = "",
+        foreign: str = "",
+        ok: bool = True,
+        scrub_damage: bool = False,
     ) -> tuple[list[dict[str, Any]], int, bool]:
         drive = MagicMock(name="drive")
         drive.name, drive.guid = POOL, GUID
@@ -536,6 +541,7 @@ class TestRunRecords:  # pylint: disable=missing-function-docstring
             cr.check.scrub = fullcheck.scrub_record(
                 "finished", examined=1, repaired=0, errors=0, permanent_errors=0, seconds=1
             )
+            cr.damage = scrub_damage
             return True
 
         def readback(*_a: Any, **_k: Any) -> Any:
@@ -611,6 +617,15 @@ class TestRunRecords:  # pylint: disable=missing-function-docstring
         assert not busy and code == 1 and len(saved) == 1
         assert saved[0]["result"] == "not_finished", saved[0]
         assert saved[0]["message"] == "backup2 is another pool (GUID 999)"
+
+    def test_damage_the_scrub_found_wins_over_a_read_back_not_done(self) -> None:
+        """M28R-2: another pool at the read-back, or a skipped one, after a
+        scrub that found damage: the check records damage, the read-back's
+        lines in its banner."""
+        for foreign, skipped in (("999", ""), ("", "operator")):
+            saved, code, busy = self._run(skipped=skipped, foreign=foreign, scrub_damage=True)
+            assert not busy and code == 1 and len(saved) == 1, (foreign, skipped, saved)
+            assert saved[0]["result"] == "damage", (foreign, skipped, saved[0])
 
     def test_a_failed_read_back_is_still_damage(self) -> None:
         saved, code, _ = self._run(ok=False)

@@ -8440,14 +8440,49 @@ class TestReadbackGuid:  # pylint: disable=missing-function-docstring
     def test_another_guid_is_exported_and_not_ok(self):
         for found, shown in (("222", "222"), (None, "unreadable")):
             mock = self._mock(found)
-            with patch_sh(mock):
+            with patch_sh(mock), patch.object(zfs_mod.forensics, "capture") as cap:
                 rb = ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, guid="111")
             assert not rb.ok and rb.imported and rb.reexported and rb.foreign == shown, rb
             assert not mock.was_called("zpool list -H -o health black"), mock.calls
             assert mock.was_called("zpool export black"), mock.calls
-            text = " ".join(rb.describe())
-            assert f"another pool named black (GUID {shown})" in text, text
-            assert rb.summary("black") == f"black is another pool (GUID {shown})"
+            assert cap.called is (found is None), (found, cap.call_args_list)
+
+    def test_another_pools_guid_is_named(self):
+        """M20R-1: a GUID read that is not the drive's names the other pool."""
+        rb = Readback(imported=True, reexported=True, foreign="222", pool="black")
+        text = " ".join(rb.describe())
+        assert "The disk holds another pool named black (GUID 222), not the one expected." in text
+        assert rb.summary("black") == "black is another pool (GUID 222)"
+
+    def test_a_guid_that_cannot_be_read_is_not_called_another_pool(self):
+        """M28R-3: no cause is named that zark did not establish (I6)."""
+        rb = Readback(imported=True, reexported=True, foreign="unreadable", pool="black")
+        text = " ".join(rb.describe())
+        assert text == (
+            "The GUID of black could not be read after the read-back's import, "
+            "so it was not checked."
+        ), text
+        assert rb.summary("black") == "black's GUID could not be read at the read-back"
+        assert "another pool" not in text + rb.summary("black")
+
+    def test_the_unreadable_guid_is_captured_before_the_export(self):
+        """M28R-3: the forensics capture runs while the pool is still imported."""
+        mock = self._mock(None)
+        order: list[str] = []
+
+        def reexport(*_a: object) -> bool:
+            order.append("export")
+            return True
+
+        with (
+            patch_sh(mock),
+            patch.object(
+                zfs_mod.forensics, "capture", side_effect=lambda *_a: order.append("capture")
+            ),
+            patch.object(ZFS, "_reexport", side_effect=reexport),
+        ):
+            _ = ZFS(make_log()).verify_exported_pool_readback("black", self.DEV, guid="111")
+        assert order == ["capture", "export"], order
 
     def test_no_guid_no_guid_read(self):
         mock = self._mock("222")
@@ -16825,6 +16860,7 @@ class TestRegistryVerify:  # pylint: disable=missing-function-docstring
         rb = Readback(imported=True, reexported=True, foreign="222", pool="old")
         rc, out, _, _ = self._run(fake, d, ["verify", "old"], rb=rb)
         assert rc == 1 and "another pool named old (GUID 222)" in out, out
+        assert "The drive has NOT been registered." in out, out
         assert "is no longer there" in out and "purge" not in out, out
         assert not (d / "pending_drives.json").exists() and not self._anchored(fake)
 
@@ -17420,6 +17456,10 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         assert any(label in ln for ln in rows), lines
         keystore = next(ln for ln in lines if ln.lstrip().startswith("keystore"))
         assert keystore[snap_col] != " " and keystore[snap_col - 1] == " ", keystore
+        # The pool root's row: (created) under SNAPSHOT, off under MOUNT (M28R-4).
+        root = next(ln for ln in lines if ln.lstrip().startswith("rpool (pool root)"))
+        assert root.index("(created)") == snap_col, root
+        assert root.index("off ") == header.index("MOUNT"), (root, header)
 
     def test_a_long_name_that_is_not_restored_widens_the_table_too(self):
         """M27E.4: a dataset created empty (excluded) or not restored has its
@@ -17429,9 +17469,21 @@ class TestRecoverPlan:  # pylint: disable=missing-function-docstring
         for n, r in enumerate(plan.rows):
             r.rel = f"rpool/d{n}"
         empty = next(r for r in plan.rows if r.empty)
-        empty.rel = "rpool/" + "an-excluded-dataset-name-well-past-44" * 2
-        lines = self._table(plan)
-        assert lines[0].index("SNAPSHOT") == 2 + len(empty.rel) + 1, lines[0]
+        gone = next(r for r in plan.rows if r.restored)
+        gone.note = "no snapshot at or before the point"
+        for long_row, short_row in ((empty, gone), (gone, empty)):
+            long_row.rel = "rpool/" + "a-dataset-name-well-past-44-chars" * 2
+            short_row.rel = "rpool/short"
+            lines = self._table(plan)
+            snap_col = 2 + len(long_row.rel) + 1
+            assert lines[0].index("SNAPSHOT") == snap_col, lines[0]
+            # Every row kind starts its second column there, long or short (M28R-4).
+            excluded = next(ln for ln in lines if f" {empty.rel} " in ln)
+            assert excluded.index("excluded from backups") == snap_col, excluded
+            not_restored = next(ln for ln in lines if f" {gone.rel} " in ln)
+            assert not_restored.index("NOT RESTORED") == snap_col, not_restored
+            short = next(ln for ln in lines if ln.startswith("  rpool/d"))
+            assert short[snap_col - 1] == " " and short[snap_col] != " ", short
 
     def test_short_names_print_the_table_as_before(self):
         """M27E.4 (D3 3b): names within 44 keep the columns at 44."""

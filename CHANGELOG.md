@@ -20,6 +20,10 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
   still checked by the command itself. `alerts`, `fullcheck` and
   `registry` with a word too many now stop here with exit status 2, where
   they stopped later with exit status 1.
+- **The package recommends `attr`.** The self-test's BOOT-03 check needs
+  `setfattr` and `getfattr`, which an Ubuntu live session does not have:
+  installing the `.deb` with apt now brings them, where BOOT-03 was
+  skipped.
 
 ### Fixed
 
@@ -31,6 +35,15 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
   damage of the drive. Their import already checked the GUID; this closes
   the read-back too. The line for another pool no longer says "nothing was
   registered", which is true only of `prepare` and `registry verify`.
+- **fullcheck keeps the damage its scrub found** when the read-back after
+  the scrub then meets another pool at the device, or is skipped while apt
+  runs: it records damage, the read-back's lines in its banner, where it
+  recorded the check as not finished.
+- **A GUID that cannot be read at the read-back is said as such**, not as
+  another pool: "The GUID of <pool> could not be read after the
+  read-back's import, so it was not checked." (backup, fullcheck,
+  `prepare`, `registry verify`), and the pool's state is captured for the
+  report before it is exported again.
 - **recover's restore table keeps its columns** when a dataset name or a
   snapshot label is longer than 44 characters: both name columns are as
   wide as their longest cell, and a table of shorter names prints as

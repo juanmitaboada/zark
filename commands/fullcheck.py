@@ -766,9 +766,11 @@ def _parts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
             cr.pool, device, cleanup, skip_note=SKIP_NOTE, guid=cr.guid
         )
         if rb.skipped or rb.foreign:
-            # Not done (apt ran) or another pool at the device: not finished, never damage.
+            # Not done (apt ran) or another pool at the device: not finished, never
+            # damage; damage the scrub found still wins at step 4 (M28R-2).
             cr.lines += rb.describe(again=False)
-            cr.record("not_finished", rb.summary(cr.pool), log)
+            if not cr.damage:
+                cr.record("not_finished", rb.summary(cr.pool), log)
         elif not rb.ok:
             cr.damage = True
             cr.lines += rb.describe(again=False)

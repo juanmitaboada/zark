@@ -121,6 +121,8 @@ READBACK_EXPORT_TRIES = 3
 # How long the read-back waits for an apt or dpkg run, from the first wait,
 # never extended (M18-11 11a, M18-14 14a): then it is reported as not done.
 READBACK_DPKG_WAIT_S = 15 * 60
+# Readback.foreign when the pool's GUID could not be read at all (M28R-3).
+UNREADABLE_GUID = "unreadable"
 
 
 @dataclass(frozen=True)
@@ -262,6 +264,8 @@ class Readback:  # pylint: disable=too-many-instance-attributes
         not run is not one that failed (M18R-14)."""
         if self.skipped:
             return f"{pool} was not read back (apt was running)"
+        if self.foreign == UNREADABLE_GUID:
+            return f"{pool}'s GUID could not be read at the read-back"
         if self.foreign:
             return f"{pool} is another pool (GUID {self.foreign})"
         return f"{pool} failed its read-back"
@@ -289,9 +293,15 @@ class Readback:  # pylint: disable=too-many-instance-attributes
                 ),
             ]
         if self.foreign:
+            what = (
+                f"The GUID of {self.pool} could not be read after the read-back's import, "
+                + "so it was not checked."
+                if self.foreign == UNREADABLE_GUID
+                else f"The disk holds another pool named {self.pool} (GUID {self.foreign}), "
+                + "not the one expected."
+            )
             return [
-                f"The disk holds another pool named {self.pool} (GUID {self.foreign}), "
-                + "not the one expected.",
+                what,
                 *(
                     []
                     if self.reexported
@@ -763,10 +773,15 @@ class ZFS:  # pylint: disable=too-many-public-methods
             return Readback(imported=False, error=r.stderr.strip())
 
         if guid and (actual := self.pool_guid(name)) != guid:
-            found = actual or "unreadable"
-            self.log.error(
-                f"Read-back of {name}: the pool at {device} has GUID {found}, not {guid}"
-            )
+            found = actual or UNREADABLE_GUID
+            if actual:
+                self.log.error(
+                    f"Read-back of {name}: the pool at {device} has GUID {found}, not {guid}"
+                )
+            else:
+                # Not another pool for certain: kept as health's failures are (M28R-3).
+                self.log.error(f"Read-back of {name}: its GUID could not be read")
+                _ = forensics.capture(name, "read-back could not read the pool's GUID", self.log)
             reexported = self._reexport(name, root, cleanup)
             return Readback(
                 imported=True,

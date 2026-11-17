@@ -23,7 +23,9 @@ Depends: ${misc:Depends},
          dracut | initramfs-tools,
          rsync,
          e2fsprogs
-Recommends: dosfstools,
+# attr: setfattr and getfattr, which the self-test's BOOT-03 needs (an Ubuntu live session lacks them).
+Recommends: attr,
+            dosfstools,
             grub-efi-amd64-signed,
             shim-signed
 Suggests: gnome-shell-extension-zark,
