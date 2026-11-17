@@ -45,8 +45,10 @@ Once per system, with a blank backup drive connected:
 
 ```bash
 sudo zark setup      # snapshot policy (sanoid), guards, status alerts
-sudo zark prepare    # turn the blank drive into a registered backup drive
+sudo zark prepare /dev/disk/by-id/<disk>  # turn the blank drive into a registered backup drive
 ```
+
+`ls -l /dev/disk/by-id/` names the drive (a USB drive's name starts with `usb-`); `prepare` refuses a disk that is not empty (`sudo zark purge <device>` empties one).
 
 On Ubuntu 26.10, `setup` also asks to create `rpool/ROOT/<be>/zark-boot`, a copy of `/boot` that every backup refreshes before its point; `backup` and `prepare` refuse until it exists.
 

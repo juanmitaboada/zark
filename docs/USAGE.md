@@ -59,8 +59,10 @@ Once per machine - installs sanoid for automatic snapshots and registers your ba
 
 ```bash
 sudo ./zark setup     # install sanoid + zfs tooling, configure snapshots
-sudo ./zark prepare   # initialize a blank drive as a backup target
+sudo ./zark prepare /dev/disk/by-id/<disk>   # initialize a blank drive as a backup target
 ```
+
+`ls -l /dev/disk/by-id/` names the drive (a USB drive's name starts with `usb-`); `prepare` refuses a disk that is not empty (`sudo ./zark purge <device>` empties one).
 
 On Ubuntu 26.10, where `/boot` is on ext4 and there is no bpool, `setup` asks to create `rpool/ROOT/<be>/zark-boot`: a copy of `/boot` inside rpool that every backup refreshes before it takes its point, so each restore point holds the root and its `/boot` together. `backup` and `prepare` refuse until it exists.
 
