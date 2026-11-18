@@ -118,8 +118,8 @@ Do not extract it on the stick: on a FAT stick, as most are, the desktop mounts 
 
 On an installed system the tarball runs from any directory (`/opt`, `~/bin`) without installation. In a live session zark writes its log to `zark.log` next to the script instead of `/var/log/`: `/tmp/zark/zark.log` here, in memory and gone at the next boot. To keep it, copy it to the stick before rebooting: `sudo cp /tmp/zark/zark.log <the stick's folder>/`.
 
-> **Why three?** The `.deb` package (PPA or direct) cannot help during recovery because the live USB does not have zark installed and you cannot `apt install`
-> in a casper environment. The portable tarball is the only path for the recover command. The PPA is the most ergonomic for routine backups (apt updates handle versioning), and the standalone `.deb` covers air-gapped or offline deployments where the PPA channel is impractical.
+> **Why three?** The `.deb` package (PPA or direct) does not help much during recovery because the live session does not have zark installed, and installing it there needs a network and is lost at the next boot.
+> The portable tarball is the way that needs neither. The PPA is the most ergonomic for routine backups (apt updates handle versioning), and the standalone `.deb` covers air-gapped or offline deployments where the PPA channel is impractical.
 
 ## Keeping an eye on it
 

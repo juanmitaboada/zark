@@ -32295,6 +32295,28 @@ class TestHelpOrder:  # pylint: disable=missing-function-docstring
         want = [x for g in cli_spec_mod.GROUPS for x in (g.title, *g.commands)]
         assert got == want, got
 
+    def test_the_manpage_escapes_its_placeholders_in_running_text(self) -> None:
+        """M28R-10: pandoc reads a bare ``<word>`` in running text as raw HTML
+        and drops it from the man page; outside code it is written ``\\<word\\>``."""
+        fence = definition = False
+        bare: list[str] = []
+        for n, line in enumerate((_REPO_ROOT / "debian/zark.1.md").read_text("utf-8").splitlines()):
+            if line.startswith("```"):
+                fence = not fence
+                continue
+            if line.startswith(":   "):
+                definition = True
+            elif line.strip() and not line.startswith(" "):
+                definition = False
+            # Code: a fence, or an indented block (inside a definition, indented
+            # past the definition's own four spaces, whose lines are its text).
+            code = "        " if definition else "    "
+            if fence or line.startswith((code, "\t")):
+                continue
+            text = re.sub(r"`[^`]*`", "", line)
+            bare += [f"{n + 1}: {m}" for m in re.findall(r"(?<!\\)<[A-Za-z][^<>\s]*>", text)]
+        assert not bare, bare
+
 
 def _word_literals(path: Path) -> list[str]:
     """The string literals a module passes to a spec's ``word()``."""

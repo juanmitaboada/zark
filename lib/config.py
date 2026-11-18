@@ -35,7 +35,7 @@ from lib.retention import Policy
 if TYPE_CHECKING:
     from lib.log import Log
 
-VERSION = "2.3.3-rc1"
+VERSION = "2.3.3"
 
 
 def zark_command(sudo: bool = True, installed: bool | None = None) -> str:
@@ -186,7 +186,7 @@ class Config:
         #     is read-only as far as dpkg is concerned. The user's config
         #     belongs in /etc/zark, where postinst created the directory.
         #   - Portable: zark_root is wherever the suite was extracted to
-        #     (USB pendrive, /opt, ~/bin, ...). Keep config alongside.
+        #     (/opt, ~/bin, /tmp in a live session, ...). Keep config alongside.
         if Config.zark_root() == Path("/usr/share/zark"):
             return system
         return portable

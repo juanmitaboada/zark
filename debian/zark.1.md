@@ -1082,7 +1082,7 @@ end-to-end sequences.
 **mount** \[*target*\]
 :   Mount a backup pool for inspection, **chroot**(1) entry or manual
     recovery work. Imports the chosen pool by its exact device with an
-    alternate root of */mnt/zark/<poolname>/*. Asks interactively whether
+    alternate root of */mnt/zark/\<poolname\>/*. Asks interactively whether
     to mount read-only (recommended, and the default) or read-write.
 
     Before importing, **mount** lists the drive with **zpool import -d**,
@@ -1091,13 +1091,13 @@ end-to-end sequences.
     and in read-write mode a stop that says to mount it read-only.
 
     Read-only imports the pool read-only and rebuilds the backed-up
-    system's tree under */mnt/zark/<poolname>/* the way **recover** would
+    system's tree under */mnt/zark/\<poolname\>/* the way **recover** would
     restore it: the boot environment at the top (with several on the drive,
     chosen from a menu, the newest the default), */home*, */boot* and every
     other dataset at the origin's mountpoint (from the origin's
     *zfs-list.cache* inside the backup, else the Ubuntu layout). Nothing
     is written to the drive. A symbolic link or *..* inside the backup is
-    resolved within */mnt/zark/<poolname>/*, as a **chroot**(1) there
+    resolved within */mnt/zark/\<poolname\>/*, as a **chroot**(1) there
     would (an absolute */var/run* -> */run* is the tree's */run*), and the
     dataset is mounted at the resolved path; one whose mountpoint
     directory does not exist, that resolves to the tree's root or that
@@ -1158,7 +1158,7 @@ end-to-end sequences.
 
 **umount** \[*target*\]
 :   Unmount a previously **mount**-ed backup pool. Unmounts only the tree
-    under */mnt/zark/<poolname>/*, closes the LUKS keystore and exports the
+    under */mnt/zark/\<poolname\>/*, closes the LUKS keystore and exports the
     pool. If the export fails because a copy of the tree stays mounted in
     another mount namespace (a service's or a snap's, including those
     **snapd** pins in */run/snapd/ns*), it unmounts the tree there with
@@ -1323,8 +1323,8 @@ tarball on a USB stick (or downloaded after booting). Extract it into
 */tmp*, which is in memory in the live session, and run it from there. Do
 not extract it on the stick: on a FAT stick, as most are, its files lose
 the execute bit. The stick's
-folder is */run/media/<user>/<label>* on Ubuntu 26.10 and
-*/media/<user>/<label>* on earlier releases; Tab completion finds it:
+folder is */run/media/\<user\>/\<label\>* on Ubuntu 26.10 and
+*/media/\<user\>/\<label\>* on earlier releases; Tab completion finds it:
 
     tar xzf <the stick's folder>/zark_*.tar.gz -C /tmp
     cd /tmp/zark
@@ -1609,7 +1609,8 @@ Hard runtime dependencies (declared by the Debian package): **python3** ≥
 **cryptsetup-bin**, **gdisk**, **grub2-common** and one of **dracut** or
 **initramfs-tools**.
 
-Soft dependencies (declared as *Recommends*): **dosfstools** (for
+Soft dependencies (declared as *Recommends*): **attr** (**setfattr** and
+**getfattr**, for the self-test's BOOT-03), **dosfstools** (for
 EFI partition formatting during **recover**), **grub-efi-amd64-signed**
 and **shim-signed** (for Secure Boot installs), **qemu-system-x86** and
 **ovmf** (for **simulate**).

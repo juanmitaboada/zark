@@ -44,8 +44,8 @@ Description: ZFS bare-metal backup and recovery suite for Ubuntu
  without touching the source system. The steps around the transfer take
  about a minute; the rest is copying the data.
  .
- zark is portable: it can also be run directly from a USB pendrive
- without installation, which is the recommended workflow for disaster
- recovery scenarios. The Debian package is intended for system-wide
- installation on machines where zark drives the day-to-day backup
- routine.
+ zark is portable: it also runs from its release tarball without
+ installation, which is the recommended workflow for disaster recovery
+ (in a live session, extracted from a USB stick into /tmp). The Debian
+ package is intended for system-wide installation on machines where zark
+ drives the day-to-day backup routine.

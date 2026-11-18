@@ -1,22 +1,23 @@
-zark (2.3.3~rc1-1) UNRELEASED; urgency=medium
+zark (2.3.3-1) stable; urgency=medium
 
   * zark 2.3.3: a small fix release. Nothing on a drive or in /etc/zark
-    changes; 2.3.2 reads everything 2.3.3 writes.
+    changes; 2.3.2 reads everything 2.3.3 writes. No zark setup needed.
   * Every command refuses a positional argument it does not take, exit
     status 2, before anything runs, as it refuses an unknown option.
-  * backup's and fullcheck's read-backs import only the pool that was
+  * backup's and fullcheck's read-backs accept only the pool that was
     written (the drive's GUID); fullcheck records another pool there as
-    not finished.
+    not finished, and keeps the scrub's damage when its read-back is not
+    done; a GUID that cannot be read at the read-back is said as such.
   * recover's restore table keeps its columns with long names.
-  * fullcheck keeps the scrub's damage when its read-back is not done; a
-    GUID that cannot be read at the read-back is said as such.
   * Recommends attr (setfattr, getfattr) for the self-test's BOOT-03.
-  * docs/HARDWARE.md: zoned block devices (SMR, ZNS) are not detected;
-    README and docs/USAGE.md give prepare its device; the docs have the
-    release tarball extracted from the stick into /tmp in a live session,
-    not run from the stick.
+  * Docs: the release tarball is extracted from the stick into /tmp in a
+    live session, not run from the stick (README, the manual page, the
+    package description); the quick start gives prepare its device; zoned
+    block devices (SMR, ZNS) are not checked for; the manual page's
+    placeholders are escaped.
+  * The self-test's certificate of the Ubuntu 26.10 live image.
 
- -- Juanmi Taboada <juanmi@juanmitaboada.com>  Tue, 17 Nov 2026 23:07:00 +0100
+ -- Juanmi Taboada <juanmi@juanmitaboada.com>  Wed, 18 Nov 2026 19:38:00 +0100
 
 zark (2.3.2-1) stable; urgency=medium
 

@@ -299,7 +299,7 @@ class Log:  # pylint: disable=too-many-public-methods
     def default_file(cls) -> str:
         """Where a Log without an explicit file writes."""
         if cls._is_live_usb():
-            # Live USB: log next to the script (on the pendrive - survives reboot)
+            # Live session: log next to the script (in memory when extracted into /tmp)
             zark_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
             return os.path.join(zark_root, "zark.log")
         return "/var/log/zark.log"

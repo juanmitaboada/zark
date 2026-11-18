@@ -5,10 +5,20 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.3.3] - 2026-11-18
 
-A small fix release after 2.3.2. Nothing on a drive or in `/etc/zark`
-changes; zark 2.3.2 reads everything 2.3.3 writes.
+A small fix release after 2.3.2: the command line's positional
+arguments, the read-backs of backup and fullcheck, recover's table, the
+package's Recommends, and the docs on running zark from a live session.
+Nothing on a drive or in `/etc/zark` changes; zark 2.3.2 reads
+everything 2.3.3 writes.
+
+### For zark 2.3.2 users
+
+No `sudo zark setup` is needed: the guards do not change. A script that
+passes a command a positional argument it does not take now stops with
+exit status 2, where 2.3.2 ran the command without it. Details in
+[docs/UPGRADING.md](docs/UPGRADING.md).
 
 ### Changed
 
@@ -19,9 +29,9 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
   from the same declaration as its options. What a declared word says is
   left to each command: `fullcheck`, `exclude` and `selftest warnings`
   refuse an unknown one; `mount`, `umount` and `simulate` still ignore
-  one (below). `alerts`, `fullcheck` and
-  `registry` with a word too many now stop here with exit status 2, where
-  they stopped later with exit status 1.
+  one (below). `alerts`, `fullcheck` and `registry` with a word too many
+  now stop here with exit status 2, where they stopped later with exit
+  status 1.
 - **The package recommends `attr`.** The self-test's BOOT-03 check needs
   `setfattr` and `getfattr`, which an Ubuntu live session does not have:
   installing the `.deb` with apt now brings them, where BOOT-03 was
@@ -61,6 +71,25 @@ changes; zark 2.3.2 reads everything 2.3.3 writes.
   live session into `/tmp` (`tar xzf <the stick's folder>/zark_*.tar.gz -C
   /tmp`, `cd /tmp/zark`, `sudo ./zark recover`), and that zark's log is
   then `/tmp/zark/zark.log`, in memory: copy it to the stick to keep it.
+  The package's description says the same. The manual page's placeholders
+  in running text (`<user>`, `<label>`, `<poolname>`) are escaped, so the
+  built page shows them where it showed `/run/media//` and
+  `/mnt/zark//`, and its list of Recommends names `attr`.
+
+### Tested
+
+On the test machine (a Dell XPS 13 9333), on the official Ubuntu 26.10
+live image with OpenZFS 2.4.4 only: the release candidate's `.deb`
+installed with apt in the live session, and the self-test's level 1 there,
+71 checks passed and 3 skipped (the three a live session cannot run), the
+image named in its certificate; BOOT-03 ran once `attr` was installed,
+which the package now recommends. On the same live with 2.3.2's release
+tarball: extracted on a FAT stick the desktop mounted, `sudo ./zark`
+failed for want of the execute bit, also after a `cp -r` to `/tmp`;
+extracted from the stick into `/tmp` it ran. Everything else in this
+release (the positional arguments, the read-backs, recover's table) is
+covered by the unit tests: no run can make another pool appear at a
+drive's device on purpose.
 
 ### Known limitations
 

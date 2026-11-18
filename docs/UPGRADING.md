@@ -1,6 +1,14 @@
 # Upgrading zark
 
-What changes when a system and its drives move from zark 2.3.1 to 2.3.2, from zark 2.3.0 to 2.3.1, from zark 2.2 to 2.3, from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+What changes when a system and its drives move from zark 2.3.2 to 2.3.3, from zark 2.3.1 to 2.3.2, from zark 2.3.0 to 2.3.1, from zark 2.2 to 2.3, from zark 2.1 to 2.2, from zark 2.0 to 2.1, and from zark 1.x to zark 2, and what to know before upgrading Ubuntu from 24.04 to 26.04 on a system zark backs up.
+
+## Upgrading from zark 2.3.2
+
+Nothing on a drive or in `/etc/zark` changes, and 2.3.2 reads everything 2.3.3 writes. The guards do not change: no `sudo zark setup` is needed after the package upgrade. The package now recommends `attr`, which apt installs with it unless Recommends are turned off.
+
+**What behaves differently.** Every command refuses a positional argument it does not take, before anything runs: `zark <command>: unexpected argument <arg>`, exit status 2. 2.3.2 ignored most of them (`zark backup foo` ran a backup), so a script that passes a word too many now stops: check scripts and timers that call zark. `alerts`, `fullcheck` and `registry` with a word too many exit 2 here, where they exited 1. A backup or a full check whose read-back finds another pool of the drive's name at its device says so (NOT VERIFIED; not finished), where 2.3.2 read that pool back as the drive.
+
+**The way back.** 2.3.2 reads everything 2.3.3 writes.
 
 ## Upgrading from zark 2.3.1
 
