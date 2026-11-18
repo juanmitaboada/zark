@@ -72,6 +72,7 @@ sudo zark finish     # rebuild the initrds and grub.cfg, and check the boot chai
 ```
 
 Every command, every question it asks and what it does: [docs/USAGE.md](docs/USAGE.md).
+Step by step through the GNOME app and extension, from installing to recovering: the [user guide](docs/GUIDE.md) and its [video](https://youtu.be/dy-WW9qjaIo).
 
 ## Installation
 
@@ -195,6 +196,7 @@ This software is provided "as is", without warranty of any kind, as detailed in 
 
 ## Documentation
 
+- [User guide](docs/GUIDE.md): every task step by step, through the GNOME app and extension; also as a [video](https://youtu.be/dy-WW9qjaIo).
 - [Usage](docs/USAGE.md): the commands, a first backup, a recovery, requirements and the drive registry.
 - [Upgrading zark](docs/UPGRADING.md) (from 2.0, and from 1.x), and upgrading Ubuntu from 24.04 to 26.04 with zark.
 - [Design](docs/DESIGN.md): architecture, key decisions, compatibility and security notes.
