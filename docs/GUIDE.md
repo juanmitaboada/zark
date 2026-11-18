@@ -103,7 +103,7 @@ A backup drive is prepared once: zark creates a pool on it, sends the first back
    - to confirm, before it writes anything.
 6. It creates the pool, sends the first backup point, sends the keystore, exports the pool, reads it back and registers the drive. The first send copies everything and takes the longest. It ends DRIVE PREPARED. If the first send or the keystore did not land, it ends DRIVE NOT REGISTERED and gives the `purge` command to wipe the drive before you prepare it again. If the read-back failed, it ends DRIVE NOT VERIFIED with what the read-back found; the drive is not registered either.
 
-<!-- screenshot: none yet; a new fixture case for the Prepare a New Drive dialog with two disks -->
+![The Prepare a New Drive dialog with two empty disks to choose from](images/guide/prepare.png)
 
 The drive's pool is not encrypted by a key of its own: the datasets on it are rpool's, sent raw, so they stay encrypted with the system's own passphrase. Keep that passphrase: you need it to recover.
 
@@ -135,7 +135,7 @@ sudo zark backup
 
 with `--drive <name>` when more than one backup drive is plugged in. `zark monitor`, in another terminal and without `sudo`, follows it.
 
-<!-- screenshot: app:running-connected run -->
+![A backup running: its step, a progress bar, the data sent, the rate and the time left](images/guide/run.png)
 
 While the app's own command runs, it holds logout and suspend: a Suspend from GNOME's menu asks for the administrator's password first. Closing a laptop's lid still suspends.
 
@@ -148,10 +148,10 @@ Each case is described under [Back up your system](USAGE.md#back-up-your-system)
 
 ### Reading the state
 
-The app's Overview shows how full the system pools are, each backup drive with its last backup, and zark's notices. A drive's page shows its status, its last run, its space, its backup points by month and its retention.
+The app's Overview shows each system pool: how full it is, what takes its space, its largest datasets and those with the most in snapshots, and **Reclaim Space...** to free some. It also lists each backup drive with its last backup, and zark's notices. A drive's page shows its status, its last run, its space, its backup points by month and its retention.
 
-<!-- screenshot: app:connected overview -->
-<!-- screenshot: app:connected drive:black -->
+![The Overview with rpool open: its space by kind of data, its snapshots and its largest datasets](images/guide/overview.png)
+![The page of the backup drive black: its status, last run, space and backup points](images/guide/drive-black.png)
 
 The extension's icon in the top bar:
 
@@ -176,7 +176,7 @@ zark's guards keep the boot chain consistent. While a backup drive is plugged in
 
 Some data churns and need not be kept: downloads, caches, virtual machine images. The app's **Exclusions** page lists what is left out of backups and out of the local snapshots. **Exclude...** picks a dataset and whether to leave it out of backups, of local snapshots, or both; **Include Again** undoes it. zark asks in the terminal before it excludes a dataset, and says what the change means for the drives.
 
-<!-- screenshot: app:exclusions exclusions -->
+![The Exclusions page: the datasets left out of backups and of local snapshots](images/guide/exclusions.png)
 
 Only a dataset can be excluded, not a folder. Making a folder a dataset of its own is done by hand; [the downloads folder example](USAGE.md#example-a-downloads-folder-out-of-snapshots-and-backups) goes through it step by step. The boot environments, the boot pool, the keystore and the structural containers are never excluded.
 
@@ -214,7 +214,7 @@ The app and the extension show this in a dialog, once per backup and drive: the 
 
 This path is validated on hardware on Ubuntu 26.10 with OpenZFS 2.4.4 only. The known limitations in the [CHANGELOG](../CHANGELOG.md) describe it further.
 
-<!-- screenshot: none yet; a new fixture case for the app's drive-gone dialog -->
+![The dialog shown when a backup's drive goes away, with zark's advice and the reboot command](images/guide/drive-gone.png)
 
 ## Browsing a backup and restoring files
 
@@ -227,7 +227,7 @@ zark restores a whole system, but you can also take single files back from a dri
 5. Copy what you need to your home with Files or `cp`. zark has no command to put a file back for you.
 6. Choose **Unmount** when you are done. While the drive is mounted, its other operations, the backup among them, are unavailable.
 
-<!-- screenshot: app:mounted drive:black -->
+![The drive black mounted for browsing, with Open in Files and Unmount](images/guide/mounted.png)
 
 **Older points.** The mount shows the newest point. Each dataset keeps its earlier snapshots in a hidden `.zfs/snapshot/` directory at its top, one directory per snapshot (zark's backup points are named `zark_` and their time in UTC): for the system's root, `/mnt/zark/<pool>/.zfs/snapshot/`, and for the homes, `/mnt/zark/<pool>/home/.zfs/snapshot/`. Files does not show `.zfs`; type the path in its location bar (Ctrl+L), or use `ls` in a terminal.
 
