@@ -5,6 +5,28 @@ All notable changes to **zark** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The VM bench (`bench/`, `.github/workflows/bench.yml`, `docs/BENCH.md`): on a
+  GitHub-hosted runner, by hand or weekly, Ubuntu 26.04 is installed from the
+  official desktop ISO with autoinstall onto a blank virtual disk, encrypted
+  ZFS as the installer lays it out, under OVMF with Secure Boot enforced; the
+  installed system is booted, its unlock prompt answered on the serial
+  console, and Secure Boot and the layout are checked. The ISO is trusted
+  through `SHA256SUMS` signed by Ubuntu's CD image key; an unsigned EFI
+  binary must be refused in the same job; the run's passphrase is made in
+  memory and the artifacts are uploaded only after a search for it in them,
+  in the installed system and in the disk image. A `probe` mode reads the
+  ISO without installing. It replaces eli for this part of the hardware
+  checks (Q1, Q2); zark's own commands in the bench come next (Q3).
+
+### Changed
+
+- ci.yml's header no longer says that GitHub-hosted runners lack nested KVM,
+  nor points at the retired `make test-real`.
+
 ## [2.3.3] - 2026-11-18
 
 A small fix release after 2.3.2: the command line's positional

@@ -19,6 +19,8 @@ The suite covers every command and module: the planner and the engine on a model
 
 GitHub Actions runs the unit-test suite on every push and pull request, with one job per supported Python version plus a separate lint job (mypy + pylint + ruff + basedpyright) and the SonarQube Cloud analysis, all on Ubuntu 24.04. On a release tag, and when run by hand, it also builds the `.deb` on 24.04 and installs it on 24.04, 26.04 and 26.10. See `.github/workflows/ci.yml`.
 
+The VM bench installs Ubuntu 26.04 from the official ISO with encrypted ZFS in QEMU/KVM, boots it with Secure Boot on and checks the installer's layout, by hand and weekly on GitHub's runners: [docs/BENCH.md](BENCH.md).
+
 ### Static analysis
 
 ```bash
