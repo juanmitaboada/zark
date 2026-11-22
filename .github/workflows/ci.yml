@@ -34,15 +34,11 @@
 #
 # What this workflow does NOT cover
 # ─────────────────────────────────
-# Integration tests (`make test-real`) run zark end-to-end inside QEMU
-# with OVMF firmware, real ZFS pools and an Ubuntu live ISO. They cannot
-# run on GitHub-hosted runners because:
-#   - GitHub-hosted runners do not provide nested KVM virtualisation.
-#   - The recovery flow needs root, raw block-device access and the ZFS
-#     kernel modules.
-#   - The full integration test takes ~15 minutes per phase and consumes
-#     several GB of disk for the QEMU images.
-# Run them locally on real hardware with `sudo make test-real ISO=...`.
+# zark end to end on an installed Ubuntu (setup, prepare, backup, recover,
+# the recovered system booting with Secure Boot on) needs a virtual machine
+# with the installer's encrypted ZFS layout, root inside it and a run of
+# tens of minutes. It is not part of this workflow, which runs on every
+# push; GitHub-hosted Linux runners do provide KVM for such a run.
 
 name: CI
 
