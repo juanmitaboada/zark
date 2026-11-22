@@ -46,6 +46,7 @@ from bench import (
     remaster,
     sbproof,
     seed,
+    vm,
 )
 from bench.qmp import Qmp, QmpError
 from bench.report import Check, all_ok, summary, write_checks
@@ -57,6 +58,14 @@ LOGIN_TIMEOUT_S = 600
 SSH_TIMEOUT_S = 300
 NEGATIVE_TIMEOUT_S = 180
 SCREEN_EVERY_S = 60
+# One line in the job's log this often during the install, so a run that
+# stops shows where.
+HEARTBEAT_EVERY_S = 300
+POWER_OFF_SSH_TIMEOUT_S = 60
+# QMP's per-read bound, and stop()'s waits: quit over QMP, then SIGTERM.
+QMP_IO_TIMEOUT_S = 30.0
+STOP_QUIT_WAIT_S = 30.0
+STOP_TERM_WAIT_S = 10.0
 
 
 class StepFailed(Exception):
@@ -91,6 +100,11 @@ class Run:  # pylint: disable=too-many-instance-attributes  # one run's whole st
     key: Path | None = None
     ssh_port: int = 0
     guest_up: bool = False
+    # Ever up over SSH in this run; guest_up goes back to False at power-off.
+    guest_seen: bool = False
+    out_of_time: bool = False
+    # Every QEMU started, with its QMP socket: none is left running at the end.
+    vms: list[tuple[subprocess.Popen[bytes], Path]] = field(default_factory=list)
 
     def path(self, *parts: str) -> Path:
         """A file under the work directory (never uploaded)."""
@@ -104,15 +118,20 @@ class Run:  # pylint: disable=too-many-instance-attributes  # one run's whole st
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
-    def sh(self, argv: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+    def sh(
+        self, argv: list[str], stdin: bytes | None = None, timeout_s: float | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
         """
         A command, logged by its arguments, which never carry a secret; a
-        secret goes in ``stdin`` only.
+        secret goes in ``stdin`` only. With ``timeout_s`` it is killed then,
+        and ``subprocess.TimeoutExpired`` raised.
         """
         qemu.assert_no_secret(argv, self.secrets)
         with self.keep("commands.log").open("a", encoding="utf-8") as f:
             f.write(" ".join(argv) + "\n")
-        return subprocess.run(argv, input=stdin, check=False, capture_output=True)
+        return subprocess.run(
+            argv, input=stdin, check=False, capture_output=True, timeout=timeout_s
+        )
 
     def must(self, argv: list[str], stdin: bytes | None = None) -> str:
         """A command that has to succeed; its output as text."""
@@ -125,16 +144,24 @@ class Run:  # pylint: disable=too-many-instance-attributes  # one run's whole st
     def step(self, name: str, fn: Callable[[], None]) -> bool:
         """Run one step, record its status and seconds; False stops the run."""
         log(f"== {name}")
+        if self.out_of_time:
+            return self._record(name, 1, 0.0, "not run: the steps' budget ran out")
         began = time.monotonic()
         status, detail = 0, ""
         try:
             fn()
+        except vm.BudgetExpired as err:
+            self.out_of_time = True
+            status, detail = 1, f"BudgetExpired: {err}"
+            log(f"FAIL {name}: {detail}")
         # A step that fails in any way is recorded as failed and stops the
         # run; the leak check and the upload decision still follow.
         except Exception as err:  # pylint: disable=broad-exception-caught
             status, detail = 1, f"{type(err).__name__}: {err}"
             log(f"FAIL {name}: {detail}")
-        seconds = round(time.monotonic() - began, 1)
+        return self._record(name, status, round(time.monotonic() - began, 1), detail)
+
+    def _record(self, name: str, status: int, seconds: float, detail: str) -> bool:
         self.steps.append({"step": name, "status": status, "seconds": seconds, "detail": detail})
         self.keep("steps.json").write_text(
             json.dumps({"record_version": RECORD_VERSION, "steps": self.steps}, indent=2) + "\n",
@@ -238,23 +265,25 @@ def start(run: Run, name: str, argv: list[str]) -> subprocess.Popen[bytes]:
     qemu.assert_no_secret(argv, run.secrets)
     run.keep(f"qemu-{name}.argv").write_text(" ".join(argv) + "\n", encoding="utf-8")
     err = run.keep(f"qemu-{name}.log").open("wb")
-    return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=err, stderr=err)
+    # Outlives this call by design: stop() or finish() ends it.
+    proc = subprocess.Popen(  # pylint: disable=consider-using-with
+        argv, stdin=subprocess.DEVNULL, stdout=err, stderr=err
+    )
+    run.vms.append((proc, run.path(f"{name}.qmp.sock")))
+    return proc
 
 
 def stop(proc: subprocess.Popen[bytes], qmp_socket: Path) -> None:
-    """Ask QEMU to quit, then make sure it did."""
-    if proc.poll() is None:
-        try:
-            q = Qmp.connect(qmp_socket, timeout_s=5)
-            q.execute("quit")
-            q.close()
-        except (OSError, QmpError):
-            pass
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+    """End QEMU, every wait bounded, and say how it ended."""
+    how = vm.stop(
+        proc,
+        qmp_socket,
+        qmp_timeout_s=min(QMP_IO_TIMEOUT_S, 5.0),
+        quit_wait_s=STOP_QUIT_WAIT_S,
+        term_wait_s=STOP_TERM_WAIT_S,
+    )
+    if how != "exited":
+        log(f"   QEMU {how}")
 
 
 def pick_firmware(run: Run) -> None:
@@ -420,13 +449,27 @@ def make_seed(run: Run, passphrase: str, password: str) -> Path:
     return image
 
 
-def _screens(q: Qmp | None, run: Run, label: str) -> None:
+def _screens(q: Qmp | None, run: Run, label: str) -> Qmp | None:
+    """A screen into out/screens; the session, or None once QMP has failed."""
     if q is None:
-        return
+        return None
     try:
         q.screendump(run.keep("screens", f"{label}-{int(time.time())}.png"))
-    except (OSError, QmpError):
-        pass
+    except (OSError, QmpError) as err:
+        # Said once, then no more screens: every later call would wait again.
+        log(f"   QMP stopped answering: {err}; no more screens")
+        q.close()
+        return None
+    return q
+
+
+def _vm_state(q: Qmp | None) -> str:
+    if q is None:
+        return "unknown (no QMP)"
+    try:
+        return q.status()
+    except (OSError, QmpError) as err:
+        return f"unknown ({err})"
 
 
 def install(run: Run, seed_image: Path, disk: Path, vars_file: Path) -> None:
@@ -440,22 +483,38 @@ def install(run: Run, seed_image: Path, disk: Path, vars_file: Path) -> None:
     )
     q: Qmp | None = None
     try:
-        q = Qmp.connect(m.qmp_socket)
-    except OSError:
-        q = None
-    deadline = time.monotonic() + INSTALL_TIMEOUT_S
-    next_screen = 0.0
-    while proc.poll() is None and time.monotonic() < deadline:
-        if time.monotonic() >= next_screen:
-            _screens(q, run, "install")
-            next_screen = time.monotonic() + SCREEN_EVERY_S
-        time.sleep(5)
-    if proc.poll() is None:
-        _screens(q, run, "install-timeout")
+        try:
+            q = Qmp.connect(m.qmp_socket, io_timeout_s=QMP_IO_TIMEOUT_S)
+        except (OSError, QmpError) as err:
+            log(f"   no QMP session: {err}; no screens")
+        began = time.monotonic()
+        deadline = began + INSTALL_TIMEOUT_S
+        next_screen = next_beat = began
+        while proc.poll() is None and time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_screen:
+                q = _screens(q, run, "install")
+                next_screen = now + SCREEN_EVERY_S
+            if now >= next_beat:
+                log(f"   install: {int(now - began)} s, QEMU running, VM {_vm_state(q)}")
+                next_beat = now + HEARTBEAT_EVERY_S
+            time.sleep(5)
+        if proc.poll() is None:
+            # Kept for the upload: what the guest showed and where it stood.
+            q = _screens(q, run, "install-timeout")
+            state = _vm_state(q)
+            df = run.sh(["df", "-h", str(run.work)], timeout_s=30)
+            run.keep("install-timeout.txt").write_text(
+                f"VM {state}\n{df.stdout.decode('utf-8', 'replace')}", encoding="utf-8"
+            )
+            raise StepFailed(f"the install did not end within {INSTALL_TIMEOUT_S} s (VM {state})")
+        if proc.returncode != 0:
+            raise StepFailed(f"QEMU exited {proc.returncode} during the install")
+    finally:
+        # On a timeout, a failure or the budget's end alike: no QEMU left behind.
+        if q is not None:
+            q.close()
         stop(proc, m.qmp_socket)
-        raise StepFailed(f"the install did not end within {INSTALL_TIMEOUT_S} s")
-    if proc.returncode != 0:
-        raise StepFailed(f"QEMU exited {proc.returncode} during the install")
 
 
 def ssh_argv(run: Run, command: str) -> list[str]:
@@ -502,7 +561,7 @@ def boot_installed(
         deadline = time.monotonic() + SSH_TIMEOUT_S
         while time.monotonic() < deadline:
             if run.sh(ssh_argv(run, "true")).returncode == 0:
-                run.guest_up = True
+                run.guest_up = run.guest_seen = True
                 return proc, m
             time.sleep(5)
         raise StepFailed(f"no SSH within {SSH_TIMEOUT_S} s")
@@ -586,7 +645,10 @@ def guest_leak_check(run: Run) -> None:
 
 def power_off(run: Run, proc: subprocess.Popen[bytes], m: qemu.Machine) -> None:
     """Shut the guest down so its disk is quiet before the image is read."""
-    run.sh(ssh_argv(run, "sudo -n systemctl poweroff"))
+    try:
+        run.sh(ssh_argv(run, "sudo -n systemctl poweroff"), timeout_s=POWER_OFF_SSH_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        log("   power-off over SSH did not return")
     try:
         proc.wait(timeout=180)
     except subprocess.TimeoutExpired:
@@ -617,11 +679,27 @@ def host_leak_check(run: Run, disk: Path | None) -> bool:
     return not hits
 
 
+def guest_leak_note(run: Run) -> str:
+    """What the job log says of the guest's own search, from the recorded steps."""
+    step = next((s for s in run.steps if s["step"] == "guest-leak-check"), None)
+    if not run.guest_seen:
+        return "   leak check, guest: not run, the guest never came up over SSH"
+    if step is None:
+        return "   leak check, guest: not run, the guest was up"
+    if step["status"] == 0:
+        return "   leak check, guest: no hit"
+    return f"   leak check, guest: {step['detail']}"
+
+
 def finish(run: Run, disk: Path | None) -> int:
     """Leak check, removal of every secret file, the upload marker, the exit status."""
+    # A machine a failed or interrupted step left running would still hold
+    # its disk image while the leak check reads it.
+    for proc, qmp_socket in run.vms:
+        stop(proc, qmp_socket)
     clean = True
-    if run.mode == "install" and not any(s["step"] == "guest-leak-check" for s in run.steps):
-        log("   leak check, guest: not run, the guest never came up over SSH")
+    if run.mode == "install":
+        log(guest_leak_note(run))
     try:
         clean = host_leak_check(run, disk)
     except OSError as err:
@@ -636,7 +714,12 @@ def finish(run: Run, disk: Path | None) -> int:
         log(f"   leak check passed: {marker.name} written, out/ may be uploaded")
     else:
         log("the leak check failed: nothing is uploaded")
-    ok = clean and bool(run.steps) and all(s["status"] == 0 for s in run.steps)
+    ok = (
+        clean
+        and not run.out_of_time
+        and bool(run.steps)
+        and all(s["status"] == 0 for s in run.steps)
+    )
     log(f"== {run.mode}: {'PASSED' if ok else 'FAILED'}")
     return 0 if ok else 1
 
@@ -653,8 +736,12 @@ def _common(run: Run) -> bool:
 def probe(run: Run) -> int:
     """ISO, firmware, negative control, remaster and the ISO read."""
     try:
-        if _common(run):
-            run.step("inspect", lambda: inspect(run))
+        with vm.watchdog(vm.STEPS_BUDGET_S):
+            if _common(run):
+                run.step("inspect", lambda: inspect(run))
+    except vm.BudgetExpired as err:
+        log(f"FAIL {err}")
+        run.out_of_time = True
     finally:
         status = finish(run, None)
     return status
@@ -708,7 +795,13 @@ def install_run(run: Run) -> int:
     disk = run.path("target.qcow2")
     booted: list[tuple[subprocess.Popen[bytes], qemu.Machine]] = []
     try:
-        _install_steps(run, disk, booted)
+        # Steps only: power-off, the leak check and the upload get the time
+        # kept back for them.
+        with vm.watchdog(vm.STEPS_BUDGET_S):
+            _install_steps(run, disk, booted)
+    except vm.BudgetExpired as err:
+        log(f"FAIL {err}")
+        run.out_of_time = True
     finally:
         if booted:
             power_off(run, *booted[0])

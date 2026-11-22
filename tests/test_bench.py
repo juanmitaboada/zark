@@ -22,13 +22,28 @@ finds them; run that file, not this one.
 import io
 import json
 import re
+import signal
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
-from bench import console, firmware, inspect_iso, iso, layout, leak, qemu, remaster, sbproof, seed
+from bench import (
+    console,
+    firmware,
+    inspect_iso,
+    iso,
+    layout,
+    leak,
+    qemu,
+    remaster,
+    run as bench_run,
+    sbproof,
+    seed,
+    vm,
+)
 from bench.qmp import Qmp, QmpError
 from bench.report import Check, all_ok, summary, write_checks
 
@@ -447,6 +462,292 @@ class TestBenchQmp:  # pylint: disable=missing-function-docstring
         raise AssertionError("no error")
 
 
+def _mute_qmp(path: Path, greet: bool = True) -> tuple[socket.socket, threading.Event]:
+    """
+    A fake QEMU whose monitor stops answering: it accepts, sends the greeting
+    (or not), then reads and never replies, as in run 45147805605's hang.
+    """
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(4)
+    done = threading.Event()
+
+    def serve() -> None:
+        conns = []
+        srv.settimeout(0.1)
+        while not done.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                continue
+            conns.append(conn)
+            if greet:
+                conn.sendall(b'{"QMP": {"version": {}}}\n')
+        for conn in conns:
+            conn.close()
+        srv.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, done
+
+
+class TestBenchQmpBounded:  # pylint: disable=missing-function-docstring
+    """Every QMP wait ends: run 45147805605 waited on a monitor for 2 hours."""
+
+    def test_a_command_with_no_answer_times_out(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.sock"
+            _, done = _mute_qmp(path)
+            began = time.monotonic()
+            try:
+                Qmp.connect(path, timeout_s=5, io_timeout_s=0.3)
+            except QmpError as err:
+                # The greeting came, qmp_capabilities got no answer.
+                assert str(err) == "QMP: no answer within 0.3 s", str(err)
+            else:
+                raise AssertionError("no error")
+            finally:
+                done.set()
+            assert time.monotonic() - began < 3
+
+    def test_a_greeting_that_never_comes_is_an_error_not_a_retry(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.sock"
+            _, done = _mute_qmp(path, greet=False)
+            began = time.monotonic()
+            try:
+                Qmp.connect(path, timeout_s=30, io_timeout_s=0.3)
+            except QmpError as err:
+                assert "no answer within 0.3 s" in str(err)
+            else:
+                raise AssertionError("no error")
+            finally:
+                done.set()
+            assert time.monotonic() - began < 3
+
+    def test_a_send_nobody_reads_times_out(self):
+        ours, theirs = socket.socketpair()
+        theirs.sendall(b'{"QMP": {}}\n{"return": {}}\n')
+        q = Qmp(ours, io_timeout_s=0.3)
+        try:
+            # Far more than a socket buffer, and the peer never reads.
+            q.execute("human-monitor-command", command_line="x" * (64 << 20))
+        except QmpError as err:
+            assert str(err) == "QMP: human-monitor-command not taken within 0.3 s", str(err)
+        else:
+            raise AssertionError("no error")
+        q.close()
+        theirs.close()
+
+    def test_status_and_a_timeout_after_answers(self):
+        ours, theirs = socket.socketpair()
+        theirs.sendall(b'{"QMP": {}}\n{"return": {}}\n{"return": {"status": "paused"}}\n')
+        q = Qmp(ours, io_timeout_s=0.3)
+        assert q.status() == "paused"
+        try:
+            q.screendump(Path("/x.png"))  # read by the fake, never answered
+        except QmpError as err:
+            assert "no answer within 0.3 s" in str(err)
+        else:
+            raise AssertionError("no error")
+        q.close()
+        theirs.close()
+
+
+def _child(code: str) -> subprocess.Popen[bytes]:
+    # Ended by the test, through vm.stop(): a with block would wait for it.
+    proc = subprocess.Popen(  # pylint: disable=consider-using-with
+        ["python3", "-c", code], stdout=subprocess.PIPE
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline() == b"ready\n"  # its handlers are in place
+    return proc
+
+
+class _NoQemuImg(bench_run.Run):
+    """A run whose ``must`` (only qemu-img, in install()) does nothing."""
+
+    def must(self, argv: list[str], stdin: bytes | None = None) -> str:
+        return ""
+
+
+class TestBenchVm:  # pylint: disable=missing-function-docstring
+    """QEMU always ends, and the steps always leave time for the leak check."""
+
+    def test_stop_an_exited_process(self):
+        with subprocess.Popen(["true"]) as proc:
+            proc.wait()
+        assert vm.stop(proc, Path("/nonexistent/q.sock"), qmp_timeout_s=0.1) == "exited"
+
+    def test_stop_with_no_monitor_terminates(self):
+        proc = _child("import time; print('ready', flush=True); time.sleep(60)")
+        how = vm.stop(proc, Path("/nonexistent/q.sock"), qmp_timeout_s=0.1, quit_wait_s=0.2)
+        assert how == "terminated" and proc.returncode == -15
+
+    def test_stop_with_a_mute_monitor_and_sigterm_ignored_kills(self):
+        code = (
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(60)"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.sock"
+            _, done = _mute_qmp(path)
+            proc = _child(code)
+            began = time.monotonic()
+            try:
+                how = vm.stop(proc, path, qmp_timeout_s=0.3, quit_wait_s=0.2, term_wait_s=0.2)
+            finally:
+                done.set()
+            assert how == "killed" and proc.returncode == -9
+            assert time.monotonic() - began < 5
+
+    def test_stop_by_quit(self):
+        # A fake QEMU that ends when it is told to quit.
+        code = (
+            "import socket, sys; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); "
+            "s.listen(1); print('ready', flush=True); c, _ = s.accept(); "
+            "f = c.makefile('rw'); f.write('{\"QMP\": {}}\\n'); f.flush(); "
+            "[(f.write('{\"return\": {}}\\n'), f.flush()) for _ in range(2) if f.readline()]"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.sock"
+            proc = subprocess.Popen(  # pylint: disable=consider-using-with
+                ["python3", "-c", code, str(path)], stdout=subprocess.PIPE
+            )
+            assert proc.stdout is not None and proc.stdout.readline() == b"ready\n"
+            assert vm.stop(proc, path, qmp_timeout_s=2, quit_wait_s=10) == "quit"
+            assert proc.returncode == 0
+
+    def test_the_watchdog_interrupts_a_blocking_read(self):
+        ours, theirs = socket.socketpair()
+        began = time.monotonic()
+        try:
+            with vm.watchdog(1):
+                ours.recv(1)  # nothing ever comes
+        except vm.BudgetExpired as err:
+            assert "budget of 1 s" in str(err)
+        else:
+            raise AssertionError("no error")
+        assert time.monotonic() - began < 3
+        assert signal.alarm(0) == 0  # nothing left armed
+        assert signal.getsignal(signal.SIGALRM) is not None
+        ours.close()
+        theirs.close()
+
+    def test_the_watchdog_disarms_when_the_steps_end_in_time(self):
+        previous = signal.getsignal(signal.SIGALRM)
+        with vm.watchdog(30):
+            pass
+        assert signal.alarm(0) == 0
+        assert signal.getsignal(signal.SIGALRM) is previous
+
+    def test_a_step_cut_by_the_budget_stops_the_rest(self):
+        ours, theirs = socket.socketpair()
+        ran: list[str] = []
+        with tempfile.TemporaryDirectory() as td:
+            run = bench_run.Run(mode="install", out=Path(td) / "out", work=Path(td) / "w")
+            with vm.watchdog(1):
+
+                def blocked() -> None:
+                    ours.recv(1)  # nothing ever comes
+
+                assert not run.step("blocked", blocked)
+            assert run.out_of_time
+            assert not run.step("next", lambda: ran.append("next"))
+        assert not ran
+        assert [s["status"] for s in run.steps] == [1, 1]
+        assert str(run.steps[0]["detail"]).startswith("BudgetExpired: ")
+        assert run.steps[1]["detail"] == "not run: the steps' budget ran out"
+        ours.close()
+        theirs.close()
+
+    def test_the_guest_leak_note(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = bench_run.Run(mode="install", out=Path(td) / "out", work=Path(td) / "w")
+            assert bench_run.guest_leak_note(run).endswith("the guest never came up over SSH")
+            run.guest_seen = True
+            assert bench_run.guest_leak_note(run).endswith("not run, the guest was up")
+            # Cut by the budget: the step is recorded, and its reason is what the log says.
+            run.out_of_time = True
+            run.step("guest-leak-check", lambda: None)
+            note = bench_run.guest_leak_note(run)
+            assert note.endswith("guest: not run: the steps' budget ran out"), note
+            run.steps.clear()
+            run.out_of_time = False
+            run.step("guest-leak-check", lambda: None)
+            assert bench_run.guest_leak_note(run).endswith("guest: no hit")
+
+    def test_the_budget_fits_the_job(self):
+        wf = (ROOT / ".github" / "workflows" / "bench.yml").read_text(encoding="utf-8")
+        found = re.search(r"timeout-minutes: (\d+)", wf)
+        assert found is not None
+        minutes = int(found.group(1))
+        assert vm.JOB_TIMEOUT_S == minutes * 60
+        assert vm.STEPS_BUDGET_S + vm.PREPARE_RESERVE_S + vm.FINISH_RESERVE_S == vm.JOB_TIMEOUT_S
+        # The longest path through the steps' own timeouts still fits.
+        waits = (
+            bench_run.NEGATIVE_TIMEOUT_S
+            + bench_run.INSTALL_TIMEOUT_S
+            + bench_run.UNLOCK_TIMEOUT_S
+            + bench_run.LOGIN_TIMEOUT_S
+            + bench_run.SSH_TIMEOUT_S
+        )
+        assert waits < vm.STEPS_BUDGET_S, (waits, vm.STEPS_BUDGET_S)
+
+    def test_an_install_whose_monitor_hangs_still_ends(self):  # pylint: disable=too-many-locals
+        # install() as run 45147805605 met it: QEMU running, its monitor mute.
+        # The bench's deadline must fire and leave no QEMU behind.
+        names = (
+            "INSTALL_TIMEOUT_S",
+            "QMP_IO_TIMEOUT_S",
+            "STOP_QUIT_WAIT_S",
+            "STOP_TERM_WAIT_S",
+            "start",
+            "machine",
+        )
+        saved = {n: getattr(bench_run, n) for n in names}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "work" / "install.qmp.sock"
+            path.parent.mkdir()
+            _, done = _mute_qmp(path)
+            procs: list[subprocess.Popen[bytes]] = []
+
+            def start(_run, _name, _argv):
+                procs.append(_child("import time; print('ready', flush=True); time.sleep(60)"))
+                return procs[-1]
+
+            def machine(_run, _name, _vars):
+                return qemu.Machine(
+                    firmware=firmware.Firmware(Path("/c"), Path("/v"), Path("/d")),
+                    vars_file=Path("/v"),
+                    serial_socket=root / "s.sock",
+                    serial_log=root / "serial.log",
+                    qmp_socket=path,
+                )
+
+            run = _NoQemuImg(mode="install", out=root / "out", work=root / "work")
+            run.remastered = Path("/iso")
+            fakes = (1, 0.3, 0.2, 1.0, start, machine)
+            for name, fake in zip(names, fakes, strict=True):
+                setattr(bench_run, name, fake)
+            began = time.monotonic()
+            try:
+                ok = run.step(
+                    "install",
+                    lambda: bench_run.install(run, root / "seed", root / "d", root / "v"),
+                )
+            finally:
+                for name, value in saved.items():
+                    setattr(bench_run, name, value)
+                done.set()
+            assert not ok and time.monotonic() - began < 20
+            assert "did not end within 1 s" in str(run.steps[-1]["detail"])
+            assert procs[0].poll() == -15  # SIGTERM: the mute monitor never took quit
+            note = (root / "out" / "install-timeout.txt").read_text(encoding="utf-8")
+            assert note.startswith("VM unknown (no QMP)")
+
+
 class _Line:
     """
     The guest's side of a serial line, in a fixed order: each read returns the
@@ -803,6 +1104,24 @@ class TestBenchReport:  # pylint: disable=missing-function-docstring
 
     def test_one_check_alone(self):
         assert all_ok([Check("x", True)]) and summary([Check("x", True)]) == "OK   x: "
+
+
+class TestBenchSuites:  # pylint: disable=missing-function-docstring,too-few-public-methods
+    """
+    make fulltest, CI and tox -e cov run only the suites tests/test_unit.py
+    names: a Test class here that is not named there never runs.
+    """
+
+    def test_every_class_here_is_registered(self):
+        here = set(
+            re.findall(r"^class (Test\w+)", Path(__file__).read_text(encoding="utf-8"), re.M)
+        )
+        unit = (ROOT / "tests" / "test_unit.py").read_text(encoding="utf-8")
+        for start in ("from tests.test_bench import (", "\nBENCH_SUITES = ("):
+            block = unit[unit.index(start) :]
+            named = set(re.findall(r"^    (Test\w+),$", block[: block.index("\n)\n")], re.M))
+            assert here, "no Test class found"
+            assert here - named == set(), (start, sorted(here - named))
 
 
 class TestBenchWorkflow:  # pylint: disable=missing-function-docstring

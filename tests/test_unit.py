@@ -360,10 +360,13 @@ from tests.test_bench import (  # pylint: disable=wrong-import-position # noqa: 
     TestBenchLeak,
     TestBenchQemu,
     TestBenchQmp,
+    TestBenchQmpBounded,
     TestBenchRemaster,
     TestBenchReport,
     TestBenchSecureBoot,
     TestBenchSeed,
+    TestBenchSuites,
+    TestBenchVm,
     TestBenchWorkflow,
 )
 from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # noqa: E402
@@ -455,10 +458,13 @@ BENCH_SUITES = (
     TestBenchLeak,
     TestBenchQemu,
     TestBenchQmp,
+    TestBenchQmpBounded,
     TestBenchRemaster,
     TestBenchReport,
     TestBenchSecureBoot,
     TestBenchSeed,
+    TestBenchSuites,
+    TestBenchVm,
     TestBenchWorkflow,
 )
 

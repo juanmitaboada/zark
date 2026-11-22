@@ -63,6 +63,8 @@ The artifact `bench-<host>-<mode>` holds:
 
 A run whose leak check fails, or cannot run, uploads nothing; its job log says why.
 
+Every wait in a run is bounded. The steps run inside a budget of their own, 100 minutes of the job's 120: when it runs out, or when a step's own timeout fires (the install's is an hour), the machine is stopped and the leak check and the upload still run. A timed-out install leaves its screens, its serial log and `install-timeout.txt` (the VM's state and the work directory's free space).
+
 ## What it does not cover
 
 A virtual machine is not a real computer: USB-SATA bridges, a real firmware's quirks, power loss and real disk timings are outside it. `zark selftest` on real hardware and the certificates it produces cover what they can.
