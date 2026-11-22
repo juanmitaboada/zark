@@ -716,11 +716,18 @@ class TestBenchInspect:  # pylint: disable=missing-function-docstring
         for path in (snap, "var/lib/dpkg/status", "etc/cloud/cloud.cfg.d/90.cfg"):
             assert inspect_iso.wanted_from_layer(path), path
         assert not inspect_iso.wanted_from_layer("var/lib/snapd/seed/snaps/firefox_1.snap")
-        assert inspect_iso.wanted_from_snap("snap/snap.yaml")
+        assert inspect_iso.wanted_from_snap("meta/snap.yaml")
+        assert not inspect_iso.wanted_from_snap("snap/snap.yaml")
         assert inspect_iso.wanted_from_snap(
             "bin/subiquity/subiquity/server/controllers/filesystem.py"
         )
         assert not inspect_iso.wanted_from_snap("snap/meta")
+
+    def test_snap_version(self):
+        meta = "name: ubuntu-desktop-bootstrap\nversion: '0+git.4d1f2a3'\nsummary: x\n"
+        assert inspect_iso.snap_version(meta) == "0+git.4d1f2a3"
+        assert inspect_iso.snap_version('version: "26.04.1"\n') == "26.04.1"
+        assert inspect_iso.snap_version("name: x\n  version: nested\n") == ""
 
     def test_unsquashfs_writes_no_xattrs(self):
         # The live's layers carry trusted.overlay.* attributes that only root

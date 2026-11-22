@@ -27,6 +27,8 @@ SNAP_PREFIX = "var/lib/snapd/seed/snaps/ubuntu-desktop-bootstrap_"
 SUBIQUITY_FILE = "subiquity/server/controllers/filesystem.py"
 CLOUD_FILES = ("etc/cloud/cloud.cfg", "etc/cloud/cloud.cfg.d", "etc/cloud/ds-identify.cfg")
 DPKG_STATUS = "var/lib/dpkg/status"
+# A snap keeps its metadata in meta/; snap/ holds hooks and the like.
+SNAP_YAML = "meta/snap.yaml"
 
 
 def squashfs_names(find_output: str) -> list[str]:
@@ -47,7 +49,7 @@ def wanted_from_layer(path: str) -> bool:
 
 def wanted_from_snap(path: str) -> bool:
     """A file the probe reads out of the installer snap."""
-    return path.endswith(SUBIQUITY_FILE) or path == "snap/snap.yaml"
+    return path.endswith(SUBIQUITY_FILE) or path == SNAP_YAML
 
 
 def layer_chain(top: str, available: list[str]) -> list[str]:
@@ -95,6 +97,14 @@ def unsquashfs_extract_cmd(image: Path, inner: str, dest: Path) -> list[str]:
     their attributes.
     """
     return ["unsquashfs", "-f", "-no-progress", "-no-xattrs", "-d", str(dest), str(image), inner]
+
+
+def snap_version(snap_yaml: str) -> str:
+    """The top-level ``version:`` of a snap's ``meta/snap.yaml``, or ""."""
+    for line in snap_yaml.splitlines():
+        if line.startswith("version:"):
+            return line.partition(":")[2].strip().strip("'\"")
+    return ""
 
 
 def listed_paths(unsquashfs_list: str) -> list[str]:

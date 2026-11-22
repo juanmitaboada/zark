@@ -14,7 +14,7 @@ On a GitHub-hosted runner (`ubuntu-24.04` or `ubuntu-26.04`), with no person:
 6. Proves Secure Boot was on (`mokutil`, the `SecureBoot` variable, the kernel's line, the QEMU command line) and checks the layout (bpool, rpool with its LUKS keystore, the boot environment, USERDATA, encrypted swap).
 7. Searches the installed system, the artifacts and the disk image for the run's secrets; uploads the artifacts only when none is found.
 
-`probe` mode stops after step 3 and reads the ISO instead: the installer snap's subiquity, cloud-init's datasource configuration, whether `openssh-server` is in the live. It takes about ten minutes.
+After step 3 every run reads the ISO without booting it: the installer snap's version and subiquity, cloud-init's datasource configuration, whether `openssh-server` is in the live. `probe` mode stops there; it takes about ten minutes.
 
 The installed system is changed in three ways, all by autoinstall's `late-commands`: GRUB and the kernel also use the serial console (`/etc/default/grub.d/90-zark-bench.cfg`, without `quiet splash`), and the bench user may use `sudo` without a password (`/etc/sudoers.d/bench`). Nothing touches the boot chain's binaries, the pools or the keystore.
 
@@ -59,7 +59,7 @@ The artifact `bench-<host>-<mode>` holds:
 - `qemu-*.argv`: every QEMU command line;
 - `negative-control.json`, `secure-boot.json`, `layout.json`: the verdicts, failures first;
 - `guest/`: the installed system's listings (`zpool get all`, `zfs get`, `findmnt`, `lsblk`, crypttab), its kernel journal and `/var/log/installer`;
-- `probe/` in probe mode.
+- `probe/`: what the ISO read found.
 
 A run whose leak check fails, or cannot run, uploads nothing; its job log says why.
 

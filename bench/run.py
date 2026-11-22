@@ -340,6 +340,9 @@ def _snap(run: Run, snap: Path, report: dict[str, object]) -> None:
     for inner in [p for p in listing if inspect_iso.wanted_from_snap(p)]:
         _extract(run, snap, inner, run.path("snap"))
         shutil.copyfile(run.path("snap", inner), run.keep("probe", "snap", inner.replace("/", "_")))
+    if inspect_iso.SNAP_YAML in listing:
+        meta = run.path("snap", inspect_iso.SNAP_YAML).read_text(encoding="utf-8", errors="replace")
+        report["installer-snap-version"] = inspect_iso.snap_version(meta)
     sources = [p for p in listing if p.endswith(inspect_iso.SUBIQUITY_FILE)]
     if sources:
         report["subiquity-filesystem-py"] = sources[0]
@@ -633,7 +636,8 @@ def probe(run: Run) -> int:
 def _install_steps(
     run: Run, disk: Path, booted: list[tuple[subprocess.Popen[bytes], qemu.Machine]]
 ) -> None:
-    if not _common(run):
+    # The ISO read is cheap (seconds) and names the subiquity each install ran.
+    if not (_common(run) and run.step("inspect", lambda: inspect(run))):
         return
     made: list[str] = []
 
