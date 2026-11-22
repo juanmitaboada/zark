@@ -489,22 +489,27 @@ def boot_installed(
     argv = qemu.installed_argv(m, disk, run.ssh_port)
     proc = start(run, "installed", argv)
     run.keep("qemu-installed.argv.json").write_text(json.dumps(argv) + "\n", encoding="utf-8")
-    with run.keep("console-installed.log").open("wb") as transcript:
-        con = console.Console.connect(m.serial_socket, transcript)
-        try:
-            answered = console.unlock(con, passphrase, UNLOCK_TIMEOUT_S, LOGIN_TIMEOUT_S)
-        except console.ConsoleError as err:
-            raise StepFailed(str(err)) from err
-        finally:
-            con.close()
-    log(f"   unlock prompt answered: {answered}")
-    deadline = time.monotonic() + SSH_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if run.sh(ssh_argv(run, "true")).returncode == 0:
-            run.guest_up = True
-            return proc, m
-        time.sleep(5)
-    raise StepFailed(f"no SSH within {SSH_TIMEOUT_S} s")
+    try:
+        with run.keep("console-installed.log").open("wb") as transcript:
+            con = console.Console.connect(m.serial_socket, transcript)
+            try:
+                answered = console.unlock(con, passphrase, UNLOCK_TIMEOUT_S, LOGIN_TIMEOUT_S)
+            except console.ConsoleError as err:
+                raise StepFailed(str(err)) from err
+            finally:
+                con.close()
+        log(f"   unlock prompt answered: {answered}")
+        deadline = time.monotonic() + SSH_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if run.sh(ssh_argv(run, "true")).returncode == 0:
+                run.guest_up = True
+                return proc, m
+            time.sleep(5)
+        raise StepFailed(f"no SSH within {SSH_TIMEOUT_S} s")
+    except BaseException:
+        # Not left running: the leak check reads the disk image next.
+        stop(proc, m.qmp_socket)
+        raise
 
 
 def guest(run: Run, command: str) -> bytes:
@@ -591,12 +596,16 @@ def host_leak_check(run: Run, disk: Path | None) -> bool:
         hits.append(f"the disk image {disk.name}")
     for hit in hits:
         log(f"LEAK in {hit}")
+    image = f" and {disk.name}" if disk is not None and disk.exists() else ""
+    log(f"   leak check, host: {len(hits)} hit(s) in out/{image}")
     return not hits
 
 
 def finish(run: Run, disk: Path | None) -> int:
     """Leak check, removal of every secret file, the upload marker, the exit status."""
     clean = True
+    if run.mode == "install" and not any(s["step"] == "guest-leak-check" for s in run.steps):
+        log("   leak check, guest: not run, the guest never came up over SSH")
     try:
         clean = host_leak_check(run, disk)
     except OSError as err:
@@ -607,6 +616,8 @@ def finish(run: Run, disk: Path | None) -> int:
     marker = run.out / "LEAK-CHECK-PASSED"
     if clean:
         marker.write_text("no secret found in out/ or the disk image\n", encoding="utf-8")
+        # The upload's if: reads this marker; the job log says so too.
+        log(f"   leak check passed: {marker.name} written, out/ may be uploaded")
     else:
         log("the leak check failed: nothing is uploaded")
     ok = clean and bool(run.steps) and all(s["status"] == 0 for s in run.steps)

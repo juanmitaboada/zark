@@ -522,6 +522,35 @@ class TestBenchConsole:  # pylint: disable=missing-function-docstring
         assert con.expect((console.LOGIN,), 5) is console.LOGIN
         assert console.clean(b"a\x1b[01;01Hb\r\n") == b"ab\n"
 
+    def test_the_26_04_dracut_prompt_then_login(self):
+        # Bytes as run 45120463779 recorded them: systemd-cryptsetup's prompt
+        # under 26.04's dracut, then agetty's login among systemd's OSC 3008
+        # markers, a DCS query and a soft reset.
+        prompt = (
+            b"         Starting \x1b[0;1;39mdracut-pre-mount.service\x1b[0m - dracut pre-mount"
+            b" hook...\r\r\n\x1b[0;1;39mPlease enter passphrase for disk keystore-rpool: (pr"
+        )
+        login = (
+            b"invocationid=48a1ca7490e4416e927d7ecd7b2de558;type=service\x1b\\\x1bP+q6E616D6"
+            b"5\x1b\\\r\r\nUbuntu 26.04.1 LTS bench ttyS0\r\n\r\nbench login: \x1b[!p\x1b]104"
+            b"\x1b\\\x1b[0m\x1b[?7h\x1b[1G\x1b[0J\x1b[6n"
+        )
+        line = _Line([prompt, b"ess TAB for no echo) \x1b[0m", b"************\r\n", login])
+        assert console.unlock(line.console(), "s3cret", 5, 5) == "systemd"
+        assert line.sent() == b"s3cret\r"
+        again = b"Please enter passphrase for disk keystore-rpool: (press TAB for no echo) "
+        refused = _Line([again, b"***\r\n" + again])
+        try:
+            console.unlock(refused.console(), "x", 5, 5)
+        except console.ConsoleError as err:
+            assert "asked again (systemd)" in str(err)
+        else:
+            raise AssertionError("no error")
+
+    def test_clean_strips_strings_and_full_csi(self):
+        raw = b"a\x1b]3008;start=1;type=service\x1b\\b\x1bP+q6E\x1b\\c\x1b[!pd\x1b]104\x07e\x1b[6n"
+        assert console.clean(raw) == b"abcde"
+
     def test_the_socket_reader(self):
         # Everything is in the socket before the reads: nothing to wait for.
         ours, guest = socket.socketpair()

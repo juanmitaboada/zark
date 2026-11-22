@@ -51,6 +51,15 @@ class Prompt:
 
 UNLOCK_PROMPTS = (
     Prompt(
+        "systemd",
+        re.compile(rb"Please enter passphrase for disk [^\n]*?keystore-rpool[^\n]*?: ?"),
+        "26.04's dracut initramfs, seen on the serial console as "
+        '"Please enter passphrase for disk keystore-rpool: (press TAB for no echo)" '
+        "(systemd 259.5-0ubuntu3.4, dracut 110-11ubuntu0.1); the format of systemd v259 "
+        "src/cryptsetup/cryptsetup.c:928 and src/shared/ask-password-api.c:467 (which "
+        "component asks was not read)",
+    ),
+    Prompt(
         "askpass",
         re.compile(rb"Please unlock disk keystore-rpool: ?"),
         "cryptsetup 2:2.7.0-1ubuntu4.2, /lib/cryptsetup/functions:295 (CRYPTTAB_NAME is the "
@@ -64,7 +73,16 @@ UNLOCK_PROMPTS = (
 )
 LOGIN = Prompt("login", re.compile(rb"\S+ login: ?"), "agetty on the serial console")
 
-_ESCAPES = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\r")
+# CSI sequences in full (ECMA-48: parameters, intermediates, final byte, so
+# "\x1b[!p" and "\x1b[6n" too), OSC, DCS, APC and PM strings (systemd 259's
+# "\x1b]3008;" context markers, agetty's "\x1bP+q" queries), charset
+# selections and carriage returns: all seen on 26.04's serial console.
+_ESCAPES = re.compile(
+    rb"\x1b\[[0-?]*[ -/]*[@-~]"
+    rb"|\x1b[\]P_^][^\x07\x1b]*(?:\x07|\x1b\\)"
+    rb"|\x1b[()][A-Za-z0-9]"
+    rb"|\r"
+)
 
 
 def clean(raw: bytes) -> bytes:
