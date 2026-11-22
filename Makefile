@@ -79,7 +79,7 @@ check: ## Syntax-check all Python files (fast, no dependencies)
 	@# and predictable. Use a single Python process via xargs (-exec ... +)
 	@# instead of one process per file. The entry-point script `zark` has
 	@# no .py extension and is checked separately.
-	find lib commands tests pages -name '*.py' -print0 \
+	find lib commands tests pages bench -name '*.py' -print0 \
 		| xargs -0 $(PYTHON) -m py_compile
 	$(PYTHON) -m py_compile zark
 	@echo "  All files OK"
@@ -102,7 +102,7 @@ pylint: ## Run the pylint in PATH; fulltest uses the pinned one (tox -e lint)
 		echo "  pylint not installed. Install with: pip install pylint --break-system-packages"; \
 		exit 1; \
 	}
-	pylint lib commands tests zark pages
+	pylint lib commands tests zark pages bench
 
 ruff: ## Run the ruff in PATH (full ruleset); fulltest uses the pinned one (tox -e ruff)
 	@command -v ruff >/dev/null || { \
@@ -116,7 +116,7 @@ format-check: ## Check formatting with the ruff in PATH; fulltest uses the pinne
 		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
 	}
-	ruff format --check lib commands tests zark pages
+	ruff format --check lib commands tests zark pages bench
 
 format: ## Reformat and auto-fix the whole project with ruff (rewrites files)
 	@# Replaces the former black + isort + pyupgrade + add-trailing-comma
@@ -127,8 +127,8 @@ format: ## Reformat and auto-fix the whole project with ruff (rewrites files)
 		echo "  ruff not installed. Install with: pip install ruff --break-system-packages"; \
 		exit 1; \
 	}
-	ruff check --fix lib commands tests zark pages
-	ruff format lib commands tests zark pages
+	ruff check --fix lib commands tests zark pages bench
+	ruff format lib commands tests zark pages bench
 
 basedpyright: ## Run the basedpyright in PATH (strict); fulltest uses the pinned one (tox -e types)
 	@# Configured in pyproject.toml under [tool.pyright]: basedpyright's

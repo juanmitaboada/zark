@@ -351,6 +351,21 @@ from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E4
     FSnap,
 )
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
+from tests.test_bench import (  # pylint: disable=wrong-import-position # noqa: E402
+    TestBenchConsole,
+    TestBenchFirmware,
+    TestBenchInspect,
+    TestBenchIso,
+    TestBenchLayout,
+    TestBenchLeak,
+    TestBenchQemu,
+    TestBenchQmp,
+    TestBenchRemaster,
+    TestBenchReport,
+    TestBenchSecureBoot,
+    TestBenchSeed,
+    TestBenchWorkflow,
+)
 from tests.test_boot_ext4 import (  # pylint: disable=wrong-import-position # noqa: E402
     TestBootChainExt4,
     TestBootCopyDiverged,
@@ -428,6 +443,23 @@ from tests.test_status_files import (  # pylint: disable=wrong-import-position #
     TestStatusSchemas,
     TestTmpfiles,
     TestTransferProgress,
+)
+
+# The VM bench's tests (Q2) live in their own module, named here for the same reason.
+BENCH_SUITES = (
+    TestBenchConsole,
+    TestBenchFirmware,
+    TestBenchInspect,
+    TestBenchIso,
+    TestBenchLayout,
+    TestBenchLeak,
+    TestBenchQemu,
+    TestBenchQmp,
+    TestBenchRemaster,
+    TestBenchReport,
+    TestBenchSecureBoot,
+    TestBenchSeed,
+    TestBenchWorkflow,
 )
 
 # The certificates matrix's tests live in their own module, named here for the same reason.

@@ -1,0 +1,2 @@
+# <target name> <source device> <key file> <options>
+cryptoswap /dev/disk/by-partuuid/00000000-0000-4000-8000-000000000002 /dev/urandom swap,initramfs

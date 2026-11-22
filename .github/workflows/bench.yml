@@ -1,11 +1,14 @@
-# zark - the VM bench (Q2, docs/BENCH.md once merged).
+# zark - the VM bench (docs/BENCH.md).
 #
-# GitHub dispatches a workflow only when a file of its name is on the
-# default branch. Until the bench is merged, this file holds that place on
-# main and does nothing (dispatched once on main so that GitHub knows it);
-# the bench itself is dispatched on its branch:
-#   gh workflow run bench.yml --ref <branch> -f host=... -f mode=...
-# The inputs are the bench's, so the same command works before and after.
+# Installs Ubuntu 26.04 from the official desktop ISO with autoinstall onto a
+# blank virtual disk, encrypted ZFS as the installer lays it out, under OVMF
+# with Secure Boot enforced; boots it, answers the unlock prompt, and checks
+# Secure Boot and the layout. `probe` stops before the install and reads the
+# ISO instead. No secret is used: the passphrase is made by the run and never
+# leaves it; the artifacts are uploaded only after the leak check passed.
+#
+# By hand (workflow_dispatch) on any branch, and weekly on main. Not on push
+# or pull request: one run takes tens of minutes.
 
 name: Bench
 
@@ -26,18 +29,44 @@ on:
         description: An ISO name, e.g. ubuntu-26.04.1-desktop-amd64.iso (empty = newest)
         type: string
         default: ""
+  schedule:
+    # Mondays 03:17 UTC, off the hour (Q2-9a).
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
 
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   bench:
-    # Its one run on main ends skipped, not failed; on any other ref it says
-    # how to reach the bench.
-    if: github.ref != 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    name: bench (${{ matrix.host }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The schedule and "both" run on the two images; otherwise the one chosen.
+        host: ${{ fromJSON((github.event_name == 'schedule' || inputs.host == 'both') && '["ubuntu-24.04","ubuntu-26.04"]' || format('["{0}"]', inputs.host)) }}
+    runs-on: ${{ matrix.host }}
+    timeout-minutes: 120
     steps:
-      - name: The bench is not on this branch
-        run: |
-          echo "The VM bench is not on this branch yet: dispatch it with --ref <branch>."
-          exit 1
+      - uses: actions/checkout@v6
+
+      - name: Prepare the runner
+        run: bench/prepare-runner.sh
+
+      - name: Run the bench
+        env:
+          BENCH_MODE: ${{ inputs.mode || 'install' }}
+          BENCH_ISO: ${{ inputs.iso }}
+        run: python3 -m bench "$BENCH_MODE" --out out --work "$BENCH_WORK" --iso "$BENCH_ISO"
+
+      - name: Upload the artifacts (only after the leak check passed)
+        if: always() && hashFiles('out/LEAK-CHECK-PASSED') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: bench-${{ matrix.host }}-${{ inputs.mode || 'install' }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: error

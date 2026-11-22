@@ -1,0 +1,2 @@
+bpool	ONLINE
+rpool	ONLINE

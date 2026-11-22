@@ -1,0 +1,14 @@
+bpool	filesystem	/boot	-	-	none	none
+bpool/BOOT	filesystem	none	-	-	none	none
+bpool/BOOT/ubuntu_abc123	filesystem	/boot	-	-	none	none
+rpool	filesystem	/	rpool	available	file:///run/keystore/rpool/system.key	raw
+rpool/ROOT	filesystem	none	rpool	available	none	raw
+rpool/ROOT/ubuntu_abc123	filesystem	/	rpool	available	none	raw
+rpool/ROOT/ubuntu_abc123/var	filesystem	/var	rpool	available	none	raw
+rpool/ROOT/ubuntu_abc123/var/lib	filesystem	/var/lib	rpool	available	none	raw
+rpool/ROOT/ubuntu_abc123/var/log	filesystem	/var/log	rpool	available	none	raw
+rpool/USERDATA	filesystem	none	rpool	available	none	raw
+rpool/USERDATA/home_def456	filesystem	/home	rpool	available	none	raw
+rpool/USERDATA/root_def456	filesystem	/root	rpool	available	none	raw
+rpool/keystore	volume	-	-	-	none	none
+rpool/var	filesystem	/var	rpool	available	none	raw

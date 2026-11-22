@@ -1,0 +1,36 @@
+El Torito catalog  : 70  1
+El Torito cat path : /boot.catalog
+El Torito images   :   N  Pltf  B   Emul  Ld_seg  Hdpt  Ldsiz         LBA
+El Torito boot img :   1  UEFI  y   none  0x0000  0x00      0        1684
+El Torito img blks :   1  32768
+System area options: 0x00000201
+System area summary: MBR protective-msdos-label cyl-align-off GPT
+ISO image size/512 : 138472
+Partition offset   : 16
+MBR heads per cyl  : 64
+MBR secs per head  : 32
+MBR partition table:   N Status  Type        Start       Blocks
+MBR partition      :   1   0x00  0xee            1       138471
+MBR partition      :   2   0x80  0x00            0            1
+GPT                :   N  Info
+GPT disk GUID      :      00112233445566778899aabbccddeeff
+GPT entry array    :      2  248  separated
+GPT lba range      :      64  138408  138471
+GPT partition name :   1  490053004f003900360036003000
+GPT partname local :   1  ISO9660
+GPT partition GUID :   1  00112233445566778899aabbccddeeff
+GPT type GUID      :   1  00112233445566778899aabbccddeeff
+GPT partition flags:   1  0x1000000000000001
+GPT start and size :   1  64  6672
+GPT partition name :   2  00112233445566778899aabbccddeeff3200
+GPT partname local :   2  Appended2
+GPT partition GUID :   2  00112233445566778899aabbccddeeff
+GPT type GUID      :   2  00112233445566778899aabbccddeeff
+GPT partition flags:   2  0x0000000000000000
+GPT start and size :   2  6736  131072
+GPT partition name :   3  4700610070003100
+GPT partname local :   3  Gap1
+GPT partition GUID :   3  00112233445566778899aabbccddeeff
+GPT type GUID      :   3  00112233445566778899aabbccddeeff
+GPT partition flags:   3  0x1000000000000001
+GPT start and size :   3  137808  600

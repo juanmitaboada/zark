@@ -1,0 +1,3 @@
+bpool	size	2147483648	-
+rpool	size	40802189312	-
+rpool	feature@encryption	active	local

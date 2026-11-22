@@ -1,0 +1,55 @@
+{
+   "filesystems": [
+      {
+         "target": "/",
+         "source": "rpool/ROOT/ubuntu_abc123",
+         "fstype": "zfs",
+         "children": [
+            {
+               "target": "/proc",
+               "source": "proc",
+               "fstype": "proc"
+            },
+            {
+               "target": "/run",
+               "source": "tmpfs",
+               "fstype": "tmpfs",
+               "children": [
+                  {
+                     "target": "/run/keystore/rpool",
+                     "source": "/dev/mapper/keystore-rpool",
+                     "fstype": "ext4"
+                  }
+               ]
+            },
+            {
+               "target": "/boot",
+               "source": "bpool/BOOT/ubuntu_abc123",
+               "fstype": "zfs",
+               "children": [
+                  {
+                     "target": "/boot/efi",
+                     "source": "/dev/vda1",
+                     "fstype": "vfat"
+                  }
+               ]
+            },
+            {
+               "target": "/var/lib",
+               "source": "rpool/ROOT/ubuntu_abc123/var/lib",
+               "fstype": "zfs"
+            },
+            {
+               "target": "/root",
+               "source": "rpool/USERDATA/root_def456",
+               "fstype": "zfs"
+            },
+            {
+               "target": "/home",
+               "source": "rpool/USERDATA/home_def456",
+               "fstype": "zfs"
+            }
+         ]
+      }
+   ]
+}

@@ -1,0 +1,2 @@
+rpool	encryption	aes-256-gcm	-
+bpool/BOOT/ubuntu_abc123	mountpoint	/boot	local

@@ -1,0 +1,4 @@
+/dev/mapper/keystore-rpool is active and is in use.
+  type:    LUKS2
+  cipher:  aes-xts-plain64
+  device:  /dev/zd0

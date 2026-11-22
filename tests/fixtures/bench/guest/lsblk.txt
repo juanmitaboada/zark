@@ -1,0 +1,74 @@
+{
+   "blockdevices": [
+      {
+         "name": "vda",
+         "type": "disk",
+         "fstype": null,
+         "mountpoints": [
+            null
+         ],
+         "children": [
+            {
+               "name": "vda1",
+               "type": "part",
+               "fstype": "vfat",
+               "mountpoints": [
+                  "/boot/efi"
+               ]
+            },
+            {
+               "name": "vda2",
+               "type": "part",
+               "fstype": "crypto_LUKS",
+               "mountpoints": [
+                  null
+               ],
+               "children": [
+                  {
+                     "name": "cryptoswap",
+                     "type": "crypt",
+                     "fstype": "swap",
+                     "mountpoints": [
+                        "[SWAP]"
+                     ]
+                  }
+               ]
+            },
+            {
+               "name": "vda3",
+               "type": "part",
+               "fstype": "zfs_member",
+               "mountpoints": [
+                  null
+               ]
+            },
+            {
+               "name": "vda4",
+               "type": "part",
+               "fstype": "zfs_member",
+               "mountpoints": [
+                  null
+               ]
+            }
+         ]
+      },
+      {
+         "name": "zd0",
+         "type": "disk",
+         "fstype": "crypto_LUKS",
+         "mountpoints": [
+            null
+         ],
+         "children": [
+            {
+               "name": "keystore-rpool",
+               "type": "crypt",
+               "fstype": "ext4",
+               "mountpoints": [
+                  "/run/keystore/rpool"
+               ]
+            }
+         ]
+      }
+   ]
+}
