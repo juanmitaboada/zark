@@ -1,0 +1,43 @@
+# zark - the VM bench (Q2, docs/BENCH.md once merged).
+#
+# GitHub dispatches a workflow only when a file of its name is on the
+# default branch. Until the bench is merged, this file holds that place on
+# main and does nothing (dispatched once on main so that GitHub knows it);
+# the bench itself is dispatched on its branch:
+#   gh workflow run bench.yml --ref <branch> -f host=... -f mode=...
+# The inputs are the bench's, so the same command works before and after.
+
+name: Bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: Runner image
+        type: choice
+        options: [ubuntu-24.04, ubuntu-26.04, both]
+        default: ubuntu-24.04
+      mode:
+        description: install (the whole run) or probe (no install)
+        type: choice
+        options: [install, probe]
+        default: install
+      iso:
+        description: An ISO name, e.g. ubuntu-26.04.1-desktop-amd64.iso (empty = newest)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    # Its one run on main ends skipped, not failed; on any other ref it says
+    # how to reach the bench.
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: The bench is not on this branch
+        run: |
+          echo "The VM bench is not on this branch yet: dispatch it with --ref <branch>."
+          exit 1
