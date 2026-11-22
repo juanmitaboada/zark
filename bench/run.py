@@ -521,6 +521,17 @@ def guest(run: Run, command: str) -> bytes:
     return proc.stdout
 
 
+def guest_reading(run: Run, name: str, command: str) -> sbproof.Reading:
+    """A read-only command in the guest, as root, kept under its name whatever its exit."""
+    proc = run.sh(ssh_argv(run, f"sudo -n {command}"))
+    err = proc.stderr.decode("utf-8", "replace")
+    run.keep("guest", f"{name}.out").write_bytes(proc.stdout)
+    run.keep("guest", f"{name}.status").write_text(
+        f"{command}\nexit {proc.returncode}\n{err}", encoding="utf-8"
+    )
+    return sbproof.Reading(proc.returncode, proc.stdout, err)
+
+
 def check_layout(run: Run) -> None:
     """The installer's layout; every listing kept for Q3."""
     outputs: dict[str, str] = {}
@@ -533,8 +544,10 @@ def check_layout(run: Run) -> None:
 def prove_secure_boot(run: Run, m: qemu.Machine) -> None:
     """Secure Boot from the guest, the kernel's line and the host's command line."""
     assert run.fw is not None
-    mokutil = guest(run, "mokutil --sb-state").decode("utf-8", "replace")
-    efivar = guest(run, f"cat {sbproof.EFIVAR}")
+    mokutil = guest_reading(run, "mokutil-sb-state", "mokutil --sb-state")
+    efivar = guest_reading(run, "efivar-secureboot", f"cat {sbproof.EFIVAR}")
+    for name, command in sbproof.EFIVAR_CONTEXT.items():
+        guest_reading(run, name, command)
     kernel = guest(run, "journalctl -k -b --no-pager").decode("utf-8", "replace")
     run.keep("guest", "journal-kernel.txt").write_text(kernel, encoding="utf-8")
     argv = json.loads(run.keep("qemu-installed.argv.json").read_text(encoding="utf-8"))
@@ -549,9 +562,12 @@ def prove_secure_boot(run: Run, m: qemu.Machine) -> None:
 
 
 def collect(run: Run) -> None:
-    """The installer's logs, as the installed system keeps them."""
+    """The installer's logs and cloud-init's, as the installed system keeps them."""
     tar = guest(run, "tar -C /var/log -cf - installer")
     run.keep("guest", "var-log-installer.tar").write_bytes(tar)
+    # cloud-init's own logs name the datasource it used; either may be absent.
+    for name in ("cloud-init.log", "cloud-init-output.log"):
+        guest_reading(run, f"var-log-{name}", f"cat /var/log/{name}")
 
 
 def guest_leak_check(run: Run) -> None:
@@ -675,13 +691,14 @@ def _install_steps(
     ):
         return
     m = booted[0][1]
+    # All three only read the guest, so one failing does not stop the others:
+    # each run then reports every reading it could take.
     for name, fn in (
         ("secure-boot", lambda: prove_secure_boot(run, m)),
         ("layout", lambda: check_layout(run)),
         ("collect", lambda: collect(run)),
     ):
-        if not run.step(name, fn):
-            break
+        run.step(name, fn)
     if run.guest_up:
         run.step("guest-leak-check", lambda: guest_leak_check(run))
 

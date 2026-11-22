@@ -55,8 +55,8 @@ UNLOCK_PROMPTS = (
         re.compile(rb"Please enter passphrase for disk [^\n]*?keystore-rpool[^\n]*?: ?"),
         "26.04's dracut initramfs, seen on the serial console as "
         '"Please enter passphrase for disk keystore-rpool: (press TAB for no echo)" '
-        "(systemd 259.5-0ubuntu3.4, dracut 110-11ubuntu0.1); the format of systemd v259 "
-        "src/cryptsetup/cryptsetup.c:928 and src/shared/ask-password-api.c:467 (which "
+        "(systemd 259.5-0ubuntu3.4, dracut 110-11ubuntu0.1); the format of systemd v259.5 "
+        "src/cryptsetup/cryptsetup.c:929 and src/shared/ask-password-api.c:467 (which "
         "component asks was not read)",
     ),
     Prompt(

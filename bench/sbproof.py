@@ -19,15 +19,22 @@ host, and a negative control in the same job. Any one missing fails.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from bench.firmware import Firmware
 from bench.report import Check
 
 EFIVAR = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d0-aa0d-00e098032b8c"
 
-# The line the kernel logs when the firmware reports Secure Boot on. Its
-# exact wording on 26.04 is not verified yet: the first install's serial
-# log settles it.
+# Read alongside the variable, so a missing one says why: where efivarfs is
+# mounted, and which SecureBoot* names it lists.
+EFIVAR_CONTEXT = {
+    "efivarfs-mount": "findmnt -J -t efivarfs",
+    "efivars-secureboot": "sh -c 'ls -1 /sys/firmware/efi/efivars | grep -i secureboot'",
+}
+
+# The line the kernel logs when the firmware reports Secure Boot on, seen
+# with these words on 26.04's kernel 7.0.0-44 (run 45120463779).
 KERNEL_LINE = re.compile(r"secureboot: Secure boot enabled")
 
 # OVMF's BDS when the image fails verification, as noble's OVMF prints it
@@ -35,14 +42,34 @@ KERNEL_LINE = re.compile(r"secureboot: Secure boot enabled")
 DENIED = re.compile(r"failed to load Boot\w+.*Access Denied")
 
 
-def guest_checks(mokutil: str, efivar: bytes) -> list[Check]:
+@dataclass(frozen=True)
+class Reading:
+    """One command's result in the guest: a failed read is a reading too."""
+
+    rc: int
+    out: bytes
+    err: str = ""
+
+    def failure(self) -> str:
+        """Why the read failed, or "" when it did not."""
+        return f"exit {self.rc}: {self.err.strip()[-200:]}" if self.rc != 0 else ""
+
+
+def guest_checks(mokutil: Reading, efivar: Reading) -> list[Check]:
     """``mokutil --sb-state`` and the SecureBoot variable (4 attribute bytes, then 1)."""
+    text = mokutil.out.decode("utf-8", "replace")
+    data = efivar.out
     return [
-        Check("mokutil", "SecureBoot enabled" in mokutil, mokutil.strip() or "no output"),
+        Check(
+            "mokutil",
+            mokutil.rc == 0 and "SecureBoot enabled" in text,
+            mokutil.failure() or text.strip() or "no output",
+        ),
         Check(
             "efivar",
-            len(efivar) == 5 and efivar[4] == 1,
-            f"{len(efivar)} bytes, value {efivar[4] if len(efivar) == 5 else 'unreadable'}",
+            efivar.rc == 0 and len(data) == 5 and data[4] == 1,
+            efivar.failure()
+            or f"{len(data)} bytes, value {data[4] if len(data) == 5 else 'unreadable'}",
         ),
     ]
 

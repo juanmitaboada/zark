@@ -648,11 +648,24 @@ class TestBenchSecureBoot:  # pylint: disable=missing-function-docstring
     """Every reading must hold; each missing one fails on its own."""
 
     def test_guest_readings(self):
-        good = sbproof.guest_checks("SecureBoot enabled\n", b"\x06\x00\x00\x00\x01")
+        r = sbproof.Reading
+        good = sbproof.guest_checks(r(0, b"SecureBoot enabled\n"), r(0, b"\x06\x00\x00\x00\x01"))
         assert all_ok(good)
-        bad = sbproof.guest_checks("SecureBoot disabled\n", b"\x06\x00\x00\x00\x00")
+        bad = sbproof.guest_checks(r(0, b"SecureBoot disabled\n"), r(0, b"\x06\x00\x00\x00\x00"))
         assert [c.ok for c in bad] == [False, False]
-        assert "unreadable" in sbproof.guest_checks("", b"")[1].detail
+        assert "unreadable" in sbproof.guest_checks(r(0, b""), r(0, b""))[1].detail
+
+    def test_a_failed_read_says_why(self):
+        # Run 45134324398: mokutil read the variable, cat found no such file.
+        r = sbproof.Reading
+        missing = r(1, b"", "cat: /sys/firmware/efi/efivars/SecureBoot-8be4: No such file\n")
+        checks = sbproof.guest_checks(r(0, b"SecureBoot enabled\n"), missing)
+        assert [c.ok for c in checks] == [True, False]
+        assert checks[1].detail.startswith("exit 1: cat: ") and "No such file" in checks[1].detail
+        # A good-looking output does not count when the command failed.
+        assert not sbproof.guest_checks(r(2, b"SecureBoot enabled\n", "x"), missing)[0].ok
+        assert sbproof.Reading(0, b"").failure() == ""
+        assert set(sbproof.EFIVAR_CONTEXT) == {"efivarfs-mount", "efivars-secureboot"}
 
     def test_kernel_and_negative_lines(self):
         assert sbproof.kernel_check("[0.0] secureboot: Secure boot enabled\n").ok
