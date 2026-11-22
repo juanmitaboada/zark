@@ -302,11 +302,11 @@ def _text(path: Path) -> str:
 
 
 def _squashfs_list(run: Run, layer: Path) -> list[str]:
-    return inspect_iso.listed_paths(run.must(["unsquashfs", "-l", "-no-progress", str(layer)]))
+    return inspect_iso.listed_paths(run.must(inspect_iso.unsquashfs_list_cmd(layer)))
 
 
 def _extract(run: Run, image: Path, inner: str, dest: Path) -> None:
-    run.must(["unsquashfs", "-f", "-no-progress", "-d", str(dest), str(image), inner])
+    run.must(inspect_iso.unsquashfs_extract_cmd(image, inner, dest))
 
 
 def _layers(run: Run, iso_path: Path, chain: list[str]) -> dict[str, Path]:

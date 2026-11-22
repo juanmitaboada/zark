@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from pathlib import Path
 
 SNAP_PREFIX = "var/lib/snapd/seed/snaps/ubuntu-desktop-bootstrap_"
 SUBIQUITY_FILE = "subiquity/server/controllers/filesystem.py"
@@ -79,6 +80,21 @@ def default_chain(available: list[str]) -> list[str]:
         return []
     top = max(live, key=lambda a: (a.count("."), a))
     return layer_chain(top, available)
+
+
+def unsquashfs_list_cmd(image: Path) -> list[str]:
+    """unsquashfs listing an image's paths, read-only."""
+    return ["unsquashfs", "-l", "-no-progress", str(image)]
+
+
+def unsquashfs_extract_cmd(image: Path, inner: str, dest: Path) -> list[str]:
+    """
+    unsquashfs writing one path out of an image. ``-no-xattrs``: the live's
+    layers carry trusted.overlay.* attributes, which only root may write; as
+    the runner user unsquashfs then exits 2. The probe reads files, never
+    their attributes.
+    """
+    return ["unsquashfs", "-f", "-no-progress", "-no-xattrs", "-d", str(dest), str(image), inner]
 
 
 def listed_paths(unsquashfs_list: str) -> list[str]:

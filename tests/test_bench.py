@@ -722,6 +722,19 @@ class TestBenchInspect:  # pylint: disable=missing-function-docstring
         )
         assert not inspect_iso.wanted_from_snap("snap/meta")
 
+    def test_unsquashfs_writes_no_xattrs(self):
+        # The live's layers carry trusted.overlay.* attributes that only root
+        # may write: without -no-xattrs, unsquashfs exits 2 as the runner user.
+        cmd = inspect_iso.unsquashfs_extract_cmd(Path("/w/l.squashfs"), "etc/x", Path("/w/out"))
+        assert cmd[0] == "unsquashfs" and "-no-xattrs" in cmd
+        assert cmd[-3:] == ["/w/out", "/w/l.squashfs", "etc/x"]
+        assert inspect_iso.unsquashfs_list_cmd(Path("/w/l.squashfs")) == [
+            "unsquashfs",
+            "-l",
+            "-no-progress",
+            "/w/l.squashfs",
+        ]
+
     def test_the_blob_id_is_git_s(self):
         assert inspect_iso.git_blob_id(b"x") == "c1b0730e0133447badcfd47fd144e254807b06e1"
 
