@@ -73,7 +73,9 @@ class Qmp:
         try:
             self._sock.sendall((json.dumps(msg) + "\n").encode())
         except OSError as err:
-            raise QmpError(f"{command}: {err}") from err
+            # The same words as a read that finds the socket closed: which of
+            # the two sees QEMU gone first is a matter of timing.
+            raise QmpError(f"QMP socket closed sending {command}: {err}") from err
         while True:
             doc = self._read()
             if "event" in doc:

@@ -26,7 +26,6 @@ import socket
 import subprocess
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 from bench import console, firmware, inspect_iso, iso, layout, leak, qemu, remaster, sbproof, seed
@@ -349,6 +348,12 @@ class TestBenchQemu:  # pylint: disable=missing-function-docstring
 
 
 def _qmp_server(path: Path, answers: list[str]) -> threading.Thread:
+    """
+    A fake QEMU answering one line per command it reads. After its answers it
+    still reads one more command before it closes, so the client's last send
+    always reaches an open socket and the read that follows always finds it
+    closed: no step depends on which thread runs first.
+    """
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(path))
     srv.listen(1)
@@ -363,6 +368,8 @@ def _qmp_server(path: Path, answers: list[str]) -> threading.Thread:
                 break
             f.write(answer + "\n")
             f.flush()
+        f.readline()  # the command it will not answer
+        f.close()
         conn.close()
         srv.close()
 
@@ -399,9 +406,38 @@ class TestBenchQmp:  # pylint: disable=missing-function-docstring
             try:
                 q.execute("quit")
             except QmpError as err:
-                assert "closed" in str(err)
+                assert str(err) == "QMP socket closed", str(err)
+            else:
+                raise AssertionError("no error")
             q.close()
             thread.join(5)
+            assert not thread.is_alive()
+
+    def test_a_send_to_a_closed_peer_is_a_closed_socket(self):
+        ours, theirs = socket.socketpair()
+        theirs.sendall(b'{"QMP": {}}\n{"return": {}}\n')
+        q = Qmp(ours)
+        theirs.close()  # QEMU gone before the next command: the send fails
+        try:
+            q.execute("quit")
+        except QmpError as err:
+            assert str(err).startswith("QMP socket closed sending quit: "), str(err)
+        else:
+            raise AssertionError("no error")
+        q.close()
+
+    def test_a_reply_that_is_not_qmp(self):
+        for first in (b"[1]\n", b'{"greeting": 1}\n'):
+            ours, theirs = socket.socketpair()
+            theirs.sendall(first)
+            try:
+                Qmp(ours)
+            except QmpError:
+                pass
+            else:
+                raise AssertionError(first)
+            ours.close()
+            theirs.close()
 
     def test_a_missing_socket_times_out(self):
         try:
@@ -411,16 +447,32 @@ class TestBenchQmp:  # pylint: disable=missing-function-docstring
         raise AssertionError("no error")
 
 
-def _feed(chunks: list[bytes], gap_s: float = 0.02) -> tuple[socket.socket, socket.socket]:
-    ours, guest = socket.socketpair()
+class _Line:
+    """
+    The guest's side of a serial line, in a fixed order: each read returns the
+    next chunk, then nothing (None) once they are used up, or b"" (closed)
+    when asked to. The bench's sends go to a socket pair, read back after.
+    """
 
-    def write() -> None:
-        for chunk in chunks:
-            guest.sendall(chunk)
-            time.sleep(gap_s)
+    def __init__(self, chunks: list[bytes], closes: bool = False) -> None:
+        self.chunks = list(chunks)
+        self.closes = closes
+        self.ours, self.guest = socket.socketpair()
 
-    threading.Thread(target=write, daemon=True).start()
-    return ours, guest
+    def read(self, _wait_s: float) -> bytes | None:
+        """The next chunk; never waits."""
+        if self.chunks:
+            return self.chunks.pop(0)
+        return b"" if self.closes else None
+
+    def console(self, transcript: io.BytesIO | None = None) -> console.Console:
+        """A console reading this line."""
+        return console.Console(self.ours, transcript or io.BytesIO(), reader=self.read)
+
+    def sent(self) -> bytes:
+        """What the bench typed into the line."""
+        self.ours.close()
+        return self.guest.recv(1000)
 
 
 class TestBenchConsole:  # pylint: disable=missing-function-docstring
@@ -428,36 +480,36 @@ class TestBenchConsole:  # pylint: disable=missing-function-docstring
 
     def test_a_split_prompt_is_answered_once_then_login(self):
         boot = b"\x1b[2J\r\nBegin: Mounting\r\nPlease unl"
-        ours, guest = _feed([boot, b"ock disk keystore-rpool: ", b"\r\nbench login: "])
+        line = _Line([boot, b"ock disk keystore-rpool: ", b"\r\nbench login: "])
         transcript = io.BytesIO()
-        con = console.Console(ours, transcript)
+        con = line.console(transcript)
         assert console.unlock(con, "s3cret", 5, 5) == "askpass"
-        assert guest.recv(100) == b"s3cret\r"
+        assert line.sent() == b"s3cret\r"
         assert b"s3cret" not in transcript.getvalue()
         assert b"Please unl" in transcript.getvalue()
-        con.close()
 
     def test_a_second_prompt_fails(self):
         prompt = b"Please unlock disk keystore-rpool: "
-        ours, _ = _feed([prompt, b"\r\nNo key available\r\n" + prompt])
-        con = console.Console(ours, io.BytesIO())
+        line = _Line([prompt, b"\r\nNo key available\r\n" + prompt])
         try:
-            console.unlock(con, "x", 5, 5)
+            console.unlock(line.console(), "x", 5, 5)
         except console.ConsoleError as err:
             assert "refused" in str(err)
         else:
             raise AssertionError("no error")
+        assert line.sent() == b"x\r"
 
     def test_no_prompt_times_out_and_a_closed_console_fails(self):
-        ours, guest = _feed([b"nothing"])
-        con = console.Console(ours, io.BytesIO())
+        con = _Line([b"nothing"]).console()
         try:
-            con.expect(console.UNLOCK_PROMPTS, 0.3)
+            con.expect(console.UNLOCK_PROMPTS, 0.2)
         except console.ConsoleError as err:
             assert "within" in str(err)
-        guest.close()
+        else:
+            raise AssertionError("no error")
+        closed = _Line([b"nothing"], closes=True).console()
         try:
-            con.expect(console.UNLOCK_PROMPTS, 2)
+            closed.expect(console.UNLOCK_PROMPTS, 5)
         except console.ConsoleError as err:
             assert "closed" in str(err)
         else:
@@ -465,11 +517,25 @@ class TestBenchConsole:  # pylint: disable=missing-function-docstring
 
     def test_the_earliest_prompt_wins_and_escapes_are_ignored(self):
         text = b"Enter passphrase for /dev/zd0-keystore: \x1b[0m and later bench login: "
-        ours, _ = _feed([text])
-        con = console.Console(ours, io.BytesIO())
+        con = _Line([text]).console()
         assert con.expect((console.LOGIN, *console.UNLOCK_PROMPTS), 5).name == "cryptsetup"
         assert con.expect((console.LOGIN,), 5) is console.LOGIN
         assert console.clean(b"a\x1b[01;01Hb\r\n") == b"ab\n"
+
+    def test_the_socket_reader(self):
+        # Everything is in the socket before the reads: nothing to wait for.
+        ours, guest = socket.socketpair()
+        guest.sendall(b"x\r\nbench login: ")
+        con = console.Console(ours, io.BytesIO())
+        assert con.expect((console.LOGIN,), 5) is console.LOGIN
+        guest.close()
+        try:
+            con.expect((console.LOGIN,), 5)
+        except console.ConsoleError as err:
+            assert "closed" in str(err)
+        else:
+            raise AssertionError("no error")
+        con.close()
 
     def test_connect_to_a_socket_path(self):
         with tempfile.TemporaryDirectory() as td:

@@ -26,9 +26,14 @@ import re
 import select
 import socket
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+
+# Waits up to the given seconds for the guest's next bytes: None when none
+# came, b"" when the line closed.
+Reader = Callable[[float], bytes | None]
 
 
 class ConsoleError(Exception):
@@ -70,11 +75,23 @@ def clean(raw: bytes) -> bytes:
 class Console:
     """One serial console, read until a prompt shows."""
 
-    def __init__(self, sock: socket.socket, transcript: BinaryIO) -> None:
+    def __init__(
+        self,
+        sock: socket.socket,
+        transcript: BinaryIO,
+        reader: Reader | None = None,
+    ) -> None:
         self._sock = sock
         self._transcript = transcript
+        # A test gives its own reader, so the chunks arrive in a fixed order
+        # instead of however a thread and the scheduler interleave them.
+        self._read: Reader = reader or self._socket_read
         self._raw = b""
         self._pos = 0
+
+    def _socket_read(self, wait_s: float) -> bytes | None:
+        ready, _, _ = select.select([self._sock], [], [], wait_s)
+        return self._sock.recv(65536) if ready else None
 
     @classmethod
     def connect(cls, path: Path, transcript: BinaryIO, timeout_s: float = 30.0) -> Console:
@@ -109,14 +126,14 @@ class Console:
             if left <= 0:
                 names = ", ".join(p.name for p in prompts)
                 raise ConsoleError(f"no prompt ({names}) within {timeout_s:.0f} s")
-            ready, _, _ = select.select([self._sock], [], [], min(left, 1.0))
-            if ready:
-                chunk = self._sock.recv(65536)
-                if not chunk:
-                    raise ConsoleError("the serial console closed")
-                self._raw += chunk
-                self._transcript.write(chunk)
-                self._transcript.flush()
+            chunk = self._read(min(left, 1.0))
+            if chunk is None:
+                continue
+            if not chunk:
+                raise ConsoleError("the serial console closed")
+            self._raw += chunk
+            self._transcript.write(chunk)
+            self._transcript.flush()
 
     def send(self, data: bytes) -> None:
         """Type into the console; not written to the transcript."""
