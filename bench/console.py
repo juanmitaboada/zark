@@ -49,10 +49,24 @@ class Prompt:
     source: str
 
 
+# After an unlock prompt matches, the line must stay quiet this long before
+# the passphrase goes out. systemd writes its prompt, then turns echo off
+# (v259.5 src/shared/ask-password-api.c:549-568, no wait in between); the
+# host sees the prompt's last byte only after it crossed the tty and the
+# 115200-baud UART, so echo is off well before that byte arrives, and the
+# settle covers the guest's scheduling between the write and the tcsetattr
+# with room to spare. The host's leak check over out/ stays the safety net.
+UNLOCK_SETTLE_S = 2.0
+
 UNLOCK_PROMPTS = (
     Prompt(
         "systemd",
-        re.compile(rb"Please enter passphrase for disk [^\n]*?keystore-rpool[^\n]*?: ?"),
+        # The whole prompt, its "(press TAB for no echo) " included: a
+        # passphrase sent before it is echoed in clear (run 45215706030).
+        re.compile(
+            rb"Please enter passphrase for disk [^\n]*?keystore-rpool[^\n]*?: "
+            rb"\(press TAB for no echo\) "
+        ),
         "26.04's dracut initramfs, seen on the serial console as "
         '"Please enter passphrase for disk keystore-rpool: (press TAB for no echo)" '
         "(systemd 259.5-0ubuntu3.4, dracut 110-11ubuntu0.1); the format of systemd v259.5 "
@@ -153,6 +167,29 @@ class Console:
             self._transcript.write(chunk)
             self._transcript.flush()
 
+    def settle(self, quiet_s: float, limit_s: float) -> None:
+        """
+        Read until the line has been quiet for ``quiet_s``, so a prompt and
+        whatever its program does right after it are done; at most ``limit_s``.
+        """
+        deadline = time.monotonic() + limit_s
+        quiet_until = time.monotonic() + quiet_s
+        while True:
+            now = time.monotonic()
+            if now >= quiet_until:
+                return
+            if now >= deadline:
+                raise ConsoleError(f"the console did not settle within {limit_s:.0f} s")
+            chunk = self._read(min(quiet_until, deadline) - now)
+            if chunk is None:
+                continue
+            if not chunk:
+                raise ConsoleError("the serial console closed")
+            self._raw += chunk
+            self._transcript.write(chunk)
+            self._transcript.flush()
+            quiet_until = time.monotonic() + quiet_s
+
     def send(self, data: bytes) -> None:
         """Type into the console; not written to the transcript."""
         self._sock.sendall(data)
@@ -162,13 +199,20 @@ class Console:
         self._sock.close()
 
 
-def unlock(console: Console, passphrase: str, prompt_s: float, login_s: float) -> str:
+def unlock(
+    console: Console,
+    passphrase: str,
+    prompt_s: float,
+    login_s: float,
+    settle_s: float = UNLOCK_SETTLE_S,
+) -> str:
     """
-    Answer the boot's unlock prompt once and wait for the login prompt.
-    A second unlock prompt fails: a refused passphrase is never retried.
-    Returns the name of the prompt that was answered.
+    Answer the boot's unlock prompt once, after it and the line have
+    settled, and wait for the login prompt. A second unlock prompt fails: a
+    refused passphrase is never retried. Returns the prompt's name.
     """
     first = console.expect(UNLOCK_PROMPTS, prompt_s)
+    console.settle(settle_s, max(prompt_s, settle_s * 10))
     console.send(passphrase.encode() + b"\r")
     after = console.expect((*UNLOCK_PROMPTS, LOGIN), login_s)
     if after is not LOGIN:

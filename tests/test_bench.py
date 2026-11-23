@@ -759,12 +759,17 @@ class _Line:
         self.chunks = list(chunks)
         self.closes = closes
         self.ours, self.guest = socket.socketpair()
+        self.reads_left_at_send: list[int] = []
 
-    def read(self, _wait_s: float) -> bytes | None:
-        """The next chunk; never waits."""
+    def read(self, wait_s: float) -> bytes | None:
+        """The next chunk at once; with none left, a quiet line for a moment."""
         if self.chunks:
+            self.reads_left_at_send.append(len(self.chunks))
             return self.chunks.pop(0)
-        return b"" if self.closes else None
+        if self.closes:
+            return b""
+        time.sleep(min(wait_s, 0.02))  # a quiet line: time passes, nothing comes
+        return None
 
     def console(self, transcript: io.BytesIO | None = None) -> console.Console:
         """A console reading this line."""
@@ -784,7 +789,7 @@ class TestBenchConsole:  # pylint: disable=missing-function-docstring
         line = _Line([boot, b"ock disk keystore-rpool: ", b"\r\nbench login: "])
         transcript = io.BytesIO()
         con = line.console(transcript)
-        assert console.unlock(con, "s3cret", 5, 5) == "askpass"
+        assert console.unlock(con, "s3cret", 5, 5, settle_s=0.1) == "askpass"
         assert line.sent() == b"s3cret\r"
         assert b"s3cret" not in transcript.getvalue()
         assert b"Please unl" in transcript.getvalue()
@@ -793,7 +798,7 @@ class TestBenchConsole:  # pylint: disable=missing-function-docstring
         prompt = b"Please unlock disk keystore-rpool: "
         line = _Line([prompt, b"\r\nNo key available\r\n" + prompt])
         try:
-            console.unlock(line.console(), "x", 5, 5)
+            console.unlock(line.console(), "x", 5, 5, settle_s=0.1)
         except console.ConsoleError as err:
             assert "refused" in str(err)
         else:
@@ -837,14 +842,76 @@ class TestBenchConsole:  # pylint: disable=missing-function-docstring
             b"\x1b\\\x1b[0m\x1b[?7h\x1b[1G\x1b[0J\x1b[6n"
         )
         line = _Line([prompt, b"ess TAB for no echo) \x1b[0m", b"************\r\n", login])
-        assert console.unlock(line.console(), "s3cret", 5, 5) == "systemd"
+        assert console.unlock(line.console(), "s3cret", 5, 5, settle_s=0.1) == "systemd"
         assert line.sent() == b"s3cret\r"
         again = b"Please enter passphrase for disk keystore-rpool: (press TAB for no echo) "
         refused = _Line([again, b"***\r\n" + again])
         try:
-            console.unlock(refused.console(), "x", 5, 5)
+            console.unlock(refused.console(), "x", 5, 5, settle_s=0.1)
         except console.ConsoleError as err:
             assert "asked again (systemd)" in str(err)
+        else:
+            raise AssertionError("no error")
+
+    def test_the_passphrase_waits_for_the_whole_prompt_and_a_quiet_line(self):
+        # Run 45215706030: the passphrase went out on "keystore-rpool: ", before
+        # systemd had printed "(press TAB for no echo) " and turned echo off,
+        # and the tty echoed it in clear. Now nothing is sent until the whole
+        # prompt is in and the line has been quiet for the settle time.
+        parts = [
+            b"\x1b[0;1;39mPlease enter passphrase for disk keystore-rpool: ",
+            b"\x1b[0;90m(press TAB ",
+            b"for no echo) ",
+            b"\x1b[0m",
+        ]
+        line = _Line([*parts, b"bench login: "])
+        con = line.console()
+        sent_at: list[float] = []
+        send = con.send
+
+        def timed_send(data: bytes) -> None:
+            sent_at.append(time.monotonic())
+            line.reads_left_at_send.append(-1)  # marks the send among the reads
+            send(data)
+
+        con.send = timed_send  # type: ignore[method-assign]
+        began = time.monotonic()
+        assert console.unlock(con, "s3cret", 5, 5, settle_s=0.3) == "systemd"
+        # Every part of the prompt, its closing escape too, was read before the send.
+        marks = line.reads_left_at_send
+        assert marks.index(-1) >= len(parts), marks
+        assert sent_at[0] - began >= 0.3
+        assert line.sent() == b"s3cret\r"
+
+    def test_the_systemd_prompt_alone_is_not_enough(self):
+        # Without its "(press TAB for no echo) " the prompt is not taken as
+        # asked: echo may still be on.
+        con = _Line([b"Please enter passphrase for disk keystore-rpool: "]).console()
+        try:
+            con.expect(console.UNLOCK_PROMPTS, 0.2)
+        except console.ConsoleError as err:
+            assert "within" in str(err)
+        else:
+            raise AssertionError("no error")
+        assert console.UNLOCK_SETTLE_S >= 1.0
+
+    def test_settle_resets_on_new_bytes_and_has_a_limit(self):
+        line = _Line([b"a", b"b", b"c"])
+        con = line.console()
+        con.settle(0.1, 5)
+        assert not line.chunks  # every chunk was read before quiet
+        busy = console.Console(socket.socketpair()[0], io.BytesIO(), reader=lambda _w: b"x")
+        try:
+            busy.settle(0.1, 0.3)
+        except console.ConsoleError as err:
+            assert "did not settle within" in str(err)
+        else:
+            raise AssertionError("no error")
+        closed = _Line([], closes=True).console()
+        try:
+            closed.settle(0.1, 5)
+        except console.ConsoleError as err:
+            assert "closed" in str(err)
         else:
             raise AssertionError("no error")
 
