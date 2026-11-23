@@ -20,11 +20,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from bench.firmware import Firmware
+from bench.qemu import opt_path
 from bench.report import Check
 
-EFIVAR = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d0-aa0d-00e098032b8c"
+# EFI_GLOBAL_VARIABLE, 8be4df61-93ca-11d2-aa0d-00e098032b8c (systemd v259.5
+# src/fundamental/efi-fundamental.h:74-75; efivarfs lists it so on 26.04,
+# run 45182632398). The bench had 11d0 until then, and found no such file.
+EFIVAR = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
 
 # Read alongside the variable, so a missing one says why: where efivarfs is
 # mounted, and which SecureBoot* names it lists.
@@ -80,16 +85,28 @@ def kernel_check(serial: str) -> Check:
     return Check("kernel-line", m is not None, m.group(0) if m else "not in the serial log")
 
 
-def host_check(argv: list[str], fw: Firmware) -> Check:
-    """The installed boot's command line: the secure-boot code, SMM, a secure flash."""
-    joined = " ".join(argv)
+def host_check(argv: list[str], fw: Firmware, vars_file: Path) -> Check:
+    """
+    The installed boot's command line: the secure-boot code read-only, a
+    copy of its enrolled variables (never the template itself), SMM and a
+    flash only SMM may write. A pass names what it found.
+    """
     parts = {
-        "code": f"file={fw.code}" in joined,
-        "smm": "smm=on" in joined,
+        "code": f"if=pflash,format=raw,unit=0,readonly=on,file={opt_path(fw.code)}" in argv,
+        "vars copy": vars_file != fw.vars_template
+        and f"if=pflash,format=raw,unit=1,file={opt_path(vars_file)}" in argv,
+        "smm": any(a.startswith("q35,smm=on,") for a in argv),
         "secure flash": "driver=cfi.pflash01,property=secure,value=on" in argv,
     }
     missing = [k for k, v in parts.items() if not v]
-    return Check("host-argv", not missing, "missing: " + ", ".join(missing) if missing else "")
+    if missing:
+        return Check("host-argv", False, "missing: " + ", ".join(missing))
+    return Check(
+        "host-argv",
+        True,
+        f"code {fw.code} read-only; vars {vars_file}, a copy of {fw.vars_template}; "
+        "smm=on; secure flash",
+    )
 
 
 def negative_check(serial: str) -> Check:

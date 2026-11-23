@@ -615,7 +615,7 @@ def prove_secure_boot(run: Run, m: qemu.Machine) -> None:
         [
             *sbproof.guest_checks(mokutil, efivar),
             sbproof.kernel_check(_text(m.serial_log)),
-            sbproof.host_check(argv, run.fw),
+            sbproof.host_check(argv, run.fw, m.vars_file),
         ],
     )
 

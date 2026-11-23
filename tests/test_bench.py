@@ -977,15 +977,27 @@ class TestBenchSecureBoot:  # pylint: disable=missing-function-docstring
 
     def test_host_argv(self):
         m = _machine(Path("/w"))
+        fw = m.firmware
         argv = qemu.installed_argv(m, Path("/w/t"), 1)
-        fw = firmware.Firmware(Path("/w/code,x.fd"), Path("/w/v"), Path("/w/d"))
-        assert not sbproof.host_check(argv, fw).ok  # the comma is doubled in the option
-        fw_plain = firmware.Firmware(Path("/w/code.fd"), Path("/w/v"), Path("/w/d"))
-        m2 = qemu.Machine(fw_plain, m.vars_file, m.serial_socket, m.serial_log, m.qmp_socket)
-        argv2 = qemu.installed_argv(m2, Path("/w/t"), 1)
-        assert sbproof.host_check(argv2, fw_plain).ok
-        no_smm = [a.replace("smm=on", "smm=off") for a in argv2]
-        assert "smm" in sbproof.host_check(no_smm, fw_plain).detail
+        good = sbproof.host_check(argv, fw, m.vars_file)
+        assert good.ok, good.detail
+        assert good.detail.startswith(f"code {fw.code} read-only; vars {m.vars_file}, a copy of ")
+        # _machine's code path has a comma: matched as QEMU's option writes it
+        # (doubled). Another firmware's code is not this one.
+        assert ",," in " ".join(argv)
+        other = firmware.Firmware(Path("/w/code.fd"), fw.vars_template, fw.descriptor)
+        assert sbproof.host_check(argv, other, m.vars_file).detail == "missing: code"
+        no_smm = [a.replace("smm=on", "smm=off") for a in argv]
+        assert sbproof.host_check(no_smm, fw, m.vars_file).detail == "missing: smm"
+        # The template itself as the machine's NVRAM is not a copy.
+        m3 = qemu.Machine(fw, fw.vars_template, m.serial_socket, m.serial_log, m.qmp_socket)
+        argv3 = qemu.installed_argv(m3, Path("/w/t"), 1)
+        assert sbproof.host_check(argv3, fw, fw.vars_template).detail == "missing: vars copy"
+
+    def test_the_efivar_is_the_global_variable(self):
+        # Run 45182632398: efivarfs listed SecureBoot-8be4df61-93ca-11d2-...;
+        # the bench asked for ...-11d0-... and found no such file.
+        assert sbproof.EFIVAR.endswith("/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c")
 
 
 class TestBenchLeak:  # pylint: disable=missing-function-docstring
