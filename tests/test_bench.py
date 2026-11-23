@@ -1067,6 +1067,115 @@ class TestBenchSecureBoot:  # pylint: disable=missing-function-docstring
         assert sbproof.EFIVAR.endswith("/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c")
 
 
+class TestBenchFinish:  # pylint: disable=missing-function-docstring
+    """
+    finish() decides what may be uploaded: the marker is written only when
+    the host's search is clean and, once the guest was up, its own search
+    passed. Run in a temporary directory, with no VM.
+    """
+
+    SECRET = "s3cret-passphrase-for-the-test"
+
+    def _run(self, td: str) -> bench_run.Run:
+        root = Path(td)
+        run = bench_run.Run(mode="install", out=root / "out", work=root / "work")
+        run.out.mkdir()
+        run.work.mkdir()
+        run.secrets = [self.SECRET]
+        run.steps.append({"step": "install", "status": 0, "seconds": 1.0, "detail": ""})
+        return run
+
+    def _disk(self, td: str, data: bytes = b"\0" * 4096) -> Path:
+        disk = Path(td) / "target.qcow2"
+        disk.write_bytes(data)
+        return disk
+
+    def _guest(self, run: bench_run.Run, status: int, detail: str = "") -> None:
+        run.guest_seen = True
+        run.steps.append(
+            {"step": "guest-leak-check", "status": status, "seconds": 1.0, "detail": detail}
+        )
+
+    def _marker(self, run: bench_run.Run) -> bool:
+        return (run.out / "LEAK-CHECK-PASSED").exists()
+
+    def test_clean_with_the_guest_search_passed_writes_the_marker(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            self._guest(run, 0)
+            assert bench_run.finish(run, self._disk(td)) == 0
+            assert self._marker(run)
+            text = (run.out / "LEAK-CHECK-PASSED").read_text(encoding="utf-8")
+            assert "the guest's own search" in text
+
+    def test_clean_with_the_guest_never_up_writes_the_marker(self):
+        # Decision 3a: nothing of the guest's encrypted rpool reached out/.
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            bench_run.finish(run, self._disk(td))
+            assert self._marker(run)
+            assert "never came up" in (run.out / "LEAK-CHECK-PASSED").read_text(encoding="utf-8")
+
+    def test_a_hit_in_out_holds_the_upload(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            self._guest(run, 0)
+            (run.out / "serial.log").write_text(f"x {self.SECRET} y", encoding="utf-8")
+            assert bench_run.finish(run, self._disk(td)) == 1
+            assert not self._marker(run)
+
+    def test_a_hit_in_the_disk_image_holds_the_upload(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            self._guest(run, 0)
+            disk = self._disk(td, b"\0" * 100 + self.SECRET.encode() + b"\0" * 100)
+            assert bench_run.finish(run, disk) == 1
+            assert not self._marker(run)
+
+    def test_a_host_search_that_cannot_run_holds_the_upload(self):
+        # The disk image is a directory: reading it raises an OSError.
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            self._guest(run, 0)
+            disk = Path(td) / "target.qcow2"
+            disk.mkdir()
+            assert bench_run.finish(run, disk) == 1
+            assert not self._marker(run)
+
+    def test_a_guest_search_that_failed_or_found_a_hit_holds_the_upload(self):
+        for detail in ("guest: grep exited 2", "a secret in /var/log/x"):
+            with tempfile.TemporaryDirectory() as td:
+                run = self._run(td)
+                self._guest(run, 1, detail)
+                assert bench_run.finish(run, self._disk(td)) == 1
+                assert not self._marker(run), detail
+
+    def test_a_guest_search_cut_by_the_budget_holds_the_upload(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            run.guest_seen = True
+            run.out_of_time = True
+            run.step("guest-leak-check", lambda: None)  # recorded as not run
+            assert bench_run.finish(run, self._disk(td)) == 1
+            assert not self._marker(run)
+
+    def test_a_guest_up_with_no_search_recorded_holds_the_upload(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            run.guest_seen = True
+            assert bench_run.finish(run, self._disk(td)) == 1
+            assert not self._marker(run)
+
+    def test_the_verdict(self):
+        v = leak.upload_verdict
+        assert v(True, True, 0)[0] and v(True, False, None)[0]
+        assert not v(False, False, None)[0] and not v(False, True, 0)[0]
+        assert v(True, True, None) == (False, "the guest was up but its own search did not run")
+        assert v(True, True, 1) == (False, "the guest's own search found a secret or failed")
+        # A guest never up: its step's status does not matter (decision 3a).
+        assert v(True, False, 1)[0]
+
+
 class TestBenchLeak:  # pylint: disable=missing-function-docstring
     """The leak check finds a secret anywhere, never prints it."""
 

@@ -69,6 +69,28 @@ def scan_tree(root: Path, needles: list[bytes]) -> list[tuple[Path, int]]:
     return hits
 
 
+def upload_verdict(
+    host_clean: bool, guest_seen: bool, guest_status: int | None
+) -> tuple[bool, str]:
+    """
+    Whether out/ may be uploaded, and why. The host's search (out/ and the
+    disk image) must be clean. Once the guest was up over SSH, its own
+    search must also have run and passed (``guest_status`` 0): a hit, a
+    search that failed or one that never ran (the budget) all hold the
+    upload. Only a guest that never came up skips it: nothing of its
+    encrypted rpool reached out/ then (decision 3a).
+    """
+    if not host_clean:
+        return False, "the host's search found a secret in out/ or the disk image, or could not run"
+    if guest_seen and guest_status is None:
+        return False, "the guest was up but its own search did not run"
+    if guest_seen and guest_status != 0:
+        return False, "the guest's own search found a secret or failed"
+    if not guest_seen:
+        return True, "no secret found in out/ or the disk image; the guest never came up"
+    return True, "no secret found in out/, the disk image or the guest's own search"
+
+
 def needles_of(secrets: Iterable[str]) -> list[bytes]:
     """The secrets as UTF-8 bytes, empty ones dropped."""
     return [s.encode() for s in secrets if s]

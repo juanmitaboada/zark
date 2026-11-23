@@ -353,6 +353,7 @@ from tests.fake_zfs import (  # pylint: disable=wrong-import-position # noqa: E4
 from tests.mock_sh import MockShell, patch_sh  # pylint: disable=wrong-import-position # noqa: E402
 from tests.test_bench import (  # pylint: disable=wrong-import-position # noqa: E402
     TestBenchConsole,
+    TestBenchFinish,
     TestBenchFirmware,
     TestBenchInspect,
     TestBenchIso,
@@ -451,6 +452,7 @@ from tests.test_status_files import (  # pylint: disable=wrong-import-position #
 # The VM bench's tests (Q2) live in their own module, named here for the same reason.
 BENCH_SUITES = (
     TestBenchConsole,
+    TestBenchFinish,
     TestBenchFirmware,
     TestBenchInspect,
     TestBenchIso,

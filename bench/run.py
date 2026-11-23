@@ -15,8 +15,9 @@
 One bench run: the steps in order, each timed, the leak check last.
 
 This module starts virtual machines and talks to the network, so it holds
-order and timing only; every decision lives in a tested module. It is
-excluded from coverage by name (sonar-project.properties).
+order and timing; the decisions live in tested modules (whether out/ may be
+uploaded in bench/leak.py), and finish(), which needs no VM, has tests of
+its own. It is excluded from coverage by name (sonar-project.properties).
 """
 
 from __future__ import annotations
@@ -697,25 +698,31 @@ def finish(run: Run, disk: Path | None) -> int:
     # its disk image while the leak check reads it.
     for proc, qmp_socket in run.vms:
         stop(proc, qmp_socket)
-    clean = True
+    host_clean = True
     if run.mode == "install":
         log(guest_leak_note(run))
     try:
-        clean = host_leak_check(run, disk)
+        host_clean = host_leak_check(run, disk)
     except OSError as err:
         log(f"FAIL the leak check could not run: {err}")
-        clean = False
+        host_clean = False
     for path in (run.path("seed"), run.path("ssh")):
         shutil.rmtree(path, ignore_errors=True)
+    guest_step = next((s for s in run.steps if s["step"] == "guest-leak-check"), None)
+    may_upload, why = leak.upload_verdict(
+        host_clean,
+        run.guest_seen,
+        None if guest_step is None else int(str(guest_step["status"])),
+    )
     marker = run.out / "LEAK-CHECK-PASSED"
-    if clean:
-        marker.write_text("no secret found in out/ or the disk image\n", encoding="utf-8")
+    if may_upload:
+        marker.write_text(why + "\n", encoding="utf-8")
         # The upload's if: reads this marker; the job log says so too.
         log(f"   leak check passed: {marker.name} written, out/ may be uploaded")
     else:
-        log("the leak check failed: nothing is uploaded")
+        log(f"the leak check failed: nothing is uploaded ({why})")
     ok = (
-        clean
+        may_upload
         and not run.out_of_time
         and bool(run.steps)
         and all(s["status"] == 0 for s in run.steps)
