@@ -44,6 +44,12 @@ dpkg-query -W -f '${Package} ${Version}\n' \
     qemu-system-x86 ovmf xorriso squashfs-tools cloud-image-utils gpgv ubuntu-keyring \
     grub-efi-amd64-bin
 test -r /usr/share/keyrings/ubuntu-archive-keyring.gpg || { echo "STOP: no ubuntu-keyring"; exit 1; }
+if [ "${BENCH_MODE:-}" = full ]; then
+    # zark's own make deb, as ci.yml's package job builds it.
+    sudo apt-get install -y --no-install-recommends \
+        build-essential devscripts debhelper dh-python fakeroot lintian pandoc
+    dpkg-query -W -f '${Package} ${Version}\n' debhelper devscripts dh-python pandoc
+fi
 
 echo "== kvm"
 # GitHub's rule for hardware acceleration on its Linux runners (changelog
@@ -58,7 +64,8 @@ ls -l /dev/kvm
 
 echo "== work directory"
 # The mount with the most free space among /mnt and the runner's temp
-# directory: the ISO, its remaster and the target disk need ~25 GB.
+# directory: the ISO, its remaster and the target disk need ~25 GB, mode full
+# about 35 GB with the USB drive's and the new disk's images.
 best="" best_free=0
 for candidate in /mnt "${RUNNER_TEMP:-/tmp}"; do
     [ -d "$candidate" ] || continue

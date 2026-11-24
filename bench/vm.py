@@ -31,14 +31,15 @@ from types import FrameType
 
 from bench.qmp import Qmp, QmpError
 
-# The job's timeout-minutes (.github/workflows/bench.yml), split three ways.
-JOB_TIMEOUT_S = 120 * 60
+# The job's timeout-minutes (.github/workflows/bench.yml), split three ways:
+# mode full runs Q2's install and then steps 4 to 6 (about 55-105 min, Q3-8a).
+JOB_TIMEOUT_S = 240 * 60
 # Checkout and runner preparation, before ``python3 -m bench`` starts
 # (137 s in run 45134324398).
 PREPARE_RESERVE_S = 10 * 60
 # After the steps: the machine's power-off, the leak check over out/ and the
-# disk image, then the upload (about 30 s so far).
-FINISH_RESERVE_S = 10 * 60
+# disk images (three in mode full), then the upload (about 30 s for one image).
+FINISH_RESERVE_S = 15 * 60
 STEPS_BUDGET_S = JOB_TIMEOUT_S - PREPARE_RESERVE_S - FINISH_RESERVE_S
 
 

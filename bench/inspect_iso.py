@@ -27,6 +27,10 @@ SNAP_PREFIX = "var/lib/snapd/seed/snaps/ubuntu-desktop-bootstrap_"
 SUBIQUITY_FILE = "subiquity/server/controllers/filesystem.py"
 CLOUD_FILES = ("etc/cloud/cloud.cfg", "etc/cloud/cloud.cfg.d", "etc/cloud/ds-identify.cfg")
 DPKG_STATUS = "var/lib/dpkg/status"
+# The packages of the tools zark recover needs in the live (its
+# commands/recover.py:174-181 at 66cce62); recover installs a missing one
+# with apt-get install, without apt-get update (:184-190).
+RECOVER_PACKAGES = ("zfsutils-linux", "gdisk", "cryptsetup-bin", "dosfstools", "parted")
 # A snap keeps its metadata in meta/; snap/ holds hooks and the like.
 SNAP_YAML = "meta/snap.yaml"
 

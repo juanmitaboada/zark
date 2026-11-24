@@ -32,6 +32,8 @@ GRUB_CFG = "/boot/grub/grub.cfg"
 # kernel command line (subiquity 26.04, controllers/install.py:616-618).
 # ds=nocloud: cloud-init reads the CIDATA seed without probing for it.
 INSTALL_ARGS = ("autoinstall", "ds=nocloud", "console=tty0", "console=ttyS0,115200n8")
+# The live for recover: the seed and the serial console, no autoinstall.
+LIVE_ARGS = ("ds=nocloud", "console=tty0", "console=ttyS0,115200n8")
 DROPPED_ARGS = frozenset({"splash"})
 
 

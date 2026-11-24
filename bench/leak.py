@@ -21,7 +21,7 @@ reported, never the secret.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import BinaryIO
 
@@ -92,6 +92,76 @@ def upload_verdict(
     if not guest_seen:
         return True, "no secret found in out/ or the disk image; the guest never came up"
     return True, "no secret found in out/, the disk image or the guest's own search"
+
+
+def stages_verdict(
+    host_clean: bool, stages: Sequence[tuple[str, bool, int | None]]
+) -> tuple[bool, str]:
+    """
+    :func:`upload_verdict` over every guest of the run (``name``, up over SSH,
+    its own search's status): each guest that came up must have searched
+    itself and found nothing. One guest gives upload_verdict's own words.
+    """
+    if len(stages) == 1:
+        return upload_verdict(host_clean, stages[0][1], stages[0][2])
+    if not host_clean:
+        return upload_verdict(False, False, None)
+    for name, seen, status in stages:
+        ok, why = upload_verdict(True, seen, status)
+        if not ok:
+            return False, f"{name}: {why}"
+    up = [name for name, seen, _ in stages if seen]
+    if not up:
+        return True, "no secret found in out/ or the disk images; no guest came up"
+    return True, (
+        "no secret found in out/, the disk images or the own searches of the guests "
+        f"that came up ({', '.join(up)})"
+    )
+
+
+# The guests whose own search the upload waits for, and their steps' names.
+STAGES = (
+    ("installed", "guest-leak-check"),
+    ("live", "guest-leak-check-live"),
+    ("recovered", "guest-leak-check-recovered"),
+)
+
+
+def _stages_for(mode: str) -> tuple[tuple[str, str], ...]:
+    # Only mode full has a live and a recovered system.
+    return STAGES if mode == "full" else STAGES[:1]
+
+
+def _step(steps: list[dict[str, object]], name: str) -> dict[str, object] | None:
+    return next((s for s in steps if s["step"] == name), None)
+
+
+def stages_of(
+    mode: str, up: set[str], steps: list[dict[str, object]]
+) -> list[tuple[str, bool, int | None]]:
+    """Each guest of a run: its name, whether it came up over SSH, its search's status."""
+    found: list[tuple[str, bool, int | None]] = []
+    for name, step_name in _stages_for(mode):
+        step = _step(steps, step_name)
+        found.append((name, name in up, None if step is None else int(str(step["status"]))))
+    return found
+
+
+def stage_notes(mode: str, up: set[str], steps: list[dict[str, object]]) -> str:
+    """The job log's line per guest about its own search."""
+    notes = []
+    for name, step_name in _stages_for(mode):
+        who = f"guest ({name})" if mode == "full" else "guest"
+        step = _step(steps, step_name)
+        if name not in up:
+            notes.append(f"   leak check, {who}: not run, the guest never came up over SSH")
+        elif step is None:
+            notes.append(f"   leak check, {who}: not run, the guest was up")
+        elif step["status"] == 0:
+            notes.append(f"   leak check, {who}: no hit")
+        else:
+            notes.append(f"   leak check, {who}: {step['detail']}")
+    return "\n".join(notes)
 
 
 def drop_stale_marker(out: Path) -> bool:

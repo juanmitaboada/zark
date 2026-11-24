@@ -3,12 +3,15 @@
 # Installs Ubuntu 26.04 from the official desktop ISO with autoinstall onto a
 # blank virtual disk, encrypted ZFS as the installer lays it out, under OVMF
 # with Secure Boot enforced; boots it, answers the unlock prompt, and checks
-# Secure Boot and the layout. `probe` stops before the install and reads the
-# ISO instead. No secret is used: the passphrase is made by the run and never
-# leaves it; the artifacts are uploaded only after the leak check passed.
+# Secure Boot and the layout. `full` then installs zark's .deb built from the
+# commit, runs setup, prepare and backup on a virtual USB drive, recovers
+# from the live onto a new disk, boots the result and backs up again.
+# `probe` stops before the install and reads the ISO instead. No secret is
+# used: the passphrase is made by the run and never leaves it; the artifacts
+# are uploaded only after the leak check passed.
 #
-# By hand (workflow_dispatch) on any branch, and weekly on main. Not on push
-# or pull request: one run takes tens of minutes.
+# By hand (workflow_dispatch) on any branch, and weekly on main (mode full).
+# Not on push or pull request: one run takes tens of minutes.
 
 name: Bench
 
@@ -21,16 +24,16 @@ on:
         options: [ubuntu-24.04, ubuntu-26.04, both]
         default: ubuntu-24.04
       mode:
-        description: install (the whole run) or probe (no install)
+        description: install (Q2's run), full (install, then zark backup and recover), or probe (no install)
         type: choice
-        options: [install, probe]
+        options: [install, full, probe]
         default: install
       iso:
         description: An ISO name, e.g. ubuntu-26.04.1-desktop-amd64.iso (empty = newest)
         type: string
         default: ""
   schedule:
-    # Mondays 03:17 UTC, off the hour (Q2-9a).
+    # Mondays 03:17 UTC, off the hour (Q2-9a); mode full (Q3-9a).
     - cron: "17 3 * * 1"
 
 permissions:
@@ -43,22 +46,26 @@ concurrency:
 jobs:
   bench:
     name: bench (${{ matrix.host }})
+    # A fork that enables Actions does not inherit the weekly run.
+    if: github.repository == 'juanmitaboada/zark' || github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
         # The schedule and "both" run on the two images; otherwise the one chosen.
         host: ${{ fromJSON((github.event_name == 'schedule' || inputs.host == 'both') && '["ubuntu-24.04","ubuntu-26.04"]' || format('["{0}"]', inputs.host)) }}
     runs-on: ${{ matrix.host }}
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v6
 
       - name: Prepare the runner
+        env:
+          BENCH_MODE: ${{ inputs.mode || 'full' }}
         run: bench/prepare-runner.sh
 
       - name: Run the bench
         env:
-          BENCH_MODE: ${{ inputs.mode || 'install' }}
+          BENCH_MODE: ${{ inputs.mode || 'full' }}
           BENCH_ISO: ${{ inputs.iso }}
         run: python3 -m bench "$BENCH_MODE" --out out --work "$BENCH_WORK" --iso "$BENCH_ISO"
 
@@ -66,7 +73,7 @@ jobs:
         if: always() && hashFiles('out/LEAK-CHECK-PASSED') != ''
         uses: actions/upload-artifact@v6
         with:
-          name: bench-${{ matrix.host }}-${{ inputs.mode || 'install' }}
+          name: bench-${{ matrix.host }}-${{ inputs.mode || 'full' }}
           path: out/
           retention-days: 14
           if-no-files-found: error

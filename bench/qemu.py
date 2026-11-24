@@ -131,9 +131,72 @@ def install_argv(m: Machine, iso: Path, seed: Path, disk: Path, ssh_port: int) -
     ]
 
 
-def installed_argv(m: Machine, disk: Path, ssh_port: int) -> list[str]:
-    """The installed disk alone, as the machine it was installed on."""
-    return [*base_argv(m, "bench-installed"), *_target(disk, 1), *_user_net(ssh_port)]
+def installed_argv(m: Machine, disk: Path, ssh_port: int, extra: tuple[str, ...] = ()) -> list[str]:
+    """The installed disk alone, as the machine it was installed on (``extra``: a USB port)."""
+    return [*base_argv(m, "bench-installed"), *_target(disk, 1), *_user_net(ssh_port), *extra]
+
+
+# The backup drive: a qcow2 node QEMU keeps while the USB device comes and
+# goes, so it is plugged in by QMP after the guest is up, as a person plugs
+# a drive in, and can be pulled by name later (Q4).
+USB_NODE = "usbdisk"
+USB_DEVICE = "usbdrive"
+
+
+def usb_port(image: Path, node: str = USB_NODE) -> list[str]:
+    """An xHCI controller and the backup drive's image as a block node, no device yet."""
+    return [
+        "-device",
+        "qemu-xhci,id=xhci",
+        "-blockdev",
+        f"driver=qcow2,node-name={node},file.driver=file,file.filename={opt_path(image)}",
+    ]
+
+
+def usb_plug(serial: str, node: str = USB_NODE) -> dict[str, str]:
+    """QMP ``device_add``'s arguments: a USB disk with an invented serial on the node."""
+    return {
+        "driver": "usb-storage",
+        "bus": "xhci.0",
+        "drive": node,
+        "serial": serial,
+        "id": USB_DEVICE,
+    }
+
+
+def new_disk(image: Path, serial: str, bootindex: int | None) -> list[str]:
+    """The disk that replaces the dead one: blank for the live, recovered after it."""
+    boot = f",bootindex={bootindex}" if bootindex is not None else ""
+    return [
+        "-drive",
+        f"if=none,id=newdisk,format=qcow2,discard=unmap,file={opt_path(image)}",
+        "-device",
+        f"virtio-blk-pci,drive=newdisk,serial={serial}{boot}",
+    ]
+
+
+def live_argv(  # pylint: disable=too-many-arguments
+    m: Machine, iso: Path, seed: Path, disk: Path, serial: str, usb: Path, ssh_port: int
+) -> list[str]:
+    """The live ISO first, its seed beside it, the new disk and the USB port; no old disk."""
+    return [
+        *base_argv(m, "bench-live"),
+        *_cdrom("cd0", iso, "ide.0", 1),
+        *_cdrom("seed", seed, "ide.1", None),
+        *new_disk(disk, serial, 2),
+        *usb_port(usb),
+        *_user_net(ssh_port),
+    ]
+
+
+def recovered_argv(m: Machine, disk: Path, serial: str, usb: Path, ssh_port: int) -> list[str]:
+    """The recovered disk alone, with the USB port its next backup uses."""
+    return [
+        *base_argv(m, "bench-recovered"),
+        *new_disk(disk, serial, 1),
+        *usb_port(usb),
+        *_user_net(ssh_port),
+    ]
 
 
 def negative_argv(m: Machine, esp_image: Path) -> list[str]:

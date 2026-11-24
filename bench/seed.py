@@ -92,6 +92,34 @@ def autoinstall(passphrase: str, password_hash: str, public_key: str) -> dict[st
     }
 
 
+def live_user_data(public_key: str) -> dict[str, Any]:
+    """
+    The live session's cloud-config, with no ``autoinstall`` key: the bench
+    user with the run's public key and sudo, and the SSH server the 26.04
+    live does not carry (Q2's ISO read), installed from the archive.
+    """
+    return {
+        "users": [
+            {
+                "name": USERNAME,
+                "gecos": "zark bench",
+                "shell": "/bin/bash",
+                "sudo": "ALL=(ALL) NOPASSWD:ALL",
+                "lock_passwd": True,
+                "ssh_authorized_keys": [public_key],
+            }
+        ],
+        "ssh_pwauth": False,
+        "package_update": True,
+        "packages": ["openssh-server"],
+    }
+
+
+def render_cloud_config(doc: dict[str, Any]) -> str:
+    """cloud-init user-data from a cloud-config document."""
+    return "#cloud-config\n" + json.dumps(doc, indent=2) + "\n"
+
+
 def render_user_data(doc: dict[str, Any]) -> str:
     """cloud-init user-data carrying the autoinstall document."""
     return "#cloud-config\n" + json.dumps({"autoinstall": doc}, indent=2) + "\n"

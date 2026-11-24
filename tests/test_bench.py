@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# pylint: disable=too-many-lines
 """
 Tests of the VM bench (bench/): everything that needs no virtual machine,
 fed with text shaped like the real outputs and with local sockets.
@@ -21,6 +22,7 @@ finds them; run that file, not this one.
 
 import io
 import json
+import os
 import re
 import shutil
 import signal
@@ -34,6 +36,7 @@ from unittest import mock
 
 from bench import (
     console,
+    drive,
     firmware,
     inspect_iso,
     iso,
@@ -45,6 +48,7 @@ from bench import (
     sbproof,
     seed,
     vm,
+    zarkcheck,
 )
 from bench.qmp import Qmp, QmpError
 from bench.report import Check, all_ok, summary, write_checks
@@ -1483,3 +1487,531 @@ class TestBenchWorkflow:  # pylint: disable=missing-function-docstring
 
     def test_the_preparation_script_is_executable(self):
         assert (ROOT / "bench" / "prepare-runner.sh").stat().st_mode & 0o111
+
+    def test_the_schedules_fallbacks_and_the_forks(self):
+        # S6: on schedule `inputs` is empty, so every use of an input has its fallback.
+        text = self._WF.read_text(encoding="utf-8")
+        assert "github.event_name == 'schedule' || inputs.host == 'both'" in text
+        assert text.count("${{ inputs.mode || 'full' }}") == 3, "prepare, run and artifact name"
+        assert "inputs.mode || 'install'" not in text
+        assert (
+            'python3 -m bench "$BENCH_MODE" --out out --work "$BENCH_WORK" --iso "$BENCH_ISO"'
+            in (text)
+        )
+        assert "BENCH_ISO: ${{ inputs.iso }}" in text
+        # N8: a fork that enables Actions does not inherit the weekly run.
+        job = text[text.index("\njobs:") :]
+        assert (
+            "if: github.repository == 'juanmitaboada/zark' || github.event_name != 'schedule'"
+            in job.split("strategy:", 1)[0]
+        )
+
+    def test_mode_full_is_offered_and_prepared(self):
+        text = self._WF.read_text(encoding="utf-8")
+        assert "options: [install, full, probe]" in text and "default: install" in text
+        prep = text[text.index("- name: Prepare the runner") : text.index("- name: Run the bench")]
+        assert "BENCH_MODE: ${{ inputs.mode || 'full' }}" in prep
+        script = (ROOT / "bench" / "prepare-runner.sh").read_text(encoding="utf-8")
+        assert 'if [ "${BENCH_MODE:-}" = full ]; then' in script
+        for tool in ("devscripts", "debhelper", "dh-python", "pandoc"):
+            assert tool in script
+
+
+def _progress_doc(waiting_for: str | None, question: dict[str, object] | None = None) -> str:
+    return json.dumps(
+        {
+            "kind": "zark-progress",
+            "waiting_for_input": waiting_for is not None,
+            "waiting_for": waiting_for,
+            "question": question,
+        }
+    )
+
+
+def _q(kind: str, **fields: object) -> dict[str, object]:
+    return {
+        "kind": kind,
+        "default": fields.get("default"),
+        "options": fields.get("options"),
+        "word": fields.get("word"),
+        "timeout_s": None,
+        "destructive": False,
+    }
+
+
+class _Pty:
+    """A scripted pty for drive.Session: each read takes the next event."""
+
+    def __init__(self, events: list[bytes | None]):
+        self.events = list(events)
+        self.t = 100.0
+        self.written: list[bytes] = []
+
+    def clock(self) -> float:
+        """The script's time."""
+        return self.t
+
+    def read(self, timeout_s: float) -> bytes | None:
+        """The next event; a quiet read takes its whole timeout."""
+        if not self.events:
+            return b""
+        event = self.events.pop(0)
+        self.t += timeout_s if event is None else 0.01
+        return event
+
+    def write(self, data: bytes) -> None:
+        """What the session typed."""
+        self.written.append(data)
+
+
+QUIET = [None] * 12  # 3 s of a quiet line at 0.25 s a read
+
+
+class TestBenchDrive:  # pylint: disable=missing-function-docstring
+    """zark's reads answered from the command's table, through progress.json and the pty."""
+
+    def test_every_row_is_found_by_kind_and_text(self):
+        table = drive.TABLES["recover"]
+        assert (
+            drive.find_row(table, "Passphrase for backup", "passphrase").answer == drive.PASSPHRASE
+        )
+        row = drive.find_row(table, "Type YES to erase /dev/vda", "word")
+        assert row.answer == "YES"
+        for kind, text in (("yes_no", "Passphrase for backup"), ("choice", "Type IUNDERSTAND")):
+            try:
+                drive.find_row(table, text, kind)
+            except drive.Unexpected:
+                continue
+            raise AssertionError((kind, text))
+        # Every table's rows have a kind zark writes, and a prompt to wait for.
+        for rows in drive.TABLES.values():
+            for r in rows:
+                assert r.kind in drive.PROMPT_TAILS, r
+
+    def test_the_restore_point_is_the_default_only_when_it_is_step_4s(self):
+        point = "zark_2026-11-24_06:03:02Z"
+        good = "2026-11-24 06:03:03 UTC  backup point  (40/40 datasets)"
+        options = ["2026-11-24 05:50:00 UTC  backup point  (40/40 datasets)", good]
+        q = _q("choice", default=1, options=options)
+        expect = drive.Expect(point=point)
+        row, text = drive.decide(
+            drive.TABLES["recover"], "Restore point (newest is the default):", q, expect, []
+        )
+        assert row.answer == drive.POINT and text == drive.ENTER
+        for bad in (
+            "2026-11-24 06:03:03 UTC  backup point, INCOMPLETE  (39/40 datasets)",
+            "2026-11-24 06:03:03 UTC    carried: hourly  (40/40 datasets)",
+            "2026-11-24 07:03:03 UTC  backup point  (40/40 datasets)",
+        ):
+            q = _q("choice", default=1, options=[options[0], bad])
+            try:
+                drive.decide(drive.TABLES["recover"], "Restore point", q, expect, [])
+            except drive.Unexpected:
+                continue
+            raise AssertionError(bad)
+        assert not drive.point_option_ok(good, "not-a-point")
+
+    def test_the_disk_is_chosen_by_its_serial_and_only_then_erased(self):
+        table = drive.TABLES["recover"]
+        expect = drive.Expect(disk_serial="ZB0Q3NEW0001")
+        options = [
+            "/dev/vda  40G    serial ZB0Q3NEW0001  ",
+            "/dev/sdb  8G  Stick  serial ZB0Q3NEW00012  usb  ⚠ USB",
+        ]
+        q = _q("choice", default=0, options=options)
+        disk_row, text = drive.decide(
+            table, "Internal disk to ERASE and restore to:", q, expect, []
+        )
+        assert text == "1"
+        word = _q("word", word="YES")
+        try:
+            drive.decide(table, "Type YES to erase /dev/vda", word, expect, [])
+        except drive.Unexpected as err:
+            assert "before the disk" in str(err)
+        else:
+            raise AssertionError("YES before the disk")
+        assert (
+            drive.decide(table, "Type YES to erase /dev/vda", word, expect, [disk_row])[1] == "YES"
+        )
+        for wrong in ([options[1]], [options[0], options[0]], []):
+            try:
+                drive.decide(
+                    table, "Internal disk", _q("choice", default=0, options=wrong), expect, []
+                )
+            except drive.Unexpected:
+                continue
+            raise AssertionError(wrong)
+        try:
+            drive.decide(
+                table, "Type YES to erase /dev/vda", _q("word", word="ERASE"), expect, [disk_row]
+            )
+        except drive.Unexpected as err:
+            assert "ERASE" in str(err)
+        else:
+            raise AssertionError("another word")
+
+    def test_a_row_is_answered_once_but_a_wait_may_come_back(self):
+        table = drive.TABLES["backup"]
+        row, text = drive.decide(
+            table, "Passphrase for backup", _q("passphrase"), drive.Expect(), []
+        )
+        assert text == drive.PASSPHRASE
+        try:
+            drive.decide(table, "Passphrase for backup", _q("passphrase"), drive.Expect(), [row])
+        except drive.Unexpected as err:
+            assert "asked again" in str(err)
+        else:
+            raise AssertionError("asked twice")
+        wait, _ = drive.decide(
+            table, "Skip the read-back of backup now?", _q("wait"), drive.Expect(), []
+        )
+        again, _ = drive.decide(
+            table, "Skip the read-back of backup now?", _q("wait"), drive.Expect(), [wait]
+        )
+        assert again is wait
+        assert drive.missing(table, [row]) == ["Eject drive 'backup' now?"]
+
+    def test_progress_json_is_read_only_while_zark_waits(self):
+        assert drive.parse_progress(_progress_doc("Q?", _q("yes_no"))) == ("Q?", _q("yes_no"))
+        assert drive.parse_progress(_progress_doc(None)) is None
+        assert drive.parse_progress("") is None and drive.parse_progress("[1]") is None
+        assert (
+            drive.parse_progress(json.dumps({"waiting_for_input": True, "question": None})) is None
+        )
+
+    def test_a_session_answers_each_read_when_its_prompt_is_on_the_screen(self):
+        table = (
+            drive.Row("yes_no", "Go on?", "y", required=True),
+            drive.Row("passphrase", "Passphrase for backup", drive.PASSPHRASE, required=True),
+        )
+        pty = _Pty(
+            [
+                b"\x1b[1;33m?\x1b[0m Go on?\r\n    [y/N]: ",
+                *QUIET,
+                b"y\r\n",
+                b"\xf0\x9f\x94\x91 Passphrase for backup\r\n",
+                b"    Passphrase: ",
+                *QUIET,
+                b"\r\n",
+                b"BACKUP COMPLETED\r\n",
+            ]
+        )
+        docs = [
+            _progress_doc("Go on?", _q("yes_no", default=False)),
+            _progress_doc("Passphrase for backup", _q("passphrase")),
+        ]
+        transcript = io.BytesIO()
+        session = drive.Session(
+            table,
+            drive.Expect(),
+            pty.read,
+            pty.write,
+            lambda: docs[len(pty.written)],
+            "s3cret",
+            transcript,
+            clock=pty.clock,
+        )
+        out = session.run(600)
+        assert pty.written == [b"y\n", b"s3cret\n"]
+        assert [a["answer"] for a in out.asked] == ["y", drive.PASSPHRASE]
+        assert b"s3cret" not in transcript.getvalue() and not out.unexpected
+        check = drive.verdict("setup", 0, b"SETUP COMPLETE", drive.Outcome())
+        assert check.ok, check
+
+    def test_a_stale_progress_file_is_not_answered(self):
+        # The screen shows the passphrase prompt; progress.json still shows the yes/no before it.
+        table = (drive.Row("passphrase", "Passphrase for backup", drive.PASSPHRASE),)
+        polls = [_progress_doc("Go on?", _q("yes_no"))] * 2 + [
+            _progress_doc("Passphrase for backup", _q("passphrase"))
+        ]
+        pty = _Pty([b"    Passphrase: ", *QUIET, *QUIET])
+        session = drive.Session(
+            table,
+            drive.Expect(),
+            pty.read,
+            pty.write,
+            lambda: polls.pop(0) if len(polls) > 1 else polls[0],
+            "pw",
+            io.BytesIO(),
+            clock=pty.clock,
+        )
+        session.run(600)
+        assert pty.written == [b"pw\n"]
+
+    def test_nothing_is_typed_before_the_line_is_quiet(self):
+        pty = _Pty([b"    Passphrase: ", None, None, b"more\r\n", None, None])
+        table = (drive.Row("passphrase", "Passphrase for backup", drive.PASSPHRASE),)
+        session = drive.Session(
+            table,
+            drive.Expect(),
+            pty.read,
+            pty.write,
+            lambda: _progress_doc("Passphrase for backup", _q("passphrase")),
+            "pw",
+            io.BytesIO(),
+            clock=pty.clock,
+        )
+        session.run(600)
+        assert not pty.written
+
+    def test_an_unexpected_read_ends_the_command_with_eof(self):
+        pty = _Pty([b"  Type IUNDERSTAND to continue anyway: ", *QUIET, b"\r\n", None, None])
+        session = drive.Session(
+            drive.TABLES["recover"],
+            drive.Expect(),
+            pty.read,
+            pty.write,
+            lambda: _progress_doc(
+                "Type IUNDERSTAND to continue anyway:", _q("word", word="IUNDERSTAND")
+            ),
+            "pw",
+            io.BytesIO(),
+            clock=pty.clock,
+        )
+        out = session.run(600)
+        assert pty.written == [b"\x04"] and "IUNDERSTAND" in out.unexpected
+        assert out.asked[-1]["answer"] == "EOF"
+        check = drive.verdict("recover", 1, b"", out)
+        assert not check.ok and "unexpected read" in check.detail and "never asked" in check.detail
+
+    def test_a_command_that_never_ends_is_cut(self):
+        pty = _Pty([None] * 100)
+        out = drive.Session(
+            (), drive.Expect(), pty.read, pty.write, lambda: "", "pw", io.BytesIO(), clock=pty.clock
+        ).run(5)
+        assert out.timed_out
+        assert "did not end in time" in drive.verdict("finish", 0, b"FINISH COMPLETE", out).detail
+
+    def test_the_verdict_reads_the_banners(self):
+        none = drive.Outcome()
+        assert drive.verdict("finish", 0, b"\x1b[32m FINISH COMPLETE \x1b[0m", none).ok
+        assert not drive.verdict("finish", 0, b"FINISH INCOMPLETE", none).ok
+        bad = drive.verdict("recover", 0, b"RECOVERY COMPLETED WITH ERRORS", none)
+        assert not bad.ok and "WITH ERRORS" in bad.detail
+        assert "exit 2" in drive.verdict("finish", 2, b"FINISH COMPLETE", none).detail
+        assert "no FINISH COMPLETE" in drive.verdict("finish", 0, b"", none).detail
+
+    def test_the_pty_reader_and_writer(self):
+        r, w = os.pipe()
+        os.set_blocking(r, False)
+        read = drive.pty_reader(r)
+        assert read(0.01) is None
+        os.write(w, b"abc")
+        assert read(1.0) == b"abc"
+        os.close(w)
+        assert read(1.0) == b""
+        os.close(r)
+        with tempfile.TemporaryFile() as f:
+            drive.pipe_writer(f)(b"xyz")
+            f.seek(0)
+            assert f.read() == b"xyz"
+        assert drive.tail_line(b"a\r\nb\x1b[0m: ") == "b: "
+        assert drive.on_prompt(b"x\n    Select [1-2, default=1]: ")
+        assert not drive.on_prompt(b"copying 3 of 7\n")
+
+
+class TestBenchZarkCheck:  # pylint: disable=missing-function-docstring
+    """What steps 4 to 6 read back, as verdicts."""
+
+    def test_the_backup_drive_is_found_by_its_serial(self):
+        names = [
+            "usb-QEMU_QEMU_HARDDISK_ZB0Q3USB0001-0:0",
+            "usb-QEMU_QEMU_HARDDISK_ZB0Q3USB0001-0:0-part1",
+            "virtio-ZB0Q3NEW0001",
+        ]
+        assert zarkcheck.by_id_name(names, "ZB0Q3USB0001") == names[0]
+        for wrong in (names[1:], [names[0], "usb-OTHER_ZB0Q3USB0001-0:0"]):
+            try:
+                zarkcheck.by_id_name(wrong, "ZB0Q3USB0001")
+            except zarkcheck.ReadBackError:
+                continue
+            raise AssertionError(wrong)
+
+    def test_the_plan_line_and_the_anchors_kept(self):
+        text = "x\nPlan: 3 at point, 1 new\nPlan: 30 incremental, 2 via bookmark, 1 excluded\n"
+        states = zarkcheck.plan_states(text)
+        assert states == {"incremental": 30, "via bookmark": 2, "excluded": 1}
+        assert zarkcheck.anchors_kept(states).ok
+        for lost in ("1 new", "2 rollback", "1 diverged"):
+            assert not zarkcheck.anchors_kept(
+                zarkcheck.plan_states(f"Plan: 3 incremental, {lost}")
+            ).ok
+        for bad in ("nothing", "Plan: three"):
+            try:
+                zarkcheck.plan_states(bad)
+            except zarkcheck.ReadBackError:
+                continue
+            raise AssertionError(bad)
+
+    def test_recovers_anchors_against_the_restored_system(self):
+        text = "✓ 3 rpool dataset(s) anchored for backup ✓\n"
+        assert zarkcheck.anchored_by_recover(text) == (3, [])
+        assert zarkcheck.anchored_by_recover(
+            "  rpool/ROOT/ubuntu_ab/var: not anchored for backup: "
+            "its next backup of it resends it in full"
+        ) == (0, ["rpool/ROOT/ubuntu_ab/var"])
+        guid = "1234"
+        stamp = "2026-11-24_06:03:02Z"
+        marks = [
+            f"rpool/ROOT/ubuntu_ab#zark_{guid}_{stamp}",
+            f"rpool/USERDATA/home_cd#zark_{guid}_{stamp}",
+            f"rpool/USERDATA/root_cd#zark_{guid}_2026-11-24_06:03:03Z",
+            "rpool/x#zark_999_" + stamp,
+        ]
+        boot = [f"bpool/BOOT/ubuntu_ab@zark_{guid}_{stamp}"]
+        assert zarkcheck.anchors_check(marks, boot, guid, 3).ok
+        assert not zarkcheck.anchors_check(marks, boot, guid, 4).ok
+        assert not zarkcheck.anchors_check(marks, [], guid, 3).ok
+        assert not zarkcheck.anchors_check(marks + marks[:1], boot, guid, 4).ok  # one dataset twice
+        assert not zarkcheck.anchors_check([], boot, guid, 0).ok
+
+    def test_the_status_file(self):
+        doc = {
+            "drives": [
+                {"name": "other"},
+                {
+                    "name": "backup",
+                    "guid": "1",
+                    "last_backup_point": "zark_2026-11-24_06:03:02Z",
+                    "last_run": {"result": "completed"},
+                },
+            ]
+        }
+        entry = zarkcheck.status_drive(json.dumps(doc), "backup")
+        assert zarkcheck.last_run_check(entry, "r").ok
+        assert zarkcheck.last_run_check(entry, "r", after="zark_2026-11-24_06:00:00Z").ok
+        assert not zarkcheck.last_run_check(entry, "r", after="zark_2026-11-24_06:03:02Z").ok
+        entry["last_run"] = {"result": "not_verified"}
+        assert not zarkcheck.last_run_check(entry, "r").ok
+        for bad in ("{", json.dumps({"drives": []}), json.dumps([1])):
+            try:
+                zarkcheck.status_drive(bad, "backup")
+            except zarkcheck.ReadBackError:
+                continue
+            raise AssertionError(bad)
+        assert zarkcheck.same_digest("m", "ab", "ab").ok
+        assert (
+            not zarkcheck.same_digest("m", "", "").ok
+            and not zarkcheck.same_digest("m", "ab", "cd").ok
+        )
+
+
+class TestBenchFullShapes:  # pylint: disable=missing-function-docstring
+    """Mode full's machines, seed and live media, and its three guests' searches."""
+
+    def test_the_usb_drive_is_a_node_plugged_in_later(self):
+        port = qemu.usb_port(Path("/w/back,up.qcow2"))
+        assert port[:2] == ["-device", "qemu-xhci,id=xhci"]
+        assert port[3] == (
+            "driver=qcow2,node-name=usbdisk,file.driver=file,file.filename=/w/back,,up.qcow2"
+        )
+        assert qemu.usb_plug("ZB0Q3USB0001") == {
+            "driver": "usb-storage",
+            "bus": "xhci.0",
+            "drive": "usbdisk",
+            "serial": "ZB0Q3USB0001",
+            "id": "usbdrive",
+        }
+        installed = qemu.installed_argv(_machine(Path("/w")), Path("/w/t"), 1, tuple(port))
+        assert installed[-4:] == port and "usb-storage" not in " ".join(installed)
+
+    def test_the_live_and_the_recovered_machines(self):
+        m = _machine(Path("/w"))
+        live = " ".join(
+            qemu.live_argv(
+                m, Path("/w/l.iso"), Path("/w/s.img"), Path("/w/n.qcow2"), "SN", Path("/w/b"), 5
+            )
+        )
+        assert "ide-cd,drive=cd0,bus=ide.0,bootindex=1" in live
+        assert "virtio-blk-pci,drive=newdisk,serial=SN,bootindex=2" in live
+        assert "drive=target" not in live and "qemu-xhci" in live
+        rec = " ".join(qemu.recovered_argv(m, Path("/w/n.qcow2"), "SN", Path("/w/b"), 5))
+        assert "virtio-blk-pci,drive=newdisk,serial=SN,bootindex=1" in rec and "ide-cd" not in rec
+        assert "hostfwd=tcp:127.0.0.1:5-:22" in rec
+
+    def test_the_live_gets_ssh_and_never_autoinstall(self):
+        doc = seed.live_user_data("ssh-ed25519 AAAA bench")
+        text = seed.render_cloud_config(doc)
+        first, rest = text.split("\n", 1)
+        assert first == "#cloud-config" and json.loads(rest) == doc
+        assert "autoinstall" not in text
+        user = doc["users"][0]
+        assert user["name"] == seed.USERNAME and user["lock_passwd"] is True
+        assert user["ssh_authorized_keys"] == ["ssh-ed25519 AAAA bench"]
+        assert doc["packages"] == ["openssh-server"] and doc["package_update"] is True
+        out = remaster.edit_grub_cfg(GRUB_CFG, remaster.LIVE_ARGS)
+        args = remaster.first_linux_args(out)
+        assert (
+            "autoinstall" not in args and "ds=nocloud" in args and "console=ttyS0,115200n8" in args
+        )
+        assert "zfsutils-linux" in inspect_iso.RECOVER_PACKAGES
+
+    def test_each_guest_that_came_up_must_have_searched_itself(self):
+        v = leak.stages_verdict
+        assert v(True, [("installed", True, 0)]) == leak.upload_verdict(True, True, 0)
+        three = [("installed", True, 0), ("live", True, 0), ("recovered", True, 0)]
+        ok, why = v(True, three)
+        assert ok and "(installed, live, recovered)" in why
+        assert not v(False, three)[0]
+        ok, why = v(True, [three[0], ("live", True, None), ("recovered", False, None)])
+        assert not ok and why.startswith("live: ")
+        ok, why = v(True, [three[0], ("live", True, 1), ("recovered", False, None)])
+        assert not ok and why == "live: the guest's own search found a secret or failed"
+        assert v(True, [("installed", False, None), ("live", False, None)])[0]
+        steps = [
+            {"step": "guest-leak-check", "status": 0, "detail": ""},
+            {"step": "guest-leak-check-live", "status": 1, "detail": "a secret in /tmp"},
+        ]
+        assert leak.stages_of("install", {"installed"}, steps) == [("installed", True, 0)]
+        assert leak.stages_of("full", {"installed", "live"}, steps) == [
+            ("installed", True, 0),
+            ("live", True, 1),
+            ("recovered", False, None),
+        ]
+        notes = leak.stage_notes("full", {"installed", "live"}, steps).splitlines()
+        assert notes == [
+            "   leak check, guest (installed): no hit",
+            "   leak check, guest (live): a secret in /tmp",
+            "   leak check, guest (recovered): not run, the guest never came up over SSH",
+        ]
+
+    def _full(self, td: str) -> bench_run.Run:
+        root = Path(td)
+        run = bench_run.Run(mode="full", out=root / "out", work=root / "work")
+        run.out.mkdir()
+        run.work.mkdir()
+        run.secrets = ["s3cret-passphrase-for-the-test"]
+        run.guest_seen = True
+        run.steps.append({"step": "guest-leak-check", "status": 0, "seconds": 1.0, "detail": ""})
+        return run
+
+    def test_finish_in_mode_full_waits_for_every_guest(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._full(td)
+            run.seen_stages = {"live"}
+            assert bench_run.finish(run, None) == 1
+            assert not (run.out / leak.MARKER).exists()
+        with tempfile.TemporaryDirectory() as td:
+            run = self._full(td)
+            run.seen_stages = {"live", "recovered"}
+            for name in ("guest-leak-check-live", "guest-leak-check-recovered"):
+                run.steps.append({"step": name, "status": 0, "seconds": 1.0, "detail": ""})
+            assert bench_run.finish(run, None) == 0
+            assert "live, recovered" in (run.out / leak.MARKER).read_text(encoding="utf-8")
+
+    def test_rpools_key_in_any_image_holds_the_upload(self):
+        key = bytes(range(32))  # holds a newline byte: never a text pattern
+        with tempfile.TemporaryDirectory() as td:
+            run = self._full(td)
+            run.byte_secrets = [key]
+            backup = Path(td) / "backup.qcow2"
+            backup.write_bytes(b"\0" * 1000 + key + b"\0" * 1000)
+            run.images = [backup]
+            assert bench_run.finish(run, Path(td) / "absent.qcow2") == 1
+            assert not (run.out / leak.MARKER).exists()
+        with tempfile.TemporaryDirectory() as td:
+            run = self._full(td)
+            run.byte_secrets = [key]
+            (run.out / "zark").mkdir()
+            (run.out / "zark" / "x.transcript").write_bytes(b"a" + key + b"b")
+            assert bench_run.finish(run, None) == 1
