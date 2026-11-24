@@ -92,13 +92,44 @@ def autoinstall(passphrase: str, password_hash: str, public_key: str) -> dict[st
     }
 
 
+# Where the live's cloud-init output and the SSH install's output go: the
+# serial console, so a live that never answers SSH still shows why.
+LIVE_LOG = "/var/log/zark-bench-live.log"
+SERIAL = "/dev/ttyS0"
+# The 26.04 live's cloud.cfg runs no package-update-upgrade-install module
+# (bench/inspect_iso.py reads it), so ``packages:`` would be ignored: runcmd
+# (config stage, run by scripts-user in the final stage, both listed there)
+# installs the SSH server instead. The archive is added as a source of its
+# own, for a live whose apt knows only the CD-ROM; a duplicate source is
+# only a warning.
+LIVE_SSH_SCRIPT = f"""\
+exec > >(tee -a {LIVE_LOG} > {SERIAL}) 2>&1
+echo "zark-bench: installing openssh-server"
+. /etc/os-release
+{{
+  echo "Types: deb"
+  echo "URIs: http://archive.ubuntu.com/ubuntu"
+  echo "Suites: $VERSION_CODENAME $VERSION_CODENAME-updates"
+  echo "Components: main"
+  echo "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
+}} > /etc/apt/sources.list.d/zark-bench-archive.sources
+apt-get -o DPkg::Lock::Timeout=600 update
+DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y openssh-server
+echo "zark-bench: openssh-server install exit $?"
+systemctl --no-pager status ssh.socket ssh.service | head -20
+"""
+
+
 def live_user_data(public_key: str) -> dict[str, Any]:
     """
     The live session's cloud-config, with no ``autoinstall`` key: the bench
     user with the run's public key and sudo, and the SSH server the 26.04
-    live does not carry (Q2's ISO read), installed from the archive.
+    live does not carry, installed from the archive by runcmd. Every stage's
+    output also goes to the serial console.
     """
     return {
+        "output": {"all": f"| tee -a /var/log/cloud-init-output.log {SERIAL}"},
+        "bootcmd": [["sh", "-c", f"echo 'zark-bench: cloud-init read the live seed' > {SERIAL}"]],
         "users": [
             {
                 "name": USERNAME,
@@ -110,8 +141,7 @@ def live_user_data(public_key: str) -> dict[str, Any]:
             }
         ],
         "ssh_pwauth": False,
-        "package_update": True,
-        "packages": ["openssh-server"],
+        "runcmd": [["bash", "-c", LIVE_SSH_SCRIPT]],
     }
 
 

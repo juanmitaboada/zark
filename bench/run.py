@@ -445,6 +445,8 @@ def inspect(run: Run) -> None:
         p: inspect_iso.package_installed(text, p) or "absent" for p in inspect_iso.RECOVER_PACKAGES
     }
     report["cloud-init-datasources"] = _cloud(run, files)
+    report.update(inspect_iso.cloud_modules_report(files))
+    report.update(inspect_iso.apt_sources_report(files))
     snaps = [p for i, p in files.items() if i.endswith(".snap")]
     report["installer-snap"] = [p.name for p in snaps]
     for snap in snaps:
@@ -1083,15 +1085,14 @@ def boot_live(
                 return
             q = _screens(q, run, "live")
             time.sleep(15)
+        # What the live printed about cloud-init, apt and SSH, in the job log too.
+        lines = zarkcheck.live_serial_lines(m.serial_log.read_bytes())
+        run.keep("live-ssh-timeout.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        log("\n".join(f"   live: {line}" for line in lines))
         raise StepFailed(f"no SSH in the live within {LIVE_SSH_TIMEOUT_S} s")
     finally:
         if q is not None:
             q.close()
-
-
-def live_tools(run: Run) -> None:
-    """What the live has of recover's tools, and whether apt has lists (recorded)."""
-    guest_reading(run, "tools.txt", zarkcheck.LIVE_TOOLS, "guest-live")
 
 
 def zark_recover(run: Run, passphrase: str, m: qemu.Machine) -> None:
@@ -1138,18 +1139,20 @@ def live_steps(
     ):
         return False
     m = booted[-1][1]
-    if not (
+    done = (
         run.step(
             "live-secure-boot", lambda: prove_secure_boot(run, m, "guest-live", "live-secure-boot")
         )
-        and run.step("live-tools", lambda: live_tools(run))
+        and run.step(
+            # What the live has of recover's tools, and apt's lists (recorded).
+            "live-tools",
+            lambda: _ignore(guest_reading(run, "tools.txt", zarkcheck.LIVE_TOOLS, "guest-live")),
+        )
         and run.step("zark-recover", lambda: zark_recover(run, passphrase, m))
-    ):
-        run.step("collect-live", lambda: collect_live(run))
-        run.step("guest-leak-check-live", lambda: guest_leak_check(run, "guest-live"))
-        return False
+    )
+    # Whatever happened above, the live searches itself before it goes.
     run.step("collect-live", lambda: collect_live(run))
-    return run.step("guest-leak-check-live", lambda: guest_leak_check(run, "guest-live"))
+    return run.step("guest-leak-check-live", lambda: guest_leak_check(run, "guest-live")) and done
 
 
 def boot_recovered(

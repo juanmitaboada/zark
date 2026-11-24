@@ -27,6 +27,11 @@ SNAP_PREFIX = "var/lib/snapd/seed/snaps/ubuntu-desktop-bootstrap_"
 SUBIQUITY_FILE = "subiquity/server/controllers/filesystem.py"
 CLOUD_FILES = ("etc/cloud/cloud.cfg", "etc/cloud/cloud.cfg.d", "etc/cloud/ds-identify.cfg")
 DPKG_STATUS = "var/lib/dpkg/status"
+# apt's sources in the live, read offline: which archives its apt can reach.
+APT_FILES = ("etc/apt/sources.list", "etc/apt/sources.list.d/")
+# cloud-init's stages and the module that acts on packages: and package_update:.
+MODULE_KEYS = ("cloud_init_modules", "cloud_config_modules", "cloud_final_modules")
+PACKAGES_MODULE = "package-update-upgrade-install"
 # The packages of the tools zark recover needs in the live (its
 # commands/recover.py:174-181 at 66cce62); recover installs a missing one
 # with apt-get install, without apt-get update (:184-190).
@@ -48,7 +53,7 @@ def squashfs_names(find_output: str) -> list[str]:
 def wanted_from_layer(path: str) -> bool:
     """A file the probe reads out of a live layer."""
     snap = path.startswith(SNAP_PREFIX) and path.endswith(".snap")
-    return path == DPKG_STATUS or path.startswith(CLOUD_FILES) or snap
+    return path == DPKG_STATUS or path.startswith(CLOUD_FILES) or path.startswith(APT_FILES) or snap
 
 
 def wanted_from_snap(path: str) -> bool:
@@ -136,6 +141,73 @@ def datasource_lines(cloud_text: str) -> list[str]:
     """The lines of cloud-init's configuration that choose datasources."""
     keys = ("datasource_list", "datasource:", "policy:", "ds-identify")
     return [ln.rstrip() for ln in cloud_text.splitlines() if any(k in ln for k in keys)]
+
+
+def module_lists(texts: list[str]) -> dict[str, list[str]]:
+    """
+    cloud-init's module list per stage, from cloud.cfg then cloud.cfg.d in
+    order: a later file's list replaces an earlier one. Only the block form
+    (``key:`` then ``- name`` or ``- [name, frequency]`` lines) is read.
+    """
+    lists: dict[str, list[str]] = {}
+    for text in texts:
+        key = ""
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].rstrip()
+            if not line:
+                continue
+            top = re.fullmatch(r"(\w+):\s*", line)
+            if top:
+                key = top.group(1) if top.group(1) in MODULE_KEYS else ""
+                if key:
+                    lists[key] = []
+                continue
+            item = re.fullmatch(r"\s*-\s*\[?\s*([\w-]+).*", line)
+            if key and item and line.startswith((" ", "-")):
+                lists[key].append(item.group(1).replace("_", "-"))
+            elif not line.startswith((" ", "-")):
+                key = ""
+    return lists
+
+
+def runs_packages(lists: dict[str, list[str]]) -> bool:
+    """Whether any stage runs the module that installs ``packages:``."""
+    return any(PACKAGES_MODULE in mods for mods in lists.values())
+
+
+def source_lines(text: str) -> list[str]:
+    """An apt sources file's meaningful lines (one-line or deb822), comments dropped."""
+    return [
+        ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+
+
+def network_sources(lines: list[str]) -> list[str]:
+    """The source lines that name an http(s) archive, not the CD-ROM."""
+    return [ln for ln in lines if re.search(r"\bhttps?://", ln)]
+
+
+def _text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def cloud_modules_report(files: dict[str, Path]) -> dict[str, object]:
+    """cloud-init's module lists in the live (cloud.cfg, then cloud.cfg.d in order)."""
+    names = sorted(i for i in files if i.startswith("etc/cloud/cloud.cfg") and i.endswith(".cfg"))
+    names.sort(key=lambda i: i != "etc/cloud/cloud.cfg")
+    lists = module_lists([_text(files[i]) for i in names if files[i].is_file()])
+    return {"cloud-init-modules": lists, "cloud-init-runs-packages": runs_packages(lists)}
+
+
+def apt_sources_report(files: dict[str, Path]) -> dict[str, object]:
+    """The live's apt sources as its layers ship them, and those on the network."""
+    found = {
+        i: source_lines(_text(p))
+        for i, p in sorted(files.items())
+        if i.startswith(APT_FILES) and p.is_file()
+    }
+    network = [ln for lines in found.values() for ln in network_sources(lines)]
+    return {"apt-sources": found, "apt-network-sources": network}
 
 
 def git_blob_id(data: bytes) -> str:

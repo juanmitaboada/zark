@@ -23,6 +23,7 @@ import json
 import re
 from typing import Any
 
+from bench.console import clean
 from bench.report import Check
 
 POINT_PREFIX = "zark_"  # zark's lib/replication.py:52
@@ -54,6 +55,20 @@ LIVE_READS = {
     "cloud-init-output.log": "cat /var/log/cloud-init-output.log",
     "journal-kernel.txt": "journalctl -k -b --no-pager",
 }
+
+
+# Lines of the live's serial console that say how far its cloud-init got
+# (the seed mirrors cloud-init's output and the SSH install there).
+LIVE_SERIAL = re.compile(
+    r"zark-bench|cloud-init|Cloud-init|apt-get|openssh|\bGet:|\bErr:|\bE: |ssh"
+)
+
+
+def live_serial_lines(raw: bytes, limit: int = 80) -> list[str]:
+    """The last ``limit`` lines of the live's serial log about cloud-init, apt and SSH."""
+    text = clean(raw.replace(b"\r\n", b"\n")).decode("utf-8", "replace")
+    lines = [ln.rstrip() for ln in text.splitlines() if LIVE_SERIAL.search(ln)]
+    return lines[-limit:]
 
 
 class ReadBackError(Exception):

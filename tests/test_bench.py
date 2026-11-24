@@ -1938,7 +1938,16 @@ class TestBenchFullShapes:  # pylint: disable=missing-function-docstring
         user = doc["users"][0]
         assert user["name"] == seed.USERNAME and user["lock_passwd"] is True
         assert user["ssh_authorized_keys"] == ["ssh-ed25519 AAAA bench"]
-        assert doc["packages"] == ["openssh-server"] and doc["package_update"] is True
+        # The live's cloud.cfg runs no packages module: runcmd installs sshd.
+        assert "packages" not in doc and "package_update" not in doc
+        assert doc["runcmd"] == [["bash", "-c", seed.LIVE_SSH_SCRIPT]]
+        script = seed.LIVE_SSH_SCRIPT
+        assert "apt-get -o DPkg::Lock::Timeout=600 install -y openssh-server" in script
+        assert 'echo "Suites: $VERSION_CODENAME $VERSION_CODENAME-updates"' in script
+        assert script.startswith("exec > >(tee -a /var/log/zark-bench-live.log > /dev/ttyS0) 2>&1")
+        assert subprocess.run(["bash", "-n"], input=script.encode(), check=False).returncode == 0
+        assert doc["output"] == {"all": "| tee -a /var/log/cloud-init-output.log /dev/ttyS0"}
+        assert "/dev/ttyS0" in doc["bootcmd"][0][2]
         out = remaster.edit_grub_cfg(GRUB_CFG, remaster.LIVE_ARGS)
         args = remaster.first_linux_args(out)
         assert (
@@ -2015,3 +2024,81 @@ class TestBenchFullShapes:  # pylint: disable=missing-function-docstring
             (run.out / "zark").mkdir()
             (run.out / "zark" / "x.transcript").write_bytes(b"a" + key + b"b")
             assert bench_run.finish(run, None) == 1
+
+    def test_the_lives_cloud_init_modules_and_apt_sources_read_offline(self):
+        cfg = (
+            "users:\n   - default\n"
+            "cloud_init_modules:\n - bootcmd\n - users-groups\n - ssh\n"
+            "cloud_config_modules:\n# a comment\n - set-passwords\n - runcmd\n"
+            "cloud_final_modules:\n - scripts-user\n - [final_message, always]\n"
+            "system_info:\n   distro: ubuntu\n"
+        )
+        lists = inspect_iso.module_lists([cfg])
+        assert lists == {
+            "cloud_init_modules": ["bootcmd", "users-groups", "ssh"],
+            "cloud_config_modules": ["set-passwords", "runcmd"],
+            "cloud_final_modules": ["scripts-user", "final-message"],
+        }
+        assert not inspect_iso.runs_packages(lists)
+        later = "cloud_final_modules:\n - package-update-upgrade-install\n"
+        both = inspect_iso.module_lists([cfg, later])
+        assert both["cloud_final_modules"] == ["package-update-upgrade-install"]
+        assert inspect_iso.runs_packages(both)
+        assert inspect_iso.wanted_from_layer("etc/apt/sources.list.d/ubuntu.sources")
+        assert inspect_iso.wanted_from_layer("etc/apt/sources.list")
+        sources = (
+            "# comment\n\ndeb cdrom:[Ubuntu 26.04]/ resolute main\n"
+            "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\n"
+        )
+        lines = inspect_iso.source_lines(sources)
+        assert lines == [
+            "deb cdrom:[Ubuntu 26.04]/ resolute main",
+            "Types: deb",
+            "URIs: http://archive.ubuntu.com/ubuntu",
+        ]
+        assert inspect_iso.network_sources(lines) == ["URIs: http://archive.ubuntu.com/ubuntu"]
+        assert not inspect_iso.network_sources(lines[:1])
+
+    def test_a_live_without_ssh_leaves_its_cloud_init_lines(self):
+        serial = (
+            "[  OK  ] Started cloud-init.service\r\nzark-bench: cloud-init read the live seed\r\n"
+            "noise\nGet:1 http://archive.ubuntu.com/ubuntu resolute InRelease\n"
+            "E: Unable to locate package openssh-server\nmore noise\n"
+        )
+        lines = zarkcheck.live_serial_lines(serial.encode())
+        assert lines == [
+            "[  OK  ] Started cloud-init.service",
+            "zark-bench: cloud-init read the live seed",
+            "Get:1 http://archive.ubuntu.com/ubuntu resolute InRelease",
+            "E: Unable to locate package openssh-server",
+        ]
+        assert zarkcheck.live_serial_lines(serial.encode(), 1) == lines[-1:]
+
+    def test_the_iso_reads_reports(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            files = {}
+            for inner, text in (
+                ("etc/cloud/cloud.cfg.d/90_x.cfg", "cloud_final_modules:\n - final-message\n"),
+                ("etc/cloud/cloud.cfg", "cloud_final_modules:\n - scripts-user\n"),
+                ("etc/cloud/cloud.cfg.d/README", "cloud_final_modules:\n - nope\n"),
+                ("etc/apt/sources.list.d/cdrom.sources", "Types: deb\nURIs: file:/cdrom\n"),
+                ("etc/apt/sources.list", "# none\n"),
+            ):
+                path = root / inner.replace("/", "_")
+                path.write_text(text, encoding="utf-8")
+                files[inner] = path
+            files["etc/apt/sources.list.d/gone.sources"] = root / "missing"
+            cloud = inspect_iso.cloud_modules_report(files)
+            assert cloud == {
+                "cloud-init-modules": {"cloud_final_modules": ["final-message"]},
+                "cloud-init-runs-packages": False,
+            }
+            apt = inspect_iso.apt_sources_report(files)
+            assert apt == {
+                "apt-sources": {
+                    "etc/apt/sources.list": [],
+                    "etc/apt/sources.list.d/cdrom.sources": ["Types: deb", "URIs: file:/cdrom"],
+                },
+                "apt-network-sources": [],
+            }
