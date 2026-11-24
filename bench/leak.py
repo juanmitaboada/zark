@@ -27,6 +27,9 @@ from typing import BinaryIO
 
 _BLOCK = 1 << 20
 
+# The file the upload's if: waits for, written only when nothing leaked.
+MARKER = "LEAK-CHECK-PASSED"
+
 # Where the guest's own search looks: the disk-image scan sees only bpool
 # and the ESP, so rpool is searched from inside the guest.
 GUEST_PATHS = ("/var/log", "/etc", "/var", "/root", "/home", "/boot", "/tmp")
@@ -91,6 +94,38 @@ def upload_verdict(
     return True, "no secret found in out/, the disk image or the guest's own search"
 
 
+def drop_stale_marker(out: Path) -> bool:
+    """
+    Remove a marker an earlier run left in a reused out/, so only this
+    run's leak check can allow the upload. True when one was there.
+    """
+    marker = out / MARKER
+    if marker.is_file() or marker.is_symlink():
+        marker.unlink()
+        return True
+    return False
+
+
 def needles_of(secrets: Iterable[str]) -> list[bytes]:
     """The secrets as UTF-8 bytes, empty ones dropped."""
     return [s.encode() for s in secrets if s]
+
+
+# A body line shorter than this is too short to name the key: the other
+# lines still do (an ed25519 key's last line has 32 characters).
+KEY_LINE_MIN = 16
+
+
+def key_needles(key_text: str) -> list[bytes]:
+    """
+    An OpenSSH private key's needles: each base64 body line on its own,
+    since the file breaks its body into 70-column lines and a copy of it
+    holds no line joined to the next, plus the joined body, for a copy
+    with the newlines removed.
+    """
+    body = [ln.strip() for ln in key_text.splitlines()]
+    body = [ln for ln in body if ln and not ln.startswith("-----")]
+    if not body:
+        return []
+    lines = [ln.encode() for ln in body if len(ln) >= KEY_LINE_MIN]
+    return [*lines, "".join(body).encode()]

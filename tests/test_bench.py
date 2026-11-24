@@ -22,6 +22,7 @@ finds them; run that file, not this one.
 import io
 import json
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -29,6 +30,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 from bench import (
     console,
@@ -454,6 +456,20 @@ class TestBenchQmp:  # pylint: disable=missing-function-docstring
             ours.close()
             theirs.close()
 
+    def test_a_line_that_is_not_json_or_not_utf8_is_a_qmp_error(self):
+        # vm.stop catches QmpError and OSError: a ValueError would escape it.
+        for first in (b"{not json\n", b"\xff\xfe\n"):
+            ours, theirs = socket.socketpair()
+            theirs.sendall(first)
+            try:
+                Qmp(ours)
+            except QmpError as err:
+                assert str(err).startswith("not a QMP message: "), str(err)
+            else:
+                raise AssertionError(first)
+            ours.close()
+            theirs.close()
+
     def test_a_missing_socket_times_out(self):
         try:
             Qmp.connect(Path("/nonexistent/q.sock"), timeout_s=0.1)
@@ -489,6 +505,24 @@ def _mute_qmp(path: Path, greet: bool = True) -> tuple[socket.socket, threading.
 
     threading.Thread(target=serve, daemon=True).start()
     return srv, done
+
+
+def _garbage_qmp(path: Path) -> threading.Thread:
+    """A fake QEMU whose monitor answers with a line that is not JSON."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(1)
+
+    def serve() -> None:
+        conn, _ = srv.accept()
+        conn.sendall(b"{garbage\n")
+        conn.recv(1)  # until the client closes
+        conn.close()
+        srv.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
 
 
 class TestBenchQmpBounded:  # pylint: disable=missing-function-docstring
@@ -600,6 +634,15 @@ class TestBenchVm:  # pylint: disable=missing-function-docstring
                 done.set()
             assert how == "killed" and proc.returncode == -9
             assert time.monotonic() - began < 5
+
+    def test_stop_with_a_monitor_that_sends_no_json_terminates(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "q.sock"
+            thread = _garbage_qmp(path)
+            proc = _child("import time; print('ready', flush=True); time.sleep(60)")
+            how = vm.stop(proc, path, qmp_timeout_s=2, quit_wait_s=0.2)
+            assert how == "terminated" and proc.returncode == -15
+            thread.join(5)
 
     def test_stop_by_quit(self):
         # A fake QEMU that ends when it is told to quit.
@@ -1165,6 +1208,106 @@ class TestBenchFinish:  # pylint: disable=missing-function-docstring
             run.guest_seen = True
             assert bench_run.finish(run, self._disk(td)) == 1
             assert not self._marker(run)
+
+    @staticmethod
+    def _key_shaped(salt: int) -> str:
+        # The shape of ssh-keygen's file: a header, base64 broken at 70
+        # columns, a shorter last line, a footer.
+        body = "".join(chr(65 + (salt * 7 + i * 13) % 26) for i in range(312))
+        lines = [body[i : i + 70] for i in range(0, len(body), 70)]
+        return "\n".join(
+            ["-----BEGIN OPENSSH PRIVATE KEY-----", *lines, "-----END OPENSSH PRIVATE KEY-----", ""]
+        )
+
+    def _with_key(self, run: bench_run.Run, text: str) -> Path:
+        keydir = run.path("ssh")
+        keydir.mkdir()
+        run.key = keydir / "id_ed25519"
+        run.key.write_text(text, encoding="utf-8")
+        return run.key
+
+    def test_a_copy_of_the_key_file_in_out_holds_the_upload(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            self._guest(run, 0)
+            key = self._with_key(run, self._key_shaped(1))
+            shutil.copy(key, run.out / "copied-key")
+            assert bench_run.finish(run, self._disk(td)) == 1
+            assert not self._marker(run)
+
+    def test_each_body_line_and_the_joined_body_are_needles(self):
+        text = self._key_shaped(2)
+        body = text.splitlines()[1:-1]
+        assert [len(ln) for ln in body] == [70, 70, 70, 70, 32]
+        needles = leak.key_needles(text)
+        assert needles == [ln.encode() for ln in body] + ["".join(body).encode()]
+        # One line of the file is enough; so is the body with its newlines gone.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "one-line").write_text(f"x {body[2]} y", encoding="utf-8")
+            (root / "joined").write_text("".join(body), encoding="utf-8")
+            hits = {p.name for p, _ in leak.scan_tree(root, needles)}
+            assert hits == {"one-line", "joined"}
+        # A short line names nothing; the header and footer are not needles.
+        short = "-----BEGIN X-----\n" + "A" * 40 + "\nAw==\n-----END X-----\n"
+        assert leak.key_needles(short) == [b"A" * 40, b"A" * 40 + b"Aw=="]
+        assert not leak.key_needles("-----BEGIN X-----\n-----END X-----\n")
+
+    def test_a_real_key_is_found_in_out_and_its_public_half_is_not(self):
+        if shutil.which("ssh-keygen") is None:
+            return  # the shape test above still runs
+        with tempfile.TemporaryDirectory() as td:
+            key = Path(td) / "k"
+            subprocess.run(
+                ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "t", "-f", str(key)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
+            needles = leak.key_needles(key.read_text(encoding="utf-8"))
+            assert len(needles) >= 2
+            assert leak.scan_file(key, needles)
+            assert not leak.scan_file(key.with_suffix(".pub"), needles)
+
+    def test_finish_runs_when_the_power_off_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._run(td)
+            run.path("seed").mkdir()
+            (run.out / "serial.log").write_text(f"x {self.SECRET} y", encoding="utf-8")
+
+            def steps(_run, _disk, booted):
+                booted.append((None, None))
+
+            with (
+                mock.patch.object(bench_run, "_install_steps", steps),
+                mock.patch.object(bench_run, "power_off", side_effect=OSError("disk full")),
+                mock.patch.object(bench_run, "finish", wraps=bench_run.finish) as fin,
+            ):
+                try:
+                    bench_run.install_run(run)
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("the power-off's error was swallowed")
+            assert fin.call_count == 1
+            assert not run.path("seed").exists()
+            assert not self._marker(run)
+
+    def test_a_marker_from_an_earlier_run_is_removed_at_the_start(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "out"
+            out.mkdir()
+            (out / "LEAK-CHECK-PASSED").write_text("old\n", encoding="utf-8")
+            seen: list[bool] = []
+
+            def probe(run):
+                seen.append((run.out / "LEAK-CHECK-PASSED").exists())
+                return 1
+
+            with mock.patch.object(bench_run, "probe", probe):
+                status = bench_run.main(["probe", "--out", str(out), "--work", str(Path(td) / "w")])
+            assert status == 1 and seen == [False]
+            assert leak.MARKER == "LEAK-CHECK-PASSED"
+            assert not leak.drop_stale_marker(out)
 
     def test_the_verdict(self):
         v = leak.upload_verdict

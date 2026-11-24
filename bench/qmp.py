@@ -75,9 +75,15 @@ class Qmp:
             raise QmpError(f"QMP: no answer within {self._timeout_s:g} s") from err
         except OSError as err:
             raise QmpError(f"QMP socket closed: {err}") from err
+        except ValueError as err:
+            # Bytes that are not UTF-8: callers catch QmpError, not this.
+            raise QmpError(f"not a QMP message: {err}") from err
         if not line:
             raise QmpError("QMP socket closed")
-        doc = json.loads(line)
+        try:
+            doc = json.loads(line)
+        except ValueError as err:
+            raise QmpError(f"not a QMP message: {line.strip()}") from err
         if not isinstance(doc, dict):
             raise QmpError(f"not a QMP message: {line.strip()}")
         return doc

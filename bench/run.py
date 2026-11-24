@@ -664,12 +664,7 @@ def host_leak_check(run: Run, disk: Path | None) -> bool:
     """out/ and the disk image hold no secret."""
     needles = leak.needles_of(run.secrets)
     if run.key is not None and run.key.exists():
-        body = "".join(
-            ln
-            for ln in run.key.read_text(encoding="utf-8").splitlines()
-            if ln and not ln.startswith("-----")
-        )
-        needles.append(body.encode())
+        needles.extend(leak.key_needles(run.key.read_text(encoding="utf-8")))
     hits = [str(p.relative_to(run.out)) for p, _ in leak.scan_tree(run.out, needles)]
     if disk is not None and disk.exists() and leak.scan_file(disk, needles[:1]):
         hits.append(f"the disk image {disk.name}")
@@ -714,7 +709,7 @@ def finish(run: Run, disk: Path | None) -> int:
         run.guest_seen,
         None if guest_step is None else int(str(guest_step["status"])),
     )
-    marker = run.out / "LEAK-CHECK-PASSED"
+    marker = run.out / leak.MARKER
     if may_upload:
         marker.write_text(why + "\n", encoding="utf-8")
         # The upload's if: reads this marker; the job log says so too.
@@ -810,9 +805,13 @@ def install_run(run: Run) -> int:
         log(f"FAIL {err}")
         run.out_of_time = True
     finally:
-        if booted:
-            power_off(run, *booted[0])
-        status = finish(run, disk)
+        # finish() stops every QEMU, removes the secret files and runs the
+        # leak check even when the power-off raises.
+        try:
+            if booted:
+                power_off(run, *booted[0])
+        finally:
+            status = finish(run, disk)
     return status
 
 
@@ -828,6 +827,8 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     args.work.mkdir(parents=True, exist_ok=True)
+    if leak.drop_stale_marker(args.out):
+        log(f"   removed {leak.MARKER} left in {args.out} by an earlier run")
     run = Run(mode=args.mode, out=args.out, work=args.work, iso_wanted=args.iso)
     return probe(run) if args.mode == "probe" else install_run(run)
 
