@@ -99,24 +99,45 @@ SERIAL = "/dev/ttyS0"
 # The 26.04 live's cloud.cfg runs no package-update-upgrade-install module
 # (bench/inspect_iso.py reads it), so ``packages:`` would be ignored: runcmd
 # (config stage, run by scripts-user in the final stage, both listed there)
-# installs the SSH server instead. The archive is added as a source of its
-# own, for a live whose apt knows only the CD-ROM; a duplicate source is
-# only a warning.
+# installs the SSH server instead, from the archive the live's apt already
+# lists.
+#
+# Then the sshd configuration is put right. set-passwords (config stage,
+# before runcmd) applies ssh_pwauth, the live's cloud.cfg's or the seed's,
+# with cloud-init's update_ssh_config(): with no /etc/ssh/sshd_config and no
+# sshd_config.d it writes a file holding that one line (cloud-init 26.1,
+# cloudinit/ssh_util.py:548-586, :623-631). openssh-server's postinst hands
+# its own file to ucf, which keeps a file it does not know when nobody can
+# be asked (ucf/changeprompt's default keep_current) and leaves the
+# package's as sshd_config.ucf-dist. sshd then runs on its built-in
+# defaults, UsePAM no among them upstream (servconf.c:299-300), and
+# refuses a user whose password field starts with "!" (OpenSSH auth.c:108,
+# platform.c:192-196), as
+# lock_passwd: true leaves it. So the package's own file goes in place,
+# password logins stay off in a drop-in it includes, and ssh.service is
+# restarted if a connection already started it. What sshd sees is printed
+# before and after; of the shadow field only its first character.
+SSHD_REPORT = (
+    "{ ssh-keygen -A; mkdir -p /run/sshd; sshd -T 2>&1 || true; } "
+    "| grep -Ei '^(usepam|passwordauthentication|pubkeyauthentication|include) "
+    "|error|no hostkeys'\n"
+    "head -5 /etc/ssh/sshd_config\n"
+    "ls -l /etc/ssh/sshd_config* /etc/ssh/sshd_config.d\n"
+    f'echo "shadow field starts with: $(getent shadow {USERNAME} | cut -d: -f2 | cut -c1)"\n'
+)
 LIVE_SSH_SCRIPT = f"""\
 exec > >(tee -a {LIVE_LOG} > {SERIAL}) 2>&1
 echo "zark-bench: installing openssh-server"
-. /etc/os-release
-{{
-  echo "Types: deb"
-  echo "URIs: http://archive.ubuntu.com/ubuntu"
-  echo "Suites: $VERSION_CODENAME $VERSION_CODENAME-updates"
-  echo "Components: main"
-  echo "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
-}} > /etc/apt/sources.list.d/zark-bench-archive.sources
 apt-get -o DPkg::Lock::Timeout=600 update
 DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y openssh-server
 echo "zark-bench: openssh-server install exit $?"
-systemctl --no-pager status ssh.socket ssh.service | head -20
+echo "zark-bench: sshd as installed"
+{SSHD_REPORT}cp /usr/share/openssh/sshd_config /etc/ssh/sshd_config
+mkdir -p /etc/ssh/sshd_config.d
+echo "PasswordAuthentication no" > /etc/ssh/sshd_config.d/50-zark-bench.conf
+sshd -t && systemctl try-restart ssh.service
+echo "zark-bench: sshd configuration put right, exit $?"
+{SSHD_REPORT}systemctl --no-pager status ssh.socket ssh.service | head -20
 """
 
 

@@ -895,7 +895,6 @@ def run_zark(  # pylint: disable=too-many-arguments
     with run.keep("commands.log").open("a", encoding="utf-8") as f:
         f.write(" ".join(argv) + "\n")
     path = run.keep("zark", f"{where}-{command}.transcript")
-    # Outlives this call only until _ended() below.
     proc = subprocess.Popen(  # pylint: disable=consider-using-with
         argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     )
@@ -1085,8 +1084,9 @@ def boot_live(
                 return
             q = _screens(q, run, "live")
             time.sleep(15)
-        # What the live printed about cloud-init, apt and SSH, in the job log too.
-        lines = zarkcheck.live_serial_lines(m.serial_log.read_bytes())
+        # The live's serial lines and one more attempt's ssh -v, in the job log too.
+        last = run.sh(["ssh", "-v", *ssh_argv(run, "true")[1:]], timeout_s=60).stderr
+        lines = zarkcheck.live_timeout_lines(m.serial_log.read_bytes(), last)
         run.keep("live-ssh-timeout.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         log("\n".join(f"   live: {line}" for line in lines))
         raise StepFailed(f"no SSH in the live within {LIVE_SSH_TIMEOUT_S} s")

@@ -71,6 +71,12 @@ def live_serial_lines(raw: bytes, limit: int = 80) -> list[str]:
     return lines[-limit:]
 
 
+def live_timeout_lines(serial: bytes, ssh_stderr: bytes, limit: int = 80) -> list[str]:
+    """The live's serial lines, then the last SSH attempt's own account of its failure."""
+    tried = clean(ssh_stderr).decode("utf-8", "replace").splitlines()[-limit:]
+    return [*live_serial_lines(serial, limit), "ssh -v, the last attempt:", *tried]
+
+
 class ReadBackError(Exception):
     """What was read back does not have the expected shape."""
 

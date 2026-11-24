@@ -1943,7 +1943,21 @@ class TestBenchFullShapes:  # pylint: disable=missing-function-docstring
         assert doc["runcmd"] == [["bash", "-c", seed.LIVE_SSH_SCRIPT]]
         script = seed.LIVE_SSH_SCRIPT
         assert "apt-get -o DPkg::Lock::Timeout=600 install -y openssh-server" in script
-        assert 'echo "Suites: $VERSION_CODENAME $VERSION_CODENAME-updates"' in script
+        # The live already lists the archive: no source of the bench's own.
+        assert "sources.list.d" not in script and "VERSION_CODENAME" not in script
+        # cloud-init's one-line sshd_config replaced by the package's, password
+        # logins off in a drop-in, sshd restarted if a connection started it.
+        fix = script.index("cp /usr/share/openssh/sshd_config /etc/ssh/sshd_config")
+        assert script.index("install -y openssh-server") < fix
+        assert (
+            'echo "PasswordAuthentication no" > /etc/ssh/sshd_config.d/50-zark-bench.conf' in script
+        )
+        assert "sshd -t && systemctl try-restart ssh.service" in script
+        # What sshd sees, before and after; of the shadow field one character.
+        assert script.count(seed.SSHD_REPORT) == 2
+        assert script.index(seed.SSHD_REPORT) < fix < script.rindex(seed.SSHD_REPORT)
+        assert "getent shadow bench | cut -d: -f2 | cut -c1)" in seed.SSHD_REPORT
+        assert "usepam|passwordauthentication|pubkeyauthentication|include" in seed.SSHD_REPORT
         assert script.startswith("exec > >(tee -a /var/log/zark-bench-live.log > /dev/ttyS0) 2>&1")
         assert subprocess.run(["bash", "-n"], input=script.encode(), check=False).returncode == 0
         assert doc["output"] == {"all": "| tee -a /var/log/cloud-init-output.log /dev/ttyS0"}
@@ -2073,6 +2087,15 @@ class TestBenchFullShapes:  # pylint: disable=missing-function-docstring
             "E: Unable to locate package openssh-server",
         ]
         assert zarkcheck.live_serial_lines(serial.encode(), 1) == lines[-1:]
+        both = zarkcheck.live_timeout_lines(
+            serial.encode(), b"debug1: Offering public key\r\nbench@127.0.0.1: Permission denied\n"
+        )
+        assert both[: len(lines)] == lines
+        assert both[len(lines) :] == [
+            "ssh -v, the last attempt:",
+            "debug1: Offering public key",
+            "bench@127.0.0.1: Permission denied",
+        ]
 
     def test_the_iso_reads_reports(self):
         with tempfile.TemporaryDirectory() as td:
