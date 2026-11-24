@@ -19,8 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binary must be refused in the same job; the run's passphrase is made in
   memory and the artifacts are uploaded only after a search for it in them,
   in the installed system and in the disk image. A `probe` mode reads the
-  ISO without installing. It replaces eli for this part of the hardware
-  checks (Q1, Q2); zark's own commands in the bench come next (Q3).
+  ISO without installing. A `full` mode then builds zark's `.deb` from the
+  commit, runs `setup`, `prepare` and `backup` on a virtual USB drive,
+  `recover` from the 26.04 live onto a new disk, boots the recovered system
+  with Secure Boot and backs it up again, answering zark's questions through
+  its terminal from the question it publishes in `progress.json`; the
+  weekly run uses it.
 
 ### Changed
 
